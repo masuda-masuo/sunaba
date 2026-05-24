@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "code-sandbox-mcp"
+version = "1.0.0"
+description = "MCP server for Docker sandbox execution with pass-through-env support"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "docker>=7.0.0",
+]
+
+[project.scripts]
+code-sandbox-mcp = "code_sandbox_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["code_sandbox_mcp*"]

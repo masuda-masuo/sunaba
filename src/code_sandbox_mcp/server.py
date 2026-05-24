@@ -51,7 +51,7 @@ logger = logging.getLogger("code-sandbox-mcp")
 
 
 # ---------------------------------------------------------------------------
-# Pass-through env keys (populated in main() before mcp.run())
+# Pass-through env keys
 # ---------------------------------------------------------------------------
 
 _PASS_THROUGH_KEYS: list[str] = []
@@ -122,33 +122,26 @@ def _exec_run(container, cmd: list[str], **kwargs):
 def _open_terminal_with_logs(container_id: str) -> None:
     """Open a terminal window tailing /tmp/mcp.log inside the container.
 
-    The window stays open after the container stops via Read-Host (Windows)
-    or read (Unix).  ``docker inspect`` is used to detect container removal
-    instead of relying on ``docker exec`` exit codes, which avoids TTY
-    issues that could close the window prematurely.
+    ``docker exec <id> tail -f`` streams output.  When the container is
+    removed tail exits, a yellow banner is printed, and ``Read-Host`` /
+    ``read`` holds the window open until the user presses Enter.
     """
     if _TERMINAL is None:
         return
 
     short_id = container_id[:12]
 
-    # PowerShell loop: inspect-based liveness check + Read-Host at end
-    ps_tail_loop = (
-        f"$cid = '{container_id}'; "
-        f"while (docker inspect $cid 2>$null) {{ "
-        f"docker exec $cid tail -f {_CONTAINER_LOG_PATH} 2>$null; "
-        f"Start-Sleep 2 "
-        f"}}; "
+    # Simple, reliable: run tail -f once, then print banner + wait for Enter.
+    # -NoExit + Read-Host together keep the window open even if TTY issues exist.
+    ps_script = (
+        f"docker exec {container_id} tail -f {_CONTAINER_LOG_PATH} 2>$null; "
         f"Write-Host ''; "
         f"Write-Host '=== Container {short_id} stopped ===' -ForegroundColor Yellow; "
         f"Read-Host 'Press Enter to close this window'"
     )
 
-    # Unix loop: while docker inspect succeeds, tail; then read to hold
-    unix_tail_loop = (
-        f"while docker inspect {container_id} >/dev/null 2>&1; "
-        f"do docker exec {container_id} tail -f {_CONTAINER_LOG_PATH} 2>/dev/null; "
-        f"sleep 2; done; "
+    unix_script = (
+        f"docker exec {container_id} tail -f {_CONTAINER_LOG_PATH} 2>/dev/null; "
         f"echo; echo '=== Container {short_id} stopped ==='; "
         f"echo 'Press Enter to close this window.'; read"
     )
@@ -167,7 +160,7 @@ def _open_terminal_with_logs(container_id: str) -> None:
                 )
             else:
                 subprocess.Popen(
-                    [_TERMINAL, "-NoExit", "-Command", ps_tail_loop],
+                    [_TERMINAL, "-NoExit", "-Command", ps_script],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -176,7 +169,7 @@ def _open_terminal_with_logs(container_id: str) -> None:
             script = (
                 'tell application "Terminal"\n'
                 '  activate\n'
-                f'  do script "{unix_tail_loop}"\n'
+                f'  do script "{unix_script}"\n'
                 'end tell'
             )
             subprocess.Popen(
@@ -190,7 +183,7 @@ def _open_terminal_with_logs(container_id: str) -> None:
                 extra = shlex.split(_TERMINAL_ARGS.format(container_id=container_id))
                 cmd = [_TERMINAL] + extra
             else:
-                cmd = [_TERMINAL, "-e", unix_tail_loop]
+                cmd = [_TERMINAL, "-e", unix_script]
             subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
@@ -319,14 +312,6 @@ mcp = FastMCP("code-sandbox-mcp")
 
 @mcp.tool()
 def sandbox_initialize(image: str = "python:3.12-slim-bookworm") -> str:
-    """Initialize a new compute environment for code execution.
-
-    Creates a Docker container based on the specified image.
-    Returns a container_id that must be passed to other sandbox tools.
-
-    Args:
-        image: Docker image to use (default: python:3.12-slim-bookworm)
-    """
     client = _docker()
     env = _container_env()
     container = client.containers.run(
@@ -342,18 +327,6 @@ def sandbox_initialize(image: str = "python:3.12-slim-bookworm") -> str:
 
 @mcp.tool()
 def sandbox_exec(container_id: str, commands: list[str]) -> str:
-    """Execute commands sequentially inside a running container.
-
-    Runs each command via 'sh -c'. Stops on first non-zero exit code.
-    Returns combined stdout/stderr output with exit codes.
-
-    NOTE: For commands that may exceed the MCP client timeout (60 s),
-    use ``sandbox_exec_background`` + ``sandbox_exec_check`` instead.
-
-    Args:
-        container_id: ID returned by sandbox_initialize
-        commands: List of shell commands to run in order
-    """
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -369,9 +342,7 @@ def sandbox_exec(container_id: str, commands: list[str]) -> str:
             exit_code, output = _exec_run(
                 container,
                 ["sh", "-c", cmd],
-                stdout=True,
-                stderr=True,
-                demux=False,
+                stdout=True, stderr=True, demux=False,
                 timeout=_EXEC_TIMEOUT,
             )
             decoded = output.decode("utf-8", errors="replace") if output else ""
@@ -386,28 +357,11 @@ def sandbox_exec(container_id: str, commands: list[str]) -> str:
         except Exception as e:
             output_parts.append(f"Error executing command: {e}")
             break
-
     return "\n".join(output_parts)
 
 
 @mcp.tool()
 def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
-    """Start commands in the background and return immediately.
-
-    Use ``sandbox_exec_check`` to poll for completion and retrieve output.
-    This is the recommended way to run commands that take > 60 seconds.
-
-    If the server was started with ``--terminal``, a terminal window is
-    automatically opened showing live output via
-    ``docker exec -it <container> tail -f /tmp/mcp.log``.
-
-    Args:
-        container_id: ID returned by sandbox_initialize
-        commands: List of shell commands to run in order
-
-    Returns:
-        job_id: Unique identifier to pass to sandbox_exec_check
-    """
     client = _docker()
     try:
         client.containers.get(container_id)
@@ -432,7 +386,6 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
         if _TERMINAL
         else ""
     )
-
     return (
         f"Job started: {job_id}\n"
         f"Check status with: sandbox_exec_check(container_id=\"{container_id[:12]}\", job_id=\"{job_id}\"){terminal_note}"
@@ -441,45 +394,21 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
 
 @mcp.tool()
 def sandbox_exec_check(container_id: str, job_id: str) -> str:
-    """Check the status of a background job started by sandbox_exec_background.
-
-    Args:
-        container_id: Same container_id used in sandbox_exec_background
-        job_id: Job identifier returned by sandbox_exec_background
-
-    Returns:
-        Job status ("running" or "done") with output when complete.
-    """
     with _jobs_lock:
         job = _jobs.get(job_id)
-
     if job is None:
-        return f"Error: job {job_id} not found (may have been cleaned up or never existed)"
-
+        return f"Error: job {job_id} not found"
     status = job["status"]
-
     if status == "running":
         elapsed = time.time() - job["started_at"]
-        partial = job.get("output", "")
-        return (
-            f"Status: running (elapsed: {elapsed:.0f}s)\n"
-            f"--- partial output ---\n"
-            f"{partial}"
-        )
-
+        return f"Status: running (elapsed: {elapsed:.0f}s)\n--- partial output ---\n{job.get('output', '')}"
     if status == "error":
         return f"Status: error\nError: {job['error']}"
-
     return f"Status: done (elapsed: {job.get('elapsed', 0):.0f}s)\n{job['output']}"
 
 
 @mcp.tool()
 def sandbox_stop(container_id: str) -> str:
-    """Stop and remove a running container sandbox.
-
-    Args:
-        container_id: ID returned by sandbox_initialize
-    """
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -496,20 +425,7 @@ def sandbox_stop(container_id: str) -> str:
 
 
 @mcp.tool()
-def write_file_sandbox(
-    container_id: str,
-    file_name: str,
-    file_contents: str,
-    dest_dir: str = "/root",
-) -> str:
-    """Write a file into the container filesystem.
-
-    Args:
-        container_id: ID returned by sandbox_initialize
-        file_name: Name of the file to create
-        file_contents: Text content to write
-        dest_dir: Directory inside the container (default: /root)
-    """
+def write_file_sandbox(container_id: str, file_name: str, file_contents: str, dest_dir: str = "/root") -> str:
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -517,7 +433,6 @@ def write_file_sandbox(
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
         return f"Error: failed to get container {container_id[:12]}: {e}"
-
     encoded = file_contents.encode("utf-8")
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
@@ -525,7 +440,6 @@ def write_file_sandbox(
         info.size = len(encoded)
         tar.addfile(info, io.BytesIO(encoded))
     buf.seek(0)
-
     try:
         container.put_archive(dest_dir, buf)
         return f"Written {file_name} to {dest_dir} in container {container_id[:12]}"
@@ -536,18 +450,7 @@ def write_file_sandbox(
 
 
 @mcp.tool()
-def copy_project(
-    container_id: str,
-    local_src_dir: str,
-    dest_dir: str = "/root",
-) -> str:
-    """Copy a local directory into the container filesystem.
-
-    Args:
-        container_id: ID returned by sandbox_initialize
-        local_src_dir: Absolute path to a directory on the host
-        dest_dir: Destination directory inside the container (default: /root)
-    """
+def copy_project(container_id: str, local_src_dir: str, dest_dir: str = "/root") -> str:
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -555,16 +458,13 @@ def copy_project(
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
         return f"Error: failed to get container {container_id[:12]}: {e}"
-
     src = Path(local_src_dir)
     if not src.is_dir():
         return f"Error: {local_src_dir} is not a directory"
-
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
         tar.add(str(src), arcname=src.name)
     buf.seek(0)
-
     try:
         container.put_archive(dest_dir, buf)
         return f"Copied {local_src_dir} to {dest_dir}/{src.name} in container {container_id[:12]}"
@@ -575,18 +475,7 @@ def copy_project(
 
 
 @mcp.tool()
-def copy_file(
-    container_id: str,
-    local_src_file: str,
-    dest_path: str = "/root",
-) -> str:
-    """Copy a single local file into the container filesystem.
-
-    Args:
-        container_id: ID returned by sandbox_initialize
-        local_src_file: Absolute path to a file on the host
-        dest_path: Destination directory inside the container (default: /root)
-    """
+def copy_file(container_id: str, local_src_file: str, dest_path: str = "/root") -> str:
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -594,16 +483,13 @@ def copy_file(
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
         return f"Error: failed to get container {container_id[:12]}: {e}"
-
     src = Path(local_src_file)
     if not src.is_file():
         return f"Error: {local_src_file} is not a file"
-
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
         tar.add(str(src), arcname=src.name)
     buf.seek(0)
-
     try:
         container.put_archive(dest_path, buf)
         return f"Copied {src.name} to {dest_path} in container {container_id[:12]}"
@@ -623,40 +509,10 @@ def main() -> None:
         description="code-sandbox-mcp: Docker sandbox MCP server",
         add_help=True,
     )
-    parser.add_argument(
-        "--pass-through-env",
-        metavar="VAR1,VAR2,...",
-        default="",
-        help="Comma-separated list of environment variable names to pass into containers",
-    )
-    parser.add_argument(
-        "--exec-timeout",
-        type=int,
-        default=300,
-        help="Timeout for command execution in seconds (default: 300)",
-    )
-    parser.add_argument(
-        "--terminal",
-        metavar="TERMINAL",
-        default=None,
-        help=(
-            "Full path to a terminal executable. When set, a new terminal window "
-            "is opened automatically on sandbox_exec_background, tailing "
-            "/tmp/mcp.log inside the container. "
-            "Windows example: C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe  "
-            "macOS example: /usr/bin/osascript"
-        ),
-    )
-    parser.add_argument(
-        "--terminal-args",
-        metavar="ARGS",
-        default=None,
-        help=(
-            "Optional extra arguments passed to --terminal before the tail command. "
-            "{container_id} is substituted at runtime. "
-            "When omitted, sensible defaults are used per platform."
-        ),
-    )
+    parser.add_argument("--pass-through-env", metavar="VAR1,VAR2,...", default="")
+    parser.add_argument("--exec-timeout", type=int, default=300)
+    parser.add_argument("--terminal", metavar="TERMINAL", default=None)
+    parser.add_argument("--terminal-args", metavar="ARGS", default=None)
     args, remaining = parser.parse_known_args()
 
     global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT, _TERMINAL, _TERMINAL_ARGS
@@ -666,7 +522,6 @@ def main() -> None:
     _TERMINAL_ARGS = args.terminal_args
 
     sys.argv = [sys.argv[0]] + remaining
-
     mcp.run()
 
 

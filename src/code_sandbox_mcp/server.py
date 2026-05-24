@@ -122,17 +122,14 @@ def _exec_run(container, cmd: list[str], **kwargs):
 def _open_terminal_with_logs(container_id: str) -> None:
     """Open a terminal window tailing /tmp/mcp.log inside the container.
 
-    ``docker exec <id> tail -f`` streams output.  When the container is
-    removed tail exits, a yellow banner is printed, and ``Read-Host`` /
-    ``read`` holds the window open until the user presses Enter.
+    On Windows ``cmd /c start`` is used to detach the window from the
+    MCP server process, so the window survives server shutdown.
     """
     if _TERMINAL is None:
         return
 
     short_id = container_id[:12]
 
-    # Simple, reliable: run tail -f once, then print banner + wait for Enter.
-    # -NoExit + Read-Host together keep the window open even if TTY issues exist.
     ps_script = (
         f"docker exec {container_id} tail -f {_CONTAINER_LOG_PATH} 2>$null; "
         f"Write-Host ''; "
@@ -150,17 +147,18 @@ def _open_terminal_with_logs(container_id: str) -> None:
         if sys.platform == "win32":
             if _TERMINAL_ARGS:
                 extra = _TERMINAL_ARGS.format(container_id=container_id).split()
-                cmd = [_TERMINAL] + extra
                 subprocess.Popen(
-                    cmd,
+                    [_TERMINAL] + extra,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
             else:
+                # Use cmd /c start to detach the window from the MCP server.
+                # Without this, killing the MCP server closes the terminal too.
                 subprocess.Popen(
-                    [_TERMINAL, "-NoExit", "-Command", ps_script],
+                    ["cmd", "/c", "start", _TERMINAL, "-NoExit", "-Command", ps_script],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -228,12 +226,7 @@ def _run_commands_in_background(
             }
         return
 
-    _exec_run(
-        container,
-        ["sh", "-c", f"truncate -s 0 {_CONTAINER_LOG_PATH}"],
-        stdout=False,
-        stderr=False,
-    )
+    _exec_run(container, ["sh", "-c", f"truncate -s 0 {_CONTAINER_LOG_PATH}"], stdout=False, stderr=False)
 
     output_parts: list[str] = []
     started_at = time.time()
@@ -250,23 +243,12 @@ def _run_commands_in_background(
     for cmd in commands:
         header = f"$ {cmd}"
         output_parts.append(header)
-
-        _exec_run(
-            container,
-            ["sh", "-c", f"echo {header!r} >> {_CONTAINER_LOG_PATH}"],
-            stdout=False,
-            stderr=False,
-        )
+        _exec_run(container, ["sh", "-c", f"echo {header!r} >> {_CONTAINER_LOG_PATH}"], stdout=False, stderr=False)
 
         try:
             tee_cmd = f"({cmd}) 2>&1 | tee -a {_CONTAINER_LOG_PATH}"
             exit_code, output = _exec_run(
-                container,
-                ["sh", "-c", tee_cmd],
-                stdout=True,
-                stderr=True,
-                demux=False,
-                timeout=timeout,
+                container, ["sh", "-c", tee_cmd], stdout=True, stderr=True, demux=False, timeout=timeout,
             )
             decoded = output.decode("utf-8", errors="replace") if output else ""
             if decoded:
@@ -274,12 +256,7 @@ def _run_commands_in_background(
             if exit_code != 0:
                 msg = f"Command exited with code {exit_code}"
                 output_parts.append(msg)
-                _exec_run(
-                    container,
-                    ["sh", "-c", f"echo {msg!r} >> {_CONTAINER_LOG_PATH}"],
-                    stdout=False,
-                    stderr=False,
-                )
+                _exec_run(container, ["sh", "-c", f"echo {msg!r} >> {_CONTAINER_LOG_PATH}"], stdout=False, stderr=False)
                 with _jobs_lock:
                     _jobs[job_id]["output"] = "\n".join(output_parts)
                 break
@@ -314,13 +291,7 @@ mcp = FastMCP("code-sandbox-mcp")
 def sandbox_initialize(image: str = "python:3.12-slim-bookworm") -> str:
     client = _docker()
     env = _container_env()
-    container = client.containers.run(
-        image,
-        command="sleep infinity",
-        detach=True,
-        remove=False,
-        environment=env,
-    )
+    container = client.containers.run(image, command="sleep infinity", detach=True, remove=False, environment=env)
     logger.info("Container %s started (image=%s)", container.id[:12], image)
     return container.id
 
@@ -340,10 +311,7 @@ def sandbox_exec(container_id: str, commands: list[str]) -> str:
         output_parts.append(f"$ {cmd}")
         try:
             exit_code, output = _exec_run(
-                container,
-                ["sh", "-c", cmd],
-                stdout=True, stderr=True, demux=False,
-                timeout=_EXEC_TIMEOUT,
+                container, ["sh", "-c", cmd], stdout=True, stderr=True, demux=False, timeout=_EXEC_TIMEOUT,
             )
             decoded = output.decode("utf-8", errors="replace") if output else ""
             if decoded:
@@ -371,21 +339,11 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
         return f"Error: failed to get container {container_id[:12]}: {e}"
 
     job_id = str(uuid.uuid4())[:8]
-
-    t = threading.Thread(
-        target=_run_commands_in_background,
-        args=(job_id, container_id, commands, _EXEC_TIMEOUT),
-        daemon=True,
-    )
-    t.start()
+    threading.Thread(target=_run_commands_in_background, args=(job_id, container_id, commands, _EXEC_TIMEOUT), daemon=True).start()
 
     _open_terminal_with_logs(container_id)
 
-    terminal_note = (
-        f"\nA terminal window has been opened (tail -f {_CONTAINER_LOG_PATH})."
-        if _TERMINAL
-        else ""
-    )
+    terminal_note = f"\nA terminal window has been opened (tail -f {_CONTAINER_LOG_PATH})." if _TERMINAL else ""
     return (
         f"Job started: {job_id}\n"
         f"Check status with: sandbox_exec_check(container_id=\"{container_id[:12]}\", job_id=\"{job_id}\"){terminal_note}"
@@ -414,14 +372,13 @@ def sandbox_stop(container_id: str) -> str:
         container = client.containers.get(container_id)
         container.stop(timeout=10)
         container.remove(v=True)
-        logger.info("Container %s stopped", container_id[:12])
         return f"Container {container_id[:12]} stopped and removed"
     except NotFound:
         return f"Container {container_id[:12]} not found (already removed?)"
     except APIError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error: unexpected error while stopping container: {e}"
+        return f"Error: {e}"
 
 
 @mcp.tool()
@@ -432,7 +389,7 @@ def write_file_sandbox(container_id: str, file_name: str, file_contents: str, de
     except NotFound:
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
-        return f"Error: failed to get container {container_id[:12]}: {e}"
+        return f"Error: {e}"
     encoded = file_contents.encode("utf-8")
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
@@ -446,7 +403,7 @@ def write_file_sandbox(container_id: str, file_name: str, file_contents: str, de
     except APIError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error: unexpected error while writing file: {e}"
+        return f"Error: {e}"
 
 
 @mcp.tool()
@@ -457,7 +414,7 @@ def copy_project(container_id: str, local_src_dir: str, dest_dir: str = "/root")
     except NotFound:
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
-        return f"Error: failed to get container {container_id[:12]}: {e}"
+        return f"Error: {e}"
     src = Path(local_src_dir)
     if not src.is_dir():
         return f"Error: {local_src_dir} is not a directory"
@@ -471,7 +428,7 @@ def copy_project(container_id: str, local_src_dir: str, dest_dir: str = "/root")
     except APIError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error: unexpected error while copying project: {e}"
+        return f"Error: {e}"
 
 
 @mcp.tool()
@@ -482,7 +439,7 @@ def copy_file(container_id: str, local_src_file: str, dest_path: str = "/root") 
     except NotFound:
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
-        return f"Error: failed to get container {container_id[:12]}: {e}"
+        return f"Error: {e}"
     src = Path(local_src_file)
     if not src.is_file():
         return f"Error: {local_src_file} is not a file"
@@ -496,7 +453,7 @@ def copy_file(container_id: str, local_src_file: str, dest_path: str = "/root") 
     except APIError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error: unexpected error while copying file: {e}"
+        return f"Error: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -505,10 +462,7 @@ def copy_file(container_id: str, local_src_file: str, dest_path: str = "/root") 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="code-sandbox-mcp: Docker sandbox MCP server",
-        add_help=True,
-    )
+    parser = argparse.ArgumentParser(description="code-sandbox-mcp: Docker sandbox MCP server", add_help=True)
     parser.add_argument("--pass-through-env", metavar="VAR1,VAR2,...", default="")
     parser.add_argument("--exec-timeout", type=int, default=300)
     parser.add_argument("--terminal", metavar="TERMINAL", default=None)

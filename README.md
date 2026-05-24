@@ -29,6 +29,26 @@ where.exe code-sandbox-mcp   # Windows
 which code-sandbox-mcp       # Mac/Linux
 ```
 
+### Uninstall
+
+```powershell
+pip uninstall code-sandbox-mcp
+```
+
+### Update to latest
+
+```powershell
+pip install --force-reinstall git+https://github.com/masuda-masuo/code-sandbox-mcp
+```
+
+### Update to a specific commit
+
+```powershell
+pip install --force-reinstall git+https://github.com/masuda-masuo/code-sandbox-mcp@<commit-hash>
+```
+
+After updating, restart Claude Desktop to load the new version.
+
 ### claude_desktop_config.json
 
 ```json

@@ -12,6 +12,8 @@ import os
 import sys
 import tarfile
 import threading
+import time
+import uuid
 from pathlib import Path
 
 import docker
@@ -20,15 +22,6 @@ from fastmcp import FastMCP
 
 # ---------------------------------------------------------------------------
 # Monkey-patch: prevent server crash when client times out
-#
-# When the MCP client (Claude Desktop / TypingMind) times out after 60 s,
-# it disconnects and marks the session as completed.  If our long-running
-# sandbox_exec finishes *after* that, FastMCP tries to send the response
-# and hits ``AssertionError: Request already responded to``, which kills
-# the server.
-#
-# We replace ``RequestResponder.respond`` with a version that silently
-# drops responses on already-completed sessions instead of crashing.
 # ---------------------------------------------------------------------------
 
 import mcp.shared.session as _mcp_session  # noqa: E402
@@ -38,12 +31,10 @@ _original_respond = _mcp_session.RequestResponder.respond
 
 async def _safe_respond(self, response) -> None:
     if getattr(self, "_completed", False):
-        # Client already timed out / disconnected – silently ignore.
         return
     try:
         await _original_respond(self, response)
     except AssertionError:
-        # Race: completed flag flipped between check and respond call.
         pass
 
 
@@ -91,11 +82,7 @@ _EXEC_RUN_SUPPORTS_TIMEOUT: bool | None = None
 
 
 def _exec_run(container, cmd: list[str], **kwargs):
-    """Call exec_run with timeout if the SDK supports it, else without.
-
-    Older docker-py versions do not accept a 'timeout' keyword argument.
-    We detect support lazily via inspect.signature.
-    """
+    """Call exec_run with timeout if the SDK supports it, else without."""
     global _EXEC_RUN_SUPPORTS_TIMEOUT
     if _EXEC_RUN_SUPPORTS_TIMEOUT is None:
         try:
@@ -106,7 +93,6 @@ def _exec_run(container, cmd: list[str], **kwargs):
 
     timeout = kwargs.pop("timeout", None)
     if timeout is not None and not _EXEC_RUN_SUPPORTS_TIMEOUT:
-        # SDK doesn't support timeout – use threading-based fallback
         result: list[tuple[int, bytes] | Exception] = []
 
         def _run():
@@ -120,9 +106,7 @@ def _exec_run(container, cmd: list[str], **kwargs):
         t.start()
         t.join(timeout)
         if t.is_alive():
-            raise TimeoutError(
-                f"Command timed out after {timeout} seconds"
-            )
+            raise TimeoutError(f"Command timed out after {timeout} seconds")
         if isinstance(result[0], Exception):
             raise result[0]
         return result[0]
@@ -130,6 +114,93 @@ def _exec_run(container, cmd: list[str], **kwargs):
     if timeout is not None and _EXEC_RUN_SUPPORTS_TIMEOUT:
         kwargs["timeout"] = timeout
     return container.exec_run(cmd, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Background job tracking
+# ---------------------------------------------------------------------------
+
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+
+
+def _run_commands_in_background(
+    job_id: str,
+    container_id: str,
+    commands: list[str],
+    timeout: int,
+):
+    """Run commands in a background thread, updating job status."""
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        with _jobs_lock:
+            _jobs[job_id] = {
+                "status": "error",
+                "error": f"container {container_id[:12]} not found",
+                "finished_at": time.time(),
+            }
+        return
+    except Exception as e:
+        with _jobs_lock:
+            _jobs[job_id] = {
+                "status": "error",
+                "error": f"failed to get container: {e}",
+                "finished_at": time.time(),
+            }
+        return
+
+    output_parts: list[str] = []
+    started_at = time.time()
+
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "running",
+            "container_id": container_id,
+            "commands": commands,
+            "started_at": started_at,
+            "output": "",
+        }
+
+    for cmd in commands:
+        output_parts.append(f"$ {cmd}")
+        try:
+            exit_code, output = _exec_run(
+                container,
+                ["sh", "-c", cmd],
+                stdout=True,
+                stderr=True,
+                demux=False,
+                timeout=timeout,
+            )
+            decoded = output.decode("utf-8", errors="replace") if output else ""
+            if decoded:
+                output_parts.append(decoded.rstrip("\n"))
+            if exit_code != 0:
+                output_parts.append(f"Command exited with code {exit_code}")
+                with _jobs_lock:
+                    _jobs[job_id]["output"] = "\n".join(output_parts)
+                break
+        except TimeoutError as e:
+            output_parts.append(f"Error: {e}")
+            break
+        except Exception as e:
+            output_parts.append(f"Error executing command: {e}")
+            break
+
+        # Update partial output for polling
+        with _jobs_lock:
+            _jobs[job_id]["output"] = "\n".join(output_parts)
+
+    finished_at = time.time()
+    with _jobs_lock:
+        _jobs[job_id].update(
+            status="done",
+            output="\n".join(output_parts),
+            finished_at=finished_at,
+            elapsed=finished_at - started_at,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +240,9 @@ def sandbox_exec(container_id: str, commands: list[str]) -> str:
     Runs each command via 'sh -c'. Stops on first non-zero exit code.
     Returns combined stdout/stderr output with exit codes.
 
+    NOTE: For commands that may exceed the MCP client timeout (60 s),
+    use ``sandbox_exec_background`` + ``sandbox_exec_check`` instead.
+
     Args:
         container_id: ID returned by sandbox_initialize
         commands: List of shell commands to run in order
@@ -207,6 +281,78 @@ def sandbox_exec(container_id: str, commands: list[str]) -> str:
             break
 
     return "\n".join(output_parts)
+
+
+@mcp.tool()
+def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
+    """Start commands in the background and return immediately.
+
+    Use ``sandbox_exec_check`` to poll for completion and retrieve output.
+    This is the recommended way to run commands that take > 60 seconds.
+
+    Args:
+        container_id: ID returned by sandbox_initialize
+        commands: List of shell commands to run in order
+
+    Returns:
+        job_id: Unique identifier to pass to sandbox_exec_check
+    """
+    client = _docker()
+    try:
+        client.containers.get(container_id)
+    except NotFound:
+        return f"Error: container {container_id[:12]} not found"
+    except Exception as e:
+        return f"Error: failed to get container {container_id[:12]}: {e}"
+
+    job_id = str(uuid.uuid4())[:8]
+
+    t = threading.Thread(
+        target=_run_commands_in_background,
+        args=(job_id, container_id, commands, _EXEC_TIMEOUT),
+        daemon=True,
+    )
+    t.start()
+
+    return (
+        f"Job started: {job_id}\n"
+        f"Check status with: sandbox_exec_check(container_id=\"{container_id[:12]}\", job_id=\"{job_id}\")"
+    )
+
+
+@mcp.tool()
+def sandbox_exec_check(container_id: str, job_id: str) -> str:
+    """Check the status of a background job started by sandbox_exec_background.
+
+    Args:
+        container_id: Same container_id used in sandbox_exec_background
+        job_id: Job identifier returned by sandbox_exec_background
+
+    Returns:
+        Job status ("running" or "done") with output when complete.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+
+    if job is None:
+        return f"Error: job {job_id} not found (may have been cleaned up or never existed)"
+
+    status = job["status"]
+
+    if status == "running":
+        elapsed = time.time() - job["started_at"]
+        partial = job.get("output", "")
+        return (
+            f"Status: running (elapsed: {elapsed:.0f}s)\n"
+            f"--- partial output ---\n"
+            f"{partial}"
+        )
+
+    if status == "error":
+        return f"Status: error\nError: {job['error']}"
+
+    # done
+    return f"Status: done (elapsed: {job.get('elapsed', 0):.0f}s)\n{job['output']}"
 
 
 @mcp.tool()
@@ -355,7 +501,6 @@ def copy_file(
 
 
 def main() -> None:
-    # Parse our own args before fastmcp sees sys.argv
     parser = argparse.ArgumentParser(
         description="code-sandbox-mcp: Docker sandbox MCP server",
         add_help=True,
@@ -374,12 +519,10 @@ def main() -> None:
     )
     args, remaining = parser.parse_known_args()
 
-    # Populate pass-through keys
     global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT
     _PASS_THROUGH_KEYS = [k.strip() for k in args.pass_through_env.split(",") if k.strip()]
     _EXEC_TIMEOUT = args.exec_timeout
 
-    # Replace sys.argv with only what fastmcp should see
     sys.argv = [sys.argv[0]] + remaining
 
     mcp.run()

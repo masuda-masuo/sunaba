@@ -9,6 +9,7 @@ import inspect
 import io
 import logging
 import os
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -55,10 +56,18 @@ logger = logging.getLogger("code-sandbox-mcp")
 
 _PASS_THROUGH_KEYS: list[str] = []
 _EXEC_TIMEOUT: int = 300  # Default 5 minutes
-_TERMINAL: str | None = None  # Full path to terminal executable
+_TERMINAL: str | None = None       # Full path to terminal executable
+_TERMINAL_ARGS: str | None = None  # Argument template; {container_id} is substituted
 
 # Path inside the container where background job output is streamed
 _CONTAINER_LOG_PATH = "/tmp/mcp.log"
+
+# Default terminal args per platform, used when --terminal-args is not specified
+_DEFAULT_TERMINAL_ARGS: dict[str, str] = {
+    "win32": "-NoExit -Command \"docker exec -it {container_id} tail -f /tmp/mcp.log\"",
+    "darwin": "",   # handled separately via osascript
+    "linux": "-e docker exec -it {container_id} tail -f /tmp/mcp.log",
+}
 
 
 def _container_env() -> dict[str, str]:
@@ -128,15 +137,18 @@ def _exec_run(container, cmd: list[str], **kwargs):
 def _open_terminal_with_logs(container_id: str) -> None:
     """Open a terminal window tailing /tmp/mcp.log inside the container.
 
-    Uses 'docker exec -it <container_id> tail -f /tmp/mcp.log' so that
-    output from exec_run (which does NOT appear in 'docker logs') is visible.
+    --terminal : full path to the terminal executable
+    --terminal-args : argument template where {container_id} is substituted.
+                      Defaults to PowerShell-compatible args on Windows,
+                      osascript on macOS, and -e on Linux.
 
-    --terminal must be the full path to a terminal executable.
-    On Windows, CREATE_NEW_CONSOLE is added so a visible window appears.
+    Windows example (PowerShell):
+        --terminal "C:\\path\\to\\pwsh.exe"
+        --terminal-args "-NoExit -Command \\"docker exec -it {container_id} tail -f /tmp/mcp.log\\""
 
-    Examples:
-        Windows: --terminal "C:\\Windows\\System32\\cmd.exe"
-        macOS:   --terminal "/usr/bin/osascript"
+    macOS example:
+        --terminal "/usr/bin/osascript"
+        (--terminal-args not required; AppleScript is used automatically)
     """
     if _TERMINAL is None:
         return
@@ -145,8 +157,11 @@ def _open_terminal_with_logs(container_id: str) -> None:
 
     try:
         if sys.platform == "win32":
+            args_template = _TERMINAL_ARGS or _DEFAULT_TERMINAL_ARGS["win32"]
+            args_str = args_template.format(container_id=container_id)
+            cmd = [_TERMINAL] + shlex.split(args_str)
             subprocess.Popen(
-                [_TERMINAL, "/k", tail_cmd],
+                cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -166,8 +181,11 @@ def _open_terminal_with_logs(container_id: str) -> None:
                 stderr=subprocess.DEVNULL,
             )
         else:
+            args_template = _TERMINAL_ARGS or _DEFAULT_TERMINAL_ARGS["linux"]
+            args_str = args_template.format(container_id=container_id)
+            cmd = [_TERMINAL] + shlex.split(args_str)
             subprocess.Popen(
-                [_TERMINAL, "-e", tail_cmd],
+                cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -628,17 +646,29 @@ def main() -> None:
         help=(
             "Full path to a terminal executable. When set, a new terminal window "
             "is opened automatically on sandbox_exec_background, tailing "
-            "/tmp/mcp.log inside the container via 'docker exec -it ... tail -f'. "
-            "Windows example: C:\\Windows\\System32\\cmd.exe  "
+            "/tmp/mcp.log inside the container. "
+            "Windows/PowerShell example: C:\\path\\to\\pwsh.exe  "
             "macOS example: /usr/bin/osascript"
+        ),
+    )
+    parser.add_argument(
+        "--terminal-args",
+        metavar="ARGS",
+        default=None,
+        help=(
+            "Argument template passed to --terminal. "
+            "{container_id} is substituted at runtime. "
+            "Defaults to PowerShell-compatible args on Windows. "
+            "Example: \"-NoExit -Command \\\"docker exec -it {container_id} tail -f /tmp/mcp.log\\\"\""
         ),
     )
     args, remaining = parser.parse_known_args()
 
-    global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT, _TERMINAL
+    global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT, _TERMINAL, _TERMINAL_ARGS
     _PASS_THROUGH_KEYS = [k.strip() for k in args.pass_through_env.split(",") if k.strip()]
     _EXEC_TIMEOUT = args.exec_timeout
     _TERMINAL = args.terminal
+    _TERMINAL_ARGS = args.terminal_args
 
     sys.argv = [sys.argv[0]] + remaining
 

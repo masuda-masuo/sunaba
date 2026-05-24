@@ -55,8 +55,7 @@ logger = logging.getLogger("code-sandbox-mcp")
 
 _PASS_THROUGH_KEYS: list[str] = []
 _EXEC_TIMEOUT: int = 300  # Default 5 minutes
-_TERMINAL: str | None = None        # Full path to terminal executable
-_TERMINAL_ARGS: str | None = None   # Args template; {container_id} is substituted
+_TERMINAL: str | None = None  # Full path to terminal executable
 
 
 def _container_env() -> dict[str, str]:
@@ -126,33 +125,60 @@ def _exec_run(container, cmd: list[str], **kwargs):
 def _open_terminal_with_logs(container_id: str) -> None:
     """Open a terminal window tailing 'docker logs -f <container_id>'.
 
-    Requires both --terminal and --terminal-args to be set.
+    --terminal must be the full path to a terminal executable.
 
-    --terminal : full path to the terminal executable
-    --terminal-args : argument template where {container_id} is substituted
-                      with the actual container ID.
+    On Windows, CREATE_NEW_CONSOLE is added automatically so a visible
+    console window appears. stdin/stdout/stderr are always redirected to
+    DEVNULL to prevent inheriting the MCP server's stdio pipe (which would
+    cause an EPIPE crash when the MCP client closes the connection).
 
-    Example (Windows cmd.exe):
-        --terminal "C:\\Windows\\System32\\cmd.exe"
-        --terminal-args "/k docker logs -f {container_id}"
+    Examples:
+        Windows cmd.exe:
+            --terminal "C:\\Windows\\System32\\cmd.exe"
+            → opens: cmd.exe /k docker logs -f <container_id>
 
-    Example (macOS Terminal via open):
-        --terminal "/usr/bin/open"
-        --terminal-args "-a Terminal"
-        (then pipe docker logs separately — or use a shell script wrapper)
+        macOS Terminal.app (via osascript):
+            --terminal "/usr/bin/osascript"
+            → opens Terminal.app and runs docker logs -f <container_id>
     """
-    if _TERMINAL is None or _TERMINAL_ARGS is None:
+    if _TERMINAL is None:
         return
 
+    log_cmd = f"docker logs -f {container_id}"
+
     try:
-        args_str = _TERMINAL_ARGS.format(container_id=container_id)
-        cmd = [_TERMINAL] + args_str.split()
-        subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if sys.platform == "win32":
+            cmd = [_TERMINAL, "/k", log_cmd]
+            subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+        else:
+            # macOS / Linux: use osascript or a terminal emulator with -e
+            if _TERMINAL.endswith("osascript"):
+                script = (
+                    'tell application "Terminal"\n'
+                    '  activate\n'
+                    f'  do script "{log_cmd}"\n'
+                    'end tell'
+                )
+                subprocess.Popen(
+                    [_TERMINAL, "-e", script],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                # Generic terminal emulator accepting -e (gnome-terminal, xterm, etc.)
+                subprocess.Popen(
+                    [_TERMINAL, "-e", log_cmd],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
     except Exception as e:
         logger.warning("Failed to open terminal (%s): %s", _TERMINAL, e)
 
@@ -331,9 +357,8 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
     Use ``sandbox_exec_check`` to poll for completion and retrieve output.
     This is the recommended way to run commands that take > 60 seconds.
 
-    If the server was started with ``--terminal`` and ``--terminal-args``,
-    a terminal window is automatically opened showing live output via
-    ``docker logs -f``.
+    If the server was started with ``--terminal``, a terminal window is
+    automatically opened showing live output via ``docker logs -f``.
 
     Args:
         container_id: ID returned by sandbox_initialize
@@ -364,7 +389,7 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
 
     terminal_note = (
         "\nA terminal window has been opened showing live output (docker logs -f)."
-        if _TERMINAL and _TERMINAL_ARGS
+        if _TERMINAL
         else ""
     )
 
@@ -576,30 +601,19 @@ def main() -> None:
         metavar="TERMINAL",
         default=None,
         help=(
-            "Full path to a terminal executable to open for live log tailing "
-            "when sandbox_exec_background is called. Must be used together with "
-            "--terminal-args. "
-            "Example (Windows): C:\\Windows\\System32\\cmd.exe"
-        ),
-    )
-    parser.add_argument(
-        "--terminal-args",
-        metavar="ARGS",
-        default=None,
-        help=(
-            "Argument template passed to --terminal. "
-            "Use {container_id} as a placeholder; it will be substituted with "
-            "the actual container ID at runtime. "
-            "Example (Windows cmd.exe): \"/k docker logs -f {container_id}\""
+            "Full path to a terminal executable. When set, a new terminal window "
+            "is opened automatically on sandbox_exec_background showing live output "
+            "via 'docker logs -f'. "
+            "Windows example: C:\\Windows\\System32\\cmd.exe  "
+            "macOS example: /usr/bin/osascript"
         ),
     )
     args, remaining = parser.parse_known_args()
 
-    global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT, _TERMINAL, _TERMINAL_ARGS
+    global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT, _TERMINAL
     _PASS_THROUGH_KEYS = [k.strip() for k in args.pass_through_env.split(",") if k.strip()]
     _EXEC_TIMEOUT = args.exec_timeout
     _TERMINAL = args.terminal
-    _TERMINAL_ARGS = args.terminal_args
 
     sys.argv = [sys.argv[0]] + remaining
 

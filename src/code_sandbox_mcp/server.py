@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import io
+import logging
 import os
 import sys
 import tarfile
@@ -16,6 +17,45 @@ from pathlib import Path
 import docker
 from docker.errors import APIError, NotFound
 from fastmcp import FastMCP
+
+# ---------------------------------------------------------------------------
+# Monkey-patch: prevent server crash when client times out
+#
+# When the MCP client (Claude Desktop / TypingMind) times out after 60 s,
+# it disconnects and marks the session as completed.  If our long-running
+# sandbox_exec finishes *after* that, FastMCP tries to send the response
+# and hits ``AssertionError: Request already responded to``, which kills
+# the server.
+#
+# We replace ``RequestResponder.respond`` with a version that silently
+# drops responses on already-completed sessions instead of crashing.
+# ---------------------------------------------------------------------------
+
+import mcp.shared.session as _mcp_session  # noqa: E402
+
+_original_respond = _mcp_session.RequestResponder.respond
+
+
+async def _safe_respond(self, response) -> None:
+    if getattr(self, "_completed", False):
+        # Client already timed out / disconnected – silently ignore.
+        return
+    try:
+        await _original_respond(self, response)
+    except AssertionError:
+        # Race: completed flag flipped between check and respond call.
+        pass
+
+
+_mcp_session.RequestResponder.respond = _safe_respond  # type: ignore[method-assign]
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger("code-sandbox-mcp")
+
 
 # ---------------------------------------------------------------------------
 # Pass-through env keys (populated in main() before mcp.run())
@@ -118,6 +158,7 @@ def sandbox_initialize(image: str = "python:3.12-slim-bookworm") -> str:
         remove=False,
         environment=env,
     )
+    logger.info("Container %s started (image=%s)", container.id[:12], image)
     return container.id
 
 
@@ -180,6 +221,7 @@ def sandbox_stop(container_id: str) -> str:
         container = client.containers.get(container_id)
         container.stop(timeout=10)
         container.remove(v=True)
+        logger.info("Container %s stopped", container_id[:12])
         return f"Container {container_id[:12]} stopped and removed"
     except NotFound:
         return f"Container {container_id[:12]} not found (already removed?)"

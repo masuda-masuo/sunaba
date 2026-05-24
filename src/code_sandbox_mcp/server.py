@@ -130,45 +130,52 @@ def _exec_run(container, cmd: list[str], **kwargs):
 def _open_terminal_with_logs(container_id: str) -> None:
     """Open a terminal window tailing /tmp/mcp.log inside the container.
 
+    The tail command runs in a retry loop so the window stays open even
+    after the container is removed. A yellow banner is printed when the
+    container disappears, telling the user what happened.
+
     --terminal : full path to the terminal executable
     --terminal-args : optional extra args inserted before the tail command.
                       {container_id} is substituted at runtime.
                       When omitted, sensible defaults are used per platform.
-
-    Windows default (PowerShell):
-        Opens a single PowerShell window with -NoExit that runs
-        ``docker exec -it <id> tail -f /tmp/mcp.log`` directly.
-        No Start-Process to avoid double-window.
-
-    macOS default:
-        osascript -e 'tell application "Terminal" ...'
-
-    Linux default:
-        <terminal> -e "docker exec -it <id> tail -f /tmp/mcp.log"
     """
     if _TERMINAL is None:
         return
 
-    tail_cmd = f"docker exec -it {container_id} tail -f {_CONTAINER_LOG_PATH}"
+    # Tail command with retry: keeps window open after container stops.
+    # PowerShell variant uses a while loop; Unix uses sh + while.
+    ps_tail_loop = (
+        f"while ($true) {{ "
+        f"docker exec -it {container_id} tail -f {_CONTAINER_LOG_PATH}; "
+        f"if ($LASTEXITCODE -ne 0) {{ break }}; "
+        f"Start-Sleep 2 "
+        f"}}; "
+        f"Write-Host ''; "
+        f"Write-Host '=== Container {container_id[:12]} stopped ===' -ForegroundColor Yellow; "
+        f"Write-Host 'You may close this window.' -ForegroundColor Yellow"
+    )
+
+    unix_tail_loop = (
+        f"while docker exec -it {container_id} tail -f {_CONTAINER_LOG_PATH} 2>/dev/null; "
+        f"do sleep 2; done; "
+        f"echo; echo '=== Container {container_id[:12]} stopped ==='; "
+        f"echo 'You may close this window.'"
+    )
 
     try:
         if sys.platform == "win32":
             if _TERMINAL_ARGS:
-                # User supplied custom args: substitute and split.
                 extra = _TERMINAL_ARGS.format(container_id=container_id).split()
-                cmd = [_TERMINAL] + extra
                 subprocess.Popen(
-                    cmd,
+                    [_TERMINAL] + extra,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
             else:
-                # Open ONE PowerShell window directly with the tail command.
-                # -NoExit keeps the window open after tail -f ends.
                 subprocess.Popen(
-                    [_TERMINAL, "-NoExit", "-Command", tail_cmd],
+                    [_TERMINAL, "-NoExit", "-Command", ps_tail_loop],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -177,7 +184,7 @@ def _open_terminal_with_logs(container_id: str) -> None:
             script = (
                 'tell application "Terminal"\n'
                 '  activate\n'
-                f'  do script "{tail_cmd}"\n'
+                f'  do script "{unix_tail_loop}"\n'
                 'end tell'
             )
             subprocess.Popen(
@@ -187,12 +194,11 @@ def _open_terminal_with_logs(container_id: str) -> None:
                 stderr=subprocess.DEVNULL,
             )
         else:
-            # Generic Linux terminal emulator
             if _TERMINAL_ARGS:
                 extra = shlex.split(_TERMINAL_ARGS.format(container_id=container_id))
                 cmd = [_TERMINAL] + extra
             else:
-                cmd = [_TERMINAL, "-e", tail_cmd]
+                cmd = [_TERMINAL, "-e", unix_tail_loop]
             subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
@@ -266,7 +272,6 @@ def _run_commands_in_background(
         header = f"$ {cmd}"
         output_parts.append(header)
 
-        # Echo the command itself into the log so the human sees what's running
         _exec_run(
             container,
             ["sh", "-c", f"echo {header!r} >> {_CONTAINER_LOG_PATH}"],
@@ -275,7 +280,6 @@ def _run_commands_in_background(
         )
 
         try:
-            # Run the command, tee-ing stdout+stderr into the log file
             tee_cmd = f"({cmd}) 2>&1 | tee -a {_CONTAINER_LOG_PATH}"
             exit_code, output = _exec_run(
                 container,
@@ -307,7 +311,6 @@ def _run_commands_in_background(
             output_parts.append(f"Error executing command: {e}")
             break
 
-        # Update partial output for polling
         with _jobs_lock:
             _jobs[job_id]["output"] = "\n".join(output_parts)
 
@@ -436,7 +439,6 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
     )
     t.start()
 
-    # Open a terminal window for real-time log tailing if configured
     _open_terminal_with_logs(container_id)
 
     terminal_note = (
@@ -482,7 +484,6 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
     if status == "error":
         return f"Status: error\nError: {job['error']}"
 
-    # done
     return f"Status: done (elapsed: {job.get('elapsed', 0):.0f}s)\n{job['output']}"
 
 
@@ -667,8 +668,7 @@ def main() -> None:
         help=(
             "Optional extra arguments passed to --terminal before the tail command. "
             "{container_id} is substituted at runtime. "
-            "When omitted, sensible defaults are used per platform. "
-            "Windows/PowerShell default: -NoExit -Command <tail_cmd>"
+            "When omitted, sensible defaults are used per platform."
         ),
     )
     args, remaining = parser.parse_known_args()

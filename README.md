@@ -159,6 +159,7 @@ The launcher proxies stdio between Claude Desktop and the server. When `sandbox_
 ## In-place update (launcher mode only)
 sandbox_update_start()
 → job_id
+...
 Ask Claude to notify you when done, or poll manually:
 sandbox_update_check(job_id="...")  # repeat until "Status: done"
 

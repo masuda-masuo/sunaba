@@ -158,9 +158,16 @@ Claude Desktop
 The launcher proxies stdio between Claude Desktop and the server. When `sandbox_update_start()` succeeds, the server exits with a restart signal (exit code 42) and the launcher restarts it automatically — without requiring a Claude Desktop restart.
 
 ## In-place update (launcher mode only)
+
+```
 sandbox_update_start()
-→ job_id
-...
+  → job_id
+
+# Ask Claude to notify you when done, or poll manually:
+sandbox_update_check(job_id="...")  # repeat until "Status: done"
+```
+
+The `--update-spec` flag...
 Ask Claude to notify you when done, or poll manually:
 sandbox_update_check(job_id="...")  # repeat until "Status: done"
 

@@ -34,7 +34,10 @@ def _pipe_stream(src: IO[bytes], dst: IO[bytes]) -> None:
                 break
             dst.write(data)
             dst.flush()
-    except (BrokenPipeError, OSError):
+    except (BrokenPipeError, OSError, ValueError):
+        # readline() on a closed stream raises ValueError instead of
+        # BrokenPipeError; catch all three to safely ignore harmless
+        # stream-closure errors during shutdown.
         pass
 
 

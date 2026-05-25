@@ -32,6 +32,14 @@ class TestPipeStream:
         # Should not raise despite the closed destination
         _pipe_stream(src, dst)
 
+    def test_pipe_stream_valueerror_on_closed_dst(self) -> None:
+        """readline() on a closed stream raises ValueError."""
+        src = io.BytesIO(b"data")
+        dst = io.BytesIO()
+        dst.close()  # provoke ValueError on readline() path
+        # Should not raise despite the closed destination
+        _pipe_stream(src, dst)
+
 
 class TestLauncherArgParse:
     """Tests for launcher argument parsing."""

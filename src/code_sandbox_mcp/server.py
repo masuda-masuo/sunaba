@@ -813,7 +813,7 @@ def main() -> None:
         )
 
     sys.argv = [sys.argv[0]] + remaining
-    mcp.run()
+    mcp.run(show_banner=False)
 
 
 if __name__ == "__main__":

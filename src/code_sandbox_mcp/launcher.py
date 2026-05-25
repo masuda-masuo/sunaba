@@ -1,9 +1,9 @@
 """Launcher process for code-sandbox-mcp.
 
-Spawning ``server.py`` as a child process and proxying stdio between
-Claude Desktop and the server. If the server exits with
-:data:`~code_sandbox_mcp.RESTART_EXIT_CODE` (42), the launcher restarts it
-(signaling a successful in-place update).
+Spawning server.py as a child process and proxying stdio between
+Claude Desktop and the server.  If the server exits with
+:data:`~code_sandbox_mcp.RESTART_EXIT_CODE` (42), the launcher
+restarts it (signaling a successful in-place update).
 """
 from __future__ import annotations
 
@@ -41,14 +41,20 @@ def _pipe_stream(src: IO[bytes], dst: IO[bytes]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="code-sandbox-mcp launcher: 2-process architecture for in-place updates",
+        description=(
+            "code-sandbox-mcp launcher: 2-process architecture "
+            "for in-place updates"
+        ),
         add_help=True,
     )
     parser.add_argument(
         "--auto-update",
         action="store_true",
         default=False,
-        help="Automatically run sandbox_update_start() on startup (off by default)",
+        help=(
+            "Automatically run sandbox_update_start() on startup "
+            "(off by default)"
+        ),
     )
     args, remaining = parser.parse_known_args()
 
@@ -92,7 +98,6 @@ def main() -> None:
 
         if returncode != RESTART_EXIT_CODE:
             break
-        # returncode == RESTART_EXIT_CODE (42): restart server after successful update
 
 
 if __name__ == "__main__":

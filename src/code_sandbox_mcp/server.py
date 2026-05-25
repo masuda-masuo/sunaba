@@ -24,6 +24,7 @@ from fastmcp import FastMCP
 
 from code_sandbox_mcp import RESTART_EXIT_CODE
 
+
 # ---------------------------------------------------------------------------
 # Monkey-patch: prevent server crash when client times out
 # ---------------------------------------------------------------------------
@@ -111,7 +112,9 @@ def _exec_run(container, cmd: list[str], **kwargs):
         t.start()
         t.join(timeout)
         if t.is_alive():
-            raise TimeoutError(f"Command timed out after {timeout} seconds")
+            raise TimeoutError(
+                f"Command timed out after {timeout} seconds"
+            )
         if isinstance(result[0], Exception):
             raise result[0]
         return result[0]
@@ -138,22 +141,28 @@ def _open_terminal_with_logs(container_id: str) -> None:
     short_id = container_id[:12]
 
     ps_script = (
-        f"docker exec {container_id} tail -f {_CONTAINER_LOG_PATH} 2>$null; "
+        f"docker exec {container_id} tail -f {_CONTAINER_LOG_PATH} "
+        "2>$null; "
         f"Write-Host ''; "
-        f"Write-Host '=== Container {short_id} stopped ===' -ForegroundColor Yellow; "
-        f"Read-Host 'Press Enter to close this window'"
+        f"Write-Host '=== Container {short_id} stopped ===' "
+        "-ForegroundColor Yellow; "
+        "Read-Host 'Press Enter to close this window'"
     )
 
     unix_script = (
-        f"docker exec {container_id} tail -f {_CONTAINER_LOG_PATH} 2>/dev/null; "
-        f"echo; echo '=== Container {short_id} stopped ==='; "
-        f"echo 'Press Enter to close this window.'; read"
+        f"docker exec {container_id} tail -f {_CONTAINER_LOG_PATH} "
+        "2>/dev/null; "
+        "echo; "
+        f"echo '=== Container {short_id} stopped ==='; "
+        "echo 'Press Enter to close this window.'; read"
     )
 
     try:
         if sys.platform == "win32":
             if _TERMINAL_ARGS:
-                extra = _TERMINAL_ARGS.format(container_id=container_id).split()
+                extra = _TERMINAL_ARGS.format(
+                    container_id=container_id
+                ).split()
                 subprocess.Popen(
                     [_TERMINAL] + extra,
                     stdin=subprocess.DEVNULL,
@@ -162,10 +171,12 @@ def _open_terminal_with_logs(container_id: str) -> None:
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
             else:
-                # Use cmd /c start to detach the window from the MCP server.
-                # Without this, killing the MCP server closes the terminal too.
                 subprocess.Popen(
-                    ["cmd", "/c", "start", _TERMINAL, "-NoExit", "-Command", ps_script],
+                    [
+                        "cmd", "/c", "start",
+                        _TERMINAL, "-NoExit", "-Command",
+                        ps_script,
+                    ],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -185,7 +196,9 @@ def _open_terminal_with_logs(container_id: str) -> None:
             )
         else:
             if _TERMINAL_ARGS:
-                extra = shlex.split(_TERMINAL_ARGS.format(container_id=container_id))
+                extra = shlex.split(
+                    _TERMINAL_ARGS.format(container_id=container_id)
+                )
                 cmd = [_TERMINAL] + extra
             else:
                 cmd = [_TERMINAL, "-e", unix_script]
@@ -196,7 +209,9 @@ def _open_terminal_with_logs(container_id: str) -> None:
                 stderr=subprocess.DEVNULL,
             )
     except Exception as e:
-        logger.warning("Failed to open terminal (%s): %s", _TERMINAL, e)
+        logger.warning(
+            "Failed to open terminal (%s): %s", _TERMINAL, e
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +248,12 @@ def _run_commands_in_background(
             }
         return
 
-    _exec_run(container, ["sh", "-c", f"truncate -s 0 {_CONTAINER_LOG_PATH}"], stdout=False, stderr=False)
+    _exec_run(
+        container,
+        ["sh", "-c", f"truncate -s 0 {_CONTAINER_LOG_PATH}"],
+        stdout=False,
+        stderr=False,
+    )
 
     output_parts: list[str] = []
     started_at = time.time()
@@ -250,20 +270,38 @@ def _run_commands_in_background(
     for cmd in commands:
         header = f"$ {cmd}"
         output_parts.append(header)
-        _exec_run(container, ["sh", "-c", f"echo {header!r} >> {_CONTAINER_LOG_PATH}"], stdout=False, stderr=False)
+        _exec_run(
+            container,
+            ["sh", "-c", f"echo {header!r} >> {_CONTAINER_LOG_PATH}"],
+            stdout=False,
+            stderr=False,
+        )
 
         try:
             tee_cmd = f"({cmd}) 2>&1 | tee -a {_CONTAINER_LOG_PATH}"
             exit_code, output = _exec_run(
-                container, ["sh", "-c", tee_cmd], stdout=True, stderr=True, demux=False, timeout=timeout,
+                container,
+                ["sh", "-c", tee_cmd],
+                stdout=True,
+                stderr=True,
+                demux=False,
+                timeout=timeout,
             )
-            decoded = output.decode("utf-8", errors="replace") if output else ""
+            decoded = (
+                output.decode("utf-8", errors="replace")
+                if output else ""
+            )
             if decoded:
                 output_parts.append(decoded.rstrip("\n"))
             if exit_code != 0:
                 msg = f"Command exited with code {exit_code}"
                 output_parts.append(msg)
-                _exec_run(container, ["sh", "-c", f"echo {msg!r} >> {_CONTAINER_LOG_PATH}"], stdout=False, stderr=False)
+                _exec_run(
+                    container,
+                    ["sh", "-c", f"echo {msg!r} >> {_CONTAINER_LOG_PATH}"],
+                    stdout=False,
+                    stderr=False,
+                )
                 with _jobs_lock:
                     _jobs[job_id]["output"] = "\n".join(output_parts)
                 break
@@ -295,7 +333,8 @@ def _run_commands_in_background(
 #: Defaults to reinstalling from the local working tree.
 _UPDATE_SPEC: str = "."
 
-#: When True, ``sandbox_update_start()`` is called automatically on server start.
+#: When True, ``sandbox_update_start()`` is called automatically on
+#: server start.
 _UPDATE_AUTO: bool = False
 
 
@@ -321,7 +360,10 @@ def _run_update_background(job_id: str) -> None:
 
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--force-reinstall", _UPDATE_SPEC],
+            [
+                sys.executable, "-m", "pip", "install",
+                "--force-reinstall", _UPDATE_SPEC,
+            ],
             capture_output=True,
             text=True,
         )
@@ -339,7 +381,11 @@ def _run_update_background(job_id: str) -> None:
             time.sleep(2)
             sys.exit(RESTART_EXIT_CODE)
         else:
-            error_msg = result.stderr or result.stdout or f"pip exited with code {result.returncode}"
+            error_msg = (
+                result.stderr
+                or result.stdout
+                or f"pip exited with code {result.returncode}"
+            )
             with _jobs_lock:
                 _jobs[job_id].update(
                     status="error",
@@ -367,36 +413,62 @@ mcp = FastMCP("code-sandbox-mcp")
 
 
 @mcp.tool()
-def sandbox_initialize(image: str = "python:3.12-slim-bookworm") -> str:
+def sandbox_initialize(
+    image: str = "python:3.12-slim-bookworm",
+) -> str:
     client = _docker()
     env = _container_env()
-    container = client.containers.run(image, command="sleep infinity", detach=True, remove=False, environment=env)
-    logger.info("Container %s started (image=%s)", container.id[:12], image)
+    container = client.containers.run(
+        image,
+        command="sleep infinity",
+        detach=True,
+        remove=False,
+        environment=env,
+    )
+    logger.info(
+        "Container %s started (image=%s)", container.id[:12], image
+    )
     return container.id
 
 
 @mcp.tool()
-def sandbox_exec(container_id: str, commands: list[str]) -> str:
+def sandbox_exec(
+    container_id: str,
+    commands: list[str],
+) -> str:
     client = _docker()
     try:
         container = client.containers.get(container_id)
     except NotFound:
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
-        return f"Error: failed to get container {container_id[:12]}: {e}"
+        return (
+            f"Error: failed to get container "
+            f"{container_id[:12]}: {e}"
+        )
 
     output_parts: list[str] = []
     for cmd in commands:
         output_parts.append(f"$ {cmd}")
         try:
             exit_code, output = _exec_run(
-                container, ["sh", "-c", cmd], stdout=True, stderr=True, demux=False, timeout=_EXEC_TIMEOUT,
+                container,
+                ["sh", "-c", cmd],
+                stdout=True,
+                stderr=True,
+                demux=False,
+                timeout=_EXEC_TIMEOUT,
             )
-            decoded = output.decode("utf-8", errors="replace") if output else ""
+            decoded = (
+                output.decode("utf-8", errors="replace")
+                if output else ""
+            )
             if decoded:
                 output_parts.append(decoded.rstrip("\n"))
             if exit_code != 0:
-                output_parts.append(f"Command exited with code {exit_code}")
+                output_parts.append(
+                    f"Command exited with code {exit_code}"
+                )
                 break
         except TimeoutError as e:
             output_parts.append(f"Error: {e}")
@@ -408,29 +480,55 @@ def sandbox_exec(container_id: str, commands: list[str]) -> str:
 
 
 @mcp.tool()
-def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
+def sandbox_exec_background(
+    container_id: str,
+    commands: list[str],
+) -> str:
     client = _docker()
     try:
         client.containers.get(container_id)
     except NotFound:
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
-        return f"Error: failed to get container {container_id[:12]}: {e}"
+        return (
+            f"Error: failed to get container "
+            f"{container_id[:12]}: {e}"
+        )
 
     job_id = str(uuid.uuid4())[:8]
-    threading.Thread(target=_run_commands_in_background, args=(job_id, container_id, commands, _EXEC_TIMEOUT), daemon=True).start()
+    threading.Thread(
+        target=_run_commands_in_background,
+        args=(
+            job_id,
+            container_id,
+            commands,
+            _EXEC_TIMEOUT,
+        ),
+        daemon=True,
+    ).start()
 
     _open_terminal_with_logs(container_id)
 
-    terminal_note = f"\nA terminal window has been opened (tail -f {_CONTAINER_LOG_PATH})." if _TERMINAL else ""
+    if _TERMINAL:
+        terminal_note = (
+            "\nA terminal window has been opened "
+            f"(tail -f {_CONTAINER_LOG_PATH})."
+        )
+    else:
+        terminal_note = ""
     return (
         f"Job started: {job_id}\n"
-        f"Check status with: sandbox_exec_check(container_id=\"{container_id[:12]}\", job_id=\"{job_id}\"){terminal_note}"
+        f"Check status with: sandbox_exec_check("
+        f"container_id=\"{container_id[:12]}\", "
+        f"job_id=\"{job_id}\"){terminal_note}"
     )
 
 
 @mcp.tool()
-def sandbox_exec_check(container_id: str, job_id: str) -> str:
+def sandbox_exec_check(
+    container_id: str,
+    job_id: str,
+) -> str:
     with _jobs_lock:
         job = _jobs.get(job_id)
     if job is None:
@@ -438,19 +536,26 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
     status = job["status"]
     if status == "running":
         elapsed = time.time() - job["started_at"]
-        return f"Status: running (elapsed: {elapsed:.0f}s)\n--- partial output ---\n{job.get('output', '')}"
+        return (
+            f"Status: running (elapsed: {elapsed:.0f}s)\n"
+            f"--- partial output ---\n{job.get('output', '')}"
+        )
     if status == "error":
         return f"Status: error\nError: {job['error']}"
-    return f"Status: done (elapsed: {job.get('elapsed', 0):.0f}s)\n{job['output']}"
+    return (
+        f"Status: done (elapsed: {job.get('elapsed', 0):.0f}s)\n"
+        f"{job['output']}"
+    )
 
 
 @mcp.tool()
 def sandbox_update_start() -> str:
-    """Start an in-place update (pip install --force-reinstall) in the background.
+    """Start an in-place update in the background.
 
-    Returns a ``job_id`` immediately.  Use :func:`sandbox_update_check` to
-    poll the status.  On success the server process will restart automatically
-    (the launcher maintains the stdio connection).
+    Runs ``pip install --force-reinstall`` asynchronously.  Returns a
+    ``job_id`` immediately.  Use :func:`sandbox_update_check` to poll
+    the status.  On success the server process will restart
+    automatically (the launcher maintains the stdio connection).
 
     The update source is controlled by the ``--update-spec`` CLI flag
     (default: ``.`` = current working directory).
@@ -461,18 +566,21 @@ def sandbox_update_start() -> str:
         args=(job_id,),
         daemon=True,
     ).start()
-    return f"Update job started: {job_id}\nPoll with: sandbox_update_check(job_id=\"{job_id}\")"
+    return (
+        f"Update job started: {job_id}\n"
+        f"Poll with: sandbox_update_check("
+        f"job_id=\"{job_id}\")"
+    )
 
 
 @mcp.tool()
 def sandbox_update_check(job_id: str) -> str:
-    """Poll the status of an update job started by :func:`sandbox_update_start`.
+    """Poll the status of an update job.
 
     Returns one of:
-    - ``Status: running (elapsed: Xs)``
-    - ``Status: done (elapsed: Xs)\n<pip output>``
-    - ``Status: error\nError: <message>``
-    - ``Error: job {job_id} not found``
+
+    * ``Status: running (elapsed: Xs)``
+    * ``Status: done (elapsed: Xs)""" + rest
     """
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -484,7 +592,10 @@ def sandbox_update_check(job_id: str) -> str:
         return f"Status: running (elapsed: {elapsed:.0f}s)"
     if status == "error":
         return f"Status: error\nError: {job['error']}"
-    return f"Status: done (elapsed: {job.get('elapsed', 0):.0f}s)\n{job.get('output', '')}"
+    return (
+        f"Status: done (elapsed: {job.get('elapsed', 0):.0f}s)\n"
+        f"{job.get('output', '')}"
+    )
 
 
 @mcp.tool()
@@ -494,9 +605,14 @@ def sandbox_stop(container_id: str) -> str:
         container = client.containers.get(container_id)
         container.stop(timeout=10)
         container.remove(v=True)
-        return f"Container {container_id[:12]} stopped and removed"
+        return (
+            f"Container {container_id[:12]} stopped and removed"
+        )
     except NotFound:
-        return f"Container {container_id[:12]} not found (already removed?)"
+        return (
+            f"Container {container_id[:12]} not found "
+            "(already removed?)"
+        )
     except APIError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -504,7 +620,12 @@ def sandbox_stop(container_id: str) -> str:
 
 
 @mcp.tool()
-def write_file_sandbox(container_id: str, file_name: str, file_contents: str, dest_dir: str = "/root") -> str:
+def write_file_sandbox(
+    container_id: str,
+    file_name: str,
+    file_contents: str,
+    dest_dir: str = "/root",
+) -> str:
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -521,7 +642,10 @@ def write_file_sandbox(container_id: str, file_name: str, file_contents: str, de
     buf.seek(0)
     try:
         container.put_archive(dest_dir, buf)
-        return f"Written {file_name} to {dest_dir} in container {container_id[:12]}"
+        return (
+            f"Written {file_name} to {dest_dir} "
+            f"in container {container_id[:12]}"
+        )
     except APIError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -529,7 +653,11 @@ def write_file_sandbox(container_id: str, file_name: str, file_contents: str, de
 
 
 @mcp.tool()
-def copy_project(container_id: str, local_src_dir: str, dest_dir: str = "/root") -> str:
+def copy_project(
+    container_id: str,
+    local_src_dir: str,
+    dest_dir: str = "/root",
+) -> str:
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -546,7 +674,11 @@ def copy_project(container_id: str, local_src_dir: str, dest_dir: str = "/root")
     buf.seek(0)
     try:
         container.put_archive(dest_dir, buf)
-        return f"Copied {local_src_dir} to {dest_dir}/{src.name} in container {container_id[:12]}"
+        return (
+            f"Copied {local_src_dir} to "
+            f"{dest_dir}/{src.name} in container "
+            f"{container_id[:12]}"
+        )
     except APIError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -554,7 +686,11 @@ def copy_project(container_id: str, local_src_dir: str, dest_dir: str = "/root")
 
 
 @mcp.tool()
-def copy_file(container_id: str, local_src_file: str, dest_path: str = "/root") -> str:
+def copy_file(
+    container_id: str,
+    local_src_file: str,
+    dest_path: str = "/root",
+) -> str:
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -571,7 +707,10 @@ def copy_file(container_id: str, local_src_file: str, dest_path: str = "/root") 
     buf.seek(0)
     try:
         container.put_archive(dest_path, buf)
-        return f"Copied {src.name} to {dest_path} in container {container_id[:12]}"
+        return (
+            f"Copied {src.name} to {dest_path} "
+            f"in container {container_id[:12]}"
+        )
     except APIError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -584,27 +723,61 @@ def copy_file(container_id: str, local_src_file: str, dest_path: str = "/root") 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="code-sandbox-mcp: Docker sandbox MCP server", add_help=True)
-    parser.add_argument("--pass-through-env", metavar="VAR1,VAR2,...", default="")
-    parser.add_argument("--exec-timeout", type=int, default=300)
-    parser.add_argument("--terminal", metavar="TERMINAL", default=None)
-    parser.add_argument("--terminal-args", metavar="ARGS", default=None)
+    parser = argparse.ArgumentParser(
+        description=(
+            "code-sandbox-mcp: "
+            "Docker sandbox MCP server"
+        ),
+        add_help=True,
+    )
+    parser.add_argument(
+        "--pass-through-env",
+        metavar="VAR1,VAR2,...",
+        default="",
+    )
+    parser.add_argument(
+        "--exec-timeout",
+        type=int,
+        default=300,
+    )
+    parser.add_argument(
+        "--terminal",
+        metavar="TERMINAL",
+        default=None,
+    )
+    parser.add_argument(
+        "--terminal-args",
+        metavar="ARGS",
+        default=None,
+    )
     parser.add_argument(
         "--update-spec",
         metavar="SPEC",
         default=".",
-        help="Pip install specifier for sandbox_update_start() (default: .)",
+        help=(
+            "Pip install specifier for "
+            "sandbox_update_start() (default: .)"
+        ),
     )
     parser.add_argument(
         "--auto-update",
         action="store_true",
         default=False,
-        help="Automatically run sandbox_update_start() on startup",
+        help=(
+            "Automatically run sandbox_update_start() "
+            "on startup"
+        ),
     )
     args, remaining = parser.parse_known_args()
 
-    global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT, _TERMINAL, _TERMINAL_ARGS, _UPDATE_SPEC, _UPDATE_AUTO
-    _PASS_THROUGH_KEYS = [k.strip() for k in args.pass_through_env.split(",") if k.strip()]
+    global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT
+    global _TERMINAL, _TERMINAL_ARGS
+    global _UPDATE_SPEC, _UPDATE_AUTO
+    _PASS_THROUGH_KEYS = [
+        k.strip()
+        for k in args.pass_through_env.split(",")
+        if k.strip()
+    ]
     _EXEC_TIMEOUT = args.exec_timeout
     _TERMINAL = args.terminal
     _TERMINAL_ARGS = args.terminal_args
@@ -612,14 +785,15 @@ def main() -> None:
     _UPDATE_AUTO = args.auto_update
 
     if _UPDATE_AUTO:
-        # Fire-and-forget: update runs in background thread
         job_id = str(uuid.uuid4())[:8]
         threading.Thread(
             target=_run_update_background,
             args=(job_id,),
             daemon=True,
         ).start()
-        logger.info("Auto-update started (job_id=%s)", job_id)
+        logger.info(
+            "Auto-update started (job_id=%s)", job_id
+        )
 
     sys.argv = [sys.argv[0]] + remaining
     mcp.run()

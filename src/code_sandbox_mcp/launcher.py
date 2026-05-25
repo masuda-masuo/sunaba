@@ -1,8 +1,9 @@
 """Launcher process for code-sandbox-mcp.
 
 Spawning ``server.py`` as a child process and proxying stdio between
-Claude Desktop and the server. If the server exits with code 42,
-the launcher restarts it (signaling a successful in-place update).
+Claude Desktop and the server. If the server exits with
+:data:`~code_sandbox_mcp.RESTART_EXIT_CODE` (42), the launcher restarts it
+(signaling a successful in-place update).
 """
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ import subprocess
 import sys
 import threading
 from typing import IO
+
+from code_sandbox_mcp import RESTART_EXIT_CODE
 
 
 # ---------------------------------------------------------------------------
@@ -87,9 +90,9 @@ def main() -> None:
         for t in threads:
             t.join(timeout=1)
 
-        if returncode != 42:  # 42 = restart-after-update signal
+        if returncode != RESTART_EXIT_CODE:
             break
-        # returncode == 42: restart server after successful update
+        # returncode == RESTART_EXIT_CODE (42): restart server after successful update
 
 
 if __name__ == "__main__":

@@ -22,6 +22,8 @@ import docker
 from docker.errors import APIError, NotFound
 from fastmcp import FastMCP
 
+from code_sandbox_mcp import RESTART_EXIT_CODE
+
 # ---------------------------------------------------------------------------
 # Monkey-patch: prevent server crash when client times out
 # ---------------------------------------------------------------------------
@@ -301,15 +303,13 @@ _UPDATE_AUTO: bool = False
 # Background update helper
 # ---------------------------------------------------------------------------
 
-_RESTART_SENTINEL = 42
-"""Exit code used to signal the launcher to restart the server."""
-
 
 def _run_update_background(job_id: str) -> None:
     """Run pip install --force-reinstall in a background thread.
 
     On success, sets job status to ``done`` and exits the process with
-    code 42 (restart signal).  On failure, sets job status to ``error``.
+    :data:`~code_sandbox_mcp.RESTART_EXIT_CODE` (42, restart signal).
+    On failure, sets job status to ``error``.
     """
     started_at = time.time()
 
@@ -337,7 +337,7 @@ def _run_update_background(job_id: str) -> None:
                 )
             # Give Claude a brief window to poll before exiting
             time.sleep(2)
-            sys.exit(_RESTART_SENTINEL)
+            sys.exit(RESTART_EXIT_CODE)
         else:
             error_msg = result.stderr or result.stdout or f"pip exited with code {result.returncode}"
             with _jobs_lock:

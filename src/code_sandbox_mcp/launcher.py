@@ -20,14 +20,16 @@ from code_sandbox_mcp import RESTART_EXIT_CODE
 # Stdio proxy helpers
 # ---------------------------------------------------------------------------
 
-_CHUNK_SIZE: int = 4096
-
 
 def _pipe_stream(src: IO[bytes], dst: IO[bytes]) -> None:
-    """Forward bytes from *src* to *dst* until EOF."""
+    """Forward lines from *src* to *dst* until EOF.
+
+    MCP uses newline-delimited JSON-RPC, so readline() ensures each
+    message is forwarded immediately without waiting to fill a buffer.
+    """
     try:
         while True:
-            data = src.read(_CHUNK_SIZE)
+            data = src.readline()
             if not data:
                 break
             dst.write(data)

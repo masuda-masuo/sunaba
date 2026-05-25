@@ -6,7 +6,25 @@ Inspired by [Automata-Labs-team/code-sandbox-mcp](https://github.com/Automata-La
 
 ## Why this exists
 
+### 1. Pass host credentials into containers securely
+
 The original Automata-Labs version does not support passing host environment variables into containers. This implementation adds `--pass-through-env` so credentials stored in `claude_desktop_config.json` (e.g. `GITHUB_TOKEN`) are forwarded to the container — following the [MCP security best practice](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices) of keeping secrets out of AI context.
+
+### 2. Token-efficient workflows via git clone
+
+Instead of having the AI read source files and write them back into the container one by one, the AI simply runs `git clone` inside the container. The entire codebase is fetched directly from GitHub without ever passing through the AI's context window — saving a significant amount of tokens on large projects.
+
+Only the results (e.g. `pytest` output) are returned to the AI, keeping both input and output tokens minimal.
+
+### 3. Reproducible, transparent test environments
+
+Built-in AI sandboxes are opaque: the OS, installed packages, and runtime versions are unknown and uncontrollable. With this MCP, the Docker image is specified explicitly by the user:
+
+```
+sandbox_initialize(image="python:3.11-slim-bookworm")
+```
+
+Any image on Docker Hub can be used, including custom images that replicate a production environment exactly. The AI runs tests in the same environment every time — no surprises from mismatched dependencies or hidden system packages.
 
 ## Requirements
 

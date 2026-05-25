@@ -146,6 +146,7 @@ Default command execution timeout is 300 seconds. Override with `--exec-timeout`
 ```json
 "args": ["--pass-through-env", "GITHUB_TOKEN", "--exec-timeout", "600"]
 ```
+
 ## Launcher architecture
 
 ```

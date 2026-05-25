@@ -167,10 +167,6 @@ sandbox_update_start()
 sandbox_update_check(job_id="...")  # repeat until "Status: done"
 ```
 
-The `--update-spec` flag...
-Ask Claude to notify you when done, or poll manually:
-sandbox_update_check(job_id="...")  # repeat until "Status: done"
-
 The `--update-spec` flag controls the pip install source (default: `git+https://github.com/masuda-masuo/code-sandbox-mcp`).
 
 ## Terminal auto-open (optional)

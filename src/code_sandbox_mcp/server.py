@@ -447,6 +447,8 @@ def sandbox_exec(
             f"{container_id[:12]}: {e}"
         )
 
+    _open_terminal_with_logs(container_id)
+
     output_parts: list[str] = []
     for cmd in commands:
         output_parts.append(f"$ {cmd}")
@@ -476,7 +478,14 @@ def sandbox_exec(
         except Exception as e:
             output_parts.append(f"Error executing command: {e}")
             break
-    return "\n".join(output_parts)
+
+    result = "\n".join(output_parts)
+    if _TERMINAL:
+        result += (
+            "\n\nA terminal window has been opened "
+            f"(tail -f {_CONTAINER_LOG_PATH})."
+        )
+    return result
 
 
 @mcp.tool()

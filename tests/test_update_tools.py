@@ -12,6 +12,7 @@ from code_sandbox_mcp.server import (
     _jobs,
     _jobs_lock,
     _run_update_background,
+    sandbox_exec_check,
     sandbox_update_check,
     sandbox_update_start,
 )
@@ -148,3 +149,84 @@ class TestUpdateSpecDefault:
 
     def test_default_update_spec_is_dot(self) -> None:
         assert _UPDATE_SPEC == "."
+
+
+class TestSandboxExecCheck:
+    """Tests for sandbox_exec_check()."""
+
+    def setup_method(self) -> None:
+        with _jobs_lock:
+            _jobs.clear()
+
+    def test_job_not_found(self) -> None:
+        result = sandbox_exec_check("nonexistent-container", "nonexistent")
+        assert "not found" in result
+
+    def test_job_running_default_no_partial(self) -> None:
+        """Default show_partial=False should not include partial output."""
+        with _jobs_lock:
+            _jobs["exec-job-1"] = {
+                "status": "running",
+                "started_at": time.time() - 10,
+                "output": "$ git clone\nCloning into...",
+            }
+        result = sandbox_exec_check("c1", "exec-job-1")
+        assert "Status: running" in result
+        assert "elapsed" in result
+        assert "partial output" not in result
+        assert "git clone" not in result
+
+    def test_job_running_with_partial(self) -> None:
+        """show_partial=True should include partial output."""
+        with _jobs_lock:
+            _jobs["exec-job-2"] = {
+                "status": "running",
+                "started_at": time.time() - 5,
+                "output": "$ pip install\nCollecting...",
+            }
+        result = sandbox_exec_check("c2", "exec-job-2", show_partial=True)
+        assert "Status: running" in result
+        assert "--- partial output ---" in result
+        assert "pip install" in result
+
+    def test_job_done(self) -> None:
+        """Done status should always include full output regardless of show_partial."""
+        with _jobs_lock:
+            _jobs["exec-job-3"] = {
+                "status": "done",
+                "started_at": time.time() - 10,
+                "finished_at": time.time(),
+                "elapsed": 10.0,
+                "output": "$ echo hello\nhello",
+            }
+        result = sandbox_exec_check("c3", "exec-job-3")
+        assert "done" in result
+        assert "echo hello" in result
+
+    def test_job_error(self) -> None:
+        """Error status should always include error message."""
+        with _jobs_lock:
+            _jobs["exec-job-4"] = {
+                "status": "error",
+                "started_at": time.time() - 2,
+                "finished_at": time.time(),
+                "elapsed": 2.0,
+                "error": "command not found",
+            }
+        result = sandbox_exec_check("c4", "exec-job-4")
+        assert "error" in result.lower()
+        assert "command not found" in result
+
+    def test_backward_compatible(self) -> None:
+        """Calling without show_partial should work (backward compatibility)."""
+        with _jobs_lock:
+            _jobs["exec-job-5"] = {
+                "status": "done",
+                "started_at": time.time() - 3,
+                "finished_at": time.time(),
+                "elapsed": 3.0,
+                "output": "done",
+            }
+        # No show_partial argument - should still work
+        result = sandbox_exec_check("c5", "exec-job-5")
+        assert "done" in result

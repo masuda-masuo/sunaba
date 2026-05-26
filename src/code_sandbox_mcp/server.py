@@ -529,6 +529,7 @@ def sandbox_exec_check(
     container_id: str,
     job_id: str,
     wait_seconds: int = 10,
+    show_partial: bool = False,
 ) -> str:
     """Poll the status of a background exec job.
 
@@ -543,10 +544,12 @@ def sandbox_exec_check(
     status = job["status"]
     if status == "running":
         elapsed = time.time() - job["started_at"]
-        return (
-            f"Status: running (elapsed: {elapsed:.0f}s)\n"
-            f"--- partial output ---\n{job.get('output', '')}"
-        )
+        if show_partial:
+            return (
+                f"Status: running (elapsed: {elapsed:.0f}s)\n"
+                f"--- partial output ---\n{job.get('output', '')}"
+            )
+        return f"Status: running (elapsed: {elapsed:.0f}s)"
     if status == "error":
         return f"Status: error\nError: {job['error']}"
     return (

@@ -143,6 +143,12 @@ def _forget_terminal(container_id: str) -> None:
         _terminals_opened.discard(container_id)
 
 
+def _terminal_already_open(container_id: str) -> bool:
+    """Return True if a terminal window is already open for *container_id*."""
+    with _terminals_lock:
+        return container_id in _terminals_opened
+
+
 # ---------------------------------------------------------------------------
 # Terminal auto-open helper
 # ---------------------------------------------------------------------------
@@ -480,13 +486,16 @@ def sandbox_exec(
             f"{container_id[:12]}: {e}"
         )
 
-    # Truncate log file so terminal tail shows fresh output
-    _exec_run(
-        container,
-        ["sh", "-c", f"truncate -s 0 {_CONTAINER_LOG_PATH}"],
-        stdout=False,
-        stderr=False,
-    )
+    # Only truncate the log file on the first call (when the terminal
+    # window is not yet open).  Subsequent calls append to the existing
+    # log so the already-open tail -f window keeps showing output.
+    if not _terminal_already_open(container_id):
+        _exec_run(
+            container,
+            ["sh", "-c", f"truncate -s 0 {_CONTAINER_LOG_PATH}"],
+            stdout=False,
+            stderr=False,
+        )
 
     _open_terminal_with_logs(container_id)
 

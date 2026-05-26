@@ -11,9 +11,12 @@ from code_sandbox_mcp.server import (
     _CONTAINER_LOG_PATH,
     _TERMINAL,
     _exec_run,
+    _forget_terminal,
     _jobs,
     _jobs_lock,
     _open_terminal_with_logs,
+    _terminals_lock,
+    _terminals_opened,
     sandbox_exec,
     sandbox_exec_check,
 )
@@ -25,6 +28,8 @@ class TestSandboxExecTerminal:
     def setup_method(self) -> None:
         with _jobs_lock:
             _jobs.clear()
+        with _terminals_lock:
+            _terminals_opened.clear()
 
     @patch("code_sandbox_mcp.server._docker")
     def test_terminal_note_included_when_terminal_set(
@@ -187,6 +192,8 @@ class TestSandboxExecCheck:
     def setup_method(self) -> None:
         with _jobs_lock:
             _jobs.clear()
+        with _terminals_lock:
+            _terminals_opened.clear()
 
     def test_job_not_found(self) -> None:
         result = sandbox_exec_check("nonexistent-container", "nonexistent")
@@ -260,3 +267,129 @@ class TestSandboxExecCheck:
         # No show_partial argument - should still work
         result = sandbox_exec_check("c5", "exec-job-5")
         assert "done" in result
+
+
+class TestOpenTerminalWithLogs:
+    """Tests for _open_terminal_with_logs deduplication."""
+
+    def setup_method(self) -> None:
+        with _terminals_lock:
+            _terminals_opened.clear()
+
+    @patch("code_sandbox_mcp.server.subprocess.Popen")
+    def test_first_call_opens_terminal(
+        self,
+        mock_popen: MagicMock,
+    ) -> None:
+        """First call for a container_id should open a terminal window."""
+        import code_sandbox_mcp.server as server
+        original_terminal = server._TERMINAL
+        server._TERMINAL = "xterm"
+
+        try:
+            _open_terminal_with_logs("abc123def456")
+            mock_popen.assert_called_once()
+        finally:
+            server._TERMINAL = original_terminal
+
+    @patch("code_sandbox_mcp.server.subprocess.Popen")
+    def test_second_call_skips_terminal(
+        self,
+        mock_popen: MagicMock,
+    ) -> None:
+        """Second call for the same container_id should NOT open a new terminal."""
+        import code_sandbox_mcp.server as server
+        original_terminal = server._TERMINAL
+        server._TERMINAL = "xterm"
+
+        try:
+            _open_terminal_with_logs("abc123def456")
+            _open_terminal_with_logs("abc123def456")
+            # Popen should have been called only once
+            mock_popen.assert_called_once()
+        finally:
+            server._TERMINAL = original_terminal
+
+    @patch("code_sandbox_mcp.server.subprocess.Popen")
+    def test_different_containers_open_separate_windows(
+        self,
+        mock_popen: MagicMock,
+    ) -> None:
+        """Different container_ids should each open their own terminal."""
+        import code_sandbox_mcp.server as server
+        original_terminal = server._TERMINAL
+        server._TERMINAL = "xterm"
+
+        try:
+            _open_terminal_with_logs("abc123def456")
+            _open_terminal_with_logs("xyz789ghi012")
+            assert mock_popen.call_count == 2
+        finally:
+            server._TERMINAL = original_terminal
+
+    @patch("code_sandbox_mcp.server.subprocess.Popen")
+    def test_skip_when_terminal_none(
+        self,
+        mock_popen: MagicMock,
+    ) -> None:
+        """When _TERMINAL is None, no terminal is opened even on first call."""
+        import code_sandbox_mcp.server as server
+        original_terminal = server._TERMINAL
+        server._TERMINAL = None
+
+        try:
+            _open_terminal_with_logs("abc123def456")
+            mock_popen.assert_not_called()
+        finally:
+            server._TERMINAL = original_terminal
+
+    @patch("code_sandbox_mcp.server.subprocess.Popen")
+    def test_forget_terminal_allows_reopen(
+        self,
+        mock_popen: MagicMock,
+    ) -> None:
+        """After _forget_terminal(), the same container_id can open a new window."""
+        import code_sandbox_mcp.server as server
+        original_terminal = server._TERMINAL
+        server._TERMINAL = "xterm"
+
+        try:
+            _open_terminal_with_logs("abc123def456")
+            _forget_terminal("abc123def456")
+            _open_terminal_with_logs("abc123def456")
+            assert mock_popen.call_count == 2
+        finally:
+            server._TERMINAL = original_terminal
+
+    @patch("code_sandbox_mcp.server.subprocess.Popen")
+    def test_sandbox_exec_multiple_calls_reuse_terminal(
+        self,
+        mock_popen: MagicMock,
+    ) -> None:
+        """Multiple sandbox_exec calls for the same container should open only one terminal.
+
+        This integration-style test verifies that the full tool path
+        respects the deduplication.
+        """
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, b"output")
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+
+        import code_sandbox_mcp.server as server
+        original_terminal = server._TERMINAL
+        original_docker = server._docker
+        server._TERMINAL = "xterm"
+        server._docker = lambda: mock_client
+
+        try:
+            # First call should open terminal
+            sandbox_exec("abc123def456", ["echo hello"])
+            first_call_count = mock_popen.call_count
+
+            # Second call should NOT open new terminal
+            sandbox_exec("abc123def456", ["echo world"])
+            assert mock_popen.call_count == first_call_count
+        finally:
+            server._TERMINAL = original_terminal
+            server._docker = original_docker

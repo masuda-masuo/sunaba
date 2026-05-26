@@ -125,6 +125,25 @@ def _exec_run(container, cmd: list[str], **kwargs):
 
 
 # ---------------------------------------------------------------------------
+# Terminal window tracking
+# ---------------------------------------------------------------------------
+
+#: Set of container_ids for which a terminal window has already been opened.
+_terminals_opened: set[str] = set()
+_terminals_lock = threading.Lock()
+
+
+def _forget_terminal(container_id: str) -> None:
+    """Remove *container_id* from the terminal tracking set.
+
+    Called when a container is stopped so the next invocation can
+    open a fresh terminal window.
+    """
+    with _terminals_lock:
+        _terminals_opened.discard(container_id)
+
+
+# ---------------------------------------------------------------------------
 # Terminal auto-open helper
 # ---------------------------------------------------------------------------
 
@@ -134,9 +153,23 @@ def _open_terminal_with_logs(container_id: str) -> None:
 
     On Windows ``cmd /c start`` is used to detach the window from the
     MCP server process, so the window survives server shutdown.
+
+    If a terminal window has already been opened for the same
+    *container_id*, this call is a no-op so that multiple sequential
+    ``sandbox_exec`` / ``sandbox_exec_background`` calls reuse the
+    same window.
     """
     if _TERMINAL is None:
         return
+
+    with _terminals_lock:
+        if container_id in _terminals_opened:
+            logger.debug(
+                "Terminal already open for container %s, skipping",
+                container_id[:12],
+            )
+            return
+        _terminals_opened.add(container_id)
 
     short_id = container_id[:12]
 
@@ -656,10 +689,12 @@ def sandbox_stop(container_id: str) -> str:
         container = client.containers.get(container_id)
         container.stop(timeout=10)
         container.remove(v=True)
+        _forget_terminal(container_id)
         return (
             f"Container {container_id[:12]} stopped and removed"
         )
     except NotFound:
+        _forget_terminal(container_id)
         return (
             f"Container {container_id[:12]} not found "
             "(already removed?)"

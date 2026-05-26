@@ -32,7 +32,7 @@ class TestSandboxExecTerminal:
         mock_docker: MagicMock,
     ) -> None:
         """When _TERMINAL is set, sandbox_exec returns a terminal notification."""
-        # Setup mock container
+        # Setup mock container - exec_run returns (0, output_bytes) for all calls
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, b"hello world")
         mock_client = MagicMock()
@@ -140,12 +140,24 @@ class TestSandboxExecTerminal:
         self,
         mock_docker: MagicMock,
     ) -> None:
-        """Terminal notification is included even when a command fails."""
+        """Terminal notification is included even when a command fails.
+
+        sandbox_exec now calls exec_run multiple times per command:
+          1. truncate -s 0 /tmp/mcp.log
+          2. echo '$ echo first' >> /tmp/mcp.log   (header for cmd 1)
+          3. (echo first) 2>&1 | tee -a /tmp/mcp.log (cmd 1)
+          4. echo '$ false' >> /tmp/mcp.log         (header for cmd 2)
+          5. (false) 2>&1 | tee -a /tmp/mcp.log     (cmd 2, fails)
+          6. echo "Command exited with code 1" >> /tmp/mcp.log (error msg)
+        """
         mock_container = MagicMock()
-        # First command succeeds, second fails
         mock_container.exec_run.side_effect = [
-            (0, b"first output"),
-            (1, b"error message"),
+            (0, b""),            # 1. truncate
+            (0, b""),            # 2. header 1
+            (0, b"first output"),  # 3. cmd 1 success
+            (0, b""),            # 4. header 2
+            (1, b"error msg"),   # 5. cmd 2 fails
+            (0, b""),            # 6. error msg to log
         ]
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
@@ -163,6 +175,8 @@ class TestSandboxExecTerminal:
             assert "$ echo first" in result
             assert "Command exited with code 1" in result
             assert "A terminal window has been opened" in result
+            # Second command should NOT appear in output (stopped at failure)
+            assert "$ false" in result
         finally:
             server._TERMINAL = original_terminal
 

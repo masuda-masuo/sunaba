@@ -4,6 +4,17 @@ Spawning server.py as a child process and proxying stdio between
 Claude Desktop and the server.  If the server exits with
 :data:`~code_sandbox_mcp.RESTART_EXIT_CODE` (42), the launcher
 restarts it (signaling a successful in-place update).
+
+Architecture
+------------
+* **stdin proxy** – a single long-lived thread reads from
+  ``sys.stdin.buffer`` and writes to the *current* server's stdin via
+  a ``threading.Event``-guarded reference.  On restart the reference is
+  atomically swapped so the single reader thread always feeds the live
+  process without duplication or races.
+* **stdout/stderr proxies** – one thread per stream per server process,
+  started fresh on each restart.  These are daemon threads so they are
+  reaped automatically when the launcher exits.
 """
 from __future__ import annotations
 
@@ -41,6 +52,33 @@ def _pipe_stream(src: IO[bytes], dst: IO[bytes]) -> None:
         pass
 
 
+def _stdin_proxy(get_dst) -> None:
+    """Read sys.stdin.buffer forever, writing each line to get_dst().
+
+    *get_dst* is a callable that returns the current destination stream.
+    Returning ``None`` causes the proxy to silently drop the line, which
+    happens during the brief gap between server processes on restart.
+    """
+    src = sys.stdin.buffer
+    try:
+        while True:
+            data = src.readline()
+            if not data:
+                break
+            dst = get_dst()
+            if dst is None:
+                continue
+            try:
+                dst.write(data)
+                dst.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                # Server stdin closed mid-restart; next line will get
+                # the new dst from get_dst().
+                pass
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -70,6 +108,23 @@ def main() -> None:
         server_args.append("--auto-update")
     server_args.extend(remaining)
 
+    # Shared mutable reference to the current server's stdin.
+    # A lock protects swaps during restart.
+    _lock = threading.Lock()
+    _current_stdin: list[IO[bytes] | None] = [None]
+
+    def _get_current_stdin() -> IO[bytes] | None:
+        with _lock:
+            return _current_stdin[0]
+
+    # Single stdin proxy thread — lives for the duration of the launcher.
+    stdin_thread = threading.Thread(
+        target=_stdin_proxy,
+        args=(_get_current_stdin,),
+        daemon=True,
+    )
+    stdin_thread.start()
+
     while True:
         proc = subprocess.Popen(
             server_args,
@@ -78,30 +133,33 @@ def main() -> None:
             stderr=subprocess.PIPE,
         )
 
-        threads = [
-            threading.Thread(
-                target=_pipe_stream,
-                args=(sys.stdin.buffer, proc.stdin),
-                daemon=True,
-            ),
-            threading.Thread(
-                target=_pipe_stream,
-                args=(proc.stdout, sys.stdout.buffer),
-                daemon=True,
-            ),
-            threading.Thread(
-                target=_pipe_stream,
-                args=(proc.stderr, sys.stderr.buffer),
-                daemon=True,
-            ),
-        ]
-        for t in threads:
-            t.start()
+        # Point the stdin proxy at the new process.
+        with _lock:
+            _current_stdin[0] = proc.stdin
+
+        # Per-process stdout/stderr proxy threads.
+        out_thread = threading.Thread(
+            target=_pipe_stream,
+            args=(proc.stdout, sys.stdout.buffer),
+            daemon=True,
+        )
+        err_thread = threading.Thread(
+            target=_pipe_stream,
+            args=(proc.stderr, sys.stderr.buffer),
+            daemon=True,
+        )
+        out_thread.start()
+        err_thread.start()
 
         returncode = proc.wait()
 
-        for t in threads:
-            t.join(timeout=1)
+        # Detach stdin proxy from the dead process before restart so
+        # lines arriving during pip-install are not lost to a closed pipe.
+        with _lock:
+            _current_stdin[0] = None
+
+        out_thread.join(timeout=1)
+        err_thread.join(timeout=1)
 
         if returncode != RESTART_EXIT_CODE:
             break

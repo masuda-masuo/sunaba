@@ -117,13 +117,11 @@ def main() -> None:
         with _lock:
             return _current_stdin[0]
 
-    # Single stdin proxy thread — lives for the duration of the launcher.
-    stdin_thread = threading.Thread(
-        target=_stdin_proxy,
-        args=(_get_current_stdin,),
-        daemon=True,
-    )
-    stdin_thread.start()
+    # stdin proxy thread starts on first server iteration (after the
+    # server process is ready) to avoid dropping the initialize request
+    # that arrives before the server is started.
+    stdin_thread: threading.Thread | None = None
+    stdin_thread_started = False
 
     while True:
         proc = subprocess.Popen(
@@ -136,6 +134,19 @@ def main() -> None:
         # Point the stdin proxy at the new process.
         with _lock:
             _current_stdin[0] = proc.stdin
+
+        # Start the single stdin proxy thread on the first iteration,
+        # after the server process is already running and its stdin
+        # reference has been set.  This ensures no lines are dropped
+        # during the race window between thread start and server ready.
+        if not stdin_thread_started:
+            stdin_thread_started = True
+            stdin_thread = threading.Thread(
+                target=_stdin_proxy,
+                args=(_get_current_stdin,),
+                daemon=True,
+            )
+            stdin_thread.start()
 
         # Per-process stdout/stderr proxy threads.
         out_thread = threading.Thread(

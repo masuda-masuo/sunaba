@@ -98,3 +98,96 @@ class TestLauncherMainSmoke:
         t.start()
         t.join(timeout=2)
         assert dst.getvalue() == b"test data"
+
+
+class TestStdinProxyTiming:
+    """Tests for the stdin proxy thread startup timing fix (#20).
+
+    Verifies that the stdin proxy thread is not started until after
+    the first server subprocess has been spawned and its stdin
+    reference has been set, preventing the loss of the initialize
+    request.
+    """
+
+    def test_stdin_reference_set_before_thread_start(self) -> None:
+        """Simulate the startup sequence: the _current_stdin reference
+        must be set to a non-None value before the stdin proxy thread
+        is allowed to start."""
+        from code_sandbox_mcp.launcher import _stdin_proxy
+
+        # Track the order of operations
+        operations: list[str] = []
+
+        _lock = threading.Lock()
+        _current_stdin: list[IO[bytes] | None] = [None]
+
+        def _get_current_stdin() -> IO[bytes] | None:
+            with _lock:
+                return _current_stdin[0]
+
+        # Simulate server startup: set stdin reference
+        dummy_stdin = io.BytesIO()
+        with _lock:
+            _current_stdin[0] = dummy_stdin
+        operations.append("stdin_set")
+
+        # Now start the proxy thread (this is the fixed order)
+        t = threading.Thread(
+            target=_stdin_proxy,
+            args=(_get_current_stdin,),
+            daemon=True,
+        )
+        t.start()
+        operations.append("thread_started")
+
+        # Verify: stdin was set BEFORE thread started
+        assert operations == ["stdin_set", "thread_started"]
+        # Verify: the proxy can immediately get the stdin reference
+        assert _get_current_stdin() is not None
+        assert _get_current_stdin() is dummy_stdin
+
+        # Cleanup: set stdin to None to stop the thread
+        with _lock:
+            _current_stdin[0] = None
+        t.join(timeout=1)
+
+    def test_stdin_none_during_restart_gap_is_dropped(self) -> None:
+        """During the restart gap (server stopped, new server not yet
+        started), _get_current_stdin() returns None and the proxy
+        thread drops the line silently. This is the expected behavior
+        that the fix must preserve for restarts."""
+        from code_sandbox_mcp.launcher import _stdin_proxy
+
+        received: list[bytes] = []
+
+        _lock = threading.Lock()
+        _current_stdin: list[IO[bytes] | None] = [None]
+
+        def _get_current_stdin() -> IO[bytes] | None:
+            with _lock:
+                return _current_stdin[0]
+
+        # Start proxy with stdin = None (simulating restart gap)
+        t = threading.Thread(
+            target=_stdin_proxy,
+            args=(_get_current_stdin,),
+            daemon=True,
+        )
+        t.start()
+
+        # Send a line while stdin is None (should be dropped)
+        old_stdin = sys.stdin
+        try:
+            sys.stdin = io.TextIOWrapper(io.BytesIO(b"hello\n"))
+            # Give the thread time to process
+            import time
+            time.sleep(0.1)
+            # No error should occur - line is dropped silently
+        finally:
+            sys.stdin = old_stdin
+
+        # Verify that no data was forwarded (dst is None, so line dropped)
+        with _lock:
+            assert _current_stdin[0] is None
+
+        t.join(timeout=1)

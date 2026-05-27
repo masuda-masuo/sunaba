@@ -470,6 +470,16 @@ def _run_update_background(job_id: str) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         with log_path.open("w", encoding="utf-8") as log_f:
+            # Write an initial message immediately so the terminal window
+            # shows activity before pip produces any output.  Without this
+            # the log file stays at 0 bytes until pip starts writing,
+            # making it impossible to tell whether the update is running
+            # or stuck (#22).
+            log_f.write(
+                f"=== Update started (spec: {_UPDATE_SPEC}) ===\n"
+            )
+            log_f.flush()
+
             proc = subprocess.Popen(
                 [
                     sys.executable, "-m", "pip", "install",

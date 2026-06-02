@@ -450,8 +450,12 @@ _UPDATE_AUTO: bool = False
 def _run_update_background(job_id: str) -> None:
     """Run pip install --force-reinstall in a background thread.
 
-    Streams pip output to *_UPDATE_LOG_PATH* on the host so the terminal
-    window opened by ``sandbox_update_start`` can tail it in real time.
+    Redirects pip stdout/stderr directly to ``_UPDATE_LOG_PATH`` so the
+    terminal window opened by ``sandbox_update_start`` can tail it in real
+    time.  Unlike the previous implementation that read pip output line by
+    line in a Python thread (which suffered from GIL/scheduler delays), the
+    subprocess writes directly to the file, eliminating the thread-
+    scheduling dependency.
 
     On success exits the process with
     :data:`~code_sandbox_mcp.RESTART_EXIT_CODE` (42, restart signal).
@@ -480,27 +484,24 @@ def _run_update_background(job_id: str) -> None:
             )
             log_f.flush()
 
+            # Redirect stdout/stderr directly to the log file so pip
+            # output is written immediately without going through a
+            # Python-level read loop.  This avoids the GIL/scheduler
+            # issue described in #24.
             proc = subprocess.Popen(
                 [
                     sys.executable, "-m", "pip", "install",
                     "--force-reinstall", _UPDATE_SPEC,
                 ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
+                stdout=log_f,
+                stderr=log_f,
             )
-
-            output_lines: list[str] = []
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                log_f.write(line)
-                log_f.flush()
-                output_lines.append(line)
-
             proc.wait()
 
+        # Read back the full log for the job output
+        output = log_path.read_text()
+
         finished_at = time.time()
-        output = "".join(output_lines)
 
         if proc.returncode == 0:
             with _jobs_lock:
@@ -797,8 +798,14 @@ def sandbox_update_check(
         elapsed = time.time() - job["started_at"]
         return f"Status: running (elapsed: {elapsed:.0f}s)"
     if status == "error":
-        return f"Status: error\nError: {job['error']}"
-    return f"Status: done (elapsed: {job.get('elapsed', 0):.0f}s)"
+        return (
+            f"Status: error\nError: {job['error']}\n"
+            f"{job.get('output', '')}"
+        )
+    return (
+        f"Status: done (elapsed: {job.get('elapsed', 0):.0f}s)\n"
+        f"{job.get('output', '')}"
+    )
 
 
 @mcp.tool()

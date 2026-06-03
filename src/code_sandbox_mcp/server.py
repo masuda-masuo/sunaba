@@ -62,6 +62,7 @@ _PASS_THROUGH_KEYS: list[str] = []
 _EXEC_TIMEOUT: int = 300
 _TERMINAL: str | None = None
 _TERMINAL_ARGS: str | None = None
+_DEFAULT_IMAGE: str = "python:3.12-slim-bookworm"
 
 _CONTAINER_LOG_PATH = "/tmp/mcp.log"
 # Host-side update log: use the OS temp dir so it works on Windows too.
@@ -541,20 +542,33 @@ mcp = FastMCP("code-sandbox-mcp")
 
 
 @mcp.tool()
-def sandbox_initialize(
-    image: str = "python:3.12-slim-bookworm",
-) -> str:
+def sandbox_initialize(image: str | None = None) -> str:
+    """Start a Docker container and return its container_id.
+
+    Choose the image based on the project requirements:
+    - Python project                        → python:3.12-slim-bookworm (default)
+    - Python project requiring 3.11         → python:3.11-slim-bookworm
+    - Node.js project                       → node:20-slim
+    - General Linux / shell scripts         → ubuntu:24.04
+    - Custom/production environment         → specify explicitly
+
+    When *image* is omitted the default is used, which can be overridden
+    via the ``--default-image`` CLI argument in the server config.
+
+    The image must be pulled locally before use: docker pull <image>
+    """
+    resolved = image or _DEFAULT_IMAGE
     client = _docker()
     env = _container_env()
     container = client.containers.run(
-        image,
+        resolved,
         command="sleep infinity",
         detach=True,
         remove=False,
         environment=env,
     )
     logger.info(
-        "Container %s started (image=%s)", container.id[:12], image
+        "Container %s started (image=%s)", container.id[:12], resolved
     )
     return container.id
 
@@ -963,6 +977,15 @@ def main() -> None:
         default=None,
     )
     parser.add_argument(
+        "--default-image",
+        metavar="IMAGE",
+        default=_DEFAULT_IMAGE,
+        help=(
+            "Default Docker image for sandbox_initialize() "
+            f"(default: {_DEFAULT_IMAGE})"
+        ),
+    )
+    parser.add_argument(
         "--update-spec",
         metavar="SPEC",
         default=".",
@@ -985,6 +1008,7 @@ def main() -> None:
     global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT
     global _TERMINAL, _TERMINAL_ARGS
     global _UPDATE_SPEC, _UPDATE_AUTO
+    global _DEFAULT_IMAGE
     _PASS_THROUGH_KEYS = [
         k.strip()
         for k in args.pass_through_env.split(",")
@@ -993,6 +1017,7 @@ def main() -> None:
     _EXEC_TIMEOUT = args.exec_timeout
     _TERMINAL = args.terminal
     _TERMINAL_ARGS = args.terminal_args
+    _DEFAULT_IMAGE = args.default_image
     _UPDATE_SPEC = args.update_spec
     _UPDATE_AUTO = args.auto_update
 

@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -79,6 +80,46 @@ def _container_env() -> dict[str, str]:
 
 def _docker() -> docker.DockerClient:
     return docker.from_env()
+
+
+# ---------------------------------------------------------------------------
+# WSL detection and cmd.exe resolution
+# ---------------------------------------------------------------------------
+
+
+def _is_wsl() -> bool:
+    """Return True when running inside WSL (Windows Subsystem for Linux).
+
+    WSL sets the ``WSL_DISTRO_NAME`` environment variable, which is the
+    most reliable way to detect it without parsing ``/proc/version``.
+    """
+    return sys.platform != "win32" and bool(os.environ.get("WSL_DISTRO_NAME"))
+
+
+def _wsl_cmd_exe() -> str | None:
+    """Return the full path to cmd.exe usable from WSL, or None if not found.
+
+    On WSL, Windows executables live under /mnt/c/... and are not always
+    on PATH. We try shutil.which first (works when the Windows System32
+    directory is in the WSL PATH), then fall back to the canonical mount
+    point.
+    """
+    # shutil.which respects PATH, so it finds cmd.exe when
+    # /mnt/c/Windows/System32 (or similar) is in PATH.
+    found = shutil.which("cmd.exe")
+    if found:
+        return found
+
+    # Common fallback paths for standard Windows installations.
+    fallbacks = [
+        "/mnt/c/Windows/System32/cmd.exe",
+        "/mnt/c/WINDOWS/system32/cmd.exe",
+    ]
+    for path in fallbacks:
+        if Path(path).exists():
+            return path
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +202,8 @@ def _terminal_already_open(container_id: str) -> bool:
 def _open_terminal_with_logs(container_id: str) -> None:
     """Open a terminal window tailing /tmp/mcp.log inside the container.
 
-    On Windows ``cmd /c start`` is used to detach the window from the
-    MCP server process, so the window survives server shutdown.
+    On Windows and WSL, ``cmd.exe /c start`` is used to detach the window
+    from the MCP server process, so the window survives server shutdown.
 
     If a terminal window has already been opened for the same
     *container_id*, this call is a no-op so that multiple sequential
@@ -216,8 +257,36 @@ def _open_terminal_with_logs(container_id: str) -> None:
             else:
                 subprocess.Popen(
                     [
-                        "cmd", "/c", "start",
-                        _TERMINAL, "-NoExit", "-Command",
+                        "cmd.exe", "/c", "start",
+                        "powershell.exe", "-NoExit", "-Command",
+                        ps_script,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        elif _is_wsl():
+            cmd_exe = _wsl_cmd_exe()
+            if cmd_exe is None:
+                logger.warning(
+                    "WSL: cmd.exe not found; cannot open terminal window"
+                )
+                return
+            if _TERMINAL_ARGS:
+                extra = _TERMINAL_ARGS.format(
+                    container_id=container_id
+                ).split()
+                subprocess.Popen(
+                    [_TERMINAL] + extra,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                subprocess.Popen(
+                    [
+                        cmd_exe, "/c", "start",
+                        "powershell.exe", "-NoExit", "-Command",
                         ps_script,
                     ],
                     stdin=subprocess.DEVNULL,
@@ -285,8 +354,25 @@ def _open_update_terminal(log_path: str) -> None:
         if sys.platform == "win32":
             subprocess.Popen(
                 [
-                    "cmd", "/c", "start",
-                    _TERMINAL, "-NoExit", "-Command",
+                    "cmd.exe", "/c", "start",
+                    "powershell.exe", "-NoExit", "-Command",
+                    ps_script,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        elif _is_wsl():
+            cmd_exe = _wsl_cmd_exe()
+            if cmd_exe is None:
+                logger.warning(
+                    "WSL: cmd.exe not found; cannot open update terminal"
+                )
+                return
+            subprocess.Popen(
+                [
+                    cmd_exe, "/c", "start",
+                    "powershell.exe", "-NoExit", "-Command",
                     ps_script,
                 ],
                 stdin=subprocess.DEVNULL,
@@ -949,6 +1035,11 @@ def copy_file(
 
 
 def main() -> None:
+    global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT
+    global _TERMINAL, _TERMINAL_ARGS
+    global _UPDATE_SPEC, _UPDATE_AUTO
+    global _DEFAULT_IMAGE
+
     parser = argparse.ArgumentParser(
         description=(
             "code-sandbox-mcp: "
@@ -1005,10 +1096,6 @@ def main() -> None:
     )
     args, remaining = parser.parse_known_args()
 
-    global _PASS_THROUGH_KEYS, _EXEC_TIMEOUT
-    global _TERMINAL, _TERMINAL_ARGS
-    global _UPDATE_SPEC, _UPDATE_AUTO
-    global _DEFAULT_IMAGE
     _PASS_THROUGH_KEYS = [
         k.strip()
         for k in args.pass_through_env.split(",")

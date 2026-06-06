@@ -323,47 +323,6 @@ sandbox_exec_check(container_id, job_id)
 sandbox_stop(container_id)
 ```
 
-## 🐳 Docker Integration (mcp-launcher)
-
-Use with `mcp-launcher` and Claude Desktop for streamlined containerized execution.
-
-### Quick Start
-
-1. **Build Docker image**
-
-```powershell
-docker build -f Dockerfile -t ghcr.io/masuda-masuo/code-sandbox-mcp:latest .
-```
-
-2. **Set up mcp-launcher**
-
-   Follow [Docker Integration Guide](./docs/docker/INTEGRATION_GUIDE.md)
-
-3. **Use in Claude Desktop**
-
-```
-Run this Python code:
-
-print("Hello from code-sandbox-mcp!")
-```
-
-### Security
-
-- ✅ No tokens stored in files
-- ✅ Runtime environment variable injection  
-- ✅ Docker socket safely mounted
-- ✅ Containers auto-removed after use
-
-### Publish to GHCR (Optional)
-
-```powershell
-docker login ghcr.io -u <GitHub-username>
-docker tag ghcr.io/masuda-masuo/code-sandbox-mcp:latest ghcr.io/<github-username>/code-sandbox-mcp:latest
-docker push ghcr.io/<github-username>/code-sandbox-mcp:latest
-```
-
-For detailed setup, see [docs/docker/INTEGRATION_GUIDE.md](./docs/docker/INTEGRATION_GUIDE.md).
-
 ## Known limitations
 
 - **Job dictionary grows unbounded**: Completed job results are kept in memory indefinitely for the lifetime of the server process. In typical development use (short-lived server sessions) this is not a problem, but long-running server instances will accumulate memory over time.

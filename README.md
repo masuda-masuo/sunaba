@@ -75,7 +75,7 @@ Use `(Get-Command python).Source` (Windows PowerShell) or `which python` (Mac/Li
 {
   "mcpServers": {
     "code-sandbox-mcp": {
-      "command": "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "command": "C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe",
       "args": [
         "-m", "code_sandbox_mcp.launcher",
         "--update-spec", "git+https://github.com/masuda-masuo/code-sandbox-mcp",
@@ -97,7 +97,7 @@ In launcher mode, `sandbox_update_start()` / `sandbox_update_check()` allow Clau
 {
   "mcpServers": {
     "code-sandbox-mcp": {
-      "command": "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "command": "C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe",
       "args": [
         "-m", "code_sandbox_mcp.server",
         "--pass-through-env", "GITHUB_TOKEN"
@@ -129,7 +129,7 @@ Add `--terminal` to open a PowerShell/terminal window that tails container logs 
   "-m", "code_sandbox_mcp.launcher",
   "--update-spec", "git+https://github.com/masuda-masuo/code-sandbox-mcp",
   "--pass-through-env", "GITHUB_TOKEN",
-  "--terminal", "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+  "--terminal", "C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe"
 ]
 ```
 
@@ -189,7 +189,7 @@ When `--terminal` is set, a terminal window opens automatically every time `sand
       "command": "<output of where.exe code-sandbox-mcp>",
       "args": [
         "--pass-through-env", "GITHUB_TOKEN",
-        "--terminal", "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+        "--terminal", "C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe"
       ],
       "env": {
         "GITHUB_TOKEN": "github_pat_xxxx"
@@ -322,6 +322,47 @@ sandbox_exec_check(container_id, job_id)
 
 sandbox_stop(container_id)
 ```
+
+## 🐳 Docker Integration (mcp-launcher)
+
+Use with `mcp-launcher` and Claude Desktop for streamlined containerized execution.
+
+### Quick Start
+
+1. **Build Docker image**
+
+```powershell
+docker build -f Dockerfile -t ghcr.io/masuda-masuo/code-sandbox-mcp:latest .
+```
+
+2. **Set up mcp-launcher**
+
+   Follow [Docker Integration Guide](./docs/docker/INTEGRATION_GUIDE.md)
+
+3. **Use in Claude Desktop**
+
+```
+Run this Python code:
+
+print("Hello from code-sandbox-mcp!")
+```
+
+### Security
+
+- ✅ No tokens stored in files
+- ✅ Runtime environment variable injection  
+- ✅ Docker socket safely mounted
+- ✅ Containers auto-removed after use
+
+### Publish to GHCR (Optional)
+
+```powershell
+docker login ghcr.io -u <GitHub-username>
+docker tag ghcr.io/masuda-masuo/code-sandbox-mcp:latest ghcr.io/<github-username>/code-sandbox-mcp:latest
+docker push ghcr.io/<github-username>/code-sandbox-mcp:latest
+```
+
+For detailed setup, see [docs/docker/INTEGRATION_GUIDE.md](./docs/docker/INTEGRATION_GUIDE.md).
 
 ## Known limitations
 

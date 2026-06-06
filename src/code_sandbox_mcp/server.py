@@ -10,7 +10,6 @@ import io
 import logging
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import tarfile
@@ -80,60 +79,6 @@ def _container_env() -> dict[str, str]:
 
 def _docker() -> docker.DockerClient:
     return docker.from_env()
-
-
-# ---------------------------------------------------------------------------
-# WSL detection and cmd.exe resolution
-# ---------------------------------------------------------------------------
-
-
-def _is_wsl() -> bool:
-    """Return True when running inside WSL or a Docker container on WSL2.
-
-    Detection priority:
-    1. ``WSL_DISTRO_NAME`` env var — set in native WSL sessions.
-    2. ``/proc/version`` containing ``microsoft`` — Docker containers
-       running on the WSL2 backend share the WSL2 kernel and have this
-       string in ``/proc/version`` even though ``WSL_DISTRO_NAME`` is
-       not inherited by the container environment.
-    """
-    if sys.platform == "win32":
-        return False
-    if os.environ.get("WSL_DISTRO_NAME"):
-        return True
-    # Docker containers on the WSL2 backend share the WSL2 kernel.
-    # /proc/version contains "microsoft" in that case.
-    try:
-        with open("/proc/version") as _f:
-            return "microsoft" in _f.read().lower()
-    except OSError:
-        return False
-
-
-def _wsl_cmd_exe() -> str | None:
-    """Return the full path to cmd.exe usable from WSL, or None if not found.
-
-    On WSL, Windows executables live under /mnt/c/... and are not always
-    on PATH. We try shutil.which first (works when the Windows System32
-    directory is in the WSL PATH), then fall back to the canonical mount
-    point.
-    """
-    # shutil.which respects PATH, so it finds cmd.exe when
-    # /mnt/c/Windows/System32 (or similar) is in PATH.
-    found = shutil.which("cmd.exe")
-    if found:
-        return found
-
-    # Common fallback paths for standard Windows installations.
-    fallbacks = [
-        "/mnt/c/Windows/System32/cmd.exe",
-        "/mnt/c/WINDOWS/system32/cmd.exe",
-    ]
-    for path in fallbacks:
-        if Path(path).exists():
-            return path
-
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +161,8 @@ def _terminal_already_open(container_id: str) -> bool:
 def _open_terminal_with_logs(container_id: str) -> None:
     """Open a terminal window tailing /tmp/mcp.log inside the container.
 
-    On Windows and WSL, ``cmd.exe /c start`` is used to detach the window
-    from the MCP server process, so the window survives server shutdown.
+    On Windows ``cmd /c start`` is used to detach the window from the
+    MCP server process, so the window survives server shutdown.
 
     If a terminal window has already been opened for the same
     *container_id*, this call is a no-op so that multiple sequential
@@ -271,36 +216,8 @@ def _open_terminal_with_logs(container_id: str) -> None:
             else:
                 subprocess.Popen(
                     [
-                        "cmd.exe", "/c", "start",
-                        "powershell.exe", "-NoExit", "-Command",
-                        ps_script,
-                    ],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-        elif _is_wsl():
-            cmd_exe = _wsl_cmd_exe()
-            if cmd_exe is None:
-                logger.warning(
-                    "WSL: cmd.exe not found; cannot open terminal window"
-                )
-                return
-            if _TERMINAL_ARGS:
-                extra = _TERMINAL_ARGS.format(
-                    container_id=container_id
-                ).split()
-                subprocess.Popen(
-                    [_TERMINAL] + extra,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            else:
-                subprocess.Popen(
-                    [
-                        cmd_exe, "/c", "start",
-                        "powershell.exe", "-NoExit", "-Command",
+                        "cmd", "/c", "start",
+                        _TERMINAL, "-NoExit", "-Command",
                         ps_script,
                     ],
                     stdin=subprocess.DEVNULL,
@@ -368,25 +285,8 @@ def _open_update_terminal(log_path: str) -> None:
         if sys.platform == "win32":
             subprocess.Popen(
                 [
-                    "cmd.exe", "/c", "start",
-                    "powershell.exe", "-NoExit", "-Command",
-                    ps_script,
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        elif _is_wsl():
-            cmd_exe = _wsl_cmd_exe()
-            if cmd_exe is None:
-                logger.warning(
-                    "WSL: cmd.exe not found; cannot open update terminal"
-                )
-                return
-            subprocess.Popen(
-                [
-                    cmd_exe, "/c", "start",
-                    "powershell.exe", "-NoExit", "-Command",
+                    "cmd", "/c", "start",
+                    _TERMINAL, "-NoExit", "-Command",
                     ps_script,
                 ],
                 stdin=subprocess.DEVNULL,
@@ -553,10 +453,7 @@ def _run_update_background(job_id: str) -> None:
 
     Redirects pip stdout/stderr directly to ``_UPDATE_LOG_PATH`` so the
     terminal window opened by ``sandbox_update_start`` can tail it in real
-    time.  Unlike the previous implementation that read pip output line by
-    line in a Python thread (which suffered from GIL/scheduler delays), the
-    subprocess writes directly to the file, eliminating the thread-
-    scheduling dependency.
+    time.
 
     On success exits the process with
     :data:`~code_sandbox_mcp.RESTART_EXIT_CODE` (42, restart signal).
@@ -575,20 +472,11 @@ def _run_update_background(job_id: str) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         with log_path.open("w", encoding="utf-8") as log_f:
-            # Write an initial message immediately so the terminal window
-            # shows activity before pip produces any output.  Without this
-            # the log file stays at 0 bytes until pip starts writing,
-            # making it impossible to tell whether the update is running
-            # or stuck (#22).
             log_f.write(
                 f"=== Update started (spec: {_UPDATE_SPEC}) ===\n"
             )
             log_f.flush()
 
-            # Redirect stdout/stderr directly to the log file so pip
-            # output is written immediately without going through a
-            # Python-level read loop.  This avoids the GIL/scheduler
-            # issue described in #24.
             proc = subprocess.Popen(
                 [
                     sys.executable, "-m", "pip", "install",
@@ -599,7 +487,6 @@ def _run_update_background(job_id: str) -> None:
             )
             proc.wait()
 
-        # Read back the full log for the job output
         output = log_path.read_text()
 
         finished_at = time.time()
@@ -689,9 +576,6 @@ def sandbox_exec(
             f"{container_id[:12]}: {e}"
         )
 
-    # Only truncate the log file on the first call (when the terminal
-    # window is not yet open).  Subsequent calls append to the existing
-    # log so the already-open tail -f window keeps showing output.
     if not _terminal_already_open(container_id):
         _exec_run(
             container,
@@ -864,7 +748,6 @@ def sandbox_update_start() -> str:
         daemon=True,
     ).start()
 
-    # Open a terminal showing the update log so the human can watch.
     _open_update_terminal(_UPDATE_LOG_PATH)
 
     terminal_note = (

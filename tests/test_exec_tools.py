@@ -5,8 +5,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from pathlib import Path
 import pytest
+from pathlib import Path
 
 from code_sandbox_mcp.server import (
     _CONTAINER_LOG_PATH,
@@ -17,7 +17,8 @@ from code_sandbox_mcp.server import (
     _jobs_lock,
     _open_terminal_with_logs,
     _terminals_lock,
-    copy_project, _terminals_opened,
+    _terminals_opened,
+    copy_project,
     sandbox_exec,
     sandbox_exec_check,
 )
@@ -410,6 +411,7 @@ class TestCopyProject:
     def test_copy_project_with_dot(
         self,
         mock_docker: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
         """local_src_dir="." should resolve to the actual directory name as arcname."""
@@ -425,46 +427,35 @@ class TestCopyProject:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        import code_sandbox_mcp.server as server
-        original_docker = server._docker
-        server._docker = lambda: mock_client
+        with monkeypatch.context() as m:
+            m.chdir(str(src_dir))
+            result = copy_project(
+                container_id="abc123",
+                local_src_dir=".",
+                dest_dir="/root/shiori",
+            )
 
-        try:
-            original_cwd = Path.cwd()
-            import os
-            os.chdir(str(src_dir))
-            try:
-                result = server.copy_project(
-                    container_id="abc123",
-                    local_src_dir=".",
-                    dest_dir="/root/shiori",
-                )
-            finally:
-                os.chdir(str(original_cwd))
+        assert "Error" not in result
+        # Should report the resolved directory name, not "."
+        assert "/root/shiori/myproject" in result
+        assert "/root/shiori/." not in result
 
-            assert "Error" not in result
-            # Should report the resolved directory name, not "."
-            assert "/root/shiori/myproject" in result
-            assert "/root/shiori/." not in result
+        mock_container.put_archive.assert_called_once()
+        call_args = mock_container.put_archive.call_args
+        assert call_args[0][0] == "/root/shiori"
 
-            mock_container.put_archive.assert_called_once()
-            call_args = mock_container.put_archive.call_args
-            assert call_args[0][0] == "/root/shiori"
-
-            tar_data = call_args[0][1]
-            tar_data.seek(0)
-            import tarfile
-            import io
-            with tarfile.open(fileobj=tar_data, mode="r") as tar:
-                names = tar.getnames()
-            assert all(
-                name.startswith("myproject/") or name == "myproject"
-                for name in names
-            ), f"Entries should be under 'myproject/', got: {names}"
-            assert "myproject/hello.txt" in names
-            assert "myproject/subdir/nested.txt" in names
-        finally:
-            server._docker = original_docker
+        tar_data = call_args[0][1]
+        tar_data.seek(0)
+        import tarfile
+        import io
+        with tarfile.open(fileobj=tar_data, mode="r") as tar:
+            names = tar.getnames()
+        assert all(
+            name.startswith("myproject/") or name == "myproject"
+            for name in names
+        ), f"Entries should be under 'myproject/', got: {names}"
+        assert "myproject/hello.txt" in names
+        assert "myproject/subdir/nested.txt" in names
 
     @patch("code_sandbox_mcp.server._docker")
     def test_copy_project_with_absolute_path(
@@ -483,32 +474,25 @@ class TestCopyProject:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        import code_sandbox_mcp.server as server
-        original_docker = server._docker
-        server._docker = lambda: mock_client
+        result = copy_project(
+            container_id="abc123",
+            local_src_dir=str(src_dir),
+            dest_dir="/opt",
+        )
 
-        try:
-            result = server.copy_project(
-                container_id="abc123",
-                local_src_dir=str(src_dir),
-                dest_dir="/opt",
-            )
+        assert "Error" not in result
+        assert "/opt/myapp" in result
 
-            assert "Error" not in result
-            assert "/opt/myapp" in result
+        call_args = mock_container.put_archive.call_args
+        assert call_args[0][0] == "/opt"
 
-            call_args = mock_container.put_archive.call_args
-            assert call_args[0][0] == "/opt"
-
-            tar_data = call_args[0][1]
-            tar_data.seek(0)
-            import tarfile
-            import io
-            with tarfile.open(fileobj=tar_data, mode="r") as tar:
-                names = tar.getnames()
-            assert "myapp/app.py" in names
-        finally:
-            server._docker = original_docker
+        tar_data = call_args[0][1]
+        tar_data.seek(0)
+        import tarfile
+        import io
+        with tarfile.open(fileobj=tar_data, mode="r") as tar:
+            names = tar.getnames()
+        assert "myapp/app.py" in names
 
     @patch("code_sandbox_mcp.server._docker")
     def test_copy_project_container_not_found(
@@ -521,20 +505,13 @@ class TestCopyProject:
         mock_client.containers.get.side_effect = NotFound("not found")
         mock_docker.return_value = mock_client
 
-        import code_sandbox_mcp.server as server
-        original_docker = server._docker
-        server._docker = lambda: mock_client
-
-        try:
-            result = server.copy_project(
-                container_id="abc123",
-                local_src_dir=".",
-                dest_dir="/root",
-            )
-            assert "Error" in result
-            assert "not found" in result
-        finally:
-            server._docker = original_docker
+        result = copy_project(
+            container_id="abc123",
+            local_src_dir=".",
+            dest_dir="/root",
+        )
+        assert "Error" in result
+        assert "not found" in result
 
     @patch("code_sandbox_mcp.server._docker")
     def test_copy_project_src_not_a_directory(
@@ -545,20 +522,13 @@ class TestCopyProject:
         mock_client = MagicMock()
         mock_docker.return_value = mock_client
 
-        import code_sandbox_mcp.server as server
-        original_docker = server._docker
-        server._docker = lambda: mock_client
-
-        try:
-            result = server.copy_project(
-                container_id="abc123",
-                local_src_dir="/nonexistent/path",
-                dest_dir="/root",
-            )
-            assert "Error" in result
-            assert "not a directory" in result
-        finally:
-            server._docker = original_docker
+        result = copy_project(
+            container_id="abc123",
+            local_src_dir="/nonexistent/path",
+            dest_dir="/root",
+        )
+        assert "Error" in result
+        assert "not a directory" in result
 
     @patch("code_sandbox_mcp.server._docker")
     def test_copy_project_put_archive_fails(
@@ -587,16 +557,9 @@ class TestCopyProject:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        import code_sandbox_mcp.server as server
-        original_docker = server._docker
-        server._docker = lambda: mock_client
-
-        try:
-            result = server.copy_project(
-                container_id="abc123",
-                local_src_dir=str(src_dir),
-                dest_dir="/nonexistent",
-            )
-            assert "Error" in result
-        finally:
-            server._docker = original_docker
+        result = copy_project(
+            container_id="abc123",
+            local_src_dir=str(src_dir),
+            dest_dir="/nonexistent",
+        )
+        assert "Error" in result

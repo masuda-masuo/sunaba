@@ -828,13 +828,78 @@ def sandbox_stop(container_id: str) -> str:
         return f"Error: {e}"
 
 
+# ---------------------------------------------------------------------------
+# File read helper for write_file_sandbox partial updates
+# ---------------------------------------------------------------------------
+
+
+def _read_file(container, dest_dir: str, file_name: str) -> str:
+    """Read the contents of *file_name* from *dest_dir* in *container*.
+
+    Uses ``container.get_archive()`` to retrieve the file as a tar
+    stream and returns its UTF-8 decoded content.
+
+    Raises
+        FileNotFoundError: if the file does not exist.
+        RuntimeError: if the archive does not contain the expected file.
+    """
+    path = str(Path(dest_dir) / file_name)
+    bits, stat = container.get_archive(path)
+    buf = io.BytesIO()
+    for chunk in bits:
+        buf.write(chunk)
+    buf.seek(0)
+    with tarfile.open(fileobj=buf, mode="r") as tar:
+        member = tar.next()
+        if member is None:
+            raise RuntimeError(
+                f"Empty archive returned for {path}"
+            )
+        content = tar.extractfile(member)
+        if content is None:
+            raise RuntimeError(
+                f"Could not extract {member.name} from archive"
+            )
+        return content.read().decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# write_file_sandbox
+# ---------------------------------------------------------------------------
+
+
 @mcp.tool()
 def write_file_sandbox(
     container_id: str,
     file_name: str,
     file_contents: str,
     dest_dir: str = "/root",
+    start_line: int | None = None,
+    end_line: int | None = None,
+    append: bool = False,
+    old_str: str | None = None,
 ) -> str:
+    """Write a file to the container. Supports full overwrite and partial updates.
+
+    **Full overwrite** (default, backward compatible):
+    Writes *file_contents* as the entire file.
+
+    **Line-range replacement** (*start_line* / *end_line*, 1-indexed, inclusive):
+    Replaces the specified line range with *file_contents*. Lines outside the
+    range are preserved.  When *start_line* is omitted it defaults to line 1;
+    when *end_line* is omitted it defaults to the last line of the file.
+
+    **Append** (*append* = True):
+    Appends *file_contents* to the end of the existing file.
+
+    **Replace** (*old_str*):
+    Replaces the *first* occurrence of *old_str* in the existing file with
+    *file_contents*.  Returns an error if *old_str* is not found.
+
+    *start_line* / *end_line*, *append*, and *old_str* are mutually exclusive.
+    When none of them is specified the file is fully overwritten (original
+    behaviour).
+    """
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -842,7 +907,92 @@ def write_file_sandbox(
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
         return f"Error: {e}"
-    encoded = file_contents.encode("utf-8")
+
+    # Determine which mode is requested
+    has_line_range = start_line is not None or end_line is not None
+    has_old_str = old_str is not None
+
+    modes = sum([has_line_range, append, has_old_str])
+    if modes > 1:
+        return (
+            "Error: start_line/end_line, append, and old_str are "
+            "mutually exclusive"
+        )
+
+    if modes == 0:
+        # Full overwrite (original behaviour)
+        encoded = file_contents.encode("utf-8")
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(name=file_name)
+            info.size = len(encoded)
+            tar.addfile(info, io.BytesIO(encoded))
+        buf.seek(0)
+        try:
+            container.put_archive(dest_dir, buf)
+            return (
+                f"Written {file_name} to {dest_dir} "
+                f"in container {container_id[:12]}"
+            )
+        except APIError as e:
+            return f"Error: {e}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    # Partial update: read existing file first
+    try:
+        existing = _read_file(container, dest_dir, file_name)
+    except FileNotFoundError:
+        return (
+            f"Error: file {dest_dir}/{file_name} not found "
+            f"in container {container_id[:12]}"
+        )
+    except Exception as e:
+        return (
+            f"Error: could not read existing file "
+            f"{dest_dir}/{file_name}: {e}"
+        )
+
+    if has_line_range:
+        lines: list[str] = existing.splitlines(keepends=True)
+        file_len = len(lines)
+
+        start: int = (start_line or 1) - 1  # convert to 0-indexed
+        end: int = (end_line or file_len) - 1  # convert to 0-indexed
+
+        if start < 0:
+            return (
+                f"Error: start_line must be >= 1, got {start_line}"
+            )
+        if start >= file_len:
+            return (
+                f"Error: start_line ({start_line}) exceeds file "
+                f"length ({file_len})"
+            )
+        if end >= file_len:
+            return (
+                f"Error: end_line ({end_line}) exceeds file "
+                f"length ({file_len})"
+            )
+        if start > end:
+            return (
+                f"Error: start_line ({start_line}) is greater than "
+                f"end_line ({end_line})"
+            )
+
+        modified: str = "".join(lines[:start]) + file_contents + "".join(lines[end + 1:])
+
+    elif append:
+        modified = existing + file_contents
+
+    elif has_old_str:
+        idx = existing.find(old_str)
+        if idx == -1:
+            return f"Error: old_str not found in file"
+        modified = existing[:idx] + file_contents + existing[idx + len(old_str):]
+
+    # Write the modified content
+    encoded = modified.encode("utf-8")
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
         info = tarfile.TarInfo(name=file_name)

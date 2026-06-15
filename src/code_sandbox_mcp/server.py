@@ -957,8 +957,9 @@ def write_file_sandbox(
         lines: list[str] = existing.splitlines(keepends=True)
         file_len = len(lines)
 
-        start: int = (start_line or 1) - 1  # convert to 0-indexed
-        end: int = (end_line or file_len) - 1  # convert to 0-indexed
+        # Use explicit None check so that 0 is not treated as "not specified"
+        start: int = (start_line if start_line is not None else 1) - 1
+        end: int = (end_line if end_line is not None else file_len) - 1
 
         if start < 0:
             return (
@@ -973,6 +974,10 @@ def write_file_sandbox(
             return (
                 f"Error: end_line ({end_line}) exceeds file "
                 f"length ({file_len})"
+            )
+        if end < 0:
+            return (
+                f"Error: end_line must be >= 1, got {end_line}"
             )
         if start > end:
             return (

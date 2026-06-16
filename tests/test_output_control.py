@@ -265,6 +265,16 @@ class TestTruncateOutput:
         assert display == ""
         assert meta.shown == 0
 
+    def test_negative_max_lines_raises_value_error(self) -> None:
+        """Negative max_lines raises ValueError."""
+        with pytest.raises(ValueError, match="max_lines must be a positive integer"):
+            truncate_output("some text", max_lines=-1)
+
+    def test_zero_max_lines_raises_value_error(self) -> None:
+        """Zero max_lines raises ValueError."""
+        with pytest.raises(ValueError, match="max_lines must be a positive integer"):
+            truncate_output("some text", max_lines=0)
+
 
 # =======================================================================
 # paginate_output

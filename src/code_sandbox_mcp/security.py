@@ -14,12 +14,24 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 #: Dangerous socket paths that must not be mounted into containers.
+#: Mounting the Docker socket grants equivalent root access to the host
+#: Docker daemon, allowing container escape and host compromise.
 _DANGEROUS_SOCKET_PATTERNS: tuple[str, ...] = (
     "/var/run/docker.sock",
     "/run/docker.sock",
 )
 
 #: Whitelist of allowed host path prefixes for bind mounts.
+#:
+#: Only paths under these prefixes can be mounted into sandbox containers.
+#: This prevents attackers from reading/writing arbitrary host files
+#: (e.g. /etc/passwd, /root/.ssh).
+#:
+#: .. note::
+#:    ``/mnt/`` is included for environments where external volumes are
+#:    mounted there (e.g. cloud VM temporary disks).  Review whether this
+#:    is appropriate for your deployment — it may expose sensitive mounted
+#:    filesystems if not carefully controlled.
 _ALLOWED_HOST_MOUNT_PREFIXES: tuple[str, ...] = (
     "/tmp/",
     "/home/",
@@ -28,24 +40,44 @@ _ALLOWED_HOST_MOUNT_PREFIXES: tuple[str, ...] = (
 )
 
 #: Default non-root user to run containers as.
+#: ``nobody`` is a well-known unprivileged user available in most Linux
+#: and official Docker images.
 _DEFAULT_USER: str = "nobody"
 
 #: Default memory limit.
+#:
+#: Chosen as a balance between:
+#: - Low enough to contain resource abuse (512 MB prevents runaway processes)
+#: - High enough for typical test runs (pytest, linting, compilation)
+#: Users can override via explicit ``mem_limit`` in tool call kwargs.
 _DEFAULT_MEM_LIMIT: str = "512m"
 
 #: Default memory+swap limit (same as mem to disable swap).
+#: Setting this equal to ``mem_limit`` effectively disables swap,
+#: preventing disk-based memory pressure attacks.
 _DEFAULT_MEMSWAP_LIMIT: str = "512m"
 
 #: CPU period in microseconds (default 100ms).
+#: Standard Linux CFS (Completely Fair Scheduler) period.
 _DEFAULT_CPU_PERIOD: int = 100000
 
-#: CPU quota in microseconds (50000 = 0.5 CPU cores).
+#: CPU quota in microseconds (50000 = 0.5 CPU cores relative to period).
+#: Half a core is sufficient for most test workloads while preventing
+#: CPU exhaustion attacks from a single sandbox.
 _DEFAULT_CPU_QUOTA: int = 50000
 
 #: PIDs limit (prevents fork bombs).
+#: 100 processes is enough for typical test suites (pytest workers,
+#: subprocess calls) but low enough to stop fork-based DoS attacks.
 _DEFAULT_PIDS_LIMIT: int = 100
 
 #: Compiled pattern for SHA-256 digest references.
+#:
+#: Security importance: tag references (e.g. ``python:latest``) are
+#: mutable — the image a tag points to can change over time, enabling
+#: supply-chain attacks and breaking reproducibility.  Digest references
+#: (``image@sha256:...``) are immutable and guarantee that the exact
+#: same image is used every time, even across different hosts and registries.
 _DIGEST_PATTERN: re.Pattern[str] = re.compile(
     r"^.*@sha256:[a-f0-9]{64}$"
 )
@@ -57,6 +89,13 @@ class SecurityProfile:
 
     All settings have safe defaults.  Pass an instance to
     :func:`build_secure_run_kwargs` to apply them.
+
+    To **relax** a restriction (e.g. enable networking):
+    ``SecurityProfile(network_mode="bridge")`` or
+    ``SecurityProfile(allow_network=True)``.
+
+    To **tighten** a restriction (e.g. empty whitelist):
+    ``SecurityProfile(allowed_host_mount_prefixes=())``.
     """
 
     #: Non-root user to run as (empty string means no override).
@@ -89,6 +128,10 @@ class SecurityProfile:
     pids_limit: int = _DEFAULT_PIDS_LIMIT
 
     #: Network mode (default ``"none"`` to disable networking).
+    #:
+    #: To enable networking for legitimate use cases, override with:
+    #: ``SecurityProfile(network_mode="bridge")`` when calling
+    #: :func:`build_secure_run_kwargs`.
     network_mode: str = "none"
 
     #: Whether to require image digest references (``image@sha256:...``).
@@ -145,6 +188,10 @@ def _validate_volumes(
     reject_dangerous_sockets: bool,
 ) -> None:
     """Validate a Docker volumes dict against security policy.
+
+    Checks for:
+    - Dangerous socket mounts (``/var/run/docker.sock`` etc.)
+    - Host mount whitelist violations
 
     Args:
         volumes: Docker volumes dictionary (host_path → config).

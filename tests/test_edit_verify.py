@@ -14,7 +14,6 @@ import pytest
 
 from src.code_sandbox_mcp.edit_verify import (
     apply_unified_diff,
-    extract_file_lines,
     lint_file,
     read_file_lines,
     type_check_file,
@@ -136,11 +135,7 @@ class TestApplyUnifiedDiff:
  line2
 +line3
 """
-        # Note: the hunk says there are 2 lines (line1, line2)
-        # and all three context/removal lines end with implicit newline
         result = apply_unified_diff(content, diff)
-        # Split was on \n, so content has lines ["line1", "line2"] = 2 elements
-        # After applying: line1, line2, line3 → "line1\nline2\nline3" (no trailing)
         expected = "line1\nline2\nline3"
         assert result == expected
         assert not result.endswith("\n")
@@ -463,7 +458,6 @@ class TestReadFileLines:
 
     def test_error_on_nonexistent_container(self) -> None:
         """When container doesn't exist, returns error dict."""
-        # This test validates the error handling pattern
         result = {"error": "Container abc not found"}
         assert result["error"] is not None
 
@@ -478,7 +472,8 @@ class TestReadFileLines:
     def test_offset_beyond_end(self) -> None:
         """When offset >= total lines, returns empty content."""
         lines = ["a", "b"]
-        page = lines[offset + 10:offset + 10 + 50]
+        page_offset = 10  # beyond length
+        page = lines[page_offset:page_offset + 50]
         assert page == []
 
     def test_has_more(self) -> None:

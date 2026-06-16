@@ -783,7 +783,7 @@ def run_container_and_exec(
     """Start a container, execute commands, then remove it (one-shot).
 
     This is a convenience wrapper around:
-    :func:`sandbox_initialize` → :func:`sandbox_exec` → :func:`sandbox_stop`.
+    :func:`sandbox_initialize` \u2192 :func:`sandbox_exec` \u2192 :func:`sandbox_stop`.
 
     Output is sanitized (ANSI codes, ``\\r`` progress bars, timestamps
     removed) and consecutive repeated lines are compressed
@@ -792,6 +792,7 @@ def run_container_and_exec(
     Args:
         image: Docker image to use (``image@sha256:...``).
         commands: List of shell commands to execute sequentially.
+                  Must not be ``None`` or empty.
         verbose: Output verbosity:
 
             - ``"error_only"``: Show output only on error.
@@ -813,8 +814,11 @@ def run_container_and_exec(
     """
     import json
 
+    # Validate commands: must not be None and must not be empty
     if not commands:
         return json.dumps({"status": "error", "error": "No commands provided"})
+    if len(commands) == 0:
+        return json.dumps({"status": "error", "error": "Commands list is empty"})
 
     resolved = image or _DEFAULT_IMAGE
     client = _docker()

@@ -239,10 +239,14 @@ def truncate_output(
     Returns:
         Tuple of ``(truncated_content, metadata)`` where *metadata*
         contains ``shown``, ``total_lines``, and ``truncated``.
+
+    Raises:
+        ValueError: If *max_lines* is less than 1.
     """
-    # Guard against non-positive max_lines
     if max_lines < 1:
-        max_lines = 1
+        raise ValueError(
+            f"max_lines must be a positive integer (>= 1), got {max_lines}"
+        )
 
     if not text.strip():
         return "", OutputMetadata(shown=0, total_lines=0, truncated=False)

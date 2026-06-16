@@ -192,15 +192,23 @@ class TestTruncateOutput:
     """Tests for output truncation with verbosity levels."""
 
     def test_verbose_full_shows_all(self) -> None:
-        text = "line1\nline2\nline3\n"
+        """Full mode shows all content without truncation."""
+        text = "line1\nline2\nline3"  # No trailing newline (3 actual lines)
         display, meta = truncate_output(text, verbose="full")
         assert display == text
         assert meta.shown == 3
         assert meta.total_lines == 3
         assert meta.truncated is False
 
+    def test_verbose_full_trailing_newline(self) -> None:
+        """Full mode with trailing newline accounts for empty last line."""
+        text = "line1\nline2\nline3\n"  # Trailing newline = 4 split parts
+        display, meta = truncate_output(text, verbose="full")
+        assert meta.total_lines == 4
+        assert meta.truncated is False
+
     def test_verbose_error_only_hides_success(self) -> None:
-        text = "success output\n"
+        text = "success output"
         display, meta = truncate_output(
             text, verbose="error_only", exit_code=0, stderr=""
         )
@@ -208,30 +216,30 @@ class TestTruncateOutput:
         assert meta.shown == 0
 
     def test_verbose_error_only_shows_on_error(self) -> None:
-        text = "error output\n"
+        text = "error output"
         display, meta = truncate_output(
             text, verbose="error_only", exit_code=1, stderr="something wrong"
         )
-        assert display == "error output\n"
+        assert display == "error output"
         assert meta.shown == 1
 
     def test_verbose_error_only_shows_on_stderr(self) -> None:
-        text = "some output\n"
+        text = "some output"
         display, meta = truncate_output(
             text, verbose="error_only", exit_code=0, stderr="warning"
         )
-        assert display == "some output\n"
+        assert display == "some output"
         assert meta.shown == 1
 
     def test_summary_no_truncation_small_output(self) -> None:
-        text = "line1\nline2\n"
+        text = "line1\nline2"
         display, meta = truncate_output(text, max_lines=100, verbose="summary")
         assert display == text
         assert meta.truncated is False
         assert meta.shown == 2
 
     def test_summary_truncates_large_output(self) -> None:
-        # Create 20 lines
+        # Create 20 lines (no trailing newline)
         lines = [f"line{i}" for i in range(20)]
         text = "\n".join(lines)
         display, meta = truncate_output(text, max_lines=6, verbose="summary")
@@ -241,7 +249,7 @@ class TestTruncateOutput:
         assert "lines omitted" in display
 
     def test_error_only_tail_context_on_error(self) -> None:
-        # Create 20 lines
+        # Create 20 lines (no trailing newline)
         lines = [f"line{i}" for i in range(20)]
         text = "\n".join(lines)
         display, meta = truncate_output(
@@ -306,7 +314,7 @@ class TestPaginateOutput:
         assert page.has_more is False
 
     def test_offset_beyond_end(self) -> None:
-        lines = "line0\nline1\n"
+        lines = "line0\nline1"
         page = paginate_output(lines, offset=10, limit=3)
         assert page.content == ""
         assert page.has_more is False
@@ -324,7 +332,7 @@ class TestPaginateOutput:
         assert page.has_more is False
 
     def test_zero_offset_is_beginning(self) -> None:
-        lines = "first\nsecond\n"
+        lines = "first\nsecond"
         page = paginate_output(lines, offset=0, limit=1)
         assert page.content == "first"
         assert page.next_offset == 1

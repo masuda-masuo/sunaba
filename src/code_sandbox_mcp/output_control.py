@@ -171,7 +171,7 @@ def compress_repeated_lines(text: str) -> str:
     or retry loops), this collapses them::
 
         retrying...\nretrying...\nretrying...\n
-        → [\u00d73] retrying...
+        \u2192 [\u00d73] retrying...
 
     Args:
         text: Text with potential repeated consecutive lines.
@@ -223,7 +223,7 @@ def truncate_output(
 
     Args:
         text: The output text to truncate.
-        max_lines: Maximum number of lines to show.
+        max_lines: Maximum number of lines to show (must be >= 1).
         verbose: Verbosity level:
 
             - ``"error_only"``: Show output only if ``exit_code != 0`` or
@@ -240,6 +240,10 @@ def truncate_output(
         Tuple of ``(truncated_content, metadata)`` where *metadata*
         contains ``shown``, ``total_lines``, and ``truncated``.
     """
+    # Guard against non-positive max_lines
+    if max_lines < 1:
+        max_lines = 1
+
     if not text.strip():
         return "", OutputMetadata(shown=0, total_lines=0, truncated=False)
 

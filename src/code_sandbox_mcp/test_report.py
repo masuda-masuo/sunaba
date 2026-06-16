@@ -1,17 +1,17 @@
-'''Structured test report adapters for pytest, jest, and go test.
+"""Structured test report adapters for pytest, jest, and go test.
 
 Provides a common schema and framework-specific adapters that convert
 raw test runner output into a structured JSON format suitable for AI
 consumption (minimal, frame-pruned, consistent).
-'''
+"""
 
 from __future__ import annotations
 
 import json
 import re
-import sys
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Any
+
 
 # ---------------------------------------------------------------------------
 # Common schema
@@ -20,7 +20,8 @@ from typing import Any
 
 @dataclass
 class TestFailure:
-    '''A single test failure with location information.'''
+    """A single test failure with location information."""
+
     test: str
     error: str
     file: str
@@ -29,31 +30,32 @@ class TestFailure:
 
 @dataclass
 class TestReport:
-    '''Structured test result.'''
-    status: str          # "ok" | "failed"
-    duration: float      # seconds
+    """Structured test result."""
+
+    status: str  # "ok" | "failed"
+    duration: float  # seconds
     passed: int
     failed: int = 0
     failures: list[TestFailure] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        '''Serialize to the common JSON schema.
+        """Serialize to the common JSON schema.
 
         Success case returns minimal dict (status, passed, duration).
-        '''
+        """
         base: dict[str, Any] = {
-            'status': self.status,
-            'duration': self.duration,
-            'passed': self.passed,
+            "status": self.status,
+            "duration": self.duration,
+            "passed": self.passed,
         }
-        if self.status == 'failed' and self.failures:
-            base['failed'] = self.failed
-            base['failures'] = [asdict(f) for f in self.failures]
+        if self.status == "failed" and self.failures:
+            base["failed"] = self.failed
+            base["failures"] = [asdict(f) for f in self.failures]
         return base
 
 
 def export_test_report(report: TestReport) -> str:
-    '''Serialize a TestReport to JSON string.'''
+    """Serialize a TestReport to JSON string."""
     return json.dumps(report.to_dict(), ensure_ascii=False)
 
 
@@ -63,18 +65,18 @@ def export_test_report(report: TestReport) -> str:
 
 # Patterns that identify non-user (library/framework) stack frames.
 _LIBRARY_FRAME_PATTERNS: list[re.Pattern] = [
-    re.compile(r'site-packages/'),
-    re.compile(r'dist-packages/'),
-    re.compile(r'lib/python'),
-    re.compile(r'pytest/'),
-    re.compile(r'_pytest/'),
-    re.compile(r'<frozen '),
-    re.compile(r'<__array_function__'),
+    re.compile(r"site-packages/"),
+    re.compile(r"dist-packages/"),
+    re.compile(r"lib/python"),
+    re.compile(r"pytest/"),
+    re.compile(r"_pytest/"),
+    re.compile(r"<frozen "),
+    re.compile(r"<__array_function__"),
 ]
 
 
 def _is_library_frame(frame: str) -> bool:
-    '''Return True if *frame* looks like a library/framework frame.'''
+    """Return True if *frame* looks like a library/framework frame."""
     return any(p.search(frame) for p in _LIBRARY_FRAME_PATTERNS)
 
 
@@ -83,20 +85,20 @@ def prune_library_frames(
     *,
     max_frames: int = 5,
 ) -> str:
-    '''Remove library/framework frames from a traceback string.
+    """Remove library/framework frames from a traceback string.
 
     Keeps only user-code frames.  Limits the output to *max_frames*
     lines.  If no user frames remain, returns the last *max_frames*
     lines of the original traceback as a fallback.
-    '''
-    lines = traceback.split('\n')
+    """
+    lines = traceback.split("\n")
     user_lines = [l for l in lines if not _is_library_frame(l)]
 
     if not user_lines:
         # Fallback: keep the last N lines (often the actual error).
         user_lines = lines[-max_frames:] if len(lines) > max_frames else lines
 
-    return '\n'.join(user_lines[:max_frames])
+    return "\n".join(user_lines[:max_frames])
 
 
 # ---------------------------------------------------------------------------
@@ -106,41 +108,42 @@ def prune_library_frames(
 
 @dataclass
 class PytestAdapter:
-    '''Adapt **pytest-json-report** output (``pytest --json-report``).
+    """Adapt **pytest-json-report** output (``pytest --json-report``).
 
     Expects the JSON report dict as produced by the plugin, with keys:
     ``summary``, ``tests``, ``duration``, etc.
-    '''
+    """
 
     @staticmethod
     def parse(report: dict[str, Any]) -> TestReport:
-        '''Parse a pytest-json-report dict into a TestReport.'''
-        summary = report.get('summary', {})
-        duration = float(report.get('duration', 0.0))
-        total = int(summary.get('total', 0))
-        passed = int(summary.get('passed', 0))
-        failed = int(summary.get('failed', 0))
-        # ``error`` and ``xfailed`` are also possible.
+        """Parse a pytest-json-report dict into a TestReport."""
+        summary = report.get("summary", {})
+        duration = float(report.get("duration", 0.0))
+        total = int(summary.get("total", 0))
+        passed = int(summary.get("passed", 0))
+        failed = int(summary.get("failed", 0))
         passed = total - failed if passed == 0 and total > 0 else passed
 
         failures_list: list[TestFailure] = []
-        tests = report.get('tests', [])
+        tests = report.get("tests", [])
         for t in tests:
-            outcome = t.get('outcome', '')
-            if outcome in ('failed', 'error'):
-                call = t.get('call', {})
-                crashdetails = call.get('crash', {}) or {}
-                traceback_str = crashdetails.get('traceback', '')
+            outcome = t.get("outcome", "")
+            if outcome in ("failed", "error"):
+                call = t.get("call", {})
+                crashdetails = call.get("crash", {}) or {}
+                traceback_str = crashdetails.get("traceback", "")
                 pruned = prune_library_frames(traceback_str)
 
-                failures_list.append(TestFailure(
-                    test=t.get('nodeid', t.get('name', 'unknown')),
-                    error=pruned if pruned else call.get('message', 'unknown'),
-                    file=t.get('file', ''),
-                    line=int(t.get('line', 0)),
-                ))
+                failures_list.append(
+                    TestFailure(
+                        test=t.get("nodeid", t.get("name", "unknown")),
+                        error=pruned if pruned else call.get("message", "unknown"),
+                        file=t.get("file", ""),
+                        line=int(t.get("line", 0)),
+                    )
+                )
 
-        status = 'failed' if failed > 0 else 'ok'
+        status = "failed" if failed > 0 else "ok"
         return TestReport(
             status=status,
             duration=duration,
@@ -151,7 +154,7 @@ class PytestAdapter:
 
     @classmethod
     def parse_json(cls, raw: str) -> TestReport:
-        '''Parse a raw JSON string (from pytest --json-report) into a TestReport.'''
+        """Parse a raw JSON string (from pytest --json-report) into a TestReport."""
         data = json.loads(raw)
         return cls.parse(data)
 
@@ -163,52 +166,53 @@ class PytestAdapter:
 
 @dataclass
 class JestAdapter:
-    '''Adapt **jest --json** output.
+    """Adapt **jest --json** output.
 
     Expects the JSON object produced by ``jest --json`` with keys:
     ``numPassedTests``, ``numFailedTests``, ``testResults``, etc.
-    '''
+    """
 
     @staticmethod
     def parse(report: dict[str, Any]) -> TestReport:
-        '''Parse a jest --json dict into a TestReport.'''
-        duration = float(report.get('numRuntimeMs', 0)) / 1000.0
-        passed = int(report.get('numPassedTests', 0))
-        failed = int(report.get('numFailedTests', 0))
+        """Parse a jest --json dict into a TestReport."""
+        duration = float(report.get("numRuntimeMs", 0)) / 1000.0
+        passed = int(report.get("numPassedTests", 0))
+        failed = int(report.get("numFailedTests", 0))
 
         failures_list: list[TestFailure] = []
-        test_results = report.get('testResults', [])
+        test_results = report.get("testResults", [])
         for suite in test_results:
-            assertion_results = suite.get('assertionResults', [])
+            assertion_results = suite.get("assertionResults", [])
             for ar in assertion_results:
-                if ar.get('status') in ('failed',):
-                    failure_messages = ar.get('failureMessages', [])
-                    error_text = ''
-                    file = ''
+                if ar.get("status") in ("failed",):
+                    failure_messages = ar.get("failureMessages", [])
+                    error_text = ""
+                    file = ""
                     line = 0
                     if failure_messages:
-                        combined = '\n'.join(failure_messages)
+                        combined = "\n".join(failure_messages)
                         error_text = prune_library_frames(combined)
-                        # Try to extract file:line from the first message
-                        # Jest messages often start with:
-                        #   expect(received).toBe(expected)
+                        # Try to extract file:line from the first message.
+                        # Jest messages often look like:
                         #   at Object.<anonymous> (path/to/file.js:42:12)
                         match = re.search(
-                            r'\s+at\s.+?\(?([^:(]+?\.(?:js|ts|jsx|tsx)):(\d+))',
+                            r"\s+at\s.+?[ (]([^:(]+?\.(?:js|ts|jsx|tsx)):(\d+)",
                             failure_messages[0],
                         )
                         if match:
                             file = match.group(1)
                             line = int(match.group(2))
 
-                    failures_list.append(TestFailure(
-                        test=ar.get('fullName', ar.get('title', 'unknown')),
-                        error=error_text if error_text else 'unknown',
-                        file=file,
-                        line=line,
-                    ))
+                    failures_list.append(
+                        TestFailure(
+                            test=ar.get("fullName", ar.get("title", "unknown")),
+                            error=error_text if error_text else "unknown",
+                            file=file,
+                            line=line,
+                        )
+                    )
 
-        status = 'failed' if failed > 0 else 'ok'
+        status = "failed" if failed > 0 else "ok"
         return TestReport(
             status=status,
             duration=duration,
@@ -219,7 +223,7 @@ class JestAdapter:
 
     @classmethod
     def parse_json(cls, raw: str) -> TestReport:
-        '''Parse a raw JSON string (from jest --json) into a TestReport.'''
+        """Parse a raw JSON string (from jest --json) into a TestReport."""
         data = json.loads(raw)
         return cls.parse(data)
 
@@ -231,17 +235,16 @@ class JestAdapter:
 
 @dataclass
 class GoTestAdapter:
-    '''Adapt **go test -json** stream output.
+    """Adapt **go test -json** stream output.
 
     ``go test -json`` produces a newline-delimited JSON stream (NDJSON),
     where each line is a JSON event (``Action``, ``Package``, ``Test``,
     ``Elapsed``, ``Output``).
-    '''
+    """
 
     @staticmethod
     def parse(events: list[dict[str, Any]]) -> TestReport:
-        '''Parse a list of go test -json event dicts into a TestReport.'''
-        # Collect per-test results.
+        """Parse a list of go test -json event dicts into a TestReport."""
         tests: dict[str, dict[str, Any]] = {}
         failures_list: list[TestFailure] = []
         passed_count = 0
@@ -249,70 +252,57 @@ class GoTestAdapter:
         duration = 0.0
 
         for event in events:
-            action = event.get('Action', '')
-            test_name = event.get('Test', '')
+            action = event.get("Action", "")
+            test_name = event.get("Test", "")
 
-            if action == 'pass' and test_name:
-                tests.setdefault(test_name, {})['status'] = 'pass'
-            elif action == 'fail' and test_name:
-                tests.setdefault(test_name, {})['status'] = 'fail'
-            elif action == 'output' and test_name:
+            if action == "pass" and test_name:
+                tests.setdefault(test_name, {})["status"] = "pass"
+            elif action == "fail" and test_name:
+                tests.setdefault(test_name, {})["status"] = "fail"
+            elif action == "output" and test_name:
                 entry = tests.setdefault(test_name, {})
-                entry.setdefault('output', [])
-                entry['output'].append(event.get('Output', ''))
-            elif action == 'output' and not test_name:
-                # Package-level output – try to extract elapsed.
-                text = event.get('Output', '')
-                m = re.search(r'ok\s+\S+\s+([\d]+\.?[\d]*)s', text)
+                entry.setdefault("output", [])
+                entry["output"].append(event.get("Output", ""))
+            elif action == "output" and not test_name:
+                text = event.get("Output", "")
+                m = re.search(r"ok\s+\S+\s+([\d]+\.?[\d]*)s", text)
                 if m:
                     duration = max(duration, float(m.group(1)))
 
-        # Build failures list from collected data.
         for tname, tdata in tests.items():
-            if tdata.get('status') == 'fail':
+            if tdata.get("status") == "fail":
                 failed_count += 1
-                output_lines = tdata.get('output', [])
-                combined = ''.join(output_lines)
+                output_lines = tdata.get("output", [])
+                combined = "".join(output_lines)
                 pruned = prune_library_frames(combined)
 
-                # Try to extract file:line from go test output.
-                # Go test outputs like:
-                #   /path/to/file_test.go:42: some error
-                file = ''
+                file = ""
                 line = 0
                 for line_text in output_lines:
-                    m = re.search(r'(/\S+\.go):(\d+):', line_text)
+                    m = re.search(r"(/\S+\.go):(\d+):", line_text)
                     if m:
                         file = m.group(1)
                         line = int(m.group(2))
                         break
 
-                failures_list.append(TestFailure(
-                    test=tname,
-                    error=pruned if pruned else 'unknown',
-                    file=file,
-                    line=line,
-                ))
-            elif tdata.get('status') == 'pass':
+                failures_list.append(
+                    TestFailure(
+                        test=tname,
+                        error=pruned if pruned else "unknown",
+                        file=file,
+                        line=line,
+                    )
+                )
+            elif tdata.get("status") == "pass":
                 passed_count += 1
 
-        # Final event may have Elapsed.
         if events:
             last = events[-1]
-            elapsed = last.get('Elapsed', None)
+            elapsed = last.get("Elapsed", None)
             if elapsed is not None:
                 duration = max(duration, float(elapsed))
 
-        # Package-level pass/fail events.
-        for event in events:
-            if event.get('Test') or event.get('Action') not in ('pass', 'fail'):
-                continue
-            # This is a package-level event.
-            if event.get('Action') == 'fail' and not event.get('Test'):
-                # Package failed but individual tests were already counted.
-                pass
-
-        status = 'failed' if failed_count > 0 else 'ok'
+        status = "failed" if failed_count > 0 else "ok"
         return TestReport(
             status=status,
             duration=duration,
@@ -323,9 +313,9 @@ class GoTestAdapter:
 
     @classmethod
     def parse_json(cls, raw: str) -> TestReport:
-        '''Parse a raw NDJSON string (from go test -json) into a TestReport.'''
+        """Parse a raw NDJSON string (from go test -json) into a TestReport."""
         events: list[dict[str, Any]] = []
-        for line in raw.strip().split('\n'):
+        for line in raw.strip().split("\n"):
             line = line.strip()
             if line:
                 events.append(json.loads(line))
@@ -338,17 +328,17 @@ class GoTestAdapter:
 
 
 def parse_test_report(framework: str, raw_output: str) -> str:
-    '''Parse raw test output for *framework* and return JSON string.
+    """Parse raw test output for *framework* and return JSON string.
 
     Supported frameworks: ``pytest``, ``jest``, ``go-test``.
-    '''
+    """
     adapter_map: dict[str, Any] = {
-        'pytest': PytestAdapter.parse_json,
-        'jest': JestAdapter.parse_json,
-        'go-test': GoTestAdapter.parse_json,
+        "pytest": PytestAdapter.parse_json,
+        "jest": JestAdapter.parse_json,
+        "go-test": GoTestAdapter.parse_json,
     }
     parser = adapter_map.get(framework)
     if parser is None:
-        raise ValueError(f'Unsupported test framework: {framework!r}')
+        raise ValueError(f"Unsupported test framework: {framework!r}")
     report = parser(raw_output)
     return export_test_report(report)

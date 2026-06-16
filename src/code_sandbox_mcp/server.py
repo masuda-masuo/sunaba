@@ -23,6 +23,12 @@ from docker.errors import APIError, NotFound
 from fastmcp import FastMCP
 
 from code_sandbox_mcp import RESTART_EXIT_CODE
+from code_sandbox_mcp.edit_verify import (
+    apply_patch_to_file,
+    lint_file,
+    read_file_lines,
+    type_check_file,
+)
 from code_sandbox_mcp.output_control import (
     compress_repeated_lines,
     paginate_output,
@@ -41,7 +47,7 @@ from code_sandbox_mcp.security import (
 # ---------------------------------------------------------------------------
 
 #: Default Docker image used when no image is specified.
-_DEFAULT_IMAGE: str = "python@sha256:93f7863c0947b9b9d57d250290bfba40a7e0b4aadbace6630a6c353d332fb0e5"
+_DEFAULT_IMAGE: str = "python@sha256:93ab4b7fa528b25124c97bcc755415e60eb671a86b4dbe0328df2fe2d1c1193d"
 
 #: Stdio proxy - shared with launcher via this module variable.
 _TERMINAL: str | None = None
@@ -117,24 +123,18 @@ def sandbox_initialize(image: str | None = None) -> str:
 
     The image must be pulled locally before use: docker pull <image>
 
-    Security guardrails are applied automatically:
-    - Container runs as non-root user
-    - Privileged mode is forbidden
-    - Dangerous socket mounts are rejected
-    - Host mounts are restricted by whitelist
-    - Resource limits (memory, CPU, pids) are enforced
-    - Network is disabled by default
-    - Image must use a digest reference (``image@sha256:...``)
+    Returns:
+        Container ID string (12-character prefix).
     """
-    resolved = image or _DEFAULT_IMAGE
-
-    # Enforce image digest reference
-    validate_image_ref(resolved)
-
     client = _docker()
+    resolved = image or _DEFAULT_IMAGE
     env = _container_env()
 
-    # Build container run kwargs with security guardrails applied
+    try:
+        validate_image_ref(resolved)
+    except ValueError as e:
+        return f"Error: {e}"
+
     run_kwargs = build_secure_run_kwargs(
         DEFAULT_SECURITY_PROFILE,
         command="sleep infinity",
@@ -143,7 +143,12 @@ def sandbox_initialize(image: str | None = None) -> str:
         environment=env,
     )
 
-    container = client.containers.run(resolved, **run_kwargs)
+    try:
+        _ensure_image(resolved)
+        container = client.containers.run(resolved, **run_kwargs)
+    except Exception as e:
+        return f"Error: {e}"
+
     logger.info(
         "Container %s started (image=%s)", container.id[:12], resolved
     )
@@ -332,44 +337,6 @@ def sandbox_stop(container_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# File read helper for write_file_sandbox partial updates
-# ---------------------------------------------------------------------------
-
-
-def _read_file(container, dest_dir: str, file_name: str) -> str:
-    """Read the contents of *file_name* from *dest_dir* in *container*.
-
-    Uses ``container.get_archive()`` to retrieve the file as a tar
-    stream and returns its UTF-8 decoded content.
-
-    Raises
-        FileNotFoundError: if the file does not exist.
-        RuntimeError: if the archive does not contain the expected file.
-    """
-    path = str(Path(dest_dir) / file_name)
-    try:
-        bits, stat = container.get_archive(path)
-    except NotFound:
-        raise FileNotFoundError(f"{path} not found in container")
-    buf = io.BytesIO()
-    for chunk in bits:
-        buf.write(chunk)
-    buf.seek(0)
-    with tarfile.open(fileobj=buf, mode="r") as tar:
-        member = tar.next()
-        if member is None:
-            raise RuntimeError(
-                f"Empty archive returned for {path}"
-            )
-        content = tar.extractfile(member)
-        if content is None:
-            raise RuntimeError(
-                f"Could not extract {member.name} from archive"
-            )
-        return content.read().decode("utf-8")
-
-
-# ---------------------------------------------------------------------------
 # write_file_sandbox
 # ---------------------------------------------------------------------------
 
@@ -405,6 +372,19 @@ def write_file_sandbox(
     *start_line* / *end_line*, *append*, and *old_str* are mutually exclusive.
     When none of them is specified the file is fully overwritten (original
     behaviour).
+
+    Args:
+        container_id: 12-character container ID prefix.
+        file_name: Name of the file to write.
+        file_contents: Content to write.
+        dest_dir: Destination directory in the container (default: ``/root``).
+        start_line: Start line for line-range replacement (1-indexed, inclusive).
+        end_line: End line for line-range replacement (1-indexed, inclusive).
+        append: When True, appends to the end of the file.
+        old_str: When specified, replaces the first occurrence of this string.
+
+    Returns:
+        Success or error message.
     """
     client = _docker()
     try:
@@ -414,114 +394,54 @@ def write_file_sandbox(
     except Exception as e:
         return f"Error: {e}"
 
-    # Determine which mode is requested
-    has_line_range = start_line is not None or end_line is not None
-    has_old_str = old_str is not None
+    dest_path = f"{dest_dir}/{file_name}"
 
-    modes = sum([has_line_range, append, has_old_str])
-    if modes > 1:
-        return (
-            "Error: start_line/end_line, append, and old_str are "
-            "mutually exclusive"
+    # Build the content to write
+    content = file_contents
+
+    # For append/replace/line-range, we need to modify existing content
+    if append or old_str is not None or (start_line is not None and end_line is not None):
+        # Read existing file
+        exit_code, output = container.exec_run(
+            ["/bin/sh", "-c", f"cat {dest_path} 2>/dev/null || echo ''"],
+            stdout=True,
+            stderr=True,
         )
+        stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+        existing = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+        existing_lines = existing.split("\n")
 
-    if modes == 0:
-        # Full overwrite (original behaviour)
-        encoded = file_contents.encode("utf-8")
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w") as tar:
-            info = tarfile.TarInfo(name=file_name)
-            info.size = len(encoded)
-            tar.addfile(info, io.BytesIO(encoded))
-        buf.seek(0)
-        try:
-            container.put_archive(dest_dir, buf)
-            return (
-                f"Written {file_name} to {dest_dir} "
-                f"in container {container_id[:12]}"
-            )
-        except APIError as e:
-            return f"Error: {e}"
-        except Exception as e:
-            return f"Error: {e}"
+        if append:
+            content = existing.rstrip("\n") + "\n" + file_contents
+        elif old_str is not None:
+            idx = existing.find(old_str)
+            if idx == -1:
+                return f"Error: old_str not found in {dest_path}"
+            content = existing[:idx] + file_contents + existing[idx + len(old_str):]
+        else:
+            # Line-range replacement
+            start = start_line - 1 if start_line else 0
+            end = end_line if end_line else len(existing_lines)
+            new_lines = file_contents.split("\n")
+            content_lines = existing_lines[:start] + new_lines + existing_lines[end:]
+            content = "\n".join(content_lines)
 
-    # Partial update: read existing file first
-    try:
-        existing = _read_file(container, dest_dir, file_name)
-    except FileNotFoundError:
-        return (
-            f"Error: file {dest_dir}/{file_name} not found "
-            f"in container {container_id[:12]}"
-        )
-    except Exception as e:
-        return (
-            f"Error: could not read existing file "
-            f"{dest_dir}/{file_name}: {e}"
-        )
+    # Write the content via base64 to avoid shell escaping
+    import base64
 
-    if has_line_range:
-        lines: list[str] = existing.splitlines(keepends=True)
-        file_len = len(lines)
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    cmd = f"mkdir -p {shlex.quote(dest_dir)} && echo {encoded} | base64 -d > {shlex.quote(dest_path)}"
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", cmd],
+        stdout=True,
+        stderr=True,
+    )
+    _, stderr_part = output if isinstance(output, tuple) else (None, output)
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
-        # Use explicit None check so that 0 is not treated as "not specified"
-        start: int = (start_line if start_line is not None else 1) - 1
-        end: int = (end_line if end_line is not None else file_len) - 1
-
-        if start < 0:
-            return (
-                f"Error: start_line must be >= 1, got {start_line}"
-            )
-        if start >= file_len:
-            return (
-                f"Error: start_line ({start_line}) exceeds file "
-                f"length ({file_len})"
-            )
-        if end >= file_len:
-            return (
-                f"Error: end_line ({end_line}) exceeds file "
-                f"length ({file_len})"
-            )
-        if end < 0:
-            return (
-                f"Error: end_line must be >= 1, got {end_line}"
-            )
-        if start > end:
-            return (
-                f"Error: start_line ({start_line}) is greater than "
-                f"end_line ({end_line})"
-            )
-
-        modified: str = "".join(lines[:start]) + file_contents + "".join(lines[end + 1:])
-
-    elif append:
-        modified = existing + file_contents
-
-    elif has_old_str:
-        if not old_str:
-            return "Error: old_str must not be empty"
-        idx = existing.find(old_str)
-        if idx == -1:
-            return "Error: old_str not found in file"
-        modified = existing[:idx] + file_contents + existing[idx + len(old_str):]
-
-    # Write the modified content
-    encoded = modified.encode("utf-8")
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        info = tarfile.TarInfo(name=file_name)
-        info.size = len(encoded)
-        tar.addfile(info, io.BytesIO(encoded))
-    buf.seek(0)
-    try:
-        container.put_archive(dest_dir, buf)
-        return (
-            f"Written {file_name} to {dest_dir} "
-            f"in container {container_id[:12]}"
-        )
-    except APIError as e:
-        return f"Error: {e}"
-    except Exception as e:
-        return f"Error: {e}"
+    if exit_code != 0:
+        return f"Error: {stderr_text}"
+    return f"Written {len(content)} bytes to {dest_path}"
 
 
 # ---------------------------------------------------------------------------
@@ -778,9 +698,9 @@ def run_container_and_exec(
     """Start a container, execute commands, then remove it (one-shot).
 
     This is a convenience wrapper around:
-    :func:`sandbox_initialize` \u2192 :func:`sandbox_exec` \u2192 :func:`sandbox_stop`.
+    :func:`sandbox_initialize` → :func:`sandbox_exec` → :func:`sandbox_stop`.
 
-    Output is sanitized (ANSI codes, ``\\r`` progress bars, timestamps
+    Output is sanitized (ANSI codes, ``\r`` progress bars, timestamps
     removed) and consecutive repeated lines are compressed
     (``[\u00d7N] content``).
 
@@ -906,6 +826,140 @@ def run_container_and_exec(
         result["stderr"] = stderr_text
 
     return json.dumps(result)
+
+
+# ---------------------------------------------------------------------------
+# Edit/Verify tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
+    """Apply a unified diff to a file inside the sandbox container.
+
+    Reads the current file from the container, applies the unified diff,
+    and writes the result back.  The caller sends only a compact diff
+    instead of the full file content, reducing token cost by 1-2 orders
+    of magnitude.
+
+    Args:
+        container_id: 12-character container ID prefix.
+        file_path: Path to the file inside the container.
+        diff_content: Unified diff string to apply.
+
+    Returns:
+        Success message or error description.
+    """
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        return f"Error: container {container_id[:12]} not found"
+    except Exception as e:
+        return f"Error: {e}"
+
+    return apply_patch_to_file(client, container_id, file_path, diff_content)
+
+
+@mcp.tool()
+def read_file_range(
+    container_id: str,
+    file_path: str,
+    offset: int = 0,
+    limit: int = 50,
+) -> str:
+    """Read *limit* lines from *file_path* starting at *offset*.
+
+    Returns a JSON string with:
+    - ``content`` (str): the requested lines
+    - ``total_lines`` (int): total lines in the file
+    - ``shown`` (int): lines returned
+    - ``has_more`` (bool): whether more lines exist after this range
+    - ``next_offset`` (int | None): offset for pagination
+
+    Args:
+        container_id: 12-character container ID prefix.
+        file_path: Path to the file inside the container.
+        offset: 0-indexed line offset to start reading from.
+        limit: Maximum number of lines to return.
+
+    Returns:
+        JSON string with file content and metadata, or an error
+        message beginning with ``"Error:"``.
+    """
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    result = read_file_lines(client, container_id, file_path, offset=offset, limit=limit)
+    return json.dumps(result)
+
+
+@mcp.tool()
+def lint_in_container(container_id: str, file_path: str) -> str:
+    """Run a linter on *file_path* inside the container.
+
+    Detects the file type from its extension and chooses an appropriate
+    linter.  Returns a JSON array of findings, each with:
+    - ``file`` (str): file path
+    - ``line`` (int): line number
+    - ``rule`` (str): rule identifier (e.g. ``"F401"``)
+    - ``message`` (str): human-readable message
+
+    Supported:
+    - ``.py`` → ``ruff check`` (falls back to ``pylint``)
+    - ``.js``, ``.ts``, ``.jsx``, ``.tsx`` → ``eslint``
+
+    Args:
+        container_id: 12-character container ID prefix.
+        file_path: Path to the file inside the container.
+
+    Returns:
+        JSON string of lint findings, or an error message.
+    """
+    client = _docker()
+    try:
+        client.containers.get(container_id)
+    except NotFound:
+        return json.dumps([{"file": file_path, "line": 0, "rule": "error", "message": f"Container {container_id[:12]} not found"}])
+    except Exception as e:
+        return json.dumps([{"file": file_path, "line": 0, "rule": "error", "message": str(e)}])
+
+    results = lint_file(client, container_id, file_path)
+    return json.dumps(results)
+
+
+@mcp.tool()
+def type_check_in_container(container_id: str, file_path: str) -> str:
+    """Run a type checker on *file_path* inside the container.
+
+    Returns the same format as :func:`lint_in_container`.
+
+    Supported:
+    - ``.py`` → ``mypy`` (falls back to ``pyright``)
+    - ``.ts``, ``.tsx`` → ``tsc --noEmit``
+
+    Args:
+        container_id: 12-character container ID prefix.
+        file_path: Path to the file inside the container.
+
+    Returns:
+        JSON string of type check findings, or an error message.
+    """
+    client = _docker()
+    try:
+        client.containers.get(container_id)
+    except NotFound:
+        return json.dumps([{"file": file_path, "line": 0, "rule": "error", "message": f"Container {container_id[:12]} not found"}])
+    except Exception as e:
+        return json.dumps([{"file": file_path, "line": 0, "rule": "error", "message": str(e)}])
+
+    results = type_check_file(client, container_id, file_path)
+    return json.dumps(results)
 
 
 # ---------------------------------------------------------------------------

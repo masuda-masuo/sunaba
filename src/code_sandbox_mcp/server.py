@@ -24,6 +24,11 @@ from docker.errors import APIError, NotFound
 from fastmcp import FastMCP
 
 from code_sandbox_mcp import RESTART_EXIT_CODE
+from code_sandbox_mcp.security import (
+    DEFAULT_SECURITY_PROFILE,
+    build_secure_run_kwargs,
+    validate_image_ref,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -543,17 +548,34 @@ def sandbox_initialize(image: str | None = None) -> str:
     via the ``--default-image`` CLI argument in the server config.
 
     The image must be pulled locally before use: docker pull <image>
+
+    Security guardrails are applied automatically:
+    - Container runs as non-root user
+    - Privileged mode is forbidden
+    - Dangerous socket mounts are rejected
+    - Host mounts are restricted by whitelist
+    - Resource limits (memory, CPU, pids) are enforced
+    - Network is disabled by default
+    - Image must use a digest reference (``image@sha256:...``)
     """
     resolved = image or _DEFAULT_IMAGE
+
+    # Enforce image digest reference
+    validate_image_ref(resolved)
+
     client = _docker()
     env = _container_env()
-    container = client.containers.run(
-        resolved,
+
+    # Build container run kwargs with security guardrails applied
+    run_kwargs = build_secure_run_kwargs(
+        DEFAULT_SECURITY_PROFILE,
         command="sleep infinity",
         detach=True,
         remove=False,
         environment=env,
     )
+
+    container = client.containers.run(resolved, **run_kwargs)
     logger.info(
         "Container %s started (image=%s)", container.id[:12], resolved
     )

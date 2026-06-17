@@ -459,20 +459,48 @@ def write_file_sandbox(
 
     dest_path = f"{dest_dir}/{file_name}"
 
-    # Build the content to write
+    # Validate mutual exclusivity
+    has_line_range = start_line is not None or end_line is not None
+    mode_count = sum([append, old_str is not None, has_line_range])
+    if mode_count > 1:
+        return "Error: start_line/end_line, append, and old_str are mutually exclusive"
+
+    if old_str is not None and old_str == "":
+        return "Error: old_str must not be empty"
+    if start_line is not None and start_line < 1:
+        return "Error: start_line must be >= 1"
+
     content = file_contents
 
-    # For append/replace/line-range, we need to modify existing content
-    if append or old_str is not None or (start_line is not None and end_line is not None):
+    # For partial updates, read existing content
+    if append or old_str is not None or has_line_range:
+        # Check file exists
+        exit_code, output = container.exec_run(
+            ["/bin/sh", "-c", f"test -f {shlex.quote(dest_path)}"],
+            stdout=True,
+            stderr=True,
+        )
+        if exit_code != 0:
+            return f"Error: file {dest_path} not found"
+
         # Read existing file
         exit_code, output = container.exec_run(
-            ["/bin/sh", "-c", f"cat {dest_path} 2>/dev/null || echo ''"],
+            ["/bin/sh", "-c", f"cat {shlex.quote(dest_path)}"],
             stdout=True,
             stderr=True,
         )
         stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
         existing = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
         existing_lines = existing.split("\n")
+
+        # Validate bounds
+        if start_line is not None and start_line > len(existing_lines):
+            return f"Error: start_line {start_line} exceeds file length ({len(existing_lines)} lines)"
+        if end_line is not None:
+            if end_line > len(existing_lines):
+                return f"Error: end_line {end_line} exceeds file length ({len(existing_lines)} lines)"
+            if start_line is not None and start_line > end_line:
+                return "Error: start_line is greater than end_line"
 
         if append:
             content = existing.rstrip("\n") + "\n" + file_contents
@@ -482,9 +510,8 @@ def write_file_sandbox(
                 return f"Error: old_str not found in {dest_path}"
             content = existing[:idx] + file_contents + existing[idx + len(old_str):]
         else:
-            # Line-range replacement
-            start = start_line - 1 if start_line else 0
-            end = end_line if end_line else len(existing_lines)
+            start = start_line - 1 if start_line is not None else 0
+            end = end_line if end_line is not None else len(existing_lines)
             new_lines = file_contents.split("\n")
             content_lines = existing_lines[:start] + new_lines + existing_lines[end:]
             content = "\n".join(content_lines)
@@ -546,6 +573,8 @@ def copy_project(
     src_path = Path(local_src_dir).resolve()
     if not src_path.exists():
         return f"Error: {local_src_dir} does not exist"
+    if not src_path.is_dir():
+        return f"Error: {local_src_dir} is not a directory"
 
     arcname = src_path.name or "project"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar")

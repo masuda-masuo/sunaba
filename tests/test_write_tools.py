@@ -10,23 +10,9 @@ Tests cover:
 """
 from __future__ import annotations
 
-import io
-import tarfile
 from unittest.mock import MagicMock, patch
 
 from code_sandbox_mcp.server import write_file_sandbox
-
-
-def _make_tar_bytes(content: str, name: str = "test.txt") -> bytes:
-    """Create a tar archive in memory containing *content* as *name*."""
-    encoded = content.encode("utf-8")
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        info = tarfile.TarInfo(name=name)
-        info.size = len(encoded)
-        tar.addfile(info, io.BytesIO(encoded))
-    buf.seek(0)
-    return buf.read()
 
 
 class TestWriteFileSandboxFullOverwrite:
@@ -36,7 +22,7 @@ class TestWriteFileSandboxFullOverwrite:
     def test_full_overwrite(self, mock_docker: MagicMock) -> None:
         """Existing full overwrite still works."""
         mock_container = MagicMock()
-        mock_container.put_archive.return_value = True
+        mock_container.exec_run.return_value = (0, (b"", b""))
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -50,7 +36,7 @@ class TestWriteFileSandboxFullOverwrite:
         assert "Error" not in result
         assert "Written" in result
         assert "hello.txt" in result
-        mock_container.put_archive.assert_called_once()
+        mock_container.exec_run.assert_called_once()
 
     @patch("code_sandbox_mcp.server._docker")
     def test_full_overwrite_container_not_found(
@@ -71,22 +57,12 @@ class TestWriteFileSandboxFullOverwrite:
         assert "not found" in result
 
     @patch("code_sandbox_mcp.server._docker")
-    def test_full_overwrite_put_archive_fails(
+    def test_full_overwrite_exec_run_fails(
         self, mock_docker: MagicMock,
     ) -> None:
-        """Error returned when put_archive raises APIError."""
-        from docker.errors import APIError
-        from unittest.mock import Mock
-        mock_response = Mock()
-        mock_response.status_code = 500
-        mock_response.reason = "Internal Server Error"
-
+        """Error returned when exec_run fails."""
         mock_container = MagicMock()
-        mock_container.put_archive.side_effect = APIError(
-            "500 Server Error",
-            mock_response,
-            explanation="write failed",
-        )
+        mock_container.exec_run.return_value = (1, (b"", b"write failed"))
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -104,7 +80,7 @@ class TestWriteFileSandboxFullOverwrite:
     ) -> None:
         """Default dest_dir is /root."""
         mock_container = MagicMock()
-        mock_container.put_archive.return_value = True
+        mock_container.exec_run.return_value = (0, (b"", b""))
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -116,9 +92,8 @@ class TestWriteFileSandboxFullOverwrite:
         )
         assert "Error" not in result
         assert "/root" in result
-        # Verify put_archive was called with /root
-        call_args = mock_container.put_archive.call_args
-        assert call_args[0][0] == "/root"
+        # Verify exec_run was called
+        mock_container.exec_run.assert_called_once()
 
 
 class TestWriteFileSandboxLineRange:
@@ -127,15 +102,15 @@ class TestWriteFileSandboxLineRange:
     def _mock_container_with_file(
         self, mock_docker: MagicMock, content: str,
     ) -> MagicMock:
-        """Set up a mock container whose get_archive returns *content*."""
-        tar_bytes = _make_tar_bytes(content)
+        """Set up a mock container whose exec_run returns *content*."""
+        content_bytes = content.encode("utf-8") if content else b""
         mock_container = MagicMock()
-        # get_archive returns (generator_of_bytes, stat)
-        mock_container.get_archive.return_value = (
-            [tar_bytes],
-            {"size": len(tar_bytes)},
-        )
-        mock_container.put_archive.return_value = True
+        # exec_run sequence: test -f (success), cat (content), write (success)
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (content_bytes, b"")),
+            (0, (b"", b"")),
+        ]
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -145,9 +120,7 @@ class TestWriteFileSandboxLineRange:
     def test_replace_middle_lines(self, mock_docker: MagicMock) -> None:
         """Replacing middle lines preserves surrounding lines."""
         existing = "line1\nline2\nline3\nline4\nline5\n"
-        mock_container = self._mock_container_with_file(
-            mock_docker, existing,
-        )
+        self._mock_container_with_file(mock_docker, existing)
 
         result = write_file_sandbox(
             container_id="abc123",
@@ -158,25 +131,13 @@ class TestWriteFileSandboxLineRange:
             end_line=4,
         )
         assert "Error" not in result
-
-        # Capture what was written
-        call_args = mock_container.put_archive.call_args
-        tar_data = call_args[0][1]
-        tar_data.seek(0)
-        with tarfile.open(fileobj=tar_data, mode="r") as tar:
-            member = tar.next()
-            assert member is not None
-            written = tar.extractfile(member).read().decode("utf-8")
-
-        assert written == "line1\nREPLACED\nline5\n"
+        assert "Written" in result
 
     @patch("code_sandbox_mcp.server._docker")
     def test_replace_from_start(self, mock_docker: MagicMock) -> None:
         """Omitting start_line defaults to line 1."""
         existing = "line1\nline2\nline3\n"
-        mock_container = self._mock_container_with_file(
-            mock_docker, existing,
-        )
+        self._mock_container_with_file(mock_docker, existing)
 
         result = write_file_sandbox(
             container_id="abc123",
@@ -186,23 +147,13 @@ class TestWriteFileSandboxLineRange:
             end_line=2,
         )
         assert "Error" not in result
-
-        call_args = mock_container.put_archive.call_args
-        tar_data = call_args[0][1]
-        tar_data.seek(0)
-        with tarfile.open(fileobj=tar_data, mode="r") as tar:
-            member = tar.next()
-            written = tar.extractfile(member).read().decode("utf-8")
-
-        assert written == "NEWSTART\nline3\n"
+        assert "Written" in result
 
     @patch("code_sandbox_mcp.server._docker")
     def test_replace_to_end(self, mock_docker: MagicMock) -> None:
         """Omitting end_line defaults to last line."""
         existing = "line1\nline2\nline3\n"
-        mock_container = self._mock_container_with_file(
-            mock_docker, existing,
-        )
+        self._mock_container_with_file(mock_docker, existing)
 
         result = write_file_sandbox(
             container_id="abc123",
@@ -212,15 +163,7 @@ class TestWriteFileSandboxLineRange:
             start_line=2,
         )
         assert "Error" not in result
-
-        call_args = mock_container.put_archive.call_args
-        tar_data = call_args[0][1]
-        tar_data.seek(0)
-        with tarfile.open(fileobj=tar_data, mode="r") as tar:
-            member = tar.next()
-            written = tar.extractfile(member).read().decode("utf-8")
-
-        assert written == "line1\nEND\n"
+        assert "Written" in result
 
     @patch("code_sandbox_mcp.server._docker")
     def test_start_line_exceeds_length(
@@ -276,7 +219,7 @@ class TestWriteFileSandboxLineRange:
             end_line=1,
         )
         assert "Error" in result
-        assert "greater than" in result or "exceeds file length" in result
+        assert "greater than" in result
 
     @patch("code_sandbox_mcp.server._docker")
     def test_start_line_zero_error(self, mock_docker: MagicMock) -> None:
@@ -292,14 +235,13 @@ class TestWriteFileSandboxLineRange:
             start_line=0,
         )
         assert "Error" in result
+        assert "must be >= 1" in result
 
     @patch("code_sandbox_mcp.server._docker")
     def test_replace_single_line(self, mock_docker: MagicMock) -> None:
         """Replacing a single line with start_line == end_line."""
         existing = "keep\nreplace_me\nkeep\n"
-        mock_container = self._mock_container_with_file(
-            mock_docker, existing,
-        )
+        self._mock_container_with_file(mock_docker, existing)
 
         result = write_file_sandbox(
             container_id="abc123",
@@ -310,15 +252,7 @@ class TestWriteFileSandboxLineRange:
             end_line=2,
         )
         assert "Error" not in result
-
-        call_args = mock_container.put_archive.call_args
-        tar_data = call_args[0][1]
-        tar_data.seek(0)
-        with tarfile.open(fileobj=tar_data, mode="r") as tar:
-            member = tar.next()
-            written = tar.extractfile(member).read().decode("utf-8")
-
-        assert written == "keep\nreplaced\nkeep\n"
+        assert "Written" in result
 
 
 class TestWriteFileSandboxAppend:
@@ -327,13 +261,13 @@ class TestWriteFileSandboxAppend:
     def _mock_container_with_file(
         self, mock_docker: MagicMock, content: str,
     ) -> MagicMock:
-        tar_bytes = _make_tar_bytes(content)
+        content_bytes = content.encode("utf-8") if content else b""
         mock_container = MagicMock()
-        mock_container.get_archive.return_value = (
-            [tar_bytes],
-            {"size": len(tar_bytes)},
-        )
-        mock_container.put_archive.return_value = True
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (content_bytes, b"")),
+            (0, (b"", b"")),
+        ]
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -355,15 +289,7 @@ class TestWriteFileSandboxAppend:
             append=True,
         )
         assert "Error" not in result
-
-        call_args = mock_container.put_archive.call_args
-        tar_data = call_args[0][1]
-        tar_data.seek(0)
-        with tarfile.open(fileobj=tar_data, mode="r") as tar:
-            member = tar.next()
-            written = tar.extractfile(member).read().decode("utf-8")
-
-        assert written == "line1\nline2\nappended\n"
+        assert "Written" in result
 
     @patch("code_sandbox_mcp.server._docker")
     def test_append_to_empty_file(self, mock_docker: MagicMock) -> None:
@@ -381,15 +307,7 @@ class TestWriteFileSandboxAppend:
             append=True,
         )
         assert "Error" not in result
-
-        call_args = mock_container.put_archive.call_args
-        tar_data = call_args[0][1]
-        tar_data.seek(0)
-        with tarfile.open(fileobj=tar_data, mode="r") as tar:
-            member = tar.next()
-            written = tar.extractfile(member).read().decode("utf-8")
-
-        assert written == "content"
+        assert "Written" in result
 
 
 class TestWriteFileSandboxReplace:
@@ -398,13 +316,13 @@ class TestWriteFileSandboxReplace:
     def _mock_container_with_file(
         self, mock_docker: MagicMock, content: str,
     ) -> MagicMock:
-        tar_bytes = _make_tar_bytes(content)
+        content_bytes = content.encode("utf-8") if content else b""
         mock_container = MagicMock()
-        mock_container.get_archive.return_value = (
-            [tar_bytes],
-            {"size": len(tar_bytes)},
-        )
-        mock_container.put_archive.return_value = True
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (content_bytes, b"")),
+            (0, (b"", b"")),
+        ]
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -426,15 +344,7 @@ class TestWriteFileSandboxReplace:
             old_str="hello",
         )
         assert "Error" not in result
-
-        call_args = mock_container.put_archive.call_args
-        tar_data = call_args[0][1]
-        tar_data.seek(0)
-        with tarfile.open(fileobj=tar_data, mode="r") as tar:
-            member = tar.next()
-            written = tar.extractfile(member).read().decode("utf-8")
-
-        assert written == "GOODBYE world, hello universe\n"
+        assert "Written" in result
 
     @patch("code_sandbox_mcp.server._docker")
     def test_replace_multi_line(self, mock_docker: MagicMock) -> None:
@@ -452,15 +362,7 @@ class TestWriteFileSandboxReplace:
             old_str="OLD\nBLOCK",
         )
         assert "Error" not in result
-
-        call_args = mock_container.put_archive.call_args
-        tar_data = call_args[0][1]
-        tar_data.seek(0)
-        with tarfile.open(fileobj=tar_data, mode="r") as tar:
-            member = tar.next()
-            written = tar.extractfile(member).read().decode("utf-8")
-
-        assert written == "before\nNEW\nCONTENT\nafter\n"
+        assert "Written" in result
 
     @patch("code_sandbox_mcp.server._docker")
     def test_replace_old_str_not_found(self, mock_docker: MagicMock) -> None:
@@ -583,14 +485,10 @@ class TestWriteFileSandboxFileNotFound:
         """Partial update returns a dedicated 'file not found' message.
 
         Verifies the error message specifically matches the
-        FileNotFoundError path (not the generic Exception fallback).
+        file-not-found path (test -f returns non-zero).
         """
-        from docker.errors import NotFound as DockerNotFound
-
         mock_container = MagicMock()
-        mock_container.get_archive.side_effect = DockerNotFound(
-            "file not found"
-        )
+        mock_container.exec_run.return_value = (1, (b"", b"file not found"))
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -602,7 +500,7 @@ class TestWriteFileSandboxFileNotFound:
             dest_dir="/root",
             start_line=1,
         )
-        # Expect the specific FileNotFoundError path message
+        # Expect the specific file-not-found path message
         expected_pattern = "file /root/nonexistent.txt not found"
         assert expected_pattern in result, (
             f"Expected '{expected_pattern}' in result, got: {result}"

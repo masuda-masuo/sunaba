@@ -80,7 +80,7 @@ RUN set -ex; \
     \
     # sd: tar.gz 内のバイナリ名は "sd"
     curl -fsSL "https://github.com/chmln/sd/releases/download/v${SD_VERSION}/sd-v${SD_VERSION}-${SD_TRIPLE}.tar.gz" \
-      | tar -xz -C /usr/local/bin/ --strip-components=0 "sd-v${SD_VERSION}-${SD_TRIPLE}/sd" \
+      | tar -xz -C /usr/local/bin/ --strip-components=1 "sd-v${SD_VERSION}-${SD_TRIPLE}/sd" \
     && chmod +x /usr/local/bin/sd
 
 # ── Python ツール (root 権限が必要なものをここで) ────────────────────

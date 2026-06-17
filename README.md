@@ -65,6 +65,39 @@ sandbox_update_check(job_id="...")  # repeat until "Status: done"
 pip install --force-reinstall git+https://github.com/masuda-masuo/code-sandbox-mcp@<commit-hash>
 ```
 
+### MCP Transport: stdio vs SSE/HTTP
+
+By default, the MCP server uses **stdio** transport (stdin/stdout JSON-RPC), which has a client-side timeout of ~60 seconds. This causes `docker pull`, `pip install`, and other long operations to fail.
+
+To avoid the timeout, use **SSE** (Server-Sent Events) or **HTTP** transport:
+
+```json
+{
+  "mcpServers": {
+    "code-sandbox-mcp": {
+      "command": "C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe",
+      "args": [
+        "-m", "code_sandbox_mcp.launcher",
+        "--transport", "sse",
+        "--host", "127.0.0.1",
+        "--port", "8765"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "github_pat_xxxx"
+      }
+    }
+  }
+}
+```
+
+Available transports:
+- `stdio` — Default. Subject to ~60s client timeout.
+- `sse` — Server-Sent Events. No client timeout. Recommended.
+- `http` — HTTP transport. Also no client timeout.
+- `streamable-http` — Streamable HTTP transport (MCP spec).
+
+When using SSE/HTTP, the server binds to `127.0.0.1:8765` by default. The launcher still manages process lifecycle (restart on exit code 42) but does not proxy stdio — the client connects directly to the TCP port.
+
 ### claude_desktop_config.json
 
 #### Recommended: launcher mode (supports in-place updates)
@@ -267,9 +300,23 @@ Any image available on [Docker Hub](https://hub.docker.com) can be used. Pull it
 | `sandbox_update_start` | Start an in-place server update, returns `job_id` (launcher mode only) |
 | `sandbox_update_check` | Poll update status |
 
-## When to use background execution
+## Transport timeout
 
-MCP clients (including Claude Desktop) have a request timeout of ~60 seconds. Commands that take longer — such as `apt-get install`, `pip install`, or `pytest` on large projects — will cause a timeout error if run with `sandbox_exec`.
+MCP clients (including Claude Desktop) have a request timeout of ~60 seconds when using **stdio** transport (the default). Commands that take longer — such as `apt-get install`, `pip install`, or `pytest` on large projects — will cause a timeout error if run with `sandbox_exec`.
+
+There are two solutions:
+
+### Option 1: Use SSE/HTTP transport (recommended)
+
+Switch to SSE or HTTP transport via the `--transport` flag. This eliminates the client-side timeout entirely:
+
+```json
+"--transport", "sse"
+```
+
+See [MCP Transport: stdio vs SSE/HTTP](#mcp-transport-stdio-vs-ssehttp) above for configuration details.
+
+### Option 2: Use background execution (stdio fallback)
 
 **Use `sandbox_exec_background` + `sandbox_exec_check` for any heavy operation.**
 
@@ -327,7 +374,8 @@ sandbox_stop(container_id)
 
 - **Job dictionary grows unbounded**: Completed job results are kept in memory indefinitely for the lifetime of the server process. In typical development use (short-lived server sessions) this is not a problem, but long-running server instances will accumulate memory over time.
 - **Background jobs are lost on server restart**: Job state is in-process memory only. If the MCP server restarts (e.g. after `sandbox_update_start()`), all job IDs become invalid.
-- **MCP is synchronous by design**: The background execution pattern is an application-level workaround for the MCP 60-second timeout, not a native async feature of the protocol.
+- **MCP is synchronous by design**: The background execution pattern is an application-level workaround for the stdio 60-second timeout, not a native async feature of the protocol.
+- **SSE/HTTP transport**: Using `--transport sse` or `--transport http` eliminates the client timeout but requires the client (e.g., Claude Desktop) to support SSE-based MCP servers. Not all MCP clients support SSE transport.
 
 ## License
 

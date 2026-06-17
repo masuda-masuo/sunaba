@@ -7,14 +7,20 @@ restarts it (signaling a successful in-place update).
 
 Architecture
 ------------
-* **stdin proxy** – a single long-lived thread reads from
-  ``sys.stdin.buffer`` and writes to the *current* server's stdin via
-  a ``threading.Event``-guarded reference.  On restart the reference is
-  atomically swapped so the single reader thread always feeds the live
-  process without duplication or races.
-* **stdout/stderr proxies** – one thread per stream per server process,
-  started fresh on each restart.  These are daemon threads so they are
-  reaped automatically when the launcher exits.
+* **stdio mode** (default):
+  * **stdin proxy** – a single long-lived thread reads from
+    ``sys.stdin.buffer`` and writes to the *current* server's stdin via
+    a ``threading.Event``-guarded reference.  On restart the reference is
+    atomically swapped so the single reader thread always feeds the live
+    process without duplication or races.
+  * **stdout/stderr proxies** – one thread per stream per server process,
+    started fresh on each restart.  These are daemon threads so they are
+    reaped automatically when the launcher exits.
+* **sse/http mode** (``--transport sse`` or ``--transport http``):
+  The server listens on a TCP port (default 127.0.0.1:8765) instead of
+  using stdio.  The launcher only manages the server process lifecycle
+  and does not proxy stdio.  This avoids the ~60-second client timeout
+  that affects stdio transport.
 """
 from __future__ import annotations
 
@@ -84,6 +90,18 @@ def _stdin_proxy(get_dst) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _detect_transport(argv: list[str]) -> str:
+    """Detect the transport mode from CLI arguments.
+
+    Looks for ``--transport`` in *argv* and returns its value,
+    defaulting to ``"stdio"``.
+    """
+    for i, arg in enumerate(argv):
+        if arg == "--transport" and i + 1 < len(argv):
+            return argv[i + 1]
+    return "stdio"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -108,8 +126,11 @@ def main() -> None:
         server_args.append("--auto-update")
     server_args.extend(remaining)
 
+    transport = _detect_transport(server_args)
+    is_stdio = transport == "stdio"
+
     # Shared mutable reference to the current server's stdin.
-    # A lock protects swaps during restart.
+    # Only used in stdio mode.  A lock protects swaps during restart.
     _lock = threading.Lock()
     _current_stdin: list[IO[bytes] | None] = [None]
 
@@ -117,60 +138,63 @@ def main() -> None:
         with _lock:
             return _current_stdin[0]
 
-    # stdin proxy thread starts on first server iteration (after the
-    # server process is ready) to avoid dropping the initialize request
-    # that arrives before the server is started.
+    # stdin proxy thread (stdio mode only) starts on first server
+    # iteration after the server process is ready to avoid dropping
+    # the initialize request.
     stdin_thread: threading.Thread | None = None
     stdin_thread_started = False
 
     while True:
-        proc = subprocess.Popen(
-            server_args,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        if is_stdio:
+            proc = subprocess.Popen(
+                server_args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
 
-        # Point the stdin proxy at the new process.
-        with _lock:
-            _current_stdin[0] = proc.stdin
+            # Point the stdin proxy at the new process.
+            with _lock:
+                _current_stdin[0] = proc.stdin
 
-        # Start the single stdin proxy thread on the first iteration,
-        # after the server process is already running and its stdin
-        # reference has been set.  This ensures no lines are dropped
-        # during the race window between thread start and server ready.
-        if not stdin_thread_started:
-            stdin_thread_started = True
-            stdin_thread = threading.Thread(
-                target=_stdin_proxy,
-                args=(_get_current_stdin,),
+            # Start the single stdin proxy thread on the first iteration
+            # after the server process is already running and its stdin
+            # reference has been set.
+            if not stdin_thread_started:
+                stdin_thread_started = True
+                stdin_thread = threading.Thread(
+                    target=_stdin_proxy,
+                    args=(_get_current_stdin,),
+                    daemon=True,
+                )
+                stdin_thread.start()
+
+            # Per-process stdout/stderr proxy threads.
+            out_thread = threading.Thread(
+                target=_pipe_stream,
+                args=(proc.stdout, sys.stdout.buffer),
                 daemon=True,
             )
-            stdin_thread.start()
-
-        # Per-process stdout/stderr proxy threads.
-        out_thread = threading.Thread(
-            target=_pipe_stream,
-            args=(proc.stdout, sys.stdout.buffer),
-            daemon=True,
-        )
-        err_thread = threading.Thread(
-            target=_pipe_stream,
-            args=(proc.stderr, sys.stderr.buffer),
-            daemon=True,
-        )
-        out_thread.start()
-        err_thread.start()
+            err_thread = threading.Thread(
+                target=_pipe_stream,
+                args=(proc.stderr, sys.stderr.buffer),
+                daemon=True,
+            )
+            out_thread.start()
+            err_thread.start()
+        else:
+            # SSE/HTTP mode: server binds to a TCP port, no stdio proxy.
+            proc = subprocess.Popen(server_args)
 
         returncode = proc.wait()
 
-        # Detach stdin proxy from the dead process before restart so
-        # lines arriving during pip-install are not lost to a closed pipe.
-        with _lock:
-            _current_stdin[0] = None
+        if is_stdio:
+            # Detach stdin proxy from the dead process before restart.
+            with _lock:
+                _current_stdin[0] = None
 
-        out_thread.join(timeout=1)
-        err_thread.join(timeout=1)
+            out_thread.join(timeout=1)
+            err_thread.join(timeout=1)
 
         if returncode != RESTART_EXIT_CODE:
             break

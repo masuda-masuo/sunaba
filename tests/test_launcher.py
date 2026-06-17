@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from code_sandbox_mcp.launcher import _pipe_stream, main
+from code_sandbox_mcp.launcher import _detect_transport, _pipe_stream, main
 
 
 class TestPipeStream:
@@ -191,3 +191,45 @@ class TestStdinProxyTiming:
             assert _current_stdin[0] is None
 
         t.join(timeout=1)
+
+
+class TestTransportDetection:
+    """Tests for transport mode detection in the launcher."""
+
+    def test_detect_stdio_default(self) -> None:
+        """When no --transport is given, should default to stdio."""
+        assert _detect_transport(["-m", "code_sandbox_mcp.server"]) == "stdio"
+
+    def test_detect_sse(self) -> None:
+        """When --transport sse is given, should detect sse."""
+        assert _detect_transport(
+            ["-m", "code_sandbox_mcp.server", "--transport", "sse"]
+        ) == "sse"
+
+    def test_detect_http(self) -> None:
+        """When --transport http is given, should detect http."""
+        assert _detect_transport(
+            ["-m", "code_sandbox_mcp.server", "--transport", "http"]
+        ) == "http"
+
+    def test_detect_stdio_explicit(self) -> None:
+        """When --transport stdio is given, should detect stdio."""
+        assert _detect_transport(
+            ["-m", "code_sandbox_mcp.server", "--transport", "stdio"]
+        ) == "stdio"
+
+    def test_detect_streamable_http(self) -> None:
+        """When --transport streamable-http is given, should detect it."""
+        assert _detect_transport(
+            ["-m", "code_sandbox_mcp.server", "--transport", "streamable-http"]
+        ) == "streamable-http"
+
+    def test_detect_with_other_args(self) -> None:
+        """Transport detection should work with other arguments present."""
+        assert _detect_transport([
+            "-m", "code_sandbox_mcp.server",
+            "--pass-through-env", "GITHUB_TOKEN",
+            "--transport", "sse",
+            "--host", "0.0.0.0",
+            "--port", "9876",
+        ]) == "sse"

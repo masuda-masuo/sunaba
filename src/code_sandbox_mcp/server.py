@@ -1038,8 +1038,15 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
 def main() -> None:
     """Parse CLI arguments and run the MCP server.
 
-    Supports ``--terminal`` for update progress windows and
-    ``--default-image`` for overriding the default Docker image.
+    Supports ``--terminal`` for update progress windows,
+    ``--default-image`` for overriding the default Docker image,
+    and ``--transport`` to select the MCP transport protocol.
+
+    HTTP-based transports (``sse``, ``http``, ``streamable-http``)
+    are not subject to the ~60-second client timeout that affects
+    ``stdio``, making them suitable for long-running Docker
+    operations such as ``docker pull`` or ``copy_project`` on
+    large directories.
     """
     import argparse
 
@@ -1068,6 +1075,29 @@ def main() -> None:
         default=None,
         help="Directory for update log files",
     )
+    parser.add_argument(
+        "--transport",
+        type=str,
+        default="stdio",
+        choices=["stdio", "sse", "http", "streamable-http"],
+        help=(
+            "MCP transport protocol (default: stdio). "
+            "Use 'sse' or 'http' to avoid the ~60s client timeout. "
+            "When using SSE/HTTP, specify --host and --port."
+        ),
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Host address for HTTP transport (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="Port for HTTP transport (default: 8765)",
+    )
     args = parser.parse_args()
 
     global _TERMINAL, _UPDATE_SPEC, _UPDATE_LOG_DIR, _DEFAULT_IMAGE
@@ -1079,7 +1109,11 @@ def main() -> None:
         validate_image_ref(args.default_image)
         _DEFAULT_IMAGE = args.default_image
 
-    mcp.run()
+    transport = args.transport
+    if transport == "stdio":
+        mcp.run(transport=transport)
+    else:
+        mcp.run(transport=transport, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

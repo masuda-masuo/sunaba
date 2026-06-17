@@ -148,7 +148,50 @@ search_in_container → read_file_range → apply_patch → verify → submit
 
 ---
 
-## 7. 事後監査が安全網の主役（旧 HITL）
+## 7. トランスポート（タイムアウト対策）
+
+> **問題**: stdio ベース MCP トランスポートにはクライアント側で ~60秒のタイムアウトがかかる。Docker の `pull`, `build`, 大規模 `put_archive` などがこの制限を超える。
+
+**解決**: FastMCP がサポートする HTTP ベースのトランスポート（SSE / HTTP / streamable-HTTP）に切り替えることでクライアント側のタイムアウト制約を回避する。
+
+### 選択肢
+
+| トランスポート | タイムアウト | 特徴 |
+|---------------|-------------|------|
+| `stdio`（既定） | ~60秒 | シンプル、全クライアント対応、launcher が stdio プロキシ |
+| `sse`（推奨） | なし | Server-Sent Events、HTTP 永続接続、クライアントが SSE をサポートする必要あり |
+| `http` | なし | 標準 HTTP、ステートレスに近い |
+| `streamable-http` | なし | MCP spec の Streamable HTTP、双方向ストリーミング |
+
+### アーキテクチャ
+
+`stdio` モードでは launcher が子プロセスの stdin/stdout/stderr をプロキシする2プロセス構成。`sse`/`http` モードではサーバが TCP ポートにバインドし、launcher はプロセスライフサイクル管理のみを行う。
+
+```python
+# server.py (抜粋)
+transport = args.transport  # "stdio" | "sse" | "http" | "streamable-http"
+if transport == "stdio":
+    mcp.run(transport=transport)
+else:
+    mcp.run(transport=transport, host=args.host, port=args.port)
+```
+
+### 設定
+
+```json
+"--transport", "sse", "--host", "127.0.0.1", "--port", "8765"
+```
+
+`launcher` モードでも `--transport sse` を指定可能。launcher は stdio プロキシを省略し、サーバプロセスのみ管理する。
+
+### 補足
+
+- `sandbox_exec_background` + `sandbox_exec_check` のバックグラウンド実行パターンは引き続き利用可能（SSE 下でも有用）。
+- `_ensure_image()` の `docker pull` がタイムアウトする問題は、SSE 移行により解消される（pull 中にクライアントがタイムアウトしなくなる）。
+
+---
+
+## 8. 事後監査が安全網の主役（旧 HITL）
 
 > 旧 §7「実効性のある承認」は廃止。コンテナ内の任意コマンドは構造的に強制できない。だが**サンドボックス内は使い捨てなのでゲート不要**（§0）。本当に強制すべき境界越え操作は §2.2 に統合済み。
 
@@ -156,9 +199,9 @@ search_in_container → read_file_range → apply_patch → verify → submit
 
 ---
 
-## 8. 人間が把握しやすい仕組み（可観測性 / 監査）
+## 9. 人間が把握しやすい仕組み（可観測性 / 監査）
 
-§7の通り安全網の主役はここ。**実装の最優先はジャーナル**。
+§8の通り安全網の主役はここ。**実装の最優先はジャーナル**。
 
 - **人間可読の append-only 実行ジャーナル（最優先）**: `tail -f ~/.code-sandbox-mcp/journal.log` で「いつ・どのimageで・何を・実行結果サマリ・境界越え操作なら承認の有無・外部VCS操作の内容」が自然文で流れる。全実行を漏れなく記録。改竄しにくい append-only を厳守。
 - **run_id 単位のリプレイ可能トレース出力（HTML / JSON）**: 事後に「なぜそう動いたか」を共有・レビュー。
@@ -171,14 +214,14 @@ search_in_container → read_file_range → apply_patch → verify → submit
 
 ---
 
-## 9. テスト環境クイックパス
+## 10. テスト環境クイックパス
 
 - `run_test_environment`: Compose相当の環境を一括起動。ネットワーク作成・ヘルスチェック待機・後片付けを自動化し、各サービスのアクセス先を返す。
 - `wait_for_condition`: TCPポート開放 / ログ内文字列 / healthy を条件に待機（タイムアウト付き）。AIによる `sleep 30` 乱用を排除。
 
 ---
 
-## 10. 外部VCS連携（issue→fix→verify→submit の自己完結）
+## 11. 外部VCS連携（issue→fix→verify→submit の自己完結）
 
 > 位置づけ: edit/verify ループの**入口（課題取得）と出口（提出）**だけを足す。GitHub MCP を介さず payload をコンテキストに通さないことが唯一の狙い。
 
@@ -198,7 +241,7 @@ issue 本文も diff もコンテナ内に留まり、LLM は run_id / ハンド
 
 ---
 
-## 11. ベースイメージ（全部入り）
+## 12. ベースイメージ（全部入り）
 
 ツール同梱はイメージの責務。MCP のツール数は増やさない。`docker/Dockerfile.sandbox` で管理（→ §12）。
 
@@ -218,7 +261,7 @@ issue 本文も diff もコンテナ内に留まり、LLM は run_id / ハンド
 
 ---
 
-## 12. Dockerライフサイクル（必要最低限）
+## 13. Dockerライフサイクル（必要最低限）
 
 - `run_container_and_exec`（最重要 / ワンショット）
 - `exec_in_container`
@@ -239,11 +282,11 @@ issue 本文も diff もコンテナ内に留まり、LLM は run_id / ハンド
 | **1** | 出力制御（§6）＋ `run_container_and_exec` | トークン削減ROI最大 |
 | **2** | 構造化テスト結果 pytest/jest/go（§4） | AI-firstの本丸 |
 | **2+** | Edit/Verify コア（§5）: `search_in_container`（lexical/structural）＋ `verify`（束ね・強制ゲート）＋ stdout バグ修正（#52） | 失敗→修正→再検証ループを閉じる |
-| **4** | `run_test_environment`＋`wait_for_condition`（§9） | `sleep 30`撲滅 |
-| **5** | 外部VCS連携（§10）: `issue_view` + `submit`（verify ゲート内蔵） | issue→push をコンテキスト非通過で自己完結 |
+| **4** | `run_test_environment`＋`wait_for_condition`（§10） | `sleep 30`撲滅 |
+| **5** | 外部VCS連携（§11）: `issue_view` + `submit`（verify ゲート内蔵） | issue→push をコンテキスト非通過で自己完結 |
 | 横断 | トークン削減（§3） | 各Phaseに織り込む |
-| 並行 | 可観測性 §8 | ジャーナル→リプレイ→ダッシュボード→通知 |
-| 基盤 | `docker/Dockerfile.sandbox`（§11・§12） | Phase 1 と並行して整備 |
+| 並行 | 可観測性 §9 | ジャーナル→リプレイ→ダッシュボード→通知 |
+| 基盤 | `docker/Dockerfile.sandbox`（§12・§13） | Phase 1 と並行して整備 |
 
 **切る / 別リポジトリ**: 埋め込みセマンティック検索・code-RAG・永続コードグラフ、snapshot系、ネットワーク系の大半、コンテナ内コマンドの危険度判定ゲート、GitHub 広域運用。
 
@@ -252,6 +295,6 @@ issue 本文も diff もコンテナ内に留まり、LLM は run_id / ハンド
 ## まとめ
 
 基本思想（全部見せない / 構造を返す / 人間の最終制御）を採用し、コード理解レイヤーの**自前実装（ストア・インデックスの所有）**だけを切る（CLI は可）。
-人間の最終制御は、**静的ガードレール（§2）＋ 境界越え操作のトークン必須（§2.2、外部VCS含む）＋ 全実行の事後監査ジャーナル（§8）** で担保する。
+人間の最終制御は、**静的ガードレール（§2）＋ 境界越え操作のトークン必須（§2.2、外部VCS含む）＋ 全実行の事後監査ジャーナル（§9）** で担保する。
 payload はコンテナ内に留め、LLM は制御だけ運ぶ。
 目標は一貫して——**AIが最小限のコンテキストで最大限の判断を行える、安全なテスト・検証・提出の基盤**。

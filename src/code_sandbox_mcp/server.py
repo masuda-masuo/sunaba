@@ -4,6 +4,7 @@ This module defines the FastMCP server and all tool handlers.
 """
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import logging
@@ -942,8 +943,6 @@ def run_container_and_exec(
     except Exception:
         pass
 
-    record_stop(container_id)
-
     # --- Process output ---
     raw_output = stdout_text
     if stderr_text:
@@ -996,6 +995,7 @@ def run_container_and_exec(
             f"network={allow_network} vcs_token={inject_vcs_token}",
         )
 
+    record_stop(container_id)
     return json.dumps(result)
 
 
@@ -1236,14 +1236,12 @@ def sandbox_trace_dir() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_arg_parser():  # -> argparse.ArgumentParser
+def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the MCP server.
 
     Exported separately so tests can exercise the parser without
     starting the server.
     """
-    import argparse
-
     parser = argparse.ArgumentParser(description="Code Sandbox MCP Server")
     parser.add_argument(
         "--terminal",

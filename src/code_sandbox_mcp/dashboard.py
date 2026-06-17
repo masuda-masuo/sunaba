@@ -230,7 +230,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         journal_entries = 0
         jp = get_journal_path()
         try:
-            journal_entries = sum(1 for _ in open(jp))
+            with open(jp) as f:
+                journal_entries = sum(1 for _ in f)
         except Exception:
             pass
 
@@ -364,25 +365,39 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
 _dashboard_server: HTTPServer | None = None
 _dashboard_thread: threading.Thread | None = None
+_dashboard_host: str = "127.0.0.1"
+_dashboard_port: int = 8766
 
 
 def start_dashboard(host: str = "127.0.0.1", port: int = 8766) -> str:
     """Start the web dashboard on *host*:*port* in a background thread.
 
+    When *port* is 0, the OS assigns a free ephemeral port.
+    Use :func:`get_dashboard_url` to retrieve the actual bound address.
+
     Returns a status message.
     """
-    global _dashboard_server, _dashboard_thread
+    global _dashboard_server, _dashboard_thread, _dashboard_host, _dashboard_port
 
     if _dashboard_server is not None:
-        return f"Dashboard already running on {host}:{port}"
+        return f"Dashboard already running on http://{_dashboard_host}:{_dashboard_port}"
 
+    _dashboard_host = host
     _dashboard_server = HTTPServer((host, port), _DashboardHandler)
+    _dashboard_port = _dashboard_server.server_address[1]
     _dashboard_thread = threading.Thread(
         target=_dashboard_server.serve_forever,
         daemon=True,
     )
     _dashboard_thread.start()
-    return f"Dashboard started on http://{host}:{port}"
+    return f"Dashboard started on http://{_dashboard_host}:{_dashboard_port}"
+
+
+def get_dashboard_url() -> str | None:
+    """Return the URL of the running dashboard, or None if not started."""
+    if _dashboard_server is None:
+        return None
+    return f"http://{_dashboard_host}:{_dashboard_port}"
 
 
 def stop_dashboard() -> str:

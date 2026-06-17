@@ -2,12 +2,114 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 from code_sandbox_mcp.server import (
+    _container_env,
     copy_project,
     sandbox_exec,
+    sandbox_initialize,
 )
+
+
+class TestContainerEnv:
+    """Tests for the _container_env helper (Issue #57 token isolation)."""
+
+    def test_default_no_vcs_token(self) -> None:
+        """inject_vcs_token=False should return empty dict even if env vars are set."""
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
+            env = _container_env(inject_vcs_token=False)
+            assert env == {}
+
+    def test_inject_vcs_token_injects_github_token(self) -> None:
+        """inject_vcs_token=True should include GITHUB_TOKEN when set."""
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
+            env = _container_env(inject_vcs_token=True)
+            assert env.get("GITHUB_TOKEN") == "ghp_fake"
+
+    def test_inject_vcs_token_injects_gh_token(self) -> None:
+        """inject_vcs_token=True should include GH_TOKEN when set."""
+        with patch.dict(os.environ, {"GH_TOKEN": "gho_fake"}, clear=True):
+            env = _container_env(inject_vcs_token=True)
+            assert env.get("GH_TOKEN") == "gho_fake"
+
+    def test_inject_vcs_token_injects_github_token_source(self) -> None:
+        """inject_vcs_token=True should include GITHUB_TOKEN_SOURCE when set."""
+        with patch.dict(os.environ, {"GITHUB_TOKEN_SOURCE": "ghs_fake"}, clear=True):
+            env = _container_env(inject_vcs_token=True)
+            assert env.get("GITHUB_TOKEN_SOURCE") == "ghs_fake"
+
+    def test_inject_vcs_token_only_injects_set_vars(self) -> None:
+        """Only vars that are set in the environment should be injected."""
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
+            env = _container_env(inject_vcs_token=True)
+            assert "GITHUB_TOKEN" in env
+            assert "GH_TOKEN" not in env
+            assert "GITHUB_TOKEN_SOURCE" not in env
+
+    def test_inject_vcs_token_empty_when_no_vars_set(self) -> None:
+        """No env vars set should return empty dict even with inject_vcs_token=True."""
+        with patch.dict(os.environ, {}, clear=True):
+            env = _container_env(inject_vcs_token=True)
+            assert env == {}
+
+
+class TestSandboxInitialize:
+    """Tests for sandbox_initialize."""
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server._ensure_image")
+    @patch("code_sandbox_mcp.server.validate_image_ref")
+    def test_inject_vcs_token_passed_to_container_env(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """inject_vcs_token=True should pass through to _container_env."""
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
+            result = sandbox_initialize(
+                image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                inject_vcs_token=True,
+            )
+
+        assert result == "abc123def456"
+        # Verify environment was passed with the token
+        call_kwargs = mock_client.containers.run.call_args[1]
+        assert call_kwargs["environment"].get("GITHUB_TOKEN") == "ghp_fake"
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server._ensure_image")
+    @patch("code_sandbox_mcp.server.validate_image_ref")
+    def test_inject_vcs_token_false_omits_tokens(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """inject_vcs_token=False should omit VCS tokens from environment."""
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
+            result = sandbox_initialize(
+                image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                inject_vcs_token=False,
+            )
+
+        assert result == "abc123def456"
+        call_kwargs = mock_client.containers.run.call_args[1]
+        assert "GITHUB_TOKEN" not in call_kwargs["environment"]
 
 
 class TestSandboxExec:

@@ -147,6 +147,22 @@ class SecurityProfile:
     #:    recording (§8) is performed.
     allow_network: bool = False
 
+    #: Whether to inject VCS authentication tokens (``GITHUB_TOKEN``,
+    #: ``GITHUB_TOKEN_SOURCE``, ``GH_TOKEN``) as environment variables
+    #: in the container.  Defaults to ``False`` — only set to ``True``
+    #: for containers that need git/gh access to remote repositories.
+    #:
+    #: Injecting tokens into all containers indiscriminately violates
+    #: the principle of least privilege (Issue #57).  Enable this only
+    #: when the container will perform VCS operations (git push, gh
+    #: issue view, etc.).
+    #:
+    #: .. warning::
+    #:    Token injection is a boundary-crossing operation (§2.2).
+    #:    When set to ``True``, the caller **must** ensure journal
+    #:    recording (§8) is performed.
+    inject_vcs_token: bool = False
+
     #: Whether to require image digest references (``image@sha256:...``).
     require_digest: bool = True
 

@@ -57,6 +57,9 @@ class TestSecurityProfile:
     def test_default_profile_network_mode_none(self) -> None:
         assert DEFAULT_SECURITY_PROFILE.network_mode == "none"
 
+    def test_default_profile_inject_vcs_token_false(self) -> None:
+        assert DEFAULT_SECURITY_PROFILE.inject_vcs_token is False
+
     def test_default_profile_require_digest(self) -> None:
         assert DEFAULT_SECURITY_PROFILE.require_digest is True
 

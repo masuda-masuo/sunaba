@@ -77,18 +77,24 @@ def _docker() -> Any:
     return docker.from_env()
 
 
-def _container_env() -> dict[str, str]:
+def _container_env(inject_vcs_token: bool = False) -> dict[str, str]:
     """Build environment variables to pass to sandbox containers.
 
-    Passes through ``GITHUB_TOKEN`` and ``GITHUB_TOKEN_SOURCE`` from
-    the host environment so that GitHub MCP tools inside the sandbox
-    can authenticate automatically.
+    When *inject_vcs_token* is ``True``, passes through
+    ``GITHUB_TOKEN``, ``GITHUB_TOKEN_SOURCE``, and ``GH_TOKEN``
+    from the host environment so that GitHub MCP tools inside the
+    sandbox can authenticate automatically.
+
+    Token injection is opt-in (``inject_vcs_token=True``) to avoid
+    leaking credentials into containers that do not need VCS access
+    (principle of least privilege, Issue #57).
     """
     env: dict[str, str] = {}
-    for key in ("GITHUB_TOKEN", "GITHUB_TOKEN_SOURCE"):
-        val = os.environ.get(key)
-        if val:
-            env[key] = val
+    if inject_vcs_token:
+        for key in ("GITHUB_TOKEN", "GITHUB_TOKEN_SOURCE", "GH_TOKEN"):
+            val = os.environ.get(key)
+            if val:
+                env[key] = val
     return env
 
 
@@ -114,7 +120,8 @@ def _ensure_image(image: str) -> None:
 
 @mcp.tool()
 def sandbox_initialize(image: str | None = None,
-                       allow_network: bool = False) -> str:
+                       allow_network: bool = False,
+                       inject_vcs_token: bool = False) -> str:
     """Start a new Docker sandbox container.
 
     The container runs ``sleep infinity`` and stays alive until
@@ -131,6 +138,12 @@ def sandbox_initialize(image: str | None = None,
                Set to ``True`` for VCS operations (git/gh) that need to
                reach GitHub API.  Network access is a boundary-crossing
                operation and should be used only when necessary.
+        inject_vcs_token: Whether to inject VCS authentication tokens
+               (``GITHUB_TOKEN``, ``GITHUB_TOKEN_SOURCE``, ``GH_TOKEN``)
+               as environment variables in the container (default ``False``).
+               Enable only for containers that need git/gh access to
+               remote repositories.  Token injection is a boundary-crossing
+               operation and should be used only when necessary.
 
     The image must be pulled locally before use: docker pull <image>
 
@@ -139,7 +152,7 @@ def sandbox_initialize(image: str | None = None,
     """
     client = _docker()
     resolved = image or _DEFAULT_IMAGE
-    env = _container_env()
+    env = _container_env(inject_vcs_token=inject_vcs_token)
 
     try:
         validate_image_ref(resolved)
@@ -790,6 +803,7 @@ def run_container_and_exec(
     offset: int = 0,
     limit: int = 50,
     allow_network: bool = False,
+    inject_vcs_token: bool = False,
 ) -> str:
     """Start a container, execute commands, then remove it (one-shot).
 
@@ -797,8 +811,8 @@ def run_container_and_exec(
     :func:`sandbox_initialize` → :func:`sandbox_exec` → :func:`sandbox_stop`.
 
     Output is sanitized (ANSI codes, ``\r`` progress bars, timestamps
-    removed) and consecutive repeated lines are compressed
-    (``[\u00d7N] content``).
+    removed, VCS token values masked) and consecutive repeated lines
+    are compressed (``[\u00d7N] content``).
 
     Args:
         image: Docker image to use (``image@sha256:...``).
@@ -816,6 +830,11 @@ def run_container_and_exec(
         allow_network: Whether to allow network access (default ``False``).
                Set to ``True`` for VCS operations (git/gh) that need to
                reach GitHub API.
+        inject_vcs_token: Whether to inject VCS authentication tokens
+               (``GITHUB_TOKEN``, ``GITHUB_TOKEN_SOURCE``, ``GH_TOKEN``)
+               as environment variables in the container (default
+               ``False``).  Enable only for containers that need git/gh
+               access to remote repositories.
 
     Returns:
         JSON string with ``status``, ``output`` (or ``error``),
@@ -834,7 +853,7 @@ def run_container_and_exec(
 
     resolved = image or _DEFAULT_IMAGE
     client = _docker()
-    env = _container_env()
+    env = _container_env(inject_vcs_token=inject_vcs_token)
 
     # --- Start container ---
     try:

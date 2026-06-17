@@ -1,51 +1,82 @@
+# syntax=docker/dockerfile:1
+# docker/Dockerfile.sandbox
+#
+# Code Sandbox MCP — 全部入りベースイメージ
+# 用途: sandbox_initialize の既定イメージ
+# ビルド: docker build -f docker/Dockerfile.sandbox -t code-sandbox-mcp/sandbox:latest .
+# 運用: イメージはダイジェスト固定で参照すること (image@sha256:...)
+#
+# 同梱ツール:
+#   検索(字句)  : ripgrep (rg)
+#   検索(構造)  : ast-grep (sg)
+#   テキスト置換: sd
+#   ファイル検索: fd
+#   シンボル    : universal-ctags
+#   lint        : ruff
+#   型検査      : pyright
+#   セキュリティ: semgrep
+#   VCS         : git, gh (GitHub CLI)
+#   高速install : uv
+#   JSON処理    : jq
+
 FROM python:3.12-slim-bookworm@sha256:93ab4b7fa528b25124c97bcc755415e60eb671a86b4dbe0328df2fe2d1c1193d
 
-LABEL description="Code Sandbox MCP - pre-built sandbox image with VCS and analysis tools"
-LABEL maintainer="Code Sandbox MCP"
-
-# Install system dependencies: git, gh, build-essential for uv
+# ── システムパッケージ ──────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
-    gh \
+    curl \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install uv (fast Python package installer)
-COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /uvx /bin/
-
-# Install ripgrep (fast grep alternative)
-RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
-    && rm -rf /var/lib/apt/lists/*
+    fd-find \
+    jq \
+    universal-ctags \
+  && rm -rf /var/lib/apt/lists/*
 
-# Install ast-grep (structural search)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ast-grep \
-    && rm -rf /var/lib/apt/lists/* || \
-    (curl -fsSL https://github.com/ast-grep/ast-grep/releases/latest/download/ast-grep-x86_64-unknown-linux-gnu.tar.gz \
-    | tar xz -C /usr/local/bin/)
+# fd-find は fdfind としてインストールされるので fd にシンボリックリンク
+RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
 
-# Install Python analysis tools
-RUN uv tool install ruff && \
-    uv tool install pyright
+# ── GitHub CLI (gh) ────────────────────────────────────────────────
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends gh \
+  && rm -rf /var/lib/apt/lists/*
 
-# Install semgrep
-RUN uv tool install semgrep
+# ── Rust 製シングルバイナリ (ast-grep / sd) ────────────────────────
+ARG TARGETARCH
+ARG AST_GREP_VERSION=0.32.0
+ARG SD_VERSION=1.0.0
 
-# Create dedicated sandbox user (non-root, with home directory)
-RUN groupadd -r sandbox && \
-    useradd -r -g sandbox -d /home/sandbox -s /bin/bash -m sandbox && \
-    chmod 755 /home/sandbox
+RUN set -ex; \
+    case "${TARGETARCH}" in \
+      amd64) TRIPLE="x86_64-unknown-linux-musl" ;; \
+      arm64) TRIPLE="aarch64-unknown-linux-musl" ;; \
+      *) echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VERSION}/ast-grep-${TRIPLE}.tar.gz" \
+      | tar -xz -C /usr/local/bin/ sg; \
+    curl -fsSL "https://github.com/chmln/sd/releases/download/v${SD_VERSION}/sd-v${SD_VERSION}-${TRIPLE}.tar.gz" \
+      | tar -xz --strip-components=1 -C /usr/local/bin/ "sd-v${SD_VERSION}-${TRIPLE}/sd"
 
-# Default to sandbox user
+# ── Python ツール (uv 経由で高速インストール) ─────────────────────
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+RUN uv tool install ruff \
+ && uv tool install pyright \
+ && uv tool install semgrep \
+ && uv pip install --system pytest pytest-json-report
+
+# ── 非 root ユーザ ─────────────────────────────────────────────────
+# § 2.1 静的ガードレール: 非 root 実行を既定強制
+RUN groupadd -r sandbox && useradd -r -g sandbox -m -d /home/sandbox sandbox
 USER sandbox
 WORKDIR /home/sandbox
 
-# Verify tools
-RUN git --version && \
-    gh --version && \
-    uv --version && \
-    rg --version && \
-    ast-grep --version && \
-    ruff --version && \
-    semgrep --version
+# ── ヘルスチェック ─────────────────────────────────────────────────
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD rg --version && sg --version && semgrep --version || exit 1
+
+CMD ["bash"]

@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+# docker/Dockerfile.sandbox.minimal
+#
+# Code Sandbox MCP — 最小構成イメージ
+# 用途: 軽量・高速起動が優先の場合。lint/型検査/semgrep は入らない。
+# ビルド: docker build -f docker/Dockerfile.sandbox.minimal -t code-sandbox-mcp/sandbox:minimal .
+
+FROM python:3.12-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ripgrep \
+    jq \
+  && rm -rf /var/lib/apt/lists/*
+
+# uv（高速インストール）
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+RUN uv pip install --system pytest pytest-json-report
+
+# 非 root
+RUN groupadd -r sandbox && useradd -r -g sandbox -m -d /home/sandbox sandbox
+USER sandbox
+WORKDIR /home/sandbox
+
+CMD ["bash"]

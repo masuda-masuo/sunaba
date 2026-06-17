@@ -45,12 +45,16 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
   && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 
-# ── Rust 製シングルバイナリ (ast-grep / sd) ────────────────────────
-# ast-grep: 0.32.0 は tar.gz + musl だったが、0.37.0 以降は zip + linux-gnu に変更
-# sd: 1.0.0 は tar.gz 内バイナリだったが、1.1.0 以降は単一バイナリ直ダウンロードに変更
+# ── uv (システムワイド) ────────────────────────────────────────────
+# uv をシステムワイドにインストール (全ユーザの PATH に含まれる)
+RUN curl -LsSf https://astral.sh/uv/install.sh \
+  | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# ── ast-grep (sg) ─────────────────────────────────────────────────
+# 0.37.0 以降リリースアセットが zip 形式 + linux-gnu に変更された
+# (0.32.0 以前は tar.gz + musl)
 ARG TARGETARCH
 ARG AST_GREP_VERSION=0.43.0
-ARG SD_VERSION=1.1.0
 
 RUN set -ex; \
     case "${TARGETARCH}" in \
@@ -58,27 +62,18 @@ RUN set -ex; \
       arm64) ARCH="aarch64" ;; \
       *) echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
     esac; \
-    \
-    # ast-grep: zip 形式、linux-gnu ターゲット
     curl -fsSL "https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VERSION}/app-${ARCH}-unknown-linux-gnu.zip" \
       -o /tmp/ast-grep.zip \
     && unzip -q /tmp/ast-grep.zip -d /tmp/ast-grep \
     && mv /tmp/ast-grep/sg /usr/local/bin/sg \
     && chmod +x /usr/local/bin/sg \
-    && rm -rf /tmp/ast-grep /tmp/ast-grep.zip; \
-    \
-    # sd: 単一バイナリ直ダウンロード、linux-gnu ターゲット
-    curl -fsSL "https://github.com/chmln/sd/releases/download/v${SD_VERSION}/sd-v${SD_VERSION}-${ARCH}-unknown-linux-gnu" \
-      -o /usr/local/bin/sd \
-    && chmod +x /usr/local/bin/sd
+    && rm -rf /tmp/ast-grep /tmp/ast-grep.zip
 
-# ── Python ツール (uv 経由で高速インストール) ─────────────────────
-# uv をシステムワイドにインストール (全ユーザの PATH に含まれる)
-RUN curl -LsSf https://astral.sh/uv/install.sh \
-  | env UV_INSTALL_DIR=/usr/local/bin sh
-
-# システム Python へのパッケージインストール (root 権限が必要)
-RUN uv pip install --system pytest pytest-json-report
+# ── Python ツール (root 権限が必要なものをここで) ────────────────────
+# sd: PyPI wheel (ast-grep-cli) 経由でインストール
+# ※ chmln/sd の GitHub リリースはバージョンごとにアセット形式が変わるため
+#    pip wheel を利用してバージョン固定・クロスプラットフォーム対応とする
+RUN uv pip install --system pytest pytest-json-report sd
 
 # ── 非 root ユーザ ─────────────────────────────────────────────────
 # § 2.1 静的ガードレール: 非 root 実行を既定強制

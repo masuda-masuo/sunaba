@@ -2,6 +2,22 @@
 
 MCP server for Docker sandbox execution — AI-driven test, lint, type-check, and VCS workflows in disposable containers.
 
+## Why sandbox?
+
+AI coding agents that operate directly on the host filesystem carry maximum risk: a single `rm -rf ~` or `git push --force` can destroy your working environment, SSH keys, and git configuration. Recovery is painful and sometimes impossible.
+
+This MCP routes all AI operations through **disposable Docker containers** with structural safety guarantees:
+
+| Guarantee | Mechanism |
+|-----------|-----------|
+| Host is never touched | All file ops, package installs, and test runs happen inside the container. If the AI breaks something — delete the container and move on. |
+| No network by default | `allow_network=True` must be explicitly set. AI can't accidentally call external APIs, download payloads, or push to remotes. |
+| Non-root execution | Container runs as unprivileged user `sandbox`. No `sudo`, no system package modification. |
+| VCS token opt-in | `GITHUB_TOKEN` is injected only when `inject_vcs_token=True` is set. Even then, token values are masked in all output (`KEY=***`). |
+| Audit trail | Every operation is recorded in an append-only journal. You can trace exactly what the AI did, after the fact. |
+
+The value of this MCP is as much about **what the AI cannot do** as what it can.
+
 ## Quick start
 
 ```bash

@@ -229,7 +229,10 @@ else:
 - **`issue_view`**（`gh issue view` / read）: issue 本文をコンテナ内ファイルへ落とし、LLM には**要約＋ハンドル**だけ返す（§3.1）。§2.2 read 扱い（ジャーナル記録・ネットワーク明示許可）。
 - **`submit`**（write / 境界越え）: `branch → commit → push →（任意）PR作成` を1コール。**内部で `verify` を必ず再実行**し、失敗なら push 拒否。§2.2 の dry_run＋トークン必須、§8 ジャーナルにプランと結果を記録。
 
-**認証**: 既存の `GITHUB_TOKEN` / `GH_TOKEN` 注入をそのまま利用。新しい認証面は増えない。
+**認証**: VCS トークンの注入は **opt-in** 化（Issue #57）。`sandbox_initialize` / `run_container_and_exec` の `inject_vcs_token=True` を指定したコンテナにのみ `GITHUB_TOKEN` / `GITHUB_TOKEN_SOURCE` / `GH_TOKEN` が注入される。既定は `False`（トークン無し）。これにより:
+- 最小権限の原則を遵守（VCS 不要のコンテナにトークンが渡らない）
+- 実行ログからのトークン漏洩リスク低減（`sanitize_output` 内の `mask_tokens` で `KEY=***` に自動マスク）
+- トークンのスコープに応じた細かい制御が可能（read 用途と write 用途で別コンテナを使い分け）
 
 **payload 非通過フロー**:
 ```

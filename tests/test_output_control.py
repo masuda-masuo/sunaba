@@ -18,6 +18,7 @@ from code_sandbox_mcp.output_control import (
     OutputMetadata,
     PageResult,
     compress_repeated_lines,
+    mask_tokens,
     paginate_output,
     sanitize_output,
     strip_ansi,
@@ -124,6 +125,62 @@ class TestStripTimestamps:
 
 
 # =======================================================================
+# mask_tokens
+# =======================================================================
+
+
+class TestMaskTokens:
+    """Tests for VCS token value masking."""
+
+    def test_masks_github_token(self) -> None:
+        text = 'export GITHUB_TOKEN=ghp_abc123def456\n'
+        assert mask_tokens(text) == 'export GITHUB_TOKEN=***\n'
+
+    def test_masks_gh_token(self) -> None:
+        text = 'export GH_TOKEN=gho_xyz789\n'
+        assert mask_tokens(text) == 'export GH_TOKEN=***\n'
+
+    def test_masks_github_token_source(self) -> None:
+        text = 'GITHUB_TOKEN_SOURCE=github_pat_abc\n'
+        assert mask_tokens(text) == 'GITHUB_TOKEN_SOURCE=***\n'
+
+    def test_masks_multiple_tokens(self) -> None:
+        text = 'GITHUB_TOKEN=token1 GH_TOKEN=token2\n'
+        assert mask_tokens(text) == 'GITHUB_TOKEN=*** GH_TOKEN=***\n'
+
+    def test_preserves_text_without_tokens(self) -> None:
+        text = 'echo hello world\n'
+        assert mask_tokens(text) == 'echo hello world\n'
+
+    def test_handles_empty_string(self) -> None:
+        assert mask_tokens('') == ''
+
+    def test_masks_inline_value(self) -> None:
+        text = 'GITHUB_TOKEN=ghp_abc123 GH_TOKEN=gho_xyz789'
+        assert mask_tokens(text) == 'GITHUB_TOKEN=*** GH_TOKEN=***'
+
+    def test_masks_github_token_double_quoted(self) -> None:
+        text = 'export GITHUB_TOKEN="ghp_abc123"\n'
+        assert mask_tokens(text) == 'export GITHUB_TOKEN=***\n'
+
+    def test_masks_github_token_single_quoted(self) -> None:
+        text = "export GITHUB_TOKEN='ghp_abc123'\n"
+        assert mask_tokens(text) == "export GITHUB_TOKEN=***\n"
+
+    def test_masks_gh_token_double_quoted(self) -> None:
+        text = 'export GH_TOKEN="gho_xyz789"\n'
+        assert mask_tokens(text) == 'export GH_TOKEN=***\n'
+
+    def test_masks_github_token_source_with_quotes(self) -> None:
+        text = "GITHUB_TOKEN_SOURCE='github_pat_abc'\n"
+        assert mask_tokens(text) == "GITHUB_TOKEN_SOURCE=***\n"
+
+    def test_does_not_match_non_token_key(self) -> None:
+        text = 'MY_VAR=some_value\n'
+        assert mask_tokens(text) == 'MY_VAR=some_value\n'
+
+
+# =======================================================================
 # sanitize_output
 # =======================================================================
 
@@ -138,6 +195,14 @@ class TestSanitizeOutput:
     def test_removes_cr_and_ansi(self) -> None:
         raw = "\x1b[34mloading... 50%\r\x1b[34mloading... 100%\x1b[0m\n"
         assert sanitize_output(raw) == "loading... 100%\n"
+
+    def test_masks_github_token_in_integration(self) -> None:
+        raw = "export GITHUB_TOKEN=ghp_secret\n"
+        assert sanitize_output(raw) == "export GITHUB_TOKEN=***\n"
+
+    def test_masks_gh_token_in_integration(self) -> None:
+        raw = "export GH_TOKEN=gho_secret\n"
+        assert sanitize_output(raw) == "export GH_TOKEN=***\n"
 
     def test_preserves_clean_text(self) -> None:
         raw = "hello\nworld\n"

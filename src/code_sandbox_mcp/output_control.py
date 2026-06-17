@@ -145,22 +145,53 @@ def strip_timestamps(text: str) -> str:
     return _TIMESTAMP_PATTERN.sub("", text)
 
 
+#: Pattern matching VCS token environment variable assignments.
+#: Captures the variable name (group 1) so the replacement preserves
+#: the key while masking the secret value.
+_TOKEN_MASK_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"(GITHUB_TOKEN=)['\"]?[^\s'\"]+['\"]?"),
+    re.compile(r"(GH_TOKEN=)['\"]?[^\s'\"]+['\"]?"),
+    re.compile(r"(GITHUB_TOKEN_SOURCE=)['\"]?[^\s'\"]+['\"]?"),
+]
+
+
+def mask_tokens(text: str) -> str:
+    """Mask VCS authentication token values in command output.
+
+    Replaces the token value in ``KEY=value`` patterns with ``***``
+    so that credentials are not leaked through execution logs,
+    AI context, or journal records.
+
+    Args:
+        text: Raw output that may contain token assignments.
+
+    Returns:
+        Text with token values masked.
+    """
+    result = text
+    for pattern in _TOKEN_MASK_PATTERNS:
+        result = pattern.sub(r"\1***", result)
+    return result
+
+
 def sanitize_output(text: str) -> str:
-    """Clean raw output by removing ANSI codes, ``\\r`` bars, and timestamps.
+    """Clean raw output by removing ANSI codes, ``\\r`` bars, timestamps,
+    and VCS token values.
 
     This is the main entry point for output sanitization.  It applies
-    all three cleaners in sequence, mimicking ``CI=true`` / ``--no-color``
+    all cleaners in sequence, mimicking ``CI=true`` / ``--no-color``
     forcing for containers that do not support those flags natively.
 
     Args:
         text: Raw output from the command.
 
     Returns:
-        Clean, reader-friendly text.
+        Clean, reader-friendly text with secrets masked.
     """
     result = strip_ansi(text)
     result = strip_carriage_returns(result)
     result = strip_timestamps(result)
+    result = mask_tokens(result)
     return result
 
 

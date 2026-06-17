@@ -161,7 +161,14 @@ def sandbox_initialize(image: str | None = None) -> str:
 
 
 @mcp.tool()
-def sandbox_exec(container_id: str, commands: list[str]) -> str:
+def sandbox_exec(
+    container_id: str,
+    commands: list[str],
+    verbose: str = "summary",
+    max_lines: int = 100,
+    offset: int = 0,
+    limit: int = 50,
+) -> str:
     """Execute commands inside a running sandbox container.
 
     Each command is executed sequentially in the same ``exec`` instance
@@ -171,18 +178,29 @@ def sandbox_exec(container_id: str, commands: list[str]) -> str:
     Args:
         container_id: 12-character container ID prefix.
         commands: List of shell commands to execute sequentially.
+        verbose: Output verbosity:
+
+            - ``"error_only"``: Show output only on failure.
+            - ``"summary"``: Show first/last lines with omission notice.
+            - ``"full"``: Show all output.
+        max_lines: Maximum lines to show in summary/error_only mode.
+        offset: Line offset for paging (0-indexed).  Use with *limit*
+            to paginate through the output.
+        limit: Maximum lines per page.
 
     Returns:
-        Combined stdout of all commands.  On error returns an error
-        message string beginning with ``"Error:"``.
+        JSON string with ``status``, ``output``, and metadata
+        (``shown``, ``total_lines``, ``truncated``, ``next_offset``,
+        ``has_more``).  On failure also includes ``exit_code`` and
+        ``stderr``.
     """
     client = _docker()
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return f"Error: container {container_id[:12]} not found"
+        return json.dumps({"status": "error", "error": f"container {container_id[:12]} not found"})
     except Exception as e:
-        return f"Error: {e}"
+        return json.dumps({"status": "error", "error": str(e)})
 
     joined = " && ".join(commands)
     exit_code, output = container.exec_run(
@@ -191,14 +209,46 @@ def sandbox_exec(container_id: str, commands: list[str]) -> str:
         stderr=True,
         demux=True,
     )
-    if exit_code != 0:
-        stdout_part, stderr_part = output
-        msg = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-        return f"Error: exit code {exit_code}\n{msg}"
     stdout_part, stderr_part = output
-    if stdout_part:
-        return stdout_part.decode("utf-8", errors="replace")
-    return ""
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    # Merge for output processing: success shows stdout only,
+    # failure merges both so AI sees the full failure context
+    if exit_code == 0:
+        raw_output = stdout_text
+    else:
+        if stdout_text and stderr_text:
+            raw_output = stdout_text + "\n" + stderr_text
+        else:
+            raw_output = stdout_text or stderr_text
+
+    clean = sanitize_output(raw_output)
+    compressed = compress_repeated_lines(clean)
+    display, meta = truncate_output(
+        compressed,
+        max_lines=max_lines,
+        verbose=verbose,
+        exit_code=exit_code,
+        stderr=stderr_text,
+    )
+    page = paginate_output(display, offset=offset, limit=limit)
+
+    result: dict[str, Any] = {
+        "status": "ok" if exit_code == 0 else "error",
+        "output": page.content,
+        "shown": meta.shown,
+        "total_lines": meta.total_lines,
+        "truncated": meta.truncated,
+        "next_offset": page.next_offset,
+        "has_more": page.has_more,
+    }
+    if exit_code != 0:
+        result["exit_code"] = exit_code
+    if stderr_text and verbose != "error_only":
+        result["stderr"] = stderr_text
+
+    return json.dumps(result)
 
 
 @mcp.tool()

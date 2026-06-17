@@ -75,7 +75,8 @@ RUN set -ex; \
       -o /tmp/ast-grep.zip \
     && unzip -q /tmp/ast-grep.zip -d /tmp/ast-grep \
     && mv /tmp/ast-grep/sg /usr/local/bin/sg \
-    && chmod +x /usr/local/bin/sg \
+    && mv /tmp/ast-grep/ast-grep /usr/local/bin/ast-grep \
+    && chmod +x /usr/local/bin/sg /usr/local/bin/ast-grep \
     && rm -rf /tmp/ast-grep /tmp/ast-grep.zip; \
     \
     # sd: tar.gz 内のバイナリ名は "sd"

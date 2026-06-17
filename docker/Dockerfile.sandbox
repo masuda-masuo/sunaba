@@ -45,12 +45,18 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
   && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 
-# ── Rust 製シングルバイナリ (ast-grep / sd) ────────────────────────
-# ast-grep: 0.32.0 は tar.gz + musl だったが、0.37.0 以降は zip + linux-gnu に変更
-# sd: 1.0.0 は tar.gz 内バイナリだったが、1.1.0 以降は単一バイナリ直ダウンロードに変更
+# ── uv (システムワイド) ────────────────────────────────────────────
+RUN curl -LsSf https://astral.sh/uv/install.sh \
+  | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# ── ast-grep (sg) と sd ────────────────────────────────────────────
+# ast-grep: 0.37.0 以降リリースアセットが zip + linux-gnu に変更
+#   (0.32.0 以前は tar.gz + musl)
+# sd: v1.0.0 の確認済みアセット形式（拡張子なし単一バイナリ）を使用
+#   v1.1.0 以降は Linux 向けアセット形式が変わった可能性があるため固定
 ARG TARGETARCH
 ARG AST_GREP_VERSION=0.43.0
-ARG SD_VERSION=1.1.0
+ARG SD_VERSION=1.0.0
 
 RUN set -ex; \
     case "${TARGETARCH}" in \
@@ -67,17 +73,12 @@ RUN set -ex; \
     && chmod +x /usr/local/bin/sg \
     && rm -rf /tmp/ast-grep /tmp/ast-grep.zip; \
     \
-    # sd: 単一バイナリ直ダウンロード、linux-gnu ターゲット
+    # sd v1.0.0: 拡張子なし単一バイナリ形式（確認済み）
     curl -fsSL "https://github.com/chmln/sd/releases/download/v${SD_VERSION}/sd-v${SD_VERSION}-${ARCH}-unknown-linux-gnu" \
       -o /usr/local/bin/sd \
     && chmod +x /usr/local/bin/sd
 
-# ── Python ツール (uv 経由で高速インストール) ─────────────────────
-# uv をシステムワイドにインストール (全ユーザの PATH に含まれる)
-RUN curl -LsSf https://astral.sh/uv/install.sh \
-  | env UV_INSTALL_DIR=/usr/local/bin sh
-
-# システム Python へのパッケージインストール (root 権限が必要)
+# ── Python ツール (root 権限が必要なものをここで) ────────────────────
 RUN uv pip install --system pytest pytest-json-report
 
 # ── 非 root ユーザ ─────────────────────────────────────────────────

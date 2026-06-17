@@ -1,384 +1,278 @@
 # code-sandbox-mcp
 
-MCP server for Docker sandbox execution with `--pass-through-env` support.
+MCP server for Docker sandbox execution — AI-driven test, lint, type-check, and VCS workflows in disposable containers.
 
-Inspired by [Automata-Labs-team/code-sandbox-mcp](https://github.com/Automata-Labs-team/code-sandbox-mcp).
+## Quick start
 
-## Why this exists
-
-### 1. Pass host credentials into containers securely
-
-The original Automata-Labs version does not support passing host environment variables into containers. This implementation adds `--pass-through-env` so credentials stored in `claude_desktop_config.json` (e.g. `GITHUB_TOKEN`) are forwarded to the container — following the [MCP security best practice](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices) of keeping secrets out of AI context.
-
-### 2. Token-efficient workflows via git clone
-
-Instead of having the AI read source files and write them back into the container one by one, the AI simply runs `git clone` inside the container. The entire codebase is fetched directly from GitHub without ever passing through the AI's context window — saving a significant amount of tokens on large projects.
-
-Only the results (e.g. `pytest` output) are returned to the AI, keeping both input and output tokens minimal.
-
-### 3. Reproducible, transparent test environments
-
-Built-in AI sandboxes are opaque: the OS, installed packages, and runtime versions are unknown and uncontrollable. With this MCP, the Docker image is specified explicitly by the user:
-
-```
-sandbox_initialize(image="python:3.11-slim-bookworm")
-```
-
-Any image on Docker Hub can be used, including custom images that replicate a production environment exactly. The AI runs tests in the same environment every time — no surprises from mismatched dependencies or hidden system packages.
-
-## Requirements
-
-- Python 3.10+
-- Docker Desktop (Windows/Mac) or Docker Engine (Linux)
-- `pip`
-
-## Installation
-
-Install directly with pip:
-
-```powershell
+```bash
 pip install git+https://github.com/masuda-masuo/code-sandbox-mcp
 ```
 
-### Uninstall
+Minimal `claude_desktop_config.json`:
 
-```powershell
+```json
+{
+  "mcpServers": {
+    "code-sandbox-mcp": {
+      "command": "python",
+      "args": [
+        "-m", "code_sandbox_mcp.launcher",
+        "--pass-through-env", "GITHUB_TOKEN"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "github_pat_xxxx"
+      }
+    }
+  }
+}
+```
+
+> Use `which python` (Linux/macOS) or `(Get-Command python).Source` (Windows) to find the Python executable path if `"python"` alone doesn't work.
+
+## Installation
+
+```bash
+# Install
+pip install git+https://github.com/masuda-masuo/code-sandbox-mcp
+
+# Update
+pip install --force-reinstall git+https://github.com/masuda-masuo/code-sandbox-mcp
+
+# Pin to a specific commit
+pip install git+https://github.com/masuda-masuo/code-sandbox-mcp@<commit-hash>
+
+# Uninstall
 pip uninstall code-sandbox-mcp
 ```
 
-### Update to latest
+Requirements: Python 3.10+, Docker.
 
-```powershell
-pip install --force-reinstall git+https://github.com/masuda-masuo/code-sandbox-mcp
-```
+## Configuration
 
-Or ask Claude directly (launcher mode only):
+### Transport: stdio vs SSE/HTTP
 
-```
-sandbox_update_start()
-sandbox_update_check(job_id="...")  # repeat until "Status: done"
-```
-
-### Update to a specific commit
-
-```powershell
-pip install --force-reinstall git+https://github.com/masuda-masuo/code-sandbox-mcp@<commit-hash>
-```
-
-### MCP Transport: stdio vs SSE/HTTP
-
-By default, the MCP server uses **stdio** transport (stdin/stdout JSON-RPC), which has a client-side timeout of ~60 seconds. This causes `docker pull`, `pip install`, and other long operations to fail.
-
-To avoid the timeout, use **SSE** (Server-Sent Events) or **HTTP** transport:
+stdio has a ~60 second client timeout. Long operations (`docker pull`, `pip install`, large `copy_project`) should use SSE or HTTP transport:
 
 ```json
-{
-  "mcpServers": {
-    "code-sandbox-mcp": {
-      "command": "C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe",
-      "args": [
-        "-m", "code_sandbox_mcp.launcher",
-        "--transport", "sse",
-        "--host", "127.0.0.1",
-        "--port", "8765",
-        "--pass-through-env", "GITHUB_TOKEN"
-      ],
-      "env": {
-        "GITHUB_TOKEN": "github_pat_xxxx"
-      }
-    }
-  }
-}
+"args": [
+  "-m", "code_sandbox_mcp.launcher",
+  "--transport", "sse",
+  "--host", "127.0.0.1",
+  "--port", "8765",
+  "--pass-through-env", "GITHUB_TOKEN"
+]
 ```
 
-> **Note**: When running multiple instances of the MCP server, use a unique `--port` for each instance to avoid port conflicts. You can also use `--port 0` to let the OS pick a random available port (the actual port will be logged on startup).
+| Transport | Timeout | Notes |
+|-----------|---------|-------|
+| `stdio` (default) | ~60s | Works with all clients |
+| `sse` | None | Recommended for long operations |
+| `http` | None | Standard HTTP |
+| `streamable-http` | None | MCP spec Streamable HTTP |
 
-Available transports:
-- `stdio` — Default. Subject to ~60s client timeout.
-- `sse` — Server-Sent Events. No client timeout. Recommended.
-- `http` — HTTP transport. Also no client timeout.
-- `streamable-http` — Streamable HTTP transport (MCP spec).
+For SSE/HTTP transports, the server binds to `127.0.0.1:8765` by default. The launcher manages the server process lifecycle but does not proxy stdio.
 
-When using SSE/HTTP, the server binds to `127.0.0.1:8765` by default. The launcher still manages process lifecycle (restart on exit code 42) but does not proxy stdio — the client connects directly to the TCP port.
+### `--pass-through-env`
 
-### claude_desktop_config.json
-
-#### Recommended: launcher mode (supports in-place updates)
-
-Use `(Get-Command python).Source` (Windows PowerShell) or `which python` (Mac/Linux) to find the Python executable path.
-
-```json
-{
-  "mcpServers": {
-    "code-sandbox-mcp": {
-      "command": "C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe",
-      "args": [
-        "-m", "code_sandbox_mcp.launcher",
-        "--update-spec", "git+https://github.com/masuda-masuo/code-sandbox-mcp",
-        "--pass-through-env", "GITHUB_TOKEN"
-      ],
-      "env": {
-        "GITHUB_TOKEN": "github_pat_xxxx"
-      }
-    }
-  }
-}
-```
-
-In launcher mode, `sandbox_update_start()` / `sandbox_update_check()` allow Claude to update the server without restarting Claude Desktop.
-
-#### Simple mode (no in-place update)
-
-```json
-{
-  "mcpServers": {
-    "code-sandbox-mcp": {
-      "command": "C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe",
-      "args": [
-        "-m", "code_sandbox_mcp.server",
-        "--pass-through-env", "GITHUB_TOKEN"
-      ],
-      "env": {
-        "GITHUB_TOKEN": "github_pat_xxxx"
-      }
-    }
-  }
-}
-```
-
-> **Note**: `uvx --from git+https://...` is not recommended. uvx does not cache git-sourced packages and attempts to fetch from GitHub on every Claude Desktop startup, causing connection failures. Use `pip install` and specify the Python executable path instead.
-
-`--pass-through-env` accepts a comma-separated list of variable names:
+Forward host environment variables into containers:
 
 ```json
 "--pass-through-env", "GITHUB_TOKEN,SLACK_TOKEN"
 ```
 
-Only the listed variables are forwarded. Variables not listed are never injected into containers.
+Only explicitly listed variables are forwarded.
 
-### Optional terminal window (live logs)
-
-Add `--terminal` to open a PowerShell/terminal window that tails container logs in real time:
+### Optional: terminal window for live logs
 
 ```json
-"args": [
-  "-m", "code_sandbox_mcp.launcher",
-  "--update-spec", "git+https://github.com/masuda-masuo/code-sandbox-mcp",
-  "--pass-through-env", "GITHUB_TOKEN",
-  "--terminal", "C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe"
-]
+"--terminal", "xterm"
 ```
 
-### Version pinning (recommended for stability)
+When set, `sandbox_exec_background` opens a terminal window tailing container logs in real time. On Windows, use PowerShell (`powershell.exe`); on macOS use `osascript`; on Linux use `gnome-terminal` or `xterm`.
 
-```powershell
-pip install git+https://github.com/masuda-masuo/code-sandbox-mcp@<commit-hash>
-```
-
-### Exec timeout (optional)
-
-Default command execution timeout is 300 seconds. Override with `--exec-timeout`:
-
-```json
-"args": ["--pass-through-env", "GITHUB_TOKEN", "--exec-timeout", "600"]
-```
-
-## Launcher architecture
-
-```
-Claude Desktop
-    └─ launcher  ← Claude holds this (lightweight, stays alive)
-           └─ server  ← actual MCP server (child process)
-```
-
-The launcher proxies stdio between Claude Desktop and the server. When `sandbox_update_start()` succeeds, the server exits with a restart signal (exit code 42) and the launcher restarts it automatically — without requiring a Claude Desktop restart.
-
-## In-place update (launcher mode only)
-
-```
-sandbox_update_start()
-  → job_id
-
-# Ask Claude to notify you when done, or poll manually:
-sandbox_update_check(job_id="...")  # repeat until "Status: done"
-```
-
-The `--update-spec` flag controls the pip install source (default: `git+https://github.com/masuda-masuo/code-sandbox-mcp`).
-
-## Terminal auto-open (optional)
-
-When `--terminal` is set, a terminal window opens automatically every time `sandbox_exec_background` is called, tailing `/tmp/mcp.log` inside the container so you can watch command output in real time.
-
-### How it works
-
-- Each command's stdout/stderr is tee'd to `/tmp/mcp.log` inside the container.
-- A new terminal window runs `docker exec <container_id> tail -f /tmp/mcp.log`.
-- On Windows, the terminal is launched via `cmd /c start` so it runs as an independent process — it stays open even after the MCP server exits.
-- When the container stops, `tail -f` exits and a banner is printed. The window stays open (`-NoExit` + `Read-Host`) so you can review the output before closing manually.
-
-### Windows configuration
-
-```json
-{
-  "mcpServers": {
-    "code-sandbox-mcp": {
-      "command": "<output of where.exe code-sandbox-mcp>",
-      "args": [
-        "--pass-through-env", "GITHUB_TOKEN",
-        "--terminal", "C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe"
-      ],
-      "env": {
-        "GITHUB_TOKEN": "github_pat_xxxx"
-      }
-    }
-  }
-}
-```
-
-### macOS configuration (experimental)
-
-```json
-"args": [
-  "--pass-through-env", "GITHUB_TOKEN",
-  "--terminal", "/usr/bin/osascript"
-]
-```
-
-### Linux configuration (experimental)
-
-```json
-"args": [
-  "--pass-through-env", "GITHUB_TOKEN",
-  "--terminal", "/usr/bin/gnome-terminal"
-]
-```
-
-> **Note**: The `--terminal` option has been verified on **Windows only**. macOS and Linux support is implemented but untested. Behavior may differ depending on the terminal emulator and system configuration.
-
-### Custom terminal args
-
-Use `--terminal-args` to pass custom arguments to the terminal. `{container_id}` is substituted at runtime:
+Use `--terminal-args` to pass custom arguments. `{container_id}` is substituted at runtime:
 
 ```json
 "--terminal-args", "-NoExit -Command docker exec {container_id} tail -f /tmp/mcp.log"
 ```
 
-## Docker images
+### Optional: observability dashboard
 
-`sandbox_initialize` requires a Docker image to be available locally. If the image is not present, the tool will return an error. Pull the image manually before use:
-
-```powershell
-docker pull python:3.12-slim-bookworm
+```json
+"--dashboard-port", "8766"
 ```
 
-### Default image
+Starts a local read-only web dashboard at `http://127.0.0.1:8766` showing active containers, run history, pass/fail stats, and the approval queue.
 
-| Image | Description |
-|-------|-------------|
-| `python:3.12-slim-bookworm` | Default. Debian 12 slim, Python 3.12. Suitable for most Python projects. |
+### Optional: push notifications
 
-### Other options
+```json
+"--webhook-url", "https://hooks.example.com/notify",
+"--failure-threshold", "5",
+"--long-run-seconds", "300"
+```
 
-| Image | Use case |
-|-------|----------|
-| `python:3.11-slim-bookworm` | Projects requiring Python 3.11 |
-| `python:3.12-bookworm` | Full Debian image (larger, includes more system packages) |
-| `ubuntu:24.04` | General-purpose Linux environment |
-| `node:20-slim` | Node.js projects |
+Sends OS desktop notifications (Linux) or webhook notifications on boundary-crossing operations, failure threshold exceeded, or long-running executions.
 
-Any image available on [Docker Hub](https://hub.docker.com) can be used. Pull it first with `docker pull <image>`.
+### In-place update (launcher mode)
+
+Launcher mode (`-m code_sandbox_mcp.launcher`) supports in-place server updates without restarting Claude Desktop:
+
+```
+sandbox_update_start()    → returns job_id
+sandbox_update_check()    → poll until "done"
+```
+
+The `--update-spec` flag controls the pip install source (default: `"."` for local checkout, or `"git+https://..."`).
 
 ## Available tools
 
+### Lifecycle
+
 | Tool | Description |
 |------|-------------|
-| `sandbox_initialize` | Start a container, returns `container_id` |
-| `sandbox_exec` | Run commands inside the container (synchronous) |
-| `sandbox_exec_background` | Start commands in background, returns `job_id`. Opens a terminal window automatically if `--terminal` is set. |
-| `sandbox_exec_check` | Poll background job status and retrieve output |
-| `sandbox_stop` | Stop and remove the container |
-| `write_file_sandbox` | Write a file into the container |
-| `copy_project` | Copy a local directory into the container |
-| `copy_file` | Copy a single local file into the container |
-| `sandbox_update_start` | Start an in-place server update, returns `job_id` (launcher mode only) |
-| `sandbox_update_check` | Poll update status |
+| `sandbox_initialize` | Start a container. Returns 12-char `container_id`. Supports `image`, `allow_network`, `inject_vcs_token`. |
+| `sandbox_stop` | Stop and remove a container. |
+| `run_container_and_exec` | One-shot: `initialize` → `exec` → `stop`. |
 
-## Transport timeout
+### Execution
 
-MCP clients (including Claude Desktop) have a request timeout of ~60 seconds when using **stdio** transport (the default). Commands that take longer — such as `apt-get install`, `pip install`, or `pytest` on large projects — will cause a timeout error if run with `sandbox_exec`.
+| Tool | Description |
+|------|-------------|
+| `sandbox_exec` | Run commands synchronously. Supports `verbose` (`error_only`/`summary`/`full`), truncation, pagination (`offset`/`limit`). |
+| `sandbox_exec_background` | Run commands with `nohup` in background. Returns `job_id`. Opens terminal window if `--terminal` is set. |
+| `sandbox_exec_check` | Poll background job status. Returns `"running"`, stdout on success, or error on failure. |
 
-There are two solutions:
+### File operations
 
-### Option 1: Use SSE/HTTP transport (recommended)
+| Tool | Description |
+|------|-------------|
+| `write_file_sandbox` | Write/update files. Supports full overwrite, line-range replacement, append, and `old_str` replacement. |
+| `copy_project` | Copy a local directory into the container (tar archive streaming). |
+| `copy_file` | Copy a single local file into the container. |
 
-Switch to SSE or HTTP transport via the `--transport` flag. This eliminates the client-side timeout entirely:
+### Edit/Verify subsystem
 
-```json
-"--transport", "sse"
+| Tool | Description |
+|------|-------------|
+| `apply_patch` | Apply a unified diff to a file. Sends only the diff, not full file content (1-2 orders of magnitude token reduction). |
+| `read_file_range` | Read `limit` lines starting at `offset`. Returns JSON with pagination metadata. |
+| `lint_in_container` | Run linter on a file (`.py` → ruff/pylint, `.js/.ts/.jsx/.tsx` → eslint). |
+| `type_check_in_container` | Run type checker on a file (`.py` → mypy/pyright, `.ts/.tsx` → tsc). |
+
+### In-place update
+
+| Tool | Description |
+|------|-------------|
+| `sandbox_update_start` | Start `pip install --force-reinstall` in background. Opens terminal window if `--terminal` configured. |
+| `sandbox_update_check` | Poll update job status. |
+
+### Observability
+
+| Tool | Description |
+|------|-------------|
+| `sandbox_read_journal` | Read the append-only execution journal. Filter by `run_id`, limit by `max_entries`. |
+| `sandbox_trace` | Generate HTML or JSON replay trace for a specific `run_id`. |
+| `sandbox_list_runs` | List all runs recorded in the journal. |
+| `sandbox_journal_path` | Return path to `~/.code-sandbox-mcp/journal.log`. |
+| `sandbox_trace_dir` | Return path to `~/.code-sandbox-mcp/traces/`. |
+
+## Sandbox image
+
+The default image is a purpose-built sandbox image pushed to GHCR. It bundles all tools needed for AI-driven workflows:
+
+| Category | Tool | Purpose |
+|----------|------|---------|
+| Text search | `ripgrep` (`rg`) | Fast regex search |
+| Structural search | `ast-grep` (`sg`) | AST-based code search |
+| Text replace | `sd` | Find-and-replace |
+| File search | `fd` | Fast `find` alternative |
+| Symbols | `universal-ctags` | Code indexing |
+| Lint | `ruff` | Python linting |
+| Type check | `pyright` | Python type checking |
+| Security | `semgrep` | Static analysis |
+| VCS | `git`, `gh` | Version control, GitHub CLI |
+| Package install | `uv` | Fast pip alternative |
+| JSON | `jq` | JSON processing |
+
+The image is built from `docker/Dockerfile.sandbox` and automatically published to GHCR via CI. To use a custom image, pull it first and pass it explicitly:
+
+```
+sandbox_initialize(image="my-image@sha256:...")
 ```
 
-See [MCP Transport: stdio vs SSE/HTTP](#mcp-transport-stdio-vs-ssehttp) above for configuration details.
+A minimal variant (`docker/Dockerfile.sandbox.minimal`) with git + python + pytest only is also available for lightweight use.
 
-### Option 2: Use background execution (stdio fallback)
-
-**Use `sandbox_exec_background` + `sandbox_exec_check` for any heavy operation.**
+## Launcher architecture
 
 ```
-sandbox_initialize(image="python:3.12-slim-bookworm")
+Claude Desktop
+    └─ launcher  ← lightweight, stays alive
+           └─ server  ← actual MCP server (child process)
+```
+
+When `sandbox_update_start()` succeeds, the server exits with exit code 42. The launcher detects this and restarts the server automatically — no Claude Desktop restart needed.
+
+In SSE/HTTP mode, the launcher only manages the server process lifecycle. The client connects directly to the server's TCP port.
+
+## VCS token safety
+
+Token injection into containers is **opt-in**. By default, no VCS credentials are passed to containers.
+
+- Set `inject_vcs_token=True` in `sandbox_initialize` or `run_container_and_exec` to inject `GITHUB_TOKEN` / `GH_TOKEN`.
+- Use `allow_network=True` only when containers need network access (e.g., for `git clone` or `gh` commands).
+- All output is automatically sanitized: token values are masked as `KEY=***` in stdout/stderr.
+
+This follows the principle of least privilege — containers that don't need VCS access don't get tokens.
+
+## Observability
+
+The server maintains an append-only execution journal at `~/.code-sandbox-mcp/journal.log`. Every container lifecycle event (initialize, exec, stop) and boundary-crossing operation is recorded with timestamps and run IDs.
+
+| Component | Description |
+|-----------|-------------|
+| **Journal** | Append-only log of all operations. `tail -f` for real-time monitoring. |
+| **Trace** | HTML or JSON replay for any `run_id`. Post-hoc review of "why did it do that?" |
+| **Dashboard** | Local web UI at `http://127.0.0.1:<dashboard-port>`. Read-only, auto-refreshing. |
+| **Notifications** | OS desktop notifications or webhook callbacks for boundary-crossing events and failures. |
+
+## Workflow example
+
+```
+# One-shot: initialize, run commands, auto-stop
+run_container_and_exec(
+    image="python@sha256:...",
+    commands=[
+        "git clone https://github.com/user/repo.git /app",
+        "cd /app && pip install .[test] -q",
+        "cd /app && pytest tests/ -v"
+    ],
+    allow_network=True,
+    inject_vcs_token=True
+)
+
+# Or step-by-step for longer sessions
+sandbox_initialize(image="python@sha256:...", allow_network=True)
   → container_id
 
 sandbox_exec_background(container_id, [
-  "apt-get update -qq && apt-get install -y -qq git",
-  "git clone https://user:$GITHUB_TOKEN@github.com/org/repo.git /app",
-  "cd /app && pip install .[test] -q",
-  "cd /app && pytest tests/ -v"
+    "apt-get update -qq && apt-get install -y -qq git",
+    "git clone https://github.com/user/repo.git /app",
+    "cd /app && pip install .[test] -q",
+    "cd /app && pytest tests/ -v"
 ])
   → job_id
 
-# Poll until done (PowerShell terminal window shows live logs if --terminal is set)
-sandbox_exec_check(container_id, job_id)  # repeat until "Status: done"
-
-sandbox_stop(container_id)
-```
-
-**Use `sandbox_exec` only for quick commands** (expected to finish well within 60 seconds):
-
-```
-sandbox_exec(container_id, ["echo $GITHUB_TOKEN | head -c 10"])
-sandbox_exec(container_id, ["ls /app"])
-```
-
-## Typical workflow (pytest example)
-
-```
-# 1. Pull the image first (one-time setup)
-docker pull python:3.12-slim-bookworm
-
-# 2. Run the workflow
-sandbox_initialize(image="python:3.12-slim-bookworm")
-  → container_id
-
-sandbox_exec_background(container_id, [
-  "apt-get update -qq && apt-get install -y -qq git",
-  "git clone https://masuda-masuo:$GITHUB_TOKEN@github.com/masuda-masuo/mstu_bot.git /app",
-  "cd /app && pip install .[test] -q",
-  "cd /app && pytest tests/ -v"
-])
-  → job_id
-
-# PowerShell shows live output if --terminal is configured
-# Tell Claude when done; Claude will call sandbox_exec_check to retrieve results
 sandbox_exec_check(container_id, job_id)
-
 sandbox_stop(container_id)
 ```
 
 ## Known limitations
 
-- **Job dictionary grows unbounded**: Completed job results are kept in memory indefinitely for the lifetime of the server process. In typical development use (short-lived server sessions) this is not a problem, but long-running server instances will accumulate memory over time.
-- **Background jobs are lost on server restart**: Job state is in-process memory only. If the MCP server restarts (e.g. after `sandbox_update_start()`), all job IDs become invalid.
-- **MCP is synchronous by design**: The background execution pattern is an application-level workaround for the stdio 60-second timeout, not a native async feature of the protocol.
-- **SSE/HTTP transport**: Using `--transport sse` or `--transport http` eliminates the client timeout but requires the client (e.g., Claude Desktop) to support SSE-based MCP servers. Not all MCP clients support SSE transport.
+- **Job state is in-memory**: Background job results are lost on server restart. Job IDs become invalid after `sandbox_update_start()`.
+- **Job dictionary grows unbounded**: Completed job results accumulate in memory. Not an issue for typical short-lived sessions.
+- **SSE transport requires client support**: Not all MCP clients support SSE-based servers.
+- **Background jobs are lost on server restart**: Use `run_container_and_exec` for critical one-shot operations.
 
 ## License
 

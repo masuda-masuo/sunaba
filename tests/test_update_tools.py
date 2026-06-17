@@ -14,6 +14,7 @@ class TestSandboxUpdateStart:
     def test_returns_job_id(self) -> None:
         result = sandbox_update_start()
         assert "Update started in background" in result
+        assert "Log:" in result
 
 
 class TestUpdateSpecDefault:

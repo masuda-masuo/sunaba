@@ -316,7 +316,7 @@ class TestCopyProject:
     def test_copy_project_src_not_a_directory(
         self,
         mock_docker: MagicMock,
-        tmp_path,
+        tmp_path: Path,
     ) -> None:
         """Should return error when local_src_dir is not a directory."""
         src_file = tmp_path / "file.txt"

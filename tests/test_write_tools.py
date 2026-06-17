@@ -10,9 +10,21 @@ Tests cover:
 """
 from __future__ import annotations
 
+import base64
+import re
 from unittest.mock import MagicMock, patch
 
 from code_sandbox_mcp.server import write_file_sandbox
+
+
+def _get_written_content(mock_container: MagicMock) -> str:
+    """Extract the written file content from the exec_run write command."""
+    call = mock_container.exec_run.call_args_list[-1]
+    cmd = call[0][0][2]
+    match = re.search(r'echo (\S+) \| base64 -d', cmd)
+    if not match:
+        return ""
+    return base64.b64decode(match.group(1)).decode("utf-8")
 
 
 class TestWriteFileSandboxFullOverwrite:
@@ -37,6 +49,7 @@ class TestWriteFileSandboxFullOverwrite:
         assert "Written" in result
         assert "hello.txt" in result
         mock_container.exec_run.assert_called_once()
+        assert _get_written_content(mock_container) == "new content"
 
     @patch("code_sandbox_mcp.server._docker")
     def test_full_overwrite_container_not_found(
@@ -120,7 +133,7 @@ class TestWriteFileSandboxLineRange:
     def test_replace_middle_lines(self, mock_docker: MagicMock) -> None:
         """Replacing middle lines preserves surrounding lines."""
         existing = "line1\nline2\nline3\nline4\nline5\n"
-        self._mock_container_with_file(mock_docker, existing)
+        mock_container = self._mock_container_with_file(mock_docker, existing)
 
         result = write_file_sandbox(
             container_id="abc123",
@@ -132,12 +145,13 @@ class TestWriteFileSandboxLineRange:
         )
         assert "Error" not in result
         assert "Written" in result
+        assert _get_written_content(mock_container) == "line1\nREPLACED\nline5\n"
 
     @patch("code_sandbox_mcp.server._docker")
     def test_replace_from_start(self, mock_docker: MagicMock) -> None:
         """Omitting start_line defaults to line 1."""
         existing = "line1\nline2\nline3\n"
-        self._mock_container_with_file(mock_docker, existing)
+        mock_container = self._mock_container_with_file(mock_docker, existing)
 
         result = write_file_sandbox(
             container_id="abc123",
@@ -148,12 +162,13 @@ class TestWriteFileSandboxLineRange:
         )
         assert "Error" not in result
         assert "Written" in result
+        assert _get_written_content(mock_container) == "NEWSTART\nline3\n"
 
     @patch("code_sandbox_mcp.server._docker")
     def test_replace_to_end(self, mock_docker: MagicMock) -> None:
         """Omitting end_line defaults to last line."""
         existing = "line1\nline2\nline3\n"
-        self._mock_container_with_file(mock_docker, existing)
+        mock_container = self._mock_container_with_file(mock_docker, existing)
 
         result = write_file_sandbox(
             container_id="abc123",
@@ -164,6 +179,7 @@ class TestWriteFileSandboxLineRange:
         )
         assert "Error" not in result
         assert "Written" in result
+        assert _get_written_content(mock_container) == "line1\nEND\n"
 
     @patch("code_sandbox_mcp.server._docker")
     def test_start_line_exceeds_length(
@@ -241,7 +257,7 @@ class TestWriteFileSandboxLineRange:
     def test_replace_single_line(self, mock_docker: MagicMock) -> None:
         """Replacing a single line with start_line == end_line."""
         existing = "keep\nreplace_me\nkeep\n"
-        self._mock_container_with_file(mock_docker, existing)
+        mock_container = self._mock_container_with_file(mock_docker, existing)
 
         result = write_file_sandbox(
             container_id="abc123",
@@ -253,6 +269,7 @@ class TestWriteFileSandboxLineRange:
         )
         assert "Error" not in result
         assert "Written" in result
+        assert _get_written_content(mock_container) == "keep\nreplaced\nkeep\n"
 
 
 class TestWriteFileSandboxAppend:
@@ -290,6 +307,7 @@ class TestWriteFileSandboxAppend:
         )
         assert "Error" not in result
         assert "Written" in result
+        assert _get_written_content(mock_container) == "line1\nline2\nappended\n"
 
     @patch("code_sandbox_mcp.server._docker")
     def test_append_to_empty_file(self, mock_docker: MagicMock) -> None:
@@ -308,6 +326,7 @@ class TestWriteFileSandboxAppend:
         )
         assert "Error" not in result
         assert "Written" in result
+        assert _get_written_content(mock_container) == "content"
 
 
 class TestWriteFileSandboxReplace:
@@ -345,6 +364,7 @@ class TestWriteFileSandboxReplace:
         )
         assert "Error" not in result
         assert "Written" in result
+        assert _get_written_content(mock_container) == "GOODBYE world, hello universe\n"
 
     @patch("code_sandbox_mcp.server._docker")
     def test_replace_multi_line(self, mock_docker: MagicMock) -> None:
@@ -363,6 +383,7 @@ class TestWriteFileSandboxReplace:
         )
         assert "Error" not in result
         assert "Written" in result
+        assert _get_written_content(mock_container) == "before\nNEW\nCONTENT\nafter\n"
 
     @patch("code_sandbox_mcp.server._docker")
     def test_replace_old_str_not_found(self, mock_docker: MagicMock) -> None:

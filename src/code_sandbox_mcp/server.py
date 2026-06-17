@@ -491,7 +491,7 @@ def write_file_sandbox(
         )
         stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
         existing = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-        existing_lines = existing.split("\n")
+        existing_lines = existing.splitlines()
 
         # Validate bounds
         if start_line is not None and start_line > len(existing_lines):
@@ -503,7 +503,8 @@ def write_file_sandbox(
                 return "Error: start_line is greater than end_line"
 
         if append:
-            content = existing.rstrip("\n") + "\n" + file_contents
+            sep = "\n" if existing else ""
+            content = existing.rstrip("\n") + sep + file_contents
         elif old_str is not None:
             idx = existing.find(old_str)
             if idx == -1:
@@ -512,9 +513,11 @@ def write_file_sandbox(
         else:
             start = start_line - 1 if start_line is not None else 0
             end = end_line if end_line is not None else len(existing_lines)
-            new_lines = file_contents.split("\n")
+            new_lines = file_contents.splitlines()
             content_lines = existing_lines[:start] + new_lines + existing_lines[end:]
             content = "\n".join(content_lines)
+            if file_contents.endswith("\n"):
+                content += "\n"
 
     # Write the content via base64 to avoid shell escaping
     import base64

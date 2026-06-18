@@ -324,6 +324,7 @@ def get_runs() -> list[dict[str, Any]]:
                 "image": entry.get("image", "unknown"),
                 "operations": 0,
                 "boundary_crossings": 0,
+                "vcs_operations": 0,
                 "last_ts": entry.get("ts"),
                 "status": "running",
             }
@@ -334,5 +335,8 @@ def get_runs() -> list[dict[str, Any]]:
             run["status"] = "stopped"
         if entry.get("boundary_crossing") or entry.get("operation") == "boundary_crossing":
             run["boundary_crossings"] += 1
+            sub_op = entry.get("sub_operation", "")
+            if sub_op in ("issue_view", "submit"):
+                run["vcs_operations"] += 1
 
     return sorted(runs.values(), key=lambda r: r.get("started", ""), reverse=True)

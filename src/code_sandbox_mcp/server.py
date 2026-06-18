@@ -40,6 +40,7 @@ from code_sandbox_mcp.output_control import (
     truncate_output,
 )
 from code_sandbox_mcp.journal import (
+    get_or_create_run_id,
     record_boundary_crossing,
     record_copy,
     record_exec as journal_record_exec,
@@ -61,6 +62,7 @@ from code_sandbox_mcp.security import (
     validate_image_ref,
 )
 from code_sandbox_mcp.token import (
+    generate_token,
     verify_and_consume,
     reject_token,
     get_pending_tokens,
@@ -1441,6 +1443,449 @@ def sandbox_trace_dir() -> str:
         Absolute path to ``~/.code-sandbox-mcp/traces/``.
     """
     return get_trace_dir()
+
+
+# ---------------------------------------------------------------------------
+# External VCS tools (Issue #55)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def issue_view(
+    container_id: str,
+    repo: str,
+    issue_number: int,
+    save_to: str = "/home/sandbox/issue.md",
+) -> str:
+    """Read a GitHub issue and save its body to a file inside the container.
+
+    Uses ``gh issue view`` inside the container.  The issue body is
+    written to *save_to* and the LLM receives only a summary + handle
+    (file path and size).  Full text can be retrieved with
+    :func:`read_file_range`.
+
+    Requires a container started with ``allow_network=True`` and
+    ``inject_vcs_token=True``.
+
+    Args:
+        container_id: 12-character container ID prefix.
+        repo: Repository in ``"owner/repo"`` format.
+        issue_number: Issue number to fetch.
+        save_to: Path inside the container to save the issue body
+            (default ``"/home/sandbox/issue.md"``).
+
+    Returns:
+        JSON string with ``number``, ``title``, ``summary`` (up to 100
+        characters of body), ``file`` path, and ``size_bytes``.
+        On error returns an ``error`` field.
+    """
+    import base64
+
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    cid = container_id[:12]
+
+    # Fetch issue metadata as JSON (includes number, title, body)
+    json_cmd = (
+        f"gh issue view {issue_number} --repo {shlex.quote(repo)}"
+        f" --json number,title,body"
+    )
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", json_cmd],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = (
+        output if isinstance(output, tuple) else (output, b"")
+    )
+    stdout_text = (
+        stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    )
+    stderr_text = (
+        stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+    )
+
+    if exit_code != 0:
+        return json.dumps({
+            "error": f"Failed to fetch issue #{issue_number} from {repo}: {stderr_text or stdout_text}"
+        })
+
+    try:
+        issue_data = json.loads(stdout_text)
+    except json.JSONDecodeError:
+        return json.dumps({
+            "error": f"Failed to parse issue JSON: {stdout_text[:200]}"
+        })
+
+    number = issue_data.get("number", issue_number)
+    title = issue_data.get("title", "")
+    body = issue_data.get("body", "")
+
+    # Summary: first 100 characters of body
+    summary = body[:100] if body else "(empty body)"
+
+    # Write body to file in container via base64
+    encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
+    dir_part = str(Path(save_to).parent)
+    write_cmd = (
+        f"mkdir -p {shlex.quote(dir_part)} &&"
+        f" echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(save_to)}"
+    )
+    exit_code2, _ = container.exec_run(
+        ["/bin/sh", "-c", write_cmd],
+        stdout=True,
+        stderr=True,
+    )
+
+    if exit_code2 != 0:
+        return json.dumps({
+            "error": f"Failed to write issue body to {save_to}"
+        })
+
+    size_bytes = len(body.encode("utf-8"))
+
+    # Record boundary crossing (read-only, so approved=None)
+    record_boundary_crossing(
+        cid,
+        "issue_view",
+        f"repo={repo} issue=#{number} title={title[:60]}",
+        approved=None,
+    )
+
+    return json.dumps({
+        "number": number,
+        "title": title,
+        "summary": summary,
+        "file": save_to,
+        "size_bytes": size_bytes,
+    })
+
+
+@mcp.tool()
+def submit(
+    container_id: str,
+    repo: str,
+    branch: str,
+    message: str,
+    working_dir: str = "/root",
+    create_pr: bool = False,
+    pr_title: str = "",
+    pr_body: str = "",
+    base_branch: str = "",
+    dry_run: bool = False,
+    token: str = "",
+    verify_path: str = ".",
+    gate_on_lint_error: bool = True,
+    gate_on_type_error: bool = False,
+    gate_on_test_fail: bool = True,
+    gate_on_scan_error: bool = True,
+    gate_on_scan_warning: bool = False,
+) -> str:
+    """Stage, commit, push, and optionally create a PR.
+
+    Two-step flow for boundary-crossing writes:
+
+    1. ``dry_run=True`` — returns a diff summary and a confirmation
+       token that must be approved before execution.
+    2. ``dry_run=False`` + *token* — verifies the token, runs
+       ``verify_in_container`` as a gate, then executes
+       ``git add -A && git commit -m MESSAGE && git push origin BRANCH``
+       (and ``gh pr create`` if *create_pr* is ``True``).
+
+    Requires a container started with ``allow_network=True`` and
+    ``inject_vcs_token=True``.
+
+    Args:
+        container_id: 12-character container ID prefix.
+        repo: Repository in ``"owner/repo"`` format.
+        branch: Branch name to push.
+        message: Git commit message.
+        working_dir: Directory in the container containing the git
+            repository (default ``"/root"``).
+        create_pr: Whether to create a pull request after push.
+        pr_title: PR title (required if ``create_pr=True``).
+        pr_body: PR body (optional).
+        base_branch: Base branch for the PR (default: repository
+            default branch).
+        dry_run: When ``True``, returns a diff summary and
+            confirmation token instead of executing.
+        token: Confirmation token from a previous ``dry_run`` call.
+        verify_path: Path inside *working_dir* to run verification on
+            (default ``"."``).
+        gate_on_lint_error: Whether lint errors fail the verify gate.
+        gate_on_type_error: Whether type-check errors fail the verify
+            gate.
+        gate_on_test_fail: Whether test failures fail the verify gate.
+        gate_on_scan_error: Whether semgrep ERROR findings fail the
+            verify gate.
+        gate_on_scan_warning: Whether semgrep WARNING findings fail the
+            verify gate.
+
+    Returns:
+        JSON string with operation result.
+    """
+    import base64
+
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    cid = container_id[:12]
+    run_id = get_or_create_run_id(cid)
+
+    # Helper: run a shell command in the container in working_dir.
+    def _run(cmd: str) -> tuple[int, str, str]:
+        full_cmd = f"cd {shlex.quote(working_dir)} && {cmd}"
+        ec, out = container.exec_run(
+            ["/bin/sh", "-c", full_cmd],
+            stdout=True,
+            stderr=True,
+        )
+        out_stdout, out_stderr = (
+            out if isinstance(out, tuple) else (out, b"")
+        )
+        stdout_text = (
+            out_stdout.decode("utf-8", errors="replace") if out_stdout else ""
+        )
+        stderr_text = (
+            out_stderr.decode("utf-8", errors="replace") if out_stderr else ""
+        )
+        return ec, stdout_text, stderr_text
+
+    # ------------------------------------------------------------------
+    # DRY RUN — show plan and generate token
+    # ------------------------------------------------------------------
+    if dry_run:
+        # Gather diff summary
+        status_ec, status_out, status_err = _run(
+            "git status --porcelain && echo '---DIFF---' && git diff HEAD --stat"
+        )
+        diff_summary = (status_out + "\n" + status_err).strip()
+
+        if not diff_summary or diff_summary == "---DIFF---":
+            return json.dumps({
+                "status": "dry_run",
+                "diff_summary": "(no changes detected)",
+                "branch": branch,
+                "message": message,
+                "warning": "No changes to commit.  Submit will succeed as a no-op.",
+            })
+
+        details = (
+            f"repo={repo} branch={branch} message={message[:80]}"
+        )
+        if create_pr:
+            details += f" pr_title={pr_title[:60]}"
+
+        conf_token = generate_token(
+            operation="submit",
+            details=details,
+            container_id=cid,
+            run_id=run_id,
+        )
+
+        # Record pending boundary crossing
+        record_boundary_crossing(
+            cid,
+            "submit",
+            details,
+            approved=None,
+            token=conf_token,
+        )
+
+        return json.dumps({
+            "status": "dry_run",
+            "diff_summary": diff_summary,
+            "branch": branch,
+            "message": message,
+            "confirmation_token": conf_token,
+            "create_pr": create_pr,
+            "pr_title": pr_title if create_pr else None,
+        })
+
+    # ------------------------------------------------------------------
+    # EXECUTE — require token + verify gate
+    # ------------------------------------------------------------------
+    if not token:
+        return json.dumps({
+            "status": "error",
+            "error": "Token required for execution.  Run with dry_run=True first.",
+        })
+
+    token_result = verify_and_consume(token)
+    if token_result is None:
+        return json.dumps({
+            "status": "error",
+            "error": "Token invalid, expired, or already used",
+        })
+
+    # --- Verify gate ---
+    if os.path.isabs(verify_path):
+        verify_path_full = verify_path
+    else:
+        verify_path_full = f"{working_dir}/{verify_path}".rstrip("/")
+    verify_result = run_verify(
+        client,
+        cid,
+        verify_path_full,
+        gate_on_lint_error=gate_on_lint_error,
+        gate_on_type_error=gate_on_type_error,
+        gate_on_test_fail=gate_on_test_fail,
+        gate_on_scan_error=gate_on_scan_error,
+        gate_on_scan_warning=gate_on_scan_warning,
+    )
+
+    if not verify_result.get("gate_passed", False):
+        record_boundary_crossing(
+            cid,
+            "submit",
+            f"repo={repo} branch={branch} verify_failed",
+            approved=False,
+            token=token,
+        )
+        return json.dumps({
+            "status": "rejected",
+            "reason": "verify_gate_failed",
+            "verify_result": verify_result,
+        })
+
+    # --- Git add / commit ---
+    add_ec, add_out, add_err = _run("git add -A")
+    if add_ec != 0:
+        return json.dumps({
+            "status": "error",
+            "step": "git_add",
+            "error": add_err or add_out,
+        })
+
+    commit_ec, commit_out, commit_err = _run(
+        f"git commit -m {shlex.quote(message)}"
+    )
+    if commit_ec != 0:
+        # No changes to commit is OK if everything is already committed
+        if "nothing to commit" in (commit_out + commit_err).lower():
+            pass
+        else:
+            return json.dumps({
+                "status": "error",
+                "step": "git_commit",
+                "error": commit_err or commit_out,
+            })
+
+    # --- Git push ---
+    push_cmd = (
+        f"git -c credential.helper= "
+        f"-c credential.helper='!f() {{ echo username=x-access-token; echo password=$GITHUB_TOKEN; }}; f' "
+        f"push origin {shlex.quote(branch)}"
+    )
+    push_ec, push_out, push_err = _run(push_cmd)
+
+    # Get the SHA of the pushed commit
+    sha = ""
+    sha_ec, sha_out, _ = _run("git rev-parse HEAD")
+    if sha_ec == 0:
+        sha = sha_out.strip()[:7]
+
+    if push_ec != 0:
+        record_boundary_crossing(
+            cid,
+            "submit",
+            f"repo={repo} branch={branch} push_failed",
+            approved=False,
+            token=token,
+        )
+        return json.dumps({
+            "status": "error",
+            "step": "git_push",
+            "error": push_err or push_out,
+            "sha": sha,
+            "verify_result": verify_result,
+        })
+
+    # --- Optionally create PR ---
+    pr_url: str | None = None
+    if create_pr:
+        pr_cmd = (
+            f"gh pr create --repo {shlex.quote(repo)}"
+            f" --head {shlex.quote(branch)}"
+            f" --title {shlex.quote(pr_title)}"
+        )
+        if pr_body:
+            body_encoded = base64.b64encode(
+                pr_body.encode("utf-8")
+            ).decode("ascii")
+            pr_cmd = (
+                f"BODY_FILE=$(mktemp) &&"
+                f" echo {shlex.quote(body_encoded)} | base64 -d > \"$BODY_FILE\" &&"
+                f" gh pr create --repo {shlex.quote(repo)}"
+                f" --head {shlex.quote(branch)}"
+                f" --title {shlex.quote(pr_title)}"
+                f" --body-file \"$BODY_FILE\""
+                f"; rm -f \"$BODY_FILE\""
+            )
+        else:
+            pr_cmd += " --body ''"
+        if base_branch:
+            pr_cmd += f" --base {shlex.quote(base_branch)}"
+
+        pr_ec, pr_out, pr_err = _run(pr_cmd)
+        if pr_ec != 0:
+            # Push succeeded but PR creation failed — still record push
+            record_boundary_crossing(
+                cid,
+                "submit",
+                f"repo={repo} branch={branch} sha={sha} pr_create_failed",
+                approved=True,
+                token=token,
+            )
+            return json.dumps({
+                "status": "pushed",
+                "branch": branch,
+                "sha": sha,
+                "pr_create_error": pr_err or pr_out,
+                "verify_result": verify_result,
+            })
+
+        # Extract PR URL from gh output
+        for line in (pr_out + pr_err).splitlines():
+            line = line.strip()
+            if line.startswith("https://github.com/"):
+                pr_url = line
+                break
+
+    # --- Success ---
+    details = f"repo={repo} branch={branch} sha={sha}"
+    if pr_url:
+        details += f" pr_url={pr_url}"
+
+    record_boundary_crossing(
+        cid,
+        "submit",
+        details,
+        approved=True,
+        token=token,
+    )
+
+    result: dict[str, Any] = {
+        "status": "pushed",
+        "branch": branch,
+        "sha": sha,
+        "verify_result": verify_result,
+    }
+    if pr_url:
+        result["pr_url"] = pr_url
+
+    return json.dumps(result)
 
 
 # ---------------------------------------------------------------------------

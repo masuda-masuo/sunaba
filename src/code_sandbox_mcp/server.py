@@ -104,6 +104,18 @@ _UPDATE_LOG_DIR: Path | None = None
 #: ``clone_repo`` to copy a pre-cloned repository from this path into the
 #: container, bypassing a network ``git clone``.
 _SHIORI_REPOS_PATH: str | None = None
+#: Compiled pattern for validating clone_repo ``owner/name`` format.
+_CLONE_REPO_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9._-]+$")
+#: Sensitive file/directory basenames to exclude from tar archive.
+_SENSITIVE_FILE_BASENAMES: frozenset[str] = frozenset({
+    ".env",
+    ".git-credentials",
+    ".gitconfig",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+})
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -181,8 +193,7 @@ def _validate_clone_repo(clone_repo: str) -> tuple[str, str]:
             f"clone_repo must be 'owner/name' format, got: {clone_repo!r}"
         )
     owner, name = parts
-    valid = re.compile(r"^[a-zA-Z0-9._-]+$")
-    if not valid.match(owner) or not valid.match(name):
+    if not _CLONE_REPO_PATTERN.match(owner) or not _CLONE_REPO_PATTERN.match(name):
         raise ValueError(
             f"clone_repo must be 'owner/name' format with alphanumeric "
             f"characters (._- allowed), got: {clone_repo!r}"
@@ -211,6 +222,12 @@ def _clone_shiori_repo_to_container(
     Returns:
         Success message string.
     """
+
+    # Validate clone_dest is a safe path inside the container
+    if not clone_dest.startswith("/tmp/"):
+        raise ValueError(
+            f"clone_dest must start with /tmp/, got: {clone_dest!r}"
+        )
 
     if not _SHIORI_REPOS_PATH:
         raise ValueError(
@@ -250,9 +267,20 @@ def _clone_shiori_repo_to_container(
 
     # -- Copy via put_archive (same mechanism as copy_project) --
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar")
+
+    def _filter_sensitive(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        name = Path(tarinfo.name).name
+        if name in _SENSITIVE_FILE_BASENAMES:
+            return None
+        if name.startswith(".env."):
+            return None
+        if "/.ssh/" in tarinfo.name:
+            return None
+        return tarinfo
+
     try:
         with tarfile.open(fileobj=tmp.file, mode="w") as tar:
-            tar.add(str(resolved_from), arcname="repo")
+            tar.add(str(resolved_from), arcname="repo", filter=_filter_sensitive)
         tmp.file.close()
         with open(tmp.name, "rb") as f:
             data = f.read()
@@ -272,9 +300,10 @@ def _clone_shiori_repo_to_container(
     )
 
     # -- Run git fetch --unshallow --
+    safe_dest = shlex.quote(f"{clone_dest}/repo")
     try:
         exit_code, output = container.exec_run(
-            ["/bin/sh", "-c", f"cd {clone_dest}/repo && git fetch --unshallow 2>&1"],
+            ["/bin/sh", "-c", f"cd {safe_dest} && git fetch --unshallow 2>&1"],
             stdout=True,
             stderr=True,
             demux=True,

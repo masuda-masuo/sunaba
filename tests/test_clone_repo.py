@@ -60,6 +60,15 @@ class TestValidateCloneRepo:
 class TestCloneShioriRepoToContainer:
     """Tests for _clone_shiori_repo_to_container."""
 
+    def test_invalid_clone_dest(self) -> None:
+        with patch(
+            "code_sandbox_mcp.server._SHIORI_REPOS_PATH", "/data/repos"
+        ):
+            with pytest.raises(ValueError, match="must start with /tmp/"):
+                _clone_shiori_repo_to_container(
+                    MagicMock(), "abc123", "owner/repo", "/etc/repo"
+                )
+
     def test_no_shiori_repos_path_configured(self) -> None:
         with patch(
             "code_sandbox_mcp.server._SHIORI_REPOS_PATH", None
@@ -140,7 +149,11 @@ class TestCloneShioriRepoToContainer:
         mock_container.put_archive.assert_called_once()
         mock_container.exec_run.assert_called_once()
 
-    def test_unshallow_fails_but_copy_succeeds(self, tmp_path: Path) -> None:
+    def test_unshallow_fails_but_copy_succeeds(
+            self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+        caplog.set_level(logging.WARNING)
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
         clone_dir = repos_root / "owner" / "repo"
@@ -163,6 +176,7 @@ class TestCloneShioriRepoToContainer:
             )
 
         assert "Copied Shiori clone" in result
+        assert "git fetch --unshallow failed" in caplog.text
         mock_container.put_archive.assert_called_once()
 
     def test_unshallow_error_caught(self, tmp_path: Path) -> None:
@@ -316,11 +330,11 @@ class TestSandboxInitializeCloneRepo:
         sandbox_initialize(
             image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
             clone_repo="owner/repo",
-            clone_dest="/home/sandbox/proj",
+            clone_dest="/tmp/proj",
         )
 
         mock_clone.assert_called_once_with(
-            mock_container, "abc123def456", "owner/repo", "/home/sandbox/proj",
+            mock_container, "abc123def456", "owner/repo", "/tmp/proj",
         )
 
 

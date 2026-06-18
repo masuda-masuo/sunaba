@@ -4,10 +4,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from code_sandbox_mcp.server import issue_view, submit
-from code_sandbox_mcp.token import DEFAULT_TOKEN_TTL_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +71,7 @@ class TestIssueView:
         assert result["title"] == "Implement VCS tools"
         assert result["summary"].startswith("This is the issue body.")
         assert len(result["summary"]) <= 100
-        assert result["file"] == "/root/issue.md"
+        assert result["file"] == "/home/sandbox/issue.md"
         assert result["size_bytes"] > 0
 
         # Verify boundary crossing was recorded

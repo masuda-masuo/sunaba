@@ -158,8 +158,6 @@ tr:hover {{ background: #161b22; }}
 .op.boundary_crossing {{ color: #ffa657; }}
 .op.write_file {{ color: #d2a8ff; }}
 .op.copy_project, .op.copy_file {{ color: #a5d6ff; }}
-.op.issue_view {{ color: #a5d6ff; }}
-.op.submit {{ color: #ffa657; }}
 .crossing {{ color: #ffa657; font-weight: 600; }}
 .exit-ok {{ color: #7ee787; }}
 .exit-err {{ color: #f97583; }}

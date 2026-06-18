@@ -1455,7 +1455,7 @@ def issue_view(
     container_id: str,
     repo: str,
     issue_number: int,
-    save_to: str = "/root/issue.md",
+    save_to: str = "/home/sandbox/issue.md",
 ) -> str:
     """Read a GitHub issue and save its body to a file inside the container.
 
@@ -1472,7 +1472,7 @@ def issue_view(
         repo: Repository in ``"owner/repo"`` format.
         issue_number: Issue number to fetch.
         save_to: Path inside the container to save the issue body
-            (default ``"/root/issue.md"``).
+            (default ``"/home/sandbox/issue.md"``).
 
     Returns:
         JSON string with ``number``, ``title``, ``summary`` (up to 100
@@ -1730,7 +1730,10 @@ def submit(
         })
 
     # --- Verify gate ---
-    verify_path_full = f"{working_dir}/{verify_path}".rstrip("/")
+    if os.path.isabs(verify_path):
+        verify_path_full = verify_path
+    else:
+        verify_path_full = f"{working_dir}/{verify_path}".rstrip("/")
     verify_result = run_verify(
         client,
         cid,
@@ -1747,7 +1750,7 @@ def submit(
             cid,
             "submit",
             f"repo={repo} branch={branch} verify_failed",
-            approved=True,
+            approved=False,
             token=token,
         )
         return json.dumps({
@@ -1782,7 +1785,7 @@ def submit(
     # --- Git push ---
     push_cmd = (
         f"git -c credential.helper= "
-        f"-c credential.helper='!f() {{ echo password=$GITHUB_TOKEN; }}; f' "
+        f"-c credential.helper='!f() {{ echo username=x-access-token; echo password=$GITHUB_TOKEN; }}; f' "
         f"push origin {shlex.quote(branch)}"
     )
     push_ec, push_out, push_err = _run(push_cmd)
@@ -1798,7 +1801,7 @@ def submit(
             cid,
             "submit",
             f"repo={repo} branch={branch} push_failed",
-            approved=True,
+            approved=False,
             token=token,
         )
         return json.dumps({
@@ -1818,7 +1821,6 @@ def submit(
             f" --title {shlex.quote(pr_title)}"
         )
         if pr_body:
-            # Write body to a temp file to avoid shell escaping issues
             body_encoded = base64.b64encode(
                 pr_body.encode("utf-8")
             ).decode("ascii")
@@ -1830,6 +1832,8 @@ def submit(
                 f" --title {shlex.quote(pr_title)}"
                 f" --body-file $BODY_FILE"
             )
+        else:
+            pr_cmd += " --body ''"
         if base_branch:
             pr_cmd += f" --base {shlex.quote(base_branch)}"
 

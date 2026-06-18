@@ -283,6 +283,26 @@ sandbox_exec_check(container_id, job_id)
 sandbox_stop(container_id)
 ```
 
+## Human-in-the-loop (HITL) — beyond terminal output
+
+Existing AI coding tools (Claude Code, Open Code / Codex CLI, Copilot) display test results as transient terminal text. Once the output scrolls past, it's gone — there is no structured record of what happened, when, and why.
+
+code-sandbox-mcp shifts the human from **active watching** to **passive monitoring**:
+
+| Capability | Claude Code / Open Code | code-sandbox-mcp |
+|------------|--------------------------|-------------------|
+| Test output | Terminal text, ephemeral | Structured journal with per-operation timeline |
+| Pass/fail visibility | Scroll through raw output | Color-coded badges (green/red) at a glance |
+| "Why did it fail?" | Re-run to see | Click a run → HTML/JSON trace with full context |
+| Cross-run comparison | Manual, by memory | Side-by-side in dashboard |
+| Audit trail | None (session-scoped) | Append-only journal, survives restarts |
+| Boundary crossing ops | Invisible | Explicitly tracked, approval queue |
+| Human attention model | Must watch terminal | Check dashboard anytime, catch up in seconds |
+
+The dashboard (`--dashboard-port 8766`) runs on localhost, auto-refreshes every 10 seconds, and requires no external services. When a test fails, the trace shows exactly which assertion broke, on which line — no re-run needed.
+
+> This is the HITL layer that design.md §8-9 describes: the human's final control shifts from pre-execution approval to **post-hoc audit**, and the dashboard makes that audit practical rather than theoretical.
+
 ## Known limitations
 
 - **Job state is in-memory**: Background job results are lost on server restart. Job IDs become invalid after `sandbox_update_start()`.

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from typing import Any
 
 
@@ -43,13 +44,15 @@ def _parse_hunks(diff_text: str) -> list[dict[str, Any]]:
     for line in diff_text.split("\n"):
         m = _HUNK_HEADER_RE.match(line)
         if m:
-            hunks.append({
-                "old_start": int(m.group(1)),
-                "old_count": int(m.group(2) or 1),
-                "new_start": int(m.group(3)),
-                "new_count": int(m.group(4) or 1),
-                "lines": [],
-            })
+            hunks.append(
+                {
+                    "old_start": int(m.group(1)),
+                    "old_count": int(m.group(2) or 1),
+                    "new_start": int(m.group(3)),
+                    "new_count": int(m.group(4) or 1),
+                    "lines": [],
+                }
+            )
             continue
         if hunks and _HUNK_LINE_RE.match(line):
             hunks[-1]["lines"].append(line)
@@ -118,7 +121,11 @@ def apply_unified_diff(content: str, diff_text: str) -> str:
 
         # --- Apply the hunk ---
         before = lines[:old_start]
-        after = lines[old_start + old_count:] if old_start + old_count <= len(lines) else []
+        after = (
+            lines[old_start + old_count :]
+            if old_start + old_count <= len(lines)
+            else []
+        )
 
         new_lines: list[str] = []
         for hline in hunk_lines:
@@ -169,8 +176,7 @@ def _read_file(client: Any, container_id: str, file_path: str) -> str:
 
     if exit_code != 0:
         raise ValueError(
-            f"Failed to read {file_path}: exit code {exit_code}"
-            f"\n{stderr_text}"
+            f"Failed to read {file_path}: exit code {exit_code}\n{stderr_text}"
         )
     return stdout_text
 
@@ -185,9 +191,7 @@ def _write_file(client: Any, container_id: str, file_path: str, content: str) ->
     import base64
 
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    cmd = (
-        f"echo {encoded} | base64 -d > {_quote_path(file_path)}"
-    )
+    cmd = f"echo {encoded} | base64 -d > {_quote_path(file_path)}"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
         stdout=True,
@@ -198,16 +202,266 @@ def _write_file(client: Any, container_id: str, file_path: str, content: str) ->
 
     if exit_code != 0:
         raise ValueError(
-            f"Failed to write {file_path}: exit code {exit_code}"
-            f"\n{stderr_text}"
+            f"Failed to write {file_path}: exit code {exit_code}\n{stderr_text}"
         )
 
 
 def _quote_path(path: str) -> str:
     """Shell-escape a file path for use in a command string."""
-    import shlex
-
     return shlex.quote(path)
+
+
+# ---------------------------------------------------------------------------
+# Search in container (lexical / structural)
+# ---------------------------------------------------------------------------
+
+#: Regex for standard grep output: ``file:line:text``
+_GREP_OUTPUT_RE = re.compile(r"^([^:]+):(\d+):(.*)$")
+
+
+def search_files(
+    client: Any,
+    container_id: str,
+    pattern: str,
+    path: str = "/",
+    mode: str = "lexical",
+    max_results: int = 50,
+) -> list[dict[str, Any]]:
+    """Search for *pattern* inside the container.
+
+    Args:
+        client: Docker client.
+        container_id: 12-character container ID prefix.
+        pattern: Search pattern (regex for ``lexical``,
+            AST pattern for ``structural``).
+        path: Directory or file path to search within (default ``"/"``).
+        mode: ``"lexical"`` (ripgrep → grep fallback) or
+            ``"structural"`` (ast-grep).
+        max_results: Maximum results to return (default 50).
+
+    Returns:
+        List of dicts with ``file``, ``line`` (int), ``text`` fields.
+        Returns ``[{"error": ...}]`` on failure.
+    """
+    try:
+        container = client.containers.get(container_id)
+    except Exception as e:
+        return [{"error": f"Container {container_id[:12]} not found: {e}"}]
+
+    if mode == "structural":
+        return _search_structural(container, pattern, path, max_results)
+    else:
+        return _search_lexical(container, pattern, path, max_results)
+
+
+def _search_lexical(
+    container: Any,
+    pattern: str,
+    path: str,
+    max_results: int,
+) -> list[dict[str, Any]]:
+    """Lexical search: ripgrep first, grep fallback."""
+    quoted_pattern = shlex.quote(pattern)
+    quoted_path = shlex.quote(path)
+
+    cmd = f"rg --json -n {quoted_pattern} {quoted_path} -I 2>/dev/null"
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", cmd],
+        stdout=True,
+        stderr=True,
+    )
+    if exit_code == 127:
+        return _grep_fallback(container, pattern, path, max_results)
+    if exit_code not in (0, 1):
+        stdout_part, stderr_part = (
+            output if isinstance(output, tuple) else (output, b"")
+        )
+        stderr_text = (
+            stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+        )
+        return [{"error": f"ripgrep failed (exit {exit_code}): {stderr_text}"}]
+
+    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+    raw = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    return _parse_rg_json(raw, max_results)
+
+
+def _grep_fallback(
+    container: Any,
+    pattern: str,
+    path: str,
+    max_results: int,
+) -> list[dict[str, Any]]:
+    """Fallback to grep when ripgrep is not available."""
+    quoted_pattern = shlex.quote(pattern)
+    quoted_path = shlex.quote(path)
+
+    cmd = f"grep -rnI {quoted_pattern} {quoted_path} 2>/dev/null"
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", cmd],
+        stdout=True,
+        stderr=True,
+    )
+    if exit_code == 127:
+        return [{"error": "Neither ripgrep (rg) nor grep found in container"}]
+    if exit_code not in (0, 1):
+        stdout_part, stderr_part = (
+            output if isinstance(output, tuple) else (output, b"")
+        )
+        stderr_text = (
+            stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+        )
+        return [{"error": f"grep failed (exit {exit_code}): {stderr_text}"}]
+
+    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+    raw = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    return _parse_grep_output(raw, max_results)
+
+
+def _search_structural(
+    container: Any,
+    pattern: str,
+    path: str,
+    max_results: int,
+) -> list[dict[str, Any]]:
+    """Structural search using ast-grep."""
+    quoted_pattern = shlex.quote(pattern)
+    quoted_path = shlex.quote(path)
+
+    cmd = f"sg run -p {quoted_pattern} {quoted_path} --json=stream 2>/dev/null"
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", cmd],
+        stdout=True,
+        stderr=True,
+    )
+    if exit_code == 127:
+        return [{"error": "ast-grep (sg) not found in container"}]
+    if exit_code not in (0, 1):
+        stdout_part, stderr_part = (
+            output if isinstance(output, tuple) else (output, b"")
+        )
+        stderr_text = (
+            stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+        )
+        return [{"error": f"ast-grep failed (exit {exit_code}): {stderr_text}"}]
+
+    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+    raw = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    return _parse_sg_json(raw, max_results)
+
+
+# ---------------------------------------------------------------------------
+# Parser: ripgrep --json output
+# ---------------------------------------------------------------------------
+
+
+def _parse_rg_json(raw: str, max_results: int) -> list[dict[str, Any]]:
+    """Parse ripgrep ``--json`` output.
+
+    Each line is a JSON object with a ``type`` field:
+    - ``match``: a matching line (fields: ``path.text``,
+      ``data.lines.text``, ``data.line_number``)
+    - ``begin`` / ``end`` / ``summary``: ignored
+
+    Returns list of ``{file, line, text}`` dicts, capped at *max_results*.
+    """
+    results: list[dict[str, Any]] = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") != "match":
+            continue
+        file_path = ""
+        if "path" in obj.get("data", {}):
+            file_path = obj["data"]["path"].get("text", "")
+        match_text = obj.get("data", {}).get("lines", {}).get("text", "")
+        line_no = obj.get("data", {}).get("line_number", 0)
+        results.append(
+            {
+                "file": file_path,
+                "line": int(line_no),
+                "text": match_text.rstrip("\n"),
+            }
+        )
+        if len(results) >= max_results:
+            break
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Parser: grep output
+# ---------------------------------------------------------------------------
+
+
+def _parse_grep_output(raw: str, max_results: int) -> list[dict[str, Any]]:
+    """Parse standard ``grep -rnI`` output (``file:line:text``).
+
+    Returns list of ``{file, line, text}`` dicts, capped at *max_results*.
+    """
+    results: list[dict[str, Any]] = []
+    for line in raw.split("\n"):
+        m = _GREP_OUTPUT_RE.match(line)
+        if m:
+            results.append(
+                {
+                    "file": m.group(1),
+                    "line": int(m.group(2)),
+                    "text": m.group(3),
+                }
+            )
+            if len(results) >= max_results:
+                break
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Parser: ast-grep (sg) --json output
+# ---------------------------------------------------------------------------
+
+
+def _parse_sg_json(raw: str, max_results: int) -> list[dict[str, Any]]:
+    """Parse ``sg run --json=stream`` output.
+
+    ``sg run --json=stream`` outputs one JSON object per line.
+    """
+    raw = raw.strip()
+    if not raw:
+        return []
+
+    results: list[dict[str, Any]] = []
+    lines = raw.split("\n")
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        entries = obj if isinstance(obj, list) else [obj]
+        for entry in entries:
+            file_path = entry.get("file", "")
+            match_range = entry.get("range", {})
+            start = match_range.get("start", {})
+            line_no = start.get("line", 0)
+            text = entry.get("text", "")
+            results.append(
+                {
+                    "file": file_path,
+                    "line": int(line_no),
+                    "text": text.strip("\n"),
+                }
+            )
+            if len(results) >= max_results:
+                break
+        if len(results) >= max_results:
+            break
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -251,10 +505,7 @@ def apply_patch_to_file(
     except ValueError as e:
         return f"Error: {e}"
 
-    return (
-        f"Patch applied successfully to {file_path} "
-        f"in container {container_id[:12]}"
-    )
+    return f"Patch applied successfully to {file_path} in container {container_id[:12]}"
 
 
 def read_file_lines(
@@ -281,7 +532,7 @@ def read_file_lines(
 
     lines = content.split("\n")
     total = len(lines)
-    page_lines = lines[offset:offset + limit]
+    page_lines = lines[offset : offset + limit]
     next_offset = offset + limit
     has_more = next_offset < total
 
@@ -329,12 +580,14 @@ def lint_file(
     elif ext in (".js", ".ts", ".jsx", ".tsx"):
         return _run_js_linter(container, file_path)
     else:
-        return [{
-            "file": file_path,
-            "line": 0,
-            "rule": "no-linter",
-            "message": f"No linter configured for {ext} files",
-        }]
+        return [
+            {
+                "file": file_path,
+                "line": 0,
+                "rule": "no-linter",
+                "message": f"No linter configured for {ext} files",
+            }
+        ]
 
 
 def _run_python_linter(container: Any, file_path: str) -> list[dict[str, Any]]:
@@ -349,16 +602,18 @@ def _run_python_linter(container: Any, file_path: str) -> list[dict[str, Any]]:
     if pylint_result is not None:
         return pylint_result
 
-    return [{
-        "file": file_path,
-        "line": 0,
-        "rule": "no-linter",
-        "message": (
-            "No Python linter found in container. "
-            "Install ruff or pylint, or use a custom image "
-            "(pass --default-image to the server)."
-        ),
-    }]
+    return [
+        {
+            "file": file_path,
+            "line": 0,
+            "rule": "no-linter",
+            "message": (
+                "No Python linter found in container. "
+                "Install ruff or pylint, or use a custom image "
+                "(pass --default-image to the server)."
+            ),
+        }
+    ]
 
 
 def _run_js_linter(container: Any, file_path: str) -> list[dict[str, Any]]:
@@ -367,16 +622,18 @@ def _run_js_linter(container: Any, file_path: str) -> list[dict[str, Any]]:
     if eslint_result is not None:
         return eslint_result
 
-    return [{
-        "file": file_path,
-        "line": 0,
-        "rule": "no-linter",
-        "message": (
-            "No JS/TS linter found in container. "
-            "Install eslint, or use a custom image "
-            "(pass --default-image to the server)."
-        ),
-    }]
+    return [
+        {
+            "file": file_path,
+            "line": 0,
+            "rule": "no-linter",
+            "message": (
+                "No JS/TS linter found in container. "
+                "Install eslint, or use a custom image "
+                "(pass --default-image to the server)."
+            ),
+        }
+    ]
 
 
 def type_check_file(
@@ -405,12 +662,14 @@ def type_check_file(
     elif ext in (".ts", ".tsx"):
         return _run_ts_typecheck(container, file_path)
     else:
-        return [{
-            "file": file_path,
-            "line": 0,
-            "rule": "no-typechecker",
-            "message": f"No type checker configured for {ext} files",
-        }]
+        return [
+            {
+                "file": file_path,
+                "line": 0,
+                "rule": "no-typechecker",
+                "message": f"No type checker configured for {ext} files",
+            }
+        ]
 
 
 def _run_python_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
@@ -423,16 +682,18 @@ def _run_python_typecheck(container: Any, file_path: str) -> list[dict[str, Any]
     if pyright_result is not None:
         return pyright_result
 
-    return [{
-        "file": file_path,
-        "line": 0,
-        "rule": "no-typechecker",
-        "message": (
-            "No Python type checker found in container. "
-            "Install mypy or pyright, or use a custom image "
-            "(pass --default-image to the server)."
-        ),
-    }]
+    return [
+        {
+            "file": file_path,
+            "line": 0,
+            "rule": "no-typechecker",
+            "message": (
+                "No Python type checker found in container. "
+                "Install mypy or pyright, or use a custom image "
+                "(pass --default-image to the server)."
+            ),
+        }
+    ]
 
 
 def _run_ts_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
@@ -441,16 +702,18 @@ def _run_ts_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
     if tsc_result is not None:
         return tsc_result
 
-    return [{
-        "file": file_path,
-        "line": 0,
-        "rule": "no-typechecker",
-        "message": (
-            "No TypeScript type checker found in container. "
-            "Install typescript (tsc), or use a custom image "
-            "(pass --default-image to the server)."
-        ),
-    }]
+    return [
+        {
+            "file": file_path,
+            "line": 0,
+            "rule": "no-typechecker",
+            "message": (
+                "No TypeScript type checker found in container. "
+                "Install typescript (tsc), or use a custom image "
+                "(pass --default-image to the server)."
+            ),
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -472,8 +735,11 @@ def _get_extension(file_path: str) -> str:
 def _run_ruff(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``ruff check --output-format json``. Returns None if ruff is not installed."""
     exit_code, output = container.exec_run(
-        ["/bin/sh", "-c",
-         f"{_SANDBOX_ENV}ruff check --output-format json {_quote_path(file_path)} 2>/dev/null || true"],
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}ruff check --output-format json {_quote_path(file_path)} 2>/dev/null || true",
+        ],
         stdout=True,
         stderr=True,
     )
@@ -499,20 +765,25 @@ def _parse_ruff_output(raw: str, file_path: str) -> list[dict[str, Any]]:
 
     results: list[dict[str, Any]] = []
     for issue in issues:
-        results.append({
-            "file": issue.get("filename", file_path),
-            "line": int(issue.get("location", {}).get("row", 0)),
-            "rule": issue.get("code", "unknown"),
-            "message": issue.get("message", ""),
-        })
+        results.append(
+            {
+                "file": issue.get("filename", file_path),
+                "line": int(issue.get("location", {}).get("row", 0)),
+                "rule": issue.get("code", "unknown"),
+                "message": issue.get("message", ""),
+            }
+        )
     return results
 
 
 def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``pylint --output-format json``. Returns None if pylint is not installed."""
     exit_code, output = container.exec_run(
-        ["/bin/sh", "-c",
-         f"{_SANDBOX_ENV}pylint --output-format json {_quote_path(file_path)} 2>/dev/null || true"],
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}pylint --output-format json {_quote_path(file_path)} 2>/dev/null || true",
+        ],
         stdout=True,
         stderr=True,
     )
@@ -537,20 +808,25 @@ def _parse_pylint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
 
     results: list[dict[str, Any]] = []
     for issue in issues:
-        results.append({
-            "file": issue.get("path", file_path),
-            "line": int(issue.get("line", 0)),
-            "rule": issue.get("symbol", issue.get("message-id", "unknown")),
-            "message": issue.get("message", ""),
-        })
+        results.append(
+            {
+                "file": issue.get("path", file_path),
+                "line": int(issue.get("line", 0)),
+                "rule": issue.get("symbol", issue.get("message-id", "unknown")),
+                "message": issue.get("message", ""),
+            }
+        )
     return results
 
 
 def _run_eslint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``eslint --format json``. Returns None if eslint is not installed."""
     exit_code, output = container.exec_run(
-        ["/bin/sh", "-c",
-         f"{_SANDBOX_ENV}eslint --format json {_quote_path(file_path)} 2>/dev/null || true"],
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}eslint --format json {_quote_path(file_path)} 2>/dev/null || true",
+        ],
         stdout=True,
         stderr=True,
     )
@@ -577,12 +853,14 @@ def _parse_eslint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
     for result in data:
         fpath = result.get("filePath", file_path)
         for msg in result.get("messages", []):
-            results.append({
-                "file": fpath,
-                "line": int(msg.get("line", 0)),
-                "rule": msg.get("ruleId", "unknown"),
-                "message": msg.get("message", ""),
-            })
+            results.append(
+                {
+                    "file": fpath,
+                    "line": int(msg.get("line", 0)),
+                    "rule": msg.get("ruleId", "unknown"),
+                    "message": msg.get("message", ""),
+                }
+            )
     return results
 
 
@@ -594,8 +872,11 @@ def _parse_eslint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
 def _run_mypy(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``mypy --show-error-codes``. Returns None if mypy is not installed."""
     exit_code, output = container.exec_run(
-        ["/bin/sh", "-c",
-         f"{_SANDBOX_ENV}mypy --show-error-codes {_quote_path(file_path)} 2>/dev/null || true"],
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}mypy --show-error-codes {_quote_path(file_path)} 2>/dev/null || true",
+        ],
         stdout=True,
         stderr=True,
     )
@@ -618,20 +899,25 @@ def _parse_mypy_output(raw: str, file_path: str) -> list[dict[str, Any]]:
     for line in raw.split("\n"):
         m = _MYPY_LINE_RE.match(line)
         if m:
-            results.append({
-                "file": m.group(1),
-                "line": int(m.group(2)),
-                "rule": m.group(5) or m.group(3),  # error code or severity
-                "message": m.group(4),
-            })
+            results.append(
+                {
+                    "file": m.group(1),
+                    "line": int(m.group(2)),
+                    "rule": m.group(5) or m.group(3),  # error code or severity
+                    "message": m.group(4),
+                }
+            )
     return results
 
 
 def _run_pyright(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``pyright --outputjson``. Returns None if pyright is not installed."""
     exit_code, output = container.exec_run(
-        ["/bin/sh", "-c",
-         f"{_SANDBOX_ENV}pyright --outputjson {_quote_path(file_path)} 2>/dev/null || true"],
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}pyright --outputjson {_quote_path(file_path)} 2>/dev/null || true",
+        ],
         stdout=True,
         stderr=True,
     )
@@ -654,20 +940,25 @@ def _parse_pyright_output(raw: str, file_path: str) -> list[dict[str, Any]]:
 
     results: list[dict[str, Any]] = []
     for diag in data.get("generalDiagnostics", []):
-        results.append({
-            "file": diag.get("file", file_path),
-            "line": int(diag.get("range", {}).get("start", {}).get("line", 0)) + 1,
-            "rule": diag.get("rule", "unknown"),
-            "message": diag.get("message", ""),
-        })
+        results.append(
+            {
+                "file": diag.get("file", file_path),
+                "line": int(diag.get("range", {}).get("start", {}).get("line", 0)) + 1,
+                "rule": diag.get("rule", "unknown"),
+                "message": diag.get("message", ""),
+            }
+        )
     return results
 
 
 def _run_tsc(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``tsc --noEmit``. Returns None if tsc is not installed."""
     exit_code, output = container.exec_run(
-        ["/bin/sh", "-c",
-         f"{_SANDBOX_ENV}npx tsc --noEmit {_quote_path(file_path)} 2>&1 || true"],
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}npx tsc --noEmit {_quote_path(file_path)} 2>&1 || true",
+        ],
         stdout=True,
         stderr=True,
     )
@@ -694,12 +985,14 @@ def _parse_tsc_text(raw: str, file_path: str) -> list[dict[str, Any]]:
     for line in raw.split("\n"):
         m = _TSC_TEXT_RE.match(line)
         if m:
-            results.append({
-                "file": m.group(1),
-                "line": int(m.group(2)),
-                "rule": m.group(4),
-                "message": m.group(5),
-            })
+            results.append(
+                {
+                    "file": m.group(1),
+                    "line": int(m.group(2)),
+                    "rule": m.group(4),
+                    "message": m.group(5),
+                }
+            )
     return results
 
 
@@ -716,10 +1009,12 @@ def _parse_tsc_json(raw: str, file_path: str) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     if isinstance(data, dict):
         for diag in data.get("diagnostics", []):
-            results.append({
-                "file": diag.get("file", {}).get("fileName", file_path),
-                "line": int(diag.get("file", {}).get("line", 0)),
-                "rule": diag.get("code", "unknown"),
-                "message": diag.get("messageText", ""),
-            })
+            results.append(
+                {
+                    "file": diag.get("file", {}).get("fileName", file_path),
+                    "line": int(diag.get("file", {}).get("line", 0)),
+                    "rule": diag.get("code", "unknown"),
+                    "message": diag.get("messageText", ""),
+                }
+            )
     return results

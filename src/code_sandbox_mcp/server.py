@@ -2,6 +2,7 @@
 
 This module defines the FastMCP server and all tool handlers.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,6 +29,7 @@ from code_sandbox_mcp.edit_verify import (
     apply_patch_to_file,
     lint_file,
     read_file_lines,
+    search_files,
     type_check_file,
 )
 from code_sandbox_mcp.output_control import (
@@ -153,9 +155,11 @@ def _ensure_image(image: str) -> None:
 
 
 @mcp.tool()
-def sandbox_initialize(image: str | None = None,
-                       allow_network: bool = False,
-                       inject_vcs_token: bool = False) -> str:
+def sandbox_initialize(
+    image: str | None = None,
+    allow_network: bool = False,
+    inject_vcs_token: bool = False,
+) -> str:
     """Start a new Docker sandbox container.
 
     The container runs ``sleep infinity`` and stays alive until
@@ -210,11 +214,10 @@ def sandbox_initialize(image: str | None = None,
         return f"Error: {e}"
 
     cid = container.id[:12]
-    logger.info(
-        "Container %s started (image=%s)", cid, resolved
-    )
+    logger.info("Container %s started (image=%s)", cid, resolved)
     record_initialize(
-        cid, resolved,
+        cid,
+        resolved,
         allow_network=allow_network,
         inject_vcs_token=inject_vcs_token,
     )
@@ -264,7 +267,9 @@ def sandbox_exec(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"container {container_id[:12]} not found"})
+        return json.dumps(
+            {"status": "error", "error": f"container {container_id[:12]} not found"}
+        )
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -356,9 +361,9 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
     job_id = f"{container_id}-{int(time.time())}"
     joined = " && ".join(commands)
     bg_cmd = (
-        f'nohup /bin/sh -c {shlex.quote(joined)} '
-        f'> /tmp/{job_id}.out 2> /tmp/{job_id}.err; '
-        f'echo $? > /tmp/{job_id}.exit'
+        f"nohup /bin/sh -c {shlex.quote(joined)} "
+        f"> /tmp/{job_id}.out 2> /tmp/{job_id}.err; "
+        f"echo $? > /tmp/{job_id}.exit"
     )
     container.exec_run(
         ["/bin/sh", "-c", bg_cmd],
@@ -416,7 +421,9 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
         stdout=True,
         stderr=True,
     )
-    stdout_text = stdout_result[1].decode("utf-8", errors="replace") if stdout_result[1] else ""
+    stdout_text = (
+        stdout_result[1].decode("utf-8", errors="replace") if stdout_result[1] else ""
+    )
 
     if exit_code != 0:
         stderr_result = container.exec_run(
@@ -424,12 +431,20 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
             stdout=True,
             stderr=True,
         )
-        stderr_text = stderr_result[1].decode("utf-8", errors="replace") if stderr_result[1] else ""
+        stderr_text = (
+            stderr_result[1].decode("utf-8", errors="replace")
+            if stderr_result[1]
+            else ""
+        )
         return f"Error: exit code {exit_code}\n{stderr_text}"
 
     # Clean up temp files
     container.exec_run(
-        ["/bin/sh", "-c", f"rm -f /tmp/{job_id}.out /tmp/{job_id}.err /tmp/{job_id}.exit"],
+        [
+            "/bin/sh",
+            "-c",
+            f"rm -f /tmp/{job_id}.out /tmp/{job_id}.err /tmp/{job_id}.exit",
+        ],
         stdout=False,
         stderr=False,
     )
@@ -571,7 +586,7 @@ def write_file_sandbox(
             idx = existing.find(old_str)
             if idx == -1:
                 return f"Error: old_str not found in {dest_path}"
-            content = existing[:idx] + file_contents + existing[idx + len(old_str):]
+            content = existing[:idx] + file_contents + existing[idx + len(old_str) :]
         else:
             start = start_line - 1 if start_line is not None else 0
             end = end_line if end_line is not None else len(existing_lines)
@@ -655,7 +670,9 @@ def copy_project(
             container.put_archive(dest_dir, buf)
         except APIError as e:
             return f"Error: {e}"
-        record_copy(container_id[:12], "copy_project", local_src_dir, f"{dest_dir}/{arcname}")
+        record_copy(
+            container_id[:12], "copy_project", local_src_dir, f"{dest_dir}/{arcname}"
+        )
         return (
             f"Copied {local_src_dir} to {dest_dir}/{arcname} "
             f"in container {container_id[:12]}"
@@ -708,10 +725,7 @@ def copy_file(
     except APIError as e:
         return f"Error: {e}"
     record_copy(container_id[:12], "copy_file", local_src_file, dest)
-    return (
-        f"Copied {local_src_file} to {dest} "
-        f"in container {container_id[:12]}"
-    )
+    return f"Copied {local_src_file} to {dest} in container {container_id[:12]}"
 
 
 # ---------------------------------------------------------------------------
@@ -799,9 +813,16 @@ def _open_update_terminal(terminal: str, log_path: str) -> None:
     """Open a terminal window tailing the update log file."""
     cmd: list[str]
     if sys.platform == "win32":
-        cmd = ["cmd.exe", "/c", "start", "code-sandbox-mcp Update",
-               "powershell.exe", "-NoExit", "-Command",
-               f"Get-Content -Wait '{log_path}'"]
+        cmd = [
+            "cmd.exe",
+            "/c",
+            "start",
+            "code-sandbox-mcp Update",
+            "powershell.exe",
+            "-NoExit",
+            "-Command",
+            f"Get-Content -Wait '{log_path}'",
+        ]
     elif sys.platform == "darwin":
         cmd = ["open", "-a", "Terminal", log_path]
     else:
@@ -922,11 +943,14 @@ def run_container_and_exec(
     except ValueError as e:
         return json.dumps({"status": "error", "error": str(e)})
     except Exception as e:
-        return json.dumps({"status": "error", "error": f"Failed to start container: {e}"})
+        return json.dumps(
+            {"status": "error", "error": f"Failed to start container: {e}"}
+        )
 
     container_id = container.id[:12]
     record_initialize(
-        container_id, resolved,
+        container_id,
+        resolved,
         allow_network=allow_network,
         inject_vcs_token=inject_vcs_token,
     )
@@ -941,8 +965,12 @@ def run_container_and_exec(
             demux=True,
         )
         stdout_part, stderr_part = output
-        stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-        stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+        stdout_text = (
+            stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+        )
+        stderr_text = (
+            stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+        )
     except Exception as e:
         # Clean up
         try:
@@ -1003,7 +1031,10 @@ def run_container_and_exec(
         result["stderr"] = stderr_text
 
     journal_record_exec(
-        container_id, commands, exit_code, verbose=verbose,
+        container_id,
+        commands,
+        exit_code,
+        verbose=verbose,
     )
     if allow_network or inject_vcs_token:
         record_boundary_crossing(
@@ -1083,8 +1114,57 @@ def read_file_range(
     except Exception as e:
         return json.dumps({"error": str(e)})
 
-    result = read_file_lines(client, container_id, file_path, offset=offset, limit=limit)
+    result = read_file_lines(
+        client, container_id, file_path, offset=offset, limit=limit
+    )
     return json.dumps(result)
+
+
+@mcp.tool()
+def search_in_container(
+    container_id: str,
+    pattern: str,
+    path: str = "/",
+    mode: str = "lexical",
+    max_results: int = 50,
+) -> str:
+    """Search for *pattern* inside the container using ripgrep/ast-grep.
+
+    Returns a JSON array of matches, each with:
+    - ``file`` (str): file path
+    - ``line`` (int): line number
+    - ``text`` (str): matching line text
+
+    **Lexical** mode (default) uses ripgrep (``rg``) with regex support,
+    falling back to ``grep`` if ripgrep is not installed.
+
+    **Structural** mode uses ``ast-grep`` (``sg``) for AST-aware search
+    that ignores whitespace/formatting differences.
+
+    Args:
+        container_id: 12-character container ID prefix.
+        pattern: Search pattern (regex for lexical, AST pattern for structural).
+        path: Directory or file path to search within (default ``"/"``).
+        mode: ``"lexical"`` (ripgrep → grep) or ``"structural"`` (ast-grep).
+        max_results: Maximum results to return (default 50).
+
+    Returns:
+        JSON string with a list of match objects, each with ``file``,
+        ``line`` (int), ``text`` fields.  On container-not-found returns
+        a JSON object with an ``error`` field.
+    """
+    client = _docker()
+    try:
+        _ = client.containers.get(container_id)
+    except NotFound:
+        return json.dumps([{"error": f"Container {container_id[:12]} not found"}])
+    except Exception as e:
+        return json.dumps([{"error": str(e)}])
+
+    results = search_files(
+        client, container_id, pattern, path=path, mode=mode, max_results=max_results
+    )
+    return json.dumps(results)
 
 
 @mcp.tool()
@@ -1113,9 +1193,20 @@ def lint_in_container(container_id: str, file_path: str) -> str:
     try:
         client.containers.get(container_id)
     except NotFound:
-        return json.dumps([{"file": file_path, "line": 0, "rule": "error", "message": f"Container {container_id[:12]} not found"}])
+        return json.dumps(
+            [
+                {
+                    "file": file_path,
+                    "line": 0,
+                    "rule": "error",
+                    "message": f"Container {container_id[:12]} not found",
+                }
+            ]
+        )
     except Exception as e:
-        return json.dumps([{"file": file_path, "line": 0, "rule": "error", "message": str(e)}])
+        return json.dumps(
+            [{"file": file_path, "line": 0, "rule": "error", "message": str(e)}]
+        )
 
     results = lint_file(client, container_id, file_path)
     return json.dumps(results)
@@ -1142,9 +1233,20 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
     try:
         client.containers.get(container_id)
     except NotFound:
-        return json.dumps([{"file": file_path, "line": 0, "rule": "error", "message": f"Container {container_id[:12]} not found"}])
+        return json.dumps(
+            [
+                {
+                    "file": file_path,
+                    "line": 0,
+                    "rule": "error",
+                    "message": f"Container {container_id[:12]} not found",
+                }
+            ]
+        )
     except Exception as e:
-        return json.dumps([{"file": file_path, "line": 0, "rule": "error", "message": str(e)}])
+        return json.dumps(
+            [{"file": file_path, "line": 0, "rule": "error", "message": str(e)}]
+        )
 
     results = type_check_file(client, container_id, file_path)
     return json.dumps(results)
@@ -1298,10 +1400,12 @@ def sandbox_approve(token: str) -> str:
     """
     result = verify_and_consume(token)
     if result is None:
-        return json.dumps({
-            "status": "error",
-            "error": "Token invalid, expired, or already used",
-        })
+        return json.dumps(
+            {
+                "status": "error",
+                "error": "Token invalid, expired, or already used",
+            }
+        )
     record_boundary_crossing(
         result["container_id"],
         result["operation"],
@@ -1309,13 +1413,15 @@ def sandbox_approve(token: str) -> str:
         approved=True,
         token=token,
     )
-    return json.dumps({
-        "status": "ok",
-        "operation": result["operation"],
-        "details": result["details"],
-        "container_id": result["container_id"],
-        "run_id": result["run_id"],
-    })
+    return json.dumps(
+        {
+            "status": "ok",
+            "operation": result["operation"],
+            "details": result["details"],
+            "container_id": result["container_id"],
+            "run_id": result["run_id"],
+        }
+    )
 
 
 @mcp.tool()
@@ -1334,14 +1440,18 @@ def sandbox_reject(token: str) -> str:
     """
     ok = reject_token(token)
     if not ok:
-        return json.dumps({
-            "status": "error",
-            "error": "Token not found or already resolved",
-        })
-    return json.dumps({
-        "status": "ok",
-        "message": "Token rejected",
-    })
+        return json.dumps(
+            {
+                "status": "error",
+                "error": "Token not found or already resolved",
+            }
+        )
+    return json.dumps(
+        {
+            "status": "ok",
+            "message": "Token rejected",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1463,6 +1573,7 @@ def main() -> None:
     # Configure notifications if webhook is set
     if args.webhook_url or args.failure_threshold != 5 or args.long_run_seconds != 300:
         from code_sandbox_mcp.notify import configure
+
         configure(
             webhook_url=args.webhook_url,
             failure_threshold=args.failure_threshold,
@@ -1472,6 +1583,7 @@ def main() -> None:
     # Start dashboard if requested
     if args.dashboard_port > 0:
         from code_sandbox_mcp.dashboard import start_dashboard
+
         msg = start_dashboard(port=args.dashboard_port)
         logger.info(msg)
 

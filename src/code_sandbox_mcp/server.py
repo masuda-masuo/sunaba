@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -97,6 +98,24 @@ _DEFAULT_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:7498
 _TERMINAL: str | None = None
 _UPDATE_SPEC: str = "."
 _UPDATE_LOG_DIR: Path | None = None
+#: Shiori repos root path on the host for cp-by-pass git clone (Issue #84).
+#: Set via ``--shiori-repos-path`` CLI arg or ``SHIORI_REPOS_PATH`` env var.
+#: When set, ``sandbox_initialize`` and ``run_container_and_exec`` can use
+#: ``clone_repo`` to copy a pre-cloned repository from this path into the
+#: container, bypassing a network ``git clone``.
+_SHIORI_REPOS_PATH: str | None = None
+#: Compiled pattern for validating clone_repo ``owner/name`` format.
+_CLONE_REPO_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9._-]+$")
+#: Sensitive file/directory basenames to exclude from tar archive.
+_SENSITIVE_FILE_BASENAMES: frozenset[str] = frozenset({
+    ".env",
+    ".git-credentials",
+    ".gitconfig",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+})
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -153,6 +172,165 @@ def _ensure_image(image: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shiori clone helper (Issue #84)
+# ---------------------------------------------------------------------------
+
+
+def _validate_clone_repo(clone_repo: str) -> tuple[str, str]:
+    """Validate *clone_repo* as ``owner/name`` format.
+
+    Returns:
+        (owner, name) tuple.
+
+    Raises:
+        ValueError: If the format is invalid.
+    """
+    if not clone_repo:
+        raise ValueError("clone_repo must not be empty")
+    parts = clone_repo.split("/")
+    if len(parts) != 2 or not all(parts):
+        raise ValueError(
+            f"clone_repo must be 'owner/name' format, got: {clone_repo!r}"
+        )
+    owner, name = parts
+    if not _CLONE_REPO_PATTERN.match(owner) or not _CLONE_REPO_PATTERN.match(name):
+        raise ValueError(
+            f"clone_repo must be 'owner/name' format with alphanumeric "
+            f"characters (._- allowed), got: {clone_repo!r}"
+        )
+    return owner, name
+
+
+def _clone_shiori_repo_to_container(
+    container: Any,
+    container_id: str,
+    clone_repo: str,
+    clone_dest: str,
+) -> str:
+    """Copy a Shiori pre-cloned repo into the container.
+
+    Computes the host-side path from ``_SHIORI_REPOS_PATH`` and
+    ``clone_repo``, validates it, copies via ``put_archive``, then
+    runs ``git fetch --unshallow`` in the container.
+
+    Args:
+        container: Docker container object.
+        container_id: 12-char container ID prefix.
+        clone_repo: ``owner/name`` repository identifier.
+        clone_dest: Destination directory inside the container.
+
+    Returns:
+        Success message string.
+    """
+
+    # Validate clone_dest is a safe path inside the container
+    if not clone_dest.startswith("/tmp/"):
+        raise ValueError(
+            f"clone_dest must start with /tmp/, got: {clone_dest!r}"
+        )
+
+    if not _SHIORI_REPOS_PATH:
+        raise ValueError(
+            "Shiori repos path is not configured. "
+            "Set --shiori-repos-path or SHIORI_REPOS_PATH env var."
+        )
+
+    _validate_clone_repo(clone_repo)
+
+    repos_root = Path(_SHIORI_REPOS_PATH).resolve()
+    if not repos_root.is_dir():
+        raise ValueError(f"Shiori repos root not found: {repos_root}")
+
+    clone_from = repos_root / clone_repo
+    resolved_from = clone_from.resolve()
+
+    # Path traversal prevention: must stay under repos_root
+    try:
+        resolved_from.relative_to(repos_root)
+    except ValueError:
+        raise ValueError(
+            f"Path traversal detected: {clone_from} is outside {repos_root}"
+        )
+
+    if not resolved_from.is_dir():
+        raise ValueError(f"Repository clone not found: {resolved_from}")
+
+    if not (resolved_from / ".git").exists():
+        raise ValueError(
+            f"Repository clone at {resolved_from} has no .git directory"
+        )
+
+    logger.info(
+        "Copying Shiori clone %s → container %s:%s",
+        resolved_from, container_id[:12], clone_dest,
+    )
+
+    # -- Copy via put_archive (same mechanism as copy_project) --
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar")
+
+    def _filter_sensitive(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        name = Path(tarinfo.name).name
+        if name in _SENSITIVE_FILE_BASENAMES:
+            return None
+        if name.startswith(".env."):
+            return None
+        if "/.ssh/" in tarinfo.name:
+            return None
+        return tarinfo
+
+    try:
+        with tarfile.open(fileobj=tmp.file, mode="w") as tar:
+            tar.add(str(resolved_from), arcname="repo", filter=_filter_sensitive)
+        tmp.file.close()
+        with open(tmp.name, "rb") as f:
+            data = f.read()
+        buf = io.BytesIO(data)
+        try:
+            container.put_archive(clone_dest, buf)
+        except APIError as e:
+            raise RuntimeError(f"Failed to copy repo into container: {e}") from e
+    finally:
+        os.unlink(tmp.name)
+
+    record_copy(
+        container_id[:12],
+        "clone_shiori_repo",
+        str(resolved_from),
+        f"{clone_dest}/repo",
+    )
+
+    # -- Run git fetch --unshallow --
+    safe_dest = shlex.quote(f"{clone_dest}/repo")
+    try:
+        exit_code, output = container.exec_run(
+            ["/bin/sh", "-c", f"cd {safe_dest} && git fetch --unshallow 2>&1"],
+            stdout=True,
+            stderr=True,
+            demux=True,
+        )
+        stdout_part, stderr_part = output
+        fetch_output = (
+            stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+        )
+        if exit_code != 0:
+            logger.warning(
+                "git fetch --unshallow failed (exit=%d): %s",
+                exit_code, fetch_output.strip(),
+            )
+        else:
+            logger.info(
+                "git fetch --unshallow succeeded: %s", fetch_output.strip(),
+            )
+    except Exception as e:
+        logger.warning("git fetch --unshallow error: %s", e)
+
+    return (
+        f"Copied Shiori clone of {clone_repo} → {clone_dest}/repo "
+        f"in container {container_id[:12]}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # sandbox_initialize
 # ---------------------------------------------------------------------------
 
@@ -162,6 +340,8 @@ def sandbox_initialize(
     image: str | None = None,
     allow_network: bool = False,
     inject_vcs_token: bool = False,
+    clone_repo: str | None = None,
+    clone_dest: str = "/tmp/repo",
 ) -> str:
     """Start a new Docker sandbox container.
 
@@ -185,11 +365,20 @@ def sandbox_initialize(
                Enable only for containers that need git/gh access to
                remote repositories.  Token injection is a boundary-crossing
                operation and should be used only when necessary.
+        clone_repo: Optional ``owner/name`` repository to copy from the
+               Shiori pre-cloned repos on the host into the container.
+               Uses the host path configured via ``--shiori-repos-path``
+               (default: ``None`` = no clone copy).
+        clone_dest: Destination directory in the container for the
+               cloned repository (default: ``/tmp/repo``).
+               The actual path will be ``{clone_dest}/repo``.
 
     The image must be pulled locally before use: docker pull <image>
 
     Returns:
         Container ID string (12-character prefix).
+        If *clone_repo* is specified, a message about the clone copy
+        is appended.
     """
     client = _docker()
     resolved = image or _DEFAULT_IMAGE
@@ -224,7 +413,20 @@ def sandbox_initialize(
         allow_network=allow_network,
         inject_vcs_token=inject_vcs_token,
     )
-    return cid
+
+    # -- Shiori clone copy (Issue #84) --
+    clone_msg = ""
+    if clone_repo:
+        try:
+            clone_msg = " " + _clone_shiori_repo_to_container(
+                container, cid, clone_repo, clone_dest,
+            )
+        except Exception as e:
+            # Clone failure is non-fatal: the container is still usable.
+            logger.warning("Shiori clone copy failed: %s", e)
+            clone_msg = f" (clone_repo failed: {e})"
+
+    return cid + clone_msg
 
 
 # ---------------------------------------------------------------------------
@@ -880,6 +1082,8 @@ def run_container_and_exec(
     limit: int = 50,
     allow_network: bool = False,
     inject_vcs_token: bool = False,
+    clone_repo: str | None = None,
+    clone_dest: str = "/tmp/repo",
 ) -> str:
     """Start a container, execute commands, then remove it (one-shot).
 
@@ -911,6 +1115,13 @@ def run_container_and_exec(
                as environment variables in the container (default
                ``False``).  Enable only for containers that need git/gh
                access to remote repositories.
+        clone_repo: Optional ``owner/name`` repository to copy from the
+               Shiori pre-cloned repos on the host into the container.
+               Uses the host path configured via ``--shiori-repos-path``
+               (default: ``None`` = no clone copy).
+        clone_dest: Destination directory in the container for the
+               cloned repository (default: ``/tmp/repo``).
+               The actual path will be ``{clone_dest}/repo``.
 
     Returns:
         JSON string with ``status``, ``output`` (or ``error``),
@@ -957,6 +1168,17 @@ def run_container_and_exec(
         allow_network=allow_network,
         inject_vcs_token=inject_vcs_token,
     )
+
+    # --- Shiori clone copy (Issue #84) ---
+    clone_error: str | None = None
+    if clone_repo:
+        try:
+            _clone_shiori_repo_to_container(
+                container, container_id, clone_repo, clone_dest,
+            )
+        except Exception as e:
+            logger.warning("Shiori clone copy failed: %s", e)
+            clone_error = str(e)
 
     # --- Execute commands ---
     try:
@@ -1032,6 +1254,8 @@ def run_container_and_exec(
         result["exit_code"] = exit_code
     if stderr_text and verbose != "error_only":
         result["stderr"] = stderr_text
+    if clone_error:
+        result["clone_warning"] = clone_error
 
     journal_record_exec(
         container_id,
@@ -2029,6 +2253,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Directory for update log files",
     )
     parser.add_argument(
+        "--shiori-repos-path",
+        type=str,
+        default=os.environ.get("SHIORI_REPOS_PATH"),
+        help=(
+            "Host path to Shiori repos root (e.g. /data/repos). "
+            "When set, sandbox_initialize and run_container_and_exec "
+            "can use clone_repo to copy a pre-cloned repo into the "
+            "container instead of a network git clone. "
+            "Also read from SHIORI_REPOS_PATH env var."
+        ),
+    )
+    parser.add_argument(
         "--transport",
         type=str,
         default="stdio",
@@ -2099,7 +2335,7 @@ def main() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
 
-    global _TERMINAL, _UPDATE_SPEC, _UPDATE_LOG_DIR, _DEFAULT_IMAGE
+    global _TERMINAL, _UPDATE_SPEC, _UPDATE_LOG_DIR, _DEFAULT_IMAGE, _SHIORI_REPOS_PATH
     _TERMINAL = args.terminal
     _UPDATE_SPEC = args.update_spec
     if args.update_log_dir:
@@ -2107,6 +2343,8 @@ def main() -> None:
     if args.default_image:
         validate_image_ref(args.default_image)
         _DEFAULT_IMAGE = args.default_image
+    if args.shiori_repos_path:
+        _SHIORI_REPOS_PATH = args.shiori_repos_path
 
     # Configure notifications if webhook is set
     if args.webhook_url or args.failure_threshold != 5 or args.long_run_seconds != 300:

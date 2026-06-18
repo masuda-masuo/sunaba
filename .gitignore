@@ -219,3 +219,4 @@ __marimo__/
 
 # opencode CLI configuration
 opencode.jsonc
+.opencode/

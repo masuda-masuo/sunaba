@@ -2113,6 +2113,176 @@ def submit(
 
 
 # ---------------------------------------------------------------------------
+# Repository exploration tools (Issue #86)
+# ---------------------------------------------------------------------------
+
+_REPO_FORMAT_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+
+@mcp.tool()
+def clone_repo(
+    container_id: str,
+    repo: str,
+    dest_dir: str = "/root",
+    branch: str = "",
+) -> str:
+    """Clone a Git repository inside the container using ``gh repo clone``.
+
+    Requires a container started with ``allow_network=True`` and
+    ``inject_vcs_token=True`` for private repositories.
+
+    Args:
+        container_id: 12-character container ID prefix.
+        repo: Repository in ``"owner/repo"`` format.
+        dest_dir: Destination directory in the container
+            (default ``"/root"``).
+        branch: Branch name to clone. Omit for the default branch.
+
+    Returns:
+        JSON string with ``status``, ``repo``, ``clone_path``, and
+        ``branch``.  On error returns an ``error`` field.
+    """
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    cid = container_id[:12]
+
+    if not _REPO_FORMAT_RE.match(repo):
+        return json.dumps(
+            {"error": f"Invalid repo format: {repo} (expected owner/repo)"}
+        )
+
+    safe_dest = shlex.quote(dest_dir)
+    safe_repo = shlex.quote(repo)
+
+    if branch:
+        cmd = (
+            f"gh repo clone {safe_repo} {safe_dest}"
+            f" -- -b {shlex.quote(branch)}"
+        )
+    else:
+        cmd = f"gh repo clone {safe_repo} {safe_dest}"
+
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", cmd],
+        stdout=True,
+        stderr=True,
+    )
+
+    stdout_part, stderr_part = (
+        output if isinstance(output, tuple) else (output, b"")
+    )
+    stdout_text = (
+        stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    )
+    stderr_text = (
+        stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+    )
+
+    repo_name = repo.split("/")[-1]
+    clone_path = f"{dest_dir}/{repo_name}"
+
+    if exit_code != 0:
+        return json.dumps({
+            "status": "error",
+            "error": stderr_text or stdout_text,
+            "clone_path": clone_path,
+        })
+
+    record_boundary_crossing(
+        cid,
+        "clone_repo",
+        f"repo={repo} branch={branch or 'default'} dest={clone_path}",
+        approved=True,
+    )
+
+    return json.dumps({
+        "status": "ok",
+        "repo": repo,
+        "clone_path": clone_path,
+        "branch": branch or "default",
+    })
+
+
+@mcp.tool()
+def list_files(
+    container_id: str,
+    path: str = "/root",
+    max_depth: int = 3,
+    pattern: str = "",
+) -> str:
+    """List files inside the container using ``find``.
+
+    Returns a JSON array of file paths sorted alphabetically.
+    Hidden files (dotfiles) and directories under ``.git`` are
+    excluded.
+
+    Args:
+        container_id: 12-character container ID prefix.
+        path: Directory path to list (default ``"/root"``).
+        max_depth: Maximum directory depth (default 3).
+        pattern: Optional glob pattern to filter files
+            (e.g. ``"*.py"``, ``"*.md"``).
+
+    Returns:
+        JSON string with ``path``, ``total``, and ``files`` list.
+        On error returns an ``error`` field.
+    """
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    safe_path = shlex.quote(path)
+
+    name_filter = ""
+    if pattern:
+        name_filter = f" -name {shlex.quote(pattern)}"
+
+    cmd = (
+        f"find {safe_path} -maxdepth {max_depth}"
+        f" -not -path '*/\\.*'"
+        f" -type f{name_filter}"
+        f" | sort"
+    )
+
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", cmd],
+        stdout=True,
+        stderr=True,
+    )
+
+    stdout_part, stderr_part = (
+        output if isinstance(output, tuple) else (output, b"")
+    )
+    stdout_text = (
+        stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    )
+    stderr_text = (
+        stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+    )
+
+    if exit_code != 0:
+        return json.dumps({"error": stderr_text or stdout_text})
+
+    files = [f for f in stdout_text.strip().split("\n") if f]
+
+    return json.dumps({
+        "path": path,
+        "total": len(files),
+        "files": files,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Approval / Token tools (Issue #50)
 # ---------------------------------------------------------------------------
 

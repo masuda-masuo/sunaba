@@ -40,9 +40,11 @@ _ALLOWED_HOST_MOUNT_PREFIXES: tuple[str, ...] = (
 )
 
 #: Default non-root user to run containers as.
-#: ``nobody`` is a well-known unprivileged user available in most Linux
-#: and official Docker images.
-_DEFAULT_USER: str = "nobody"
+#: ``sandbox`` is the dedicated user created in ``Dockerfile.sandbox``
+#: (``USER sandbox``, home ``/home/sandbox``).  This user has a proper
+#: home directory and can use ``uv tool install`` / ``pip install --user``,
+#: matching the tools pre-installed in the sandbox image.
+_DEFAULT_USER: str = "sandbox"
 
 #: Default memory limit.
 #:

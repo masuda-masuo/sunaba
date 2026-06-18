@@ -29,6 +29,7 @@ from code_sandbox_mcp.edit_verify import (
     apply_patch_to_file,
     lint_file,
     read_file_lines,
+    run_verify,
     search_files,
     type_check_file,
 )
@@ -1250,6 +1251,98 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
 
     results = type_check_file(client, container_id, file_path)
     return json.dumps(results)
+
+
+@mcp.tool()
+def verify_in_container(
+    container_id: str,
+    path: str,
+    gate_on_lint_error: bool = True,
+    gate_on_type_error: bool = False,
+    gate_on_test_fail: bool = True,
+    gate_on_scan_error: bool = True,
+    gate_on_scan_warning: bool = False,
+) -> str:
+    """Run lint + type_check + test + scan as a bundled verification.
+
+    Executes all four analysis layers inside the container in a single
+    call, normalises output to a unified schema, and returns a gate
+    decision.
+
+    **Layers:**
+
+    =========== ======= ============================
+    Layer       Tool    Notes
+    =========== ======= ============================
+    lint        ruff    Python lint (``ruff check``)
+    type_check  pyright Python type checking
+    test        pytest  pytest with json-report
+    scan        semgrep Security scanning
+    =========== ======= ============================
+
+    **Gate logic:**
+
+    By default the gate fails when any of the following are detected:
+
+    * lint errors (E/F/B/RUF rule codes)
+    * test failures
+    * semgrep ``ERROR`` findings
+
+    Type-check errors and semgrep ``WARNING`` findings are
+    configurable via the ``gate_on_*`` parameters.
+
+    Args:
+        container_id: 12-character container ID prefix.
+        path: File or directory path inside the container.
+        gate_on_lint_error: Whether lint errors fail the gate
+            (default ``True``).
+        gate_on_type_error: Whether type-check errors fail the gate
+            (default ``False``).
+        gate_on_test_fail: Whether test failures fail the gate
+            (default ``True``).
+        gate_on_scan_error: Whether semgrep ERROR findings fail the gate
+            (default ``True``).
+        gate_on_scan_warning: Whether semgrep WARNING findings fail the gate
+            (default ``False``).
+
+    Returns:
+        JSON string with:
+
+        * ``status``: ``"ok"`` or ``"failed"``
+        * ``gate_passed``: ``True`` if all gate conditions are satisfied
+        * ``lint``: list of ``{file, line, rule, severity, message}``
+        * ``types``: list of ``{file, line, rule, severity, message}``
+        * ``tests``: ``{status, passed, failed, duration, failures?}``
+        * ``scan``: list of ``{file, line, rule, severity, message}``
+        * ``gate_fail_reasons`` (optional): list of human-readable reasons
+    """
+    client = _docker()
+    try:
+        _ = client.containers.get(container_id)
+    except NotFound:
+        return json.dumps({
+            "status": "error",
+            "gate_passed": False,
+            "error": f"Container {container_id[:12]} not found",
+        })
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "gate_passed": False,
+            "error": str(e),
+        })
+
+    result = run_verify(
+        client,
+        container_id,
+        path,
+        gate_on_lint_error=gate_on_lint_error,
+        gate_on_type_error=gate_on_type_error,
+        gate_on_test_fail=gate_on_test_fail,
+        gate_on_scan_error=gate_on_scan_error,
+        gate_on_scan_warning=gate_on_scan_warning,
+    )
+    return json.dumps(result)
 
 
 # ---------------------------------------------------------------------------

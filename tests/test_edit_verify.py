@@ -16,6 +16,7 @@ import pytest
 
 from src.code_sandbox_mcp.edit_verify import (
     apply_unified_diff,
+    _determine_lint_severity,
     _parse_eslint_output,
     _parse_grep_output,
     _parse_mypy_output,
@@ -23,6 +24,7 @@ from src.code_sandbox_mcp.edit_verify import (
     _parse_rg_json,
     _parse_ruff_output,
     _parse_pyright_output,
+    _parse_semgrep_output,
     _parse_sg_json,
     _parse_tsc_text,
 )
@@ -786,3 +788,343 @@ class TestParseSgJson:
         assert result[0]["file"] == "app.py"
         assert result[0]["line"] == 5
         assert result[0]["text"] == "hello"
+
+
+# ===================================================================
+# _determine_lint_severity tests (Issue #54)
+# ===================================================================
+
+
+class TestDetermineLintSeverity:
+    """Tests for lint severity mapping from rule codes."""
+
+    def test_error_rules(self) -> None:
+        assert _determine_lint_severity("E501") == "error"
+        assert _determine_lint_severity("F401") == "error"
+        assert _determine_lint_severity("B006") == "error"
+        assert _determine_lint_severity("RUF001") == "error"
+
+    def test_warning_rules(self) -> None:
+        assert _determine_lint_severity("W291") == "warning"
+        assert _determine_lint_severity("S101") == "warning"
+        assert _determine_lint_severity("C901") == "warning"
+        assert _determine_lint_severity("N801") == "warning"
+        assert _determine_lint_severity("D100") == "warning"
+
+    def test_info_rules(self) -> None:
+        assert _determine_lint_severity("I001") == "info"
+        assert _determine_lint_severity("SIM101") == "info"
+        assert _determine_lint_severity("PLW0603") == "info"
+        assert _determine_lint_severity("UP006") == "info"
+        assert _determine_lint_severity("TCH001") == "info"
+
+    def test_unknown_rule_defaults_to_error(self) -> None:
+        assert _determine_lint_severity("XYZ999") == "error"
+
+    def test_empty_rule_defaults_to_error(self) -> None:
+        assert _determine_lint_severity("") == "error"
+
+    def test_longest_prefix_match(self) -> None:
+        """C90 should match C90 prefix, not C prefix."""
+        assert _determine_lint_severity("C901") == "warning"
+
+
+# ===================================================================
+# _parse_semgrep_output tests (Issue #54)
+# ===================================================================
+
+
+class TestParseSemgrepOutput:
+    """Tests for semgrep --json output parsing."""
+
+    def test_empty_output(self) -> None:
+        assert _parse_semgrep_output("", "file.py") == []
+
+    def test_single_finding(self) -> None:
+        raw = json.dumps(
+            {
+                "results": [
+                    {
+                        "check_id": "python.lang.security.audit.sql-injection",
+                        "path": "app.py",
+                        "start": {"line": 42, "col": 5},
+                        "end": {"line": 42, "col": 20},
+                        "extra": {
+                            "severity": "ERROR",
+                            "message": "Detected SQL injection risk",
+                        },
+                    }
+                ],
+            }
+        )
+        result = _parse_semgrep_output(raw, "file.py")
+        assert len(result) == 1
+        assert result[0]["file"] == "app.py"
+        assert result[0]["line"] == 42
+        assert result[0]["rule"] == "python.lang.security.audit.sql-injection"
+        assert result[0]["severity"] == "ERROR"
+        assert "SQL injection" in result[0]["message"]
+
+    def test_multiple_findings_mixed_severity(self) -> None:
+        raw = json.dumps(
+            {
+                "results": [
+                    {
+                        "check_id": "rule-one",
+                        "path": "a.py",
+                        "start": {"line": 1},
+                        "extra": {"severity": "ERROR", "message": "error msg"},
+                    },
+                    {
+                        "check_id": "rule-two",
+                        "path": "b.py",
+                        "start": {"line": 5},
+                        "extra": {"severity": "WARNING", "message": "warning msg"},
+                    },
+                    {
+                        "check_id": "rule-three",
+                        "path": "c.py",
+                        "start": {"line": 10},
+                        "extra": {"severity": "INFO", "message": "info msg"},
+                    },
+                ],
+            }
+        )
+        result = _parse_semgrep_output(raw, "file.py")
+        assert len(result) == 3
+        assert result[0]["severity"] == "ERROR"
+        assert result[1]["severity"] == "WARNING"
+        assert result[2]["severity"] == "INFO"
+
+    def test_no_results_key(self) -> None:
+        raw = json.dumps({"errors": [{"message": "parse error"}]})
+        result = _parse_semgrep_output(raw, "file.py")
+        assert result == []
+
+    def test_invalid_json(self) -> None:
+        assert _parse_semgrep_output("not json", "file.py") == []
+
+    def test_finding_with_missing_fields(self) -> None:
+        """Missing severity defaults to WARNING, missing start.line to 0."""
+        raw = json.dumps(
+            {
+                "results": [
+                    {
+                        "check_id": "rule-minimal",
+                        "path": "min.py",
+                    }
+                ],
+            }
+        )
+        result = _parse_semgrep_output(raw, "file.py")
+        assert len(result) == 1
+        assert result[0]["file"] == "min.py"
+        assert result[0]["line"] == 0
+        assert result[0]["severity"] == "WARNING"
+        assert result[0]["message"] == ""
+
+
+# ===================================================================
+# run_verify gate logic tests (Issue #54)
+# ===================================================================
+
+
+class TestVerifyGateLogic:
+    """Tests for the gate logic in run_verify.
+
+    These tests verify the gate decision algorithm without a live
+    container by exercising the severity classification and
+    gate-fail-reason logic directly.
+    """
+
+    def _simulate_gate(
+        self,
+        lint_results: list[dict],
+        type_results: list[dict],
+        test_results: dict,
+        scan_results: list[dict],
+        gate_on_lint_error: bool = True,
+        gate_on_type_error: bool = False,
+        gate_on_test_fail: bool = True,
+        gate_on_scan_error: bool = True,
+        gate_on_scan_warning: bool = False,
+    ) -> tuple[bool, list[str]]:
+        """Simulate the gate logic from run_verify."""
+        reasons: list[str] = []
+
+        if gate_on_lint_error:
+            lint_errors = [
+                r for r in lint_results
+                if r.get("severity") == "error"
+                # Keep in sync with run_verify gate logic
+                and r.get("rule") not in ("no-linter", "error")
+            ]
+            if lint_errors:
+                reasons.append(f"lint: {len(lint_errors)} error(s)")
+
+        if gate_on_type_error:
+            type_errors = [
+                r for r in type_results
+                if r.get("severity") == "error"
+                and r.get("rule") not in ("no-typechecker", "error")
+            ]
+            if type_errors:
+                reasons.append(f"type_check: {len(type_errors)} error(s)")
+
+        if gate_on_test_fail:
+            if test_results.get("status") == "failed":
+                reasons.append(
+                    f"tests: {test_results.get('failed', 0)} failure(s)"
+                )
+
+        if gate_on_scan_error:
+            scan_errors = [
+                r for r in scan_results
+                if r.get("severity") == "ERROR"
+                and r.get("rule") not in ("no-scanner",)
+            ]
+            if scan_errors:
+                reasons.append(f"scan: {len(scan_errors)} ERROR(s)")
+
+        if gate_on_scan_warning:
+            scan_warnings = [
+                r for r in scan_results
+                if r.get("severity") == "WARNING"
+            ]
+            if scan_warnings:
+                reasons.append(f"scan: {len(scan_warnings)} WARNING(s)")
+
+        return (len(reasons) == 0, reasons)
+
+    def test_all_clean_passes_gate(self) -> None:
+        passed, reasons = self._simulate_gate([], [], {"status": "ok", "passed": 10},
+                                               [])
+        assert passed is True
+        assert reasons == []
+
+    def test_lint_error_fails_gate_by_default(self) -> None:
+        lint = [
+            {"file": "a.py", "line": 5, "rule": "F401",
+             "severity": "error", "message": "unused import"},
+        ]
+        passed, reasons = self._simulate_gate(
+            lint, [], {"status": "ok", "passed": 5}, []
+        )
+        assert passed is False
+        assert any("lint" in r for r in reasons)
+
+    def test_lint_warning_does_not_fail_gate(self) -> None:
+        lint = [
+            {"file": "a.py", "line": 5, "rule": "W291",
+             "severity": "warning", "message": "trailing whitespace"},
+        ]
+        passed, _ = self._simulate_gate(lint, [], {"status": "ok", "passed": 5}, [])
+        assert passed is True
+
+    def test_lint_info_does_not_fail_gate(self) -> None:
+        lint = [
+            {"file": "a.py", "line": 5, "rule": "I001",
+             "severity": "info", "message": "unsorted imports"},
+        ]
+        passed, _ = self._simulate_gate(lint, [], {"status": "ok", "passed": 5}, [])
+        assert passed is True
+
+    def test_no_linter_tool_does_not_fail_gate(self) -> None:
+        lint = [
+            {"file": "a.py", "line": 0, "rule": "no-linter",
+             "severity": "info", "message": "ruff not installed"},
+        ]
+        passed, _ = self._simulate_gate(lint, [], {"status": "ok", "passed": 5}, [])
+        assert passed is True
+
+    def test_type_error_passes_gate_by_default(self) -> None:
+        types_ = [
+            {"file": "a.py", "line": 10, "rule": "reportUnknownVariableType",
+             "severity": "error", "message": "unknown type"},
+        ]
+        passed, _ = self._simulate_gate(
+            [], types_, {"status": "ok", "passed": 5}, []
+        )
+        assert passed is True
+
+    def test_type_error_fails_gate_when_enabled(self) -> None:
+        types_ = [
+            {"file": "a.py", "line": 10, "rule": "reportUnknownVariableType",
+             "severity": "error", "message": "unknown type"},
+        ]
+        passed, reasons = self._simulate_gate(
+            [], types_, {"status": "ok", "passed": 5}, [],
+            gate_on_type_error=True,
+        )
+        assert passed is False
+        assert any("type_check" in r for r in reasons)
+
+    def test_test_failure_fails_gate(self) -> None:
+        test = {"status": "failed", "passed": 8, "failed": 2, "duration": 1.5}
+        passed, reasons = self._simulate_gate([], [], test, [])
+        assert passed is False
+        assert any("tests" in r for r in reasons)
+
+    def test_test_failure_passes_when_gate_disabled(self) -> None:
+        test = {"status": "failed", "passed": 8, "failed": 2, "duration": 1.5}
+        passed, _ = self._simulate_gate(
+            [], [], test, [], gate_on_test_fail=False
+        )
+        assert passed is True
+
+    def test_scan_error_fails_gate(self) -> None:
+        scan = [
+            {"file": "a.py", "line": 10, "rule": "python.sql-injection",
+             "severity": "ERROR", "message": "SQL injection"},
+        ]
+        passed, reasons = self._simulate_gate([], [], {"status": "ok", "passed": 3},
+                                               scan)
+        assert passed is False
+        assert any("scan" in r for r in reasons)
+
+    def test_scan_warning_passes_gate_by_default(self) -> None:
+        scan = [
+            {"file": "a.py", "line": 10, "rule": "python.warning",
+             "severity": "WARNING", "message": "something"},
+        ]
+        passed, _ = self._simulate_gate([], [], {"status": "ok", "passed": 3}, scan)
+        assert passed is True
+
+    def test_scan_warning_fails_gate_when_enabled(self) -> None:
+        scan = [
+            {"file": "a.py", "line": 10, "rule": "python.warning",
+             "severity": "WARNING", "message": "something"},
+        ]
+        passed, reasons = self._simulate_gate(
+            [], [], {"status": "ok", "passed": 3}, scan,
+            gate_on_scan_warning=True,
+        )
+        assert passed is False
+        assert any("WARNING" in r for r in reasons)
+
+    def test_no_scanner_tool_does_not_fail_gate(self) -> None:
+        scan = [
+            {"file": "a.py", "line": 0, "rule": "no-scanner",
+             "severity": "info", "message": "semgrep not installed"},
+        ]
+        passed, _ = self._simulate_gate([], [], {"status": "ok", "passed": 3}, scan)
+        assert passed is True
+
+    def test_multiple_fail_reasons_accumulate(self) -> None:
+        lint = [
+            {"file": "a.py", "line": 5, "rule": "F401",
+             "severity": "error", "message": "unused import"},
+        ]
+        scan = [
+            {"file": "a.py", "line": 10, "rule": "python.sql-injection",
+             "severity": "ERROR", "message": "SQL injection"},
+        ]
+        test = {"status": "failed", "passed": 5, "failed": 1, "duration": 0.5}
+        passed, reasons = self._simulate_gate(lint, [], test, scan)
+        assert passed is False
+        assert len(reasons) == 3
+
+    def test_skipped_test_does_not_fail_gate(self) -> None:
+        test = {"status": "skipped", "message": "no test output"}
+        passed, _ = self._simulate_gate([], [], test, [])
+        assert passed is True

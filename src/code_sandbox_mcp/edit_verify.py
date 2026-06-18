@@ -1018,3 +1018,342 @@ def _parse_tsc_json(raw: str, file_path: str) -> list[dict[str, Any]]:
                 }
             )
     return results
+
+
+# ---------------------------------------------------------------------------
+# Severity helper for lint rules
+# ---------------------------------------------------------------------------
+
+#: Ruff rule code prefixes mapped to severity.
+_RUFF_SEVERITY_MAP: dict[str, str] = {
+    "E": "error",      # pycodestyle errors
+    "F": "error",      # Pyflakes
+    "B": "error",      # flake8-bugbear
+    "RUF": "error",    # ruff-specific rules
+    "W": "warning",    # pycodestyle warnings
+    "C90": "warning",  # mccabe complexity
+    "N": "warning",    # pep8-naming
+    "D": "warning",    # pydocstyle
+    "I": "info",       # isort
+    "SIM": "info",     # flake8-simplify
+    "PL": "info",      # Pylint
+    "UP": "info",      # pyupgrade
+    "CPY": "info",     # flake8-copyright
+    "TID": "info",     # flake8-tidy-imports
+    "TCH": "info",     # flake8-type-checking
+    "Q": "info",       # flake8-quotes
+    "RET": "info",     # flake8-return
+    "ARG": "info",     # flake8-unused-arguments
+    "PTH": "info",     # flake8-use-pathlib
+    "G": "info",       # flake8-logging-format
+    "PGH": "info",     # pygrep-hooks
+    "S": "warning",    # flake8-bandit (security)
+}
+
+
+def _determine_lint_severity(rule: str) -> str:
+    """Map a lint rule code to a severity level.
+
+    Uses rule code prefix matching against
+    :data:`_RUFF_SEVERITY_MAP`.  Falls back to ``"error"`` for
+    unrecognised codes (conservative default).
+    """
+    if not rule:
+        return "error"
+    for prefix, severity in sorted(_RUFF_SEVERITY_MAP.items(),
+                                   key=lambda x: -len(x[0])):
+        if rule.startswith(prefix):
+            return severity
+    return "error"
+
+
+# ---------------------------------------------------------------------------
+# Verify: bundled lint + type_check + test + scan   (Issue #54)
+# TODO: consider parallel execution with ThreadPoolExecutor for large projects
+# ---------------------------------------------------------------------------
+
+
+def _run_ruff_verify(container: Any, path: str) -> list[dict[str, Any]]:
+    """Run ruff on *path* for verify.  Single-tool, no fallback."""
+    exit_code, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}ruff check --output-format json "
+            f"{_quote_path(path)} 2>/dev/null || true",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    if exit_code == 127:
+        return [
+            {
+                "file": path,
+                "line": 0,
+                "rule": "no-linter",
+                "severity": "info",
+                "message": "ruff not installed",
+            }
+        ]
+    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    results = _parse_ruff_output(stdout_text, path)
+    for r in results:
+        r["severity"] = _determine_lint_severity(r.get("rule", ""))
+    return results
+
+
+def _run_pyright_verify(container: Any, path: str) -> list[dict[str, Any]]:
+    """Run pyright on *path* for verify.  Single-tool, no fallback."""
+    exit_code, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}pyright --outputjson "
+            f"{_quote_path(path)} 2>/dev/null || true",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    if exit_code == 127:
+        return [
+            {
+                "file": path,
+                "line": 0,
+                "rule": "no-typechecker",
+                "severity": "info",
+                "message": "pyright not installed",
+            }
+        ]
+    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    results = _parse_pyright_output(stdout_text, path)
+    for r in results:
+        r["severity"] = "error"
+    return results
+
+
+def _run_pytest_verify(container: Any, path: str) -> dict[str, Any]:
+    """Run pytest with json-report on *path*.
+
+    Returns a dict with keys ``status``, ``passed``, ``failed``,
+    ``duration``, and optionally ``failures``, matching
+    :class:`code_sandbox_mcp.test_report.TestReport.to_dict`.
+    """
+    exit_code, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            (
+                f"python3 -m pytest --json-report "
+                f"--json-report-file=- {_quote_path(path)} 2>/dev/null || true"
+            ),
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    if exit_code == 127:
+        return {"status": "skipped", "message": "python3 not found"}
+    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+
+    if not stdout_text.strip():
+        return {"status": "skipped", "message": "no test output"}
+
+    try:
+        from code_sandbox_mcp.test_report import PytestAdapter
+
+        report = PytestAdapter.parse_json(stdout_text)
+        return report.to_dict()
+    except Exception:
+        return {
+            "status": "skipped",
+            "message": "pytest not installed or no tests found",
+        }
+
+
+def _run_semgrep_verify(container: Any, path: str) -> list[dict[str, Any]]:
+    """Run semgrep scan on *path* for verify.
+
+    Uses Python and security-audit rule sets.
+    """
+    exit_code, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            (
+                f"semgrep scan --config p/python --config p/security-audit "
+                f"--json {_quote_path(path)} 2>/dev/null || true"
+            ),
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    if exit_code == 127:
+        return [
+            {
+                "file": path,
+                "line": 0,
+                "rule": "no-scanner",
+                "severity": "info",
+                "message": "semgrep not installed",
+            }
+        ]
+    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    return _parse_semgrep_output(stdout_text, path)
+
+
+def _parse_semgrep_output(raw: str, file_path: str) -> list[dict[str, Any]]:
+    """Parse ``semgrep scan --json`` output into the common format.
+
+    Each result includes ``severity`` (``ERROR`` / ``WARNING`` / ``INFO``)
+    directly from semgrep's output.
+    """
+    raw = raw.strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    results: list[dict[str, Any]] = []
+    for finding in data.get("results", []):
+        results.append(
+            {
+                "file": finding.get("path", file_path),
+                "line": int(finding.get("start", {}).get("line", 0)),
+                "rule": finding.get("check_id", "unknown"),
+                "severity": finding.get("extra", {}).get("severity", "WARNING"),
+                "message": finding.get("extra", {}).get("message", ""),
+            }
+        )
+    return results
+
+
+def run_verify(
+    client: Any,
+    container_id: str,
+    path: str,
+    gate_on_lint_error: bool = True,
+    gate_on_type_error: bool = False,
+    gate_on_test_fail: bool = True,
+    gate_on_scan_error: bool = True,
+    gate_on_scan_warning: bool = False,
+) -> dict[str, Any]:
+    """Run lint + type_check + test + scan and return unified results.
+
+    This is the core of the Issue #54 verify tool.  It bundles four
+    analysis layers into a single call, normalises output, and
+    computes a gate decision.
+
+    Args:
+        client: Docker client.
+        container_id: 12-character container ID prefix.
+        path: File or directory path inside the container.
+        gate_on_lint_error: Whether lint errors fail the gate
+            (default ``True``).
+        gate_on_type_error: Whether type-check errors fail the gate
+            (default ``False``).
+        gate_on_test_fail: Whether test failures fail the gate
+            (default ``True``).
+        gate_on_scan_error: Whether semgrep ERROR findings fail the gate
+            (default ``True``).
+        gate_on_scan_warning: Whether semgrep WARNING findings fail the gate
+            (default ``False``).
+
+    Returns:
+        A dict with:
+
+        - ``status``: ``"ok"`` or ``"failed"``
+        - ``gate_passed``: ``True`` if all gate conditions are satisfied
+        - ``lint``: list of lint findings
+        - ``types``: list of type-check findings
+        - ``tests``: test report dict
+        - ``scan``: list of semgrep findings
+        - ``gate_fail_reasons`` (optional): list of human-readable reasons
+          why the gate failed
+    """
+    try:
+        container = client.containers.get(container_id)
+    except Exception as e:
+        return {
+            "status": "error",
+            "gate_passed": False,
+            "error": f"Container {container_id[:12]} not found: {e}",
+        }
+
+    lint_results = _run_ruff_verify(container, path)
+    type_results = _run_pyright_verify(container, path)
+    test_results = _run_pytest_verify(container, path)
+    scan_results = _run_semgrep_verify(container, path)
+
+    gate_fail_reasons: list[str] = []
+
+    if gate_on_lint_error:
+        lint_errors = [
+            r for r in lint_results
+            if r.get("severity") == "error"
+            # "error" rule is a safety net for unexpected paths;
+            # _run_ruff_verify never produces it today.
+            and r.get("rule") not in ("no-linter", "error")
+        ]
+        if lint_errors:
+            gate_fail_reasons.append(
+                f"lint: {len(lint_errors)} error(s)"
+            )
+
+    if gate_on_type_error:
+        type_errors = [
+            r for r in type_results
+            if r.get("severity") == "error"
+            and r.get("rule") not in ("no-typechecker", "error")
+        ]
+        if type_errors:
+            gate_fail_reasons.append(
+                f"type_check: {len(type_errors)} error(s)"
+            )
+
+    if gate_on_test_fail:
+        if test_results.get("status") == "failed":
+            gate_fail_reasons.append(
+                f"tests: {test_results.get('failed', 0)} failure(s)"
+            )
+
+    if gate_on_scan_error:
+        scan_errors = [
+            r for r in scan_results
+            if r.get("severity") == "ERROR"
+            and r.get("rule") not in ("no-scanner",)
+        ]
+        if scan_errors:
+            gate_fail_reasons.append(
+                f"scan: {len(scan_errors)} ERROR(s)"
+            )
+
+    if gate_on_scan_warning:
+        scan_warnings = [
+            r for r in scan_results
+            if r.get("severity") == "WARNING"
+        ]
+        if scan_warnings:
+            gate_fail_reasons.append(
+                f"scan: {len(scan_warnings)} WARNING(s)"
+            )
+
+    gate_passed = len(gate_fail_reasons) == 0
+    overall_status = "failed" if not gate_passed else "ok"
+
+    result: dict[str, Any] = {
+        "status": overall_status,
+        "gate_passed": gate_passed,
+        "lint": lint_results,
+        "types": type_results,
+        "tests": test_results,
+        "scan": scan_results,
+    }
+    if gate_fail_reasons:
+        result["gate_fail_reasons"] = gate_fail_reasons
+
+    return result

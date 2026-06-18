@@ -266,7 +266,7 @@ def _search_lexical(
 
     cmd = (
         f"rg --json -n {quoted_pattern} {quoted_path} "
-        f"--no-heading -I 2>/dev/null || true"
+        f"-I 2>/dev/null || true"
     )
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
@@ -315,7 +315,7 @@ def _search_structural(
     quoted_pattern = shlex.quote(pattern)
     quoted_path = shlex.quote(path)
 
-    cmd = f"sg run -p {quoted_pattern} {quoted_path} --json 2>/dev/null || true"
+    cmd = f"sg run -p {quoted_pattern} {quoted_path} --json=stream 2>/dev/null || true"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
         stdout=True,
@@ -404,10 +404,9 @@ def _parse_grep_output(raw: str, max_results: int) -> list[dict[str, Any]]:
 
 
 def _parse_sg_json(raw: str, max_results: int) -> list[dict[str, Any]]:
-    """Parse ``sg run --json`` output.
+    """Parse ``sg run --json=stream`` output.
 
-    ``sg run --json`` outputs one JSON array per file.  This parser
-    handles both a single array and newline-delimited arrays.
+    ``sg run --json=stream`` outputs one JSON object per line.
     """
     raw = raw.strip()
     if not raw:

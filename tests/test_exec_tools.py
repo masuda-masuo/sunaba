@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from code_sandbox_mcp.server import (
     _container_env,
+    copy_file,
     copy_project,
     sandbox_exec,
     sandbox_initialize,
@@ -467,6 +468,32 @@ class TestCopyProject:
             dest_dir="/nonexistent",
         )
         assert "Error" in result
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.record_copy")
+    def test_copy_file_default_dest_path(
+        self,
+        mock_record_copy: MagicMock,
+        mock_docker: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Default dest_path is /home/sandbox."""
+        src_file = tmp_path / "hello.txt"
+        src_file.write_text("hello")
+
+        mock_container = MagicMock()
+        mock_container.put_archive.return_value = True
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = copy_file(
+            container_id="abc123",
+            local_src_file=str(src_file),
+        )
+
+        assert "Error" not in result
+        assert "/home/sandbox" in result
 
 
 class TestServerArgs:

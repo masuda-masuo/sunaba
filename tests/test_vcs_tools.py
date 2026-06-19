@@ -616,6 +616,39 @@ class TestSubmit:
         assert result["step"] == "git_push"
         assert "permission denied" in result["error"]
 
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.generate_token")
+    @patch("code_sandbox_mcp.server.record_boundary_crossing")
+    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    def test_dry_run_default_working_dir(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_gen_token: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Default working_dir is /home/sandbox."""
+        mock_run_id.return_value = "run123"
+        mock_gen_token.return_value = "tok_abc123"
+
+        container = _make_container_mock([
+            (0, b"M modified.py\n?? new.py\n---DIFF---\n 2 files changed", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/issue-55",
+            message="Fix issue #55",
+            dry_run=True,
+        ))
+
+        assert result["status"] == "dry_run"
+        call_args = container.exec_run.call_args[0][0]
+        assert "cd /home/sandbox" in call_args[2]
+
 
 # ---------------------------------------------------------------------------
 # Token flow integration tests

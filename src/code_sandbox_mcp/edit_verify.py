@@ -577,6 +577,8 @@ def read_file_lines(
         "next_offset": next_offset if has_more else None,
         "error": None,
     }
+
+
 def lint_file(
     client: Any,
     container_id: str,

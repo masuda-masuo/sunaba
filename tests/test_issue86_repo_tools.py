@@ -36,7 +36,7 @@ class TestCloneRepo:
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
         assert result["repo"] == "owner/mytool"
-        assert result["clone_path"] == "/root/mytool"
+        assert result["clone_path"] == "/home/sandbox/mytool"
         assert result["branch"] == "default"
         mock_record.assert_called_once()
 

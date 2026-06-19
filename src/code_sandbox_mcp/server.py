@@ -33,6 +33,7 @@ from code_sandbox_mcp.edit_verify import (
     run_verify,
     search_files,
     type_check_file,
+    write_file,
 )
 from code_sandbox_mcp.output_control import (
     compress_repeated_lines,
@@ -45,7 +46,6 @@ from code_sandbox_mcp.journal import (
     record_boundary_crossing,
     record_copy,
     record_exec as journal_record_exec,
-    record_file_write,
     record_initialize,
     record_stop,
     read_journal,
@@ -801,22 +801,10 @@ def write_file_sandbox(
             if file_contents.endswith("\n"):
                 content += "\n"
 
-    # Write the content via base64 to avoid shell escaping
-    import base64
-
-    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    cmd = f"mkdir -p {shlex.quote(dest_dir)} && echo {encoded} | base64 -d > {shlex.quote(dest_path)}"
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", cmd],
-        stdout=True,
-        stderr=True,
-    )
-    _, stderr_part = output if isinstance(output, tuple) else (None, output)
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-
-    if exit_code != 0:
-        return f"Error: {stderr_text}"
-    record_file_write(container_id[:12], file_name, dest_dir, len(content))
+    try:
+        write_file(client, container_id, dest_path, content)
+    except ValueError as e:
+        return f"Error: {e}"
     return f"Written {len(content)} bytes to {dest_path}"
 
 

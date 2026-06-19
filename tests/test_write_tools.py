@@ -526,3 +526,32 @@ class TestWriteFileSandboxFileNotFound:
         assert expected_pattern in result, (
             f"Expected '{expected_pattern}' in result, got: {result}"
         )
+
+
+class TestWriteFileSandboxJournal:
+    """Tests that write_file_sandbox records journal entries via write_file (Issue #96)."""
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.edit_verify.record_file_write")
+    def test_full_overwrite_records_journal(
+        self, mock_record: MagicMock, mock_docker: MagicMock,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents="print('hello')",
+            dest_dir="/root",
+        )
+        assert "Error" not in result
+        mock_record.assert_called_once()
+        args, _ = mock_record.call_args
+        assert args[0] == "abc123"  # container_id
+        assert args[1] == "test.py"  # file_name
+        assert "/root" in args[2]  # dest_dir
+        assert args[3] > 0  # byte_count

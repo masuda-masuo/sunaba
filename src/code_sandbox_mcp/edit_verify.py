@@ -14,9 +14,12 @@ consumes only hundreds of tokens instead of thousands.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 from typing import Any
+
+from code_sandbox_mcp.journal import record_file_write
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +184,12 @@ def _read_file(client: Any, container_id: str, file_path: str) -> str:
     return stdout_text
 
 
-def _write_file(client: Any, container_id: str, file_path: str, content: str) -> None:
-    """Write *content* to *file_path* in the sandbox container."""
+def write_file(client: Any, container_id: str, file_path: str, content: str) -> None:
+    """Write *content* to *file_path* in the sandbox container.
+
+    Ensures the parent directory exists and records the write
+    in the execution journal (Issue #96).
+    """
     try:
         container = client.containers.get(container_id)
     except Exception as e:
@@ -191,7 +198,8 @@ def _write_file(client: Any, container_id: str, file_path: str, content: str) ->
     import base64
 
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    cmd = f"echo {encoded} | base64 -d > {_quote_path(file_path)}"
+    parent = _quote_path(os.path.dirname(file_path) or ".")
+    cmd = f"mkdir -p {parent} && echo {encoded} | base64 -d > {_quote_path(file_path)}"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
         stdout=True,
@@ -204,6 +212,12 @@ def _write_file(client: Any, container_id: str, file_path: str, content: str) ->
         raise ValueError(
             f"Failed to write {file_path}: exit code {exit_code}\n{stderr_text}"
         )
+    record_file_write(
+        container_id[:12],
+        os.path.basename(file_path),
+        os.path.dirname(file_path) or "/",
+        len(content),
+    )
 
 
 def _quote_path(path: str) -> str:
@@ -501,7 +515,7 @@ def apply_patch_to_file(
         return f"Error: failed to apply diff: {e}"
 
     try:
-        _write_file(client, container_id, file_path, patched)
+        write_file(client, container_id, file_path, patched)
     except ValueError as e:
         return f"Error: {e}"
 

@@ -14,9 +14,12 @@ consumes only hundreds of tokens instead of thousands.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 from typing import Any
+
+from code_sandbox_mcp.journal import record_file_write
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +154,7 @@ def apply_unified_diff(content: str, diff_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _read_file(client: Any, container_id: str, file_path: str) -> str:
+def read_file(container: Any, file_path: str) -> str:
     """Read the full content of *file_path* from the sandbox container.
 
     Returns:
@@ -160,11 +163,6 @@ def _read_file(client: Any, container_id: str, file_path: str) -> str:
     Raises:
         ValueError: Container not found or file read error.
     """
-    try:
-        container = client.containers.get(container_id)
-    except Exception as e:
-        raise ValueError(f"Container {container_id[:12]} not found: {e}") from e
-
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", f"cat {_quote_path(file_path)}"],
         stdout=True,
@@ -181,17 +179,23 @@ def _read_file(client: Any, container_id: str, file_path: str) -> str:
     return stdout_text
 
 
-def _write_file(client: Any, container_id: str, file_path: str, content: str) -> None:
-    """Write *content* to *file_path* in the sandbox container."""
-    try:
-        container = client.containers.get(container_id)
-    except Exception as e:
-        raise ValueError(f"Container {container_id[:12]} not found: {e}") from e
+def write_file(container: Any, container_id_short: str, file_path: str, content: str) -> None:
+    """Write *content* to *file_path* in the sandbox container.
+
+    Ensures the parent directory exists and records the write
+    in the execution journal (Issue #96).
+    """
+    if not file_path.startswith("/"):
+        raise ValueError(f"file_path must be absolute: {file_path!r}")
+    canon = os.path.normpath(file_path)
+    if ".." in canon.split(os.sep):
+        raise ValueError(f"Path traversal detected: {file_path!r}")
 
     import base64
 
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    cmd = f"echo {encoded} | base64 -d > {_quote_path(file_path)}"
+    parent = _quote_path(os.path.dirname(file_path) or ".")
+    cmd = f"mkdir -p {parent} && echo {encoded} | base64 -d > {_quote_path(file_path)}"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
         stdout=True,
@@ -204,6 +208,12 @@ def _write_file(client: Any, container_id: str, file_path: str, content: str) ->
         raise ValueError(
             f"Failed to write {file_path}: exit code {exit_code}\n{stderr_text}"
         )
+    record_file_write(
+        container_id_short,
+        os.path.basename(file_path),
+        os.path.dirname(file_path) or "/",
+        len(content),
+    )
 
 
 def _quote_path(path: str) -> str:
@@ -491,7 +501,12 @@ def apply_patch_to_file(
 ) -> str:
     """Apply a unified diff to a file inside the sandbox container."""
     try:
-        current = _read_file(client, container_id, file_path)
+        container = client.containers.get(container_id)
+    except Exception as e:
+        return f"Error: Container {container_id[:12]} not found: {e}"
+
+    try:
+        current = read_file(container, file_path)
     except ValueError as e:
         return f"Error: {e}"
 
@@ -501,7 +516,7 @@ def apply_patch_to_file(
         return f"Error: failed to apply diff: {e}"
 
     try:
-        _write_file(client, container_id, file_path, patched)
+        write_file(container, container_id[:12], file_path, patched)
     except ValueError as e:
         return f"Error: {e}"
 
@@ -509,8 +524,7 @@ def apply_patch_to_file(
 
 
 def read_file_lines(
-    client: Any,
-    container_id: str,
+    container: Any,
     file_path: str,
     offset: int = 0,
     limit: int = 50,
@@ -526,7 +540,7 @@ def read_file_lines(
     - ``error`` (str | None): error message if the read failed
     """
     try:
-        content = _read_file(client, container_id, file_path)
+        content = read_file(container, file_path)
     except ValueError as e:
         return {"error": str(e)}
 

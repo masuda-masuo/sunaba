@@ -29,10 +29,12 @@ from code_sandbox_mcp import RESTART_EXIT_CODE
 from code_sandbox_mcp.edit_verify import (
     apply_patch_to_file,
     lint_file,
+    read_file,
     read_file_lines,
     run_verify,
     search_files,
     type_check_file,
+    write_file,
 )
 from code_sandbox_mcp.output_control import (
     compress_repeated_lines,
@@ -45,7 +47,6 @@ from code_sandbox_mcp.journal import (
     record_boundary_crossing,
     record_copy,
     record_exec as journal_record_exec,
-    record_file_write,
     record_initialize,
     record_stop,
     read_journal,
@@ -756,23 +757,10 @@ def write_file_sandbox(
 
     # For partial updates, read existing content
     if append or old_str is not None or has_line_range:
-        # Check file exists
-        exit_code, output = container.exec_run(
-            ["/bin/sh", "-c", f"test -f {shlex.quote(dest_path)}"],
-            stdout=True,
-            stderr=True,
-        )
-        if exit_code != 0:
+        try:
+            existing = read_file(container, dest_path)
+        except ValueError as e:
             return f"Error: file {dest_path} not found"
-
-        # Read existing file
-        exit_code, output = container.exec_run(
-            ["/bin/sh", "-c", f"cat {shlex.quote(dest_path)}"],
-            stdout=True,
-            stderr=True,
-        )
-        stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-        existing = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
         existing_lines = existing.splitlines()
 
         # Validate bounds
@@ -801,22 +789,10 @@ def write_file_sandbox(
             if file_contents.endswith("\n"):
                 content += "\n"
 
-    # Write the content via base64 to avoid shell escaping
-    import base64
-
-    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    cmd = f"mkdir -p {shlex.quote(dest_dir)} && echo {encoded} | base64 -d > {shlex.quote(dest_path)}"
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", cmd],
-        stdout=True,
-        stderr=True,
-    )
-    _, stderr_part = output if isinstance(output, tuple) else (None, output)
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-
-    if exit_code != 0:
-        return f"Error: {stderr_text}"
-    record_file_write(container_id[:12], file_name, dest_dir, len(content))
+    try:
+        write_file(container, container_id[:12], dest_path, content)
+    except ValueError as e:
+        return f"Error: {e}"
     return f"Written {len(content)} bytes to {dest_path}"
 
 
@@ -1298,7 +1274,7 @@ def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
     """
     client = _docker()
     try:
-        _ = client.containers.get(container_id)
+        container = client.containers.get(container_id)
     except NotFound:
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
@@ -1342,7 +1318,7 @@ def read_file_range(
         return json.dumps({"error": str(e)})
 
     result = read_file_lines(
-        client, container_id, file_path, offset=offset, limit=limit
+        container, file_path, offset=offset, limit=limit
     )
     return json.dumps(result)
 

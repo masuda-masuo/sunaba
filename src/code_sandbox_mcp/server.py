@@ -6,6 +6,7 @@ This module defines the FastMCP server and all tool handlers.
 from __future__ import annotations
 
 import argparse
+import base64
 import difflib
 import io
 import json
@@ -481,8 +482,9 @@ def sandbox_exec(
         return json.dumps({"status": "error", "error": str(e)})
 
     joined = " && ".join(commands)
+    encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
     exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", joined],
+        ["/bin/sh", "-c", f"echo {shlex.quote(encoded)} | base64 -d | /bin/sh"],
         stdout=True,
         stderr=True,
         demux=True,
@@ -567,8 +569,10 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
 
     job_id = f"{container_id}-{int(time.time())}"
     joined = " && ".join(commands)
+    encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
+    inner_cmd = f"echo {shlex.quote(encoded)} | base64 -d | /bin/sh"
     bg_cmd = (
-        f"nohup /bin/sh -c {shlex.quote(joined)} "
+        f"nohup /bin/sh -c {shlex.quote(inner_cmd)} "
         f"> /tmp/{job_id}.out 2> /tmp/{job_id}.err; "
         f"echo $? > /tmp/{job_id}.exit"
     )
@@ -1348,8 +1352,9 @@ def run_container_and_exec(
     # --- Execute commands ---
     try:
         joined = " && ".join(commands)
+        encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
         exit_code, output = container.exec_run(
-            ["/bin/sh", "-c", joined],
+            ["/bin/sh", "-c", f"echo {shlex.quote(encoded)} | base64 -d | /bin/sh"],
             stdout=True,
             stderr=True,
             demux=True,
@@ -1869,8 +1874,6 @@ def issue_view(
         characters of body), ``file`` path, and ``size_bytes``.
         On error returns an ``error`` field.
     """
-    import base64
-
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -2020,8 +2023,6 @@ def submit(
     Returns:
         JSON string with operation result.
     """
-    import base64
-
     client = _docker()
     try:
         container = client.containers.get(container_id)

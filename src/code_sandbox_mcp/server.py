@@ -487,7 +487,9 @@ def sandbox_exec(
     cmd = (
         f"echo {shlex.quote(encoded)} | base64 -d > {tmpf}"
         f" && chmod +x {tmpf}"
-        f" && {tmpf}"
+        f" && {tmpf}; rc=$?"
+        f"; rm -f {tmpf}"
+        f"; exit $rc"
     )
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
@@ -580,7 +582,9 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
     inner_cmd = (
         f"echo {shlex.quote(encoded)} | base64 -d > {tmpf}"
         f" && chmod +x {tmpf}"
-        f" && {tmpf}"
+        f" && {tmpf}; rc=$?"
+        f"; rm -f {tmpf}"
+        f"; exit $rc"
     )
     bg_cmd = (
         f"nohup /bin/sh -c {shlex.quote(inner_cmd)} "
@@ -1368,7 +1372,9 @@ def run_container_and_exec(
         cmd = (
             f"echo {shlex.quote(encoded)} | base64 -d > {tmpf}"
             f" && chmod +x {tmpf}"
-            f" && {tmpf}"
+            f" && {tmpf}; rc=$?"
+            f"; rm -f {tmpf}"
+            f"; exit $rc"
         )
         exit_code, output = container.exec_run(
             ["/bin/sh", "-c", cmd],

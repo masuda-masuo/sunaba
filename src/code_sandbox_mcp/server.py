@@ -761,9 +761,7 @@ def write_file_sandbox(
             existing = read_file(container, dest_path)
         except ValueError as e:
             return f"Error: file {dest_path} not found"
-        existing_lines = existing.split("\n")
-        if existing_lines and existing_lines[-1] == "":
-            existing_lines = existing_lines[:-1]
+        existing_lines = existing.splitlines()
 
         # Validate bounds
         if start_line is not None and start_line > len(existing_lines):
@@ -785,9 +783,7 @@ def write_file_sandbox(
         else:
             start = start_line - 1 if start_line is not None else 0
             end = end_line if end_line is not None else len(existing_lines)
-            new_lines = file_contents.split("\n")
-            if new_lines and new_lines[-1] == "":
-                new_lines = new_lines[:-1]
+            new_lines = file_contents.splitlines()
             content_lines = existing_lines[:start] + new_lines + existing_lines[end:]
             content = "\n".join(content_lines)
             if file_contents.endswith("\n"):

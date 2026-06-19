@@ -529,7 +529,10 @@ def read_file_lines(
     offset: int = 0,
     limit: int = 50,
 ) -> dict[str, Any]:
-    """Read *limit* lines from *file_path* starting at *offset.
+    """Read lines from *file_path* starting at *offset*.
+
+    When *limit* is a positive integer, reads up to that many lines.
+    When *limit* is ``-1``, reads all lines from *offset* to the end.
 
     Returns a dict with:
     - ``content`` (str): the requested lines joined by newline
@@ -538,6 +541,16 @@ def read_file_lines(
     - ``has_more`` (bool): whether there are more lines after this range
     - ``next_offset`` (int | None): offset for the next page (if any)
     - ``error`` (str | None): error message if the read failed
+
+    Args:
+        container: Docker container object.
+        file_path: Path to the file inside the container.
+        offset: 0-indexed line offset to start reading from.
+        limit: Maximum number of lines to return.  Use ``-1`` to read
+            all remaining lines from *offset*.
+
+    Returns:
+        A dict with content and pagination metadata.
     """
     try:
         content = read_file(container, file_path)
@@ -546,20 +559,24 @@ def read_file_lines(
 
     lines = content.split("\n")
     total = len(lines)
-    page_lines = lines[offset : offset + limit]
+
+    if limit == -1:
+        page_lines = lines[offset:]
+        shown = max(0, total - offset)
+    else:
+        page_lines = lines[offset : offset + limit]
+        shown = len(page_lines)
     next_offset = offset + limit
-    has_more = next_offset < total
+    has_more = limit != -1 and next_offset < total
 
     return {
         "content": "\n".join(page_lines),
         "total_lines": total,
-        "shown": len(page_lines),
+        "shown": shown,
         "has_more": has_more,
         "next_offset": next_offset if has_more else None,
         "error": None,
     }
-
-
 def lint_file(
     client: Any,
     container_id: str,

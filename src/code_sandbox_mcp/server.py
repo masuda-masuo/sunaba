@@ -1479,7 +1479,7 @@ def read_file_range(
     offset: int = 0,
     limit: int = 50,
 ) -> str:
-    """Read *limit* lines from *file_path* starting at *offset*.
+    """Read lines from *file_path* starting at *offset*.
 
     Returns a JSON string with:
     - ``content`` (str): the requested lines
@@ -1492,7 +1492,8 @@ def read_file_range(
         container_id: 12-character container ID prefix.
         file_path: Path to the file inside the container.
         offset: 0-indexed line offset to start reading from.
-        limit: Maximum number of lines to return.
+        limit: Maximum number of lines to return.  Use ``-1`` to read
+            all remaining lines from *offset*.
 
     Returns:
         JSON string with file content and metadata, or an error

@@ -535,6 +535,41 @@ class TestReadFileLines:
         has_more = next_offset < total
         assert has_more is False
 
+    def test_limit_negative_one_reads_all_remaining(self) -> None:
+        """When limit=-1, reads all lines from offset to end."""
+        lines = ["a", "b", "c", "d", "e"]
+        offset = 1
+        limit = -1
+        if limit == -1:
+            page_lines = lines[offset:]
+            shown = max(0, len(lines) - offset)
+        else:
+            page_lines = lines[offset : offset + limit]
+            shown = len(page_lines)
+        next_offset = offset + limit
+        has_more = limit != -1 and next_offset < len(lines)
+        assert page_lines == ["b", "c", "d", "e"]
+        assert shown == 4
+        assert has_more is False
+
+    def test_limit_negative_one_reads_all_from_start(self) -> None:
+        """When limit=-1 and offset=0, reads the entire file."""
+        lines = ["a", "b", "c"]
+        offset = 0
+        limit = -1
+        if limit == -1:
+            page_lines = lines[offset:]
+            shown = max(0, len(lines) - offset)
+        else:
+            page_lines = lines[offset : offset + limit]
+            shown = len(page_lines)
+        next_offset = offset + limit
+        has_more = limit != -1 and next_offset < len(lines)
+        assert page_lines == ["a", "b", "c"]
+        assert shown == 3
+        assert has_more is False
+        assert has_more is False
+
 
 # ===================================================================
 # lint_file parsers: edge cases

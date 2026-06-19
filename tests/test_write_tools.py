@@ -91,7 +91,7 @@ class TestWriteFileSandboxFullOverwrite:
     def test_full_overwrite_default_dest_dir(
         self, mock_docker: MagicMock,
     ) -> None:
-        """Default dest_dir is /root."""
+        """Default dest_dir is /home/sandbox."""
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"", b""))
         mock_client = MagicMock()
@@ -104,7 +104,7 @@ class TestWriteFileSandboxFullOverwrite:
             file_contents="data",
         )
         assert "Error" not in result
-        assert "/root" in result
+        assert "/home/sandbox" in result
         # Verify exec_run was called
         mock_container.exec_run.assert_called_once()
 

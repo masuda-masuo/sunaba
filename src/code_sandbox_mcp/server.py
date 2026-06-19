@@ -691,7 +691,7 @@ def write_file_sandbox(
     container_id: str,
     file_name: str,
     file_contents: str,
-    dest_dir: str = "/root",
+    dest_dir: str = "/home/sandbox",
     start_line: int | None = None,
     end_line: int | None = None,
     append: bool = False,
@@ -722,7 +722,7 @@ def write_file_sandbox(
         container_id: 12-character container ID prefix.
         file_name: Name of the file to write.
         file_contents: Content to write.
-        dest_dir: Destination directory in the container (default: ``/root``).
+        dest_dir: Destination directory in the container (default: ``/home/sandbox``).
         start_line: Start line for line-range replacement (1-indexed, inclusive).
         end_line: End line for line-range replacement (1-indexed, inclusive).
         append: When True, appends to the end of the file.
@@ -829,7 +829,7 @@ def write_file_sandbox(
 def copy_project(
     container_id: str,
     local_src_dir: str,
-    dest_dir: str = "/root",
+    dest_dir: str = "/home/sandbox",
 ) -> str:
     """Copy a local directory (or file) into the container as a tar archive.
 
@@ -837,13 +837,13 @@ def copy_project(
     streams it into the container with ``put_archive``.
 
     The target directory inside the tar archive is named after the
-    source directory itself (i.e. ``/root/source_dir_name/...``).
+    source directory itself (i.e. ``/home/sandbox/source_dir_name/...``).
 
     Args:
         container_id: 12-character container ID prefix.
         local_src_dir: Path to the local directory to copy.
         dest_dir: Destination directory in the container (default:
-            ``/root``).
+            ``/home/sandbox``).
 
     Returns:
         Success or error message.
@@ -890,7 +890,7 @@ def copy_project(
 def copy_file(
     container_id: str,
     local_src_file: str,
-    dest_path: str = "/root",
+    dest_path: str = "/home/sandbox",
 ) -> str:
     """Copy a single local file into the container.
 
@@ -898,7 +898,7 @@ def copy_file(
         container_id: 12-character container ID prefix.
         local_src_file: Path to the local file to copy.
         dest_path: Destination directory or path in the container
-            (default: ``/root``).
+            (default: ``/home/sandbox``).
 
     Returns:
         Success or error message.
@@ -1797,7 +1797,7 @@ def submit(
     repo: str,
     branch: str,
     message: str,
-    working_dir: str = "/root",
+    working_dir: str = "/home/sandbox",
     create_pr: bool = False,
     pr_title: str = "",
     pr_body: str = "",
@@ -1831,7 +1831,7 @@ def submit(
         branch: Branch name to push.
         message: Git commit message.
         working_dir: Directory in the container containing the git
-            repository (default ``"/root"``).
+            repository (default ``"/home/sandbox"``).
         create_pr: Whether to create a pull request after push.
         pr_title: PR title (required if ``create_pr=True``).
         pr_body: PR body (optional).

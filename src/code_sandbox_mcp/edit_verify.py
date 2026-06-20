@@ -131,15 +131,26 @@ def detect_languages(
     if ext in _LANGUAGE_EXT_MAP:
         return {_LANGUAGE_EXT_MAP[ext]}, None
 
-    # Directory: check marker files
+    # Directory: check marker files (single exec for efficiency)
     markers_found: set[str] = set()
-    for marker, lang in _DIR_MARKERS.items():
-        marker_path = os.path.join(path, marker)
-        ec, _ = container.exec_run(
-            ["/bin/sh", "-c", f"test -f {_quote_path(marker_path)}"],
-        )
-        if ec == 0:
-            markers_found.add(lang)
+    marker_paths = " ".join(
+        shlex.quote(os.path.join(path, m))
+        for m in _DIR_MARKERS
+    )
+    ec, output = container.exec_run(
+        ["/bin/sh", "-c", f"ls -1d {marker_paths} 2>/dev/null"],
+        stdout=True,
+        stderr=True,
+    )
+    if ec == 0:
+        stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+        out = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+        found_markers = set(out.strip().split("\n")) if out.strip() else set()
+        name_to_lang = {os.path.basename(p): lang for p, lang in _DIR_MARKERS.items()}
+        for marker_name in found_markers:
+            basename = os.path.basename(marker_name.rstrip("/"))
+            if basename in name_to_lang:
+                markers_found.add(name_to_lang[basename])
 
     # tsconfig.json overrides package.json for ts (prefer TypeScript)
     if "ts" in markers_found:
@@ -770,7 +781,7 @@ def _run_eslint_verify(container: Any, path: str) -> VerifyResult:
         [
             "/bin/sh",
             "-c",
-            f"eslint --format json {_quote_path(path)}",
+            f"{_SANDBOX_ENV}eslint --format json {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,
@@ -797,7 +808,7 @@ def _run_golangci_lint_verify(container: Any, path: str) -> VerifyResult:
         [
             "/bin/sh",
             "-c",
-            f"golangci-lint run --out-format json {_quote_path(path)}",
+            f"{_SANDBOX_ENV}golangci-lint run --out-format json {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,
@@ -809,6 +820,7 @@ def _run_golangci_lint_verify(container: Any, path: str) -> VerifyResult:
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec not in (0, 1):
+        # golangci-lint uses exit 2 for execution errors (config issues, etc.)
         return _envelope_error("golangci-lint", stderr_text.strip() or f"exit code {ec}", ec)
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
@@ -824,7 +836,7 @@ def _run_go_vet_verify(container: Any, path: str) -> VerifyResult:
         [
             "/bin/sh",
             "-c",
-            f"go vet {_quote_path(path)}",
+            f"{_SANDBOX_ENV}go vet {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,
@@ -940,7 +952,7 @@ def _run_tsc_verify(container: Any, path: str) -> VerifyResult:
         [
             "/bin/sh",
             "-c",
-            f"npx tsc --noEmit {_quote_path(path)} 2>&1",
+            f"{_SANDBOX_ENV}npx tsc --noEmit {_quote_path(path)} 2>&1",
         ],
         stdout=True,
         stderr=True,
@@ -971,7 +983,7 @@ def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
         [
             "/bin/sh",
             "-c",
-            f"python3 -m pytest --json-report --json-report-file=- {_quote_path(path)}",
+            f"{_SANDBOX_ENV}python3 -m pytest --json-report --json-report-file=- {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,
@@ -1017,7 +1029,7 @@ def _run_jest_verify(container: Any, path: str) -> VerifyResult:
         [
             "/bin/sh",
             "-c",
-            f"npx jest --json --passWithNoTests {_quote_path(path)}",
+            f"{_SANDBOX_ENV}npx jest --json --passWithNoTests {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,
@@ -1060,7 +1072,7 @@ def _run_go_test_verify(container: Any, path: str) -> VerifyResult:
         [
             "/bin/sh",
             "-c",
-            f"go test -json {_quote_path(path)}",
+            f"{_SANDBOX_ENV}go test -json {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,
@@ -1103,7 +1115,7 @@ def _run_semgrep_verify(container: Any, path: str, lang_config: str = "p/python"
         [
             "/bin/sh",
             "-c",
-            f"semgrep scan --config {lang_config} --config p/security-audit "
+            f"{_SANDBOX_ENV}semgrep scan --config {lang_config} --config p/security-audit "
             f"--json {_quote_path(path)}",
         ],
         stdout=True,
@@ -1120,6 +1132,12 @@ def _run_semgrep_verify(container: Any, path: str, lang_config: str = "p/python"
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     findings = _parse_semgrep_output(stdout_text, path)
+    if not findings and stdout_text.strip() and ec >= 2:
+        return _envelope_error(
+            "semgrep",
+            f"parse error: semgrep output was non-empty but could not be parsed (exit {ec})",
+            ec,
+        )
     return _envelope_ok("semgrep", findings, ec)
 
 
@@ -1223,7 +1241,7 @@ def lint_file(
 def _run_python_linter(container: Any, file_path: str) -> list[dict[str, Any]]:
     """Try ruff, fall back to pylint. Report tool absence clearly."""
     result = _run_ruff_verify(container, file_path)
-    if result.status not in ("not_available",):
+    if result.status not in ("not_available", "error"):
         return result.findings
 
     # ruff not available, try pylint
@@ -1248,7 +1266,7 @@ def _run_python_linter(container: Any, file_path: str) -> list[dict[str, Any]]:
 def _run_js_linter(container: Any, file_path: str) -> list[dict[str, Any]]:
     """Try eslint."""
     result = _run_eslint_verify(container, file_path)
-    if result.status not in ("not_available",):
+    if result.status not in ("not_available", "error"):
         return result.findings
 
     return [
@@ -1276,7 +1294,7 @@ def type_check_file(
     If no type checker is installed, returns ``rule: "no-typechecker"``.
 
     Supported:
-    - ``.py`` files -> ``mypy`` (falls back to ``pyright``)
+    - ``.py`` files -> ``pyright`` (falls back to ``mypy``)
     - ``.ts``, ``.tsx`` files -> ``tsc --noEmit``
     """
     try:
@@ -1302,16 +1320,16 @@ def type_check_file(
 
 
 def _run_python_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
-    """Try mypy, fall back to pyright. Uses unified runners."""
-    # Try mypy first (consistent with old behaviour)
-    mypy_result = _run_mypy_verify(container, file_path)
-    if mypy_result.status not in ("not_available", "error"):
-        return mypy_result.findings
-
-    # Fall back to pyright
+    """Try pyright, fall back to mypy. Matches _DISPATCH priority."""
+    # Try pyright first (primary, matches _DISPATCH)
     pyright_result = _run_pyright_verify(container, file_path)
     if pyright_result.status not in ("not_available", "error"):
         return pyright_result.findings
+
+    # Fall back to mypy
+    mypy_result = _run_mypy_verify(container, file_path)
+    if mypy_result.status not in ("not_available", "error"):
+        return mypy_result.findings
 
     return [
         {

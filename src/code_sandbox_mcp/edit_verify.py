@@ -16,10 +16,12 @@ language-aware dispatch, status envelopes, and proper gate logic.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import shlex
+import secrets
 import fnmatch
 from dataclasses import dataclass, field
 from typing import Any
@@ -691,34 +693,259 @@ _SANDBOX_ENV: str = (
 # ---------------------------------------------------------------------------
 
 
+def _normalize_diff_for_git(diff_content: str) -> str | None:
+    """Reduce an arbitrary unified diff to a clean single-file patch.
+
+    Drops all pre-hunk metadata (``diff --git`` / ``index`` / original
+    ``---`` / ``+++`` lines) and re-emits deterministic ``a/target`` /
+    ``b/target`` headers so ``git apply -p1`` targets a known basename
+    regardless of how the caller wrote the original headers.  Everything from
+    the first ``@@`` onward (all hunks) is preserved verbatim — ``git apply
+    --recount`` fixes any wrong line counts.  Returns ``None`` when the diff
+    contains no hunks.
+    """
+    body: list[str] = []
+    in_body = False
+    for line in diff_content.split("\n"):
+        if line.startswith("@@"):
+            in_body = True
+        if in_body:
+            body.append(line)
+    if not body:
+        return None
+    return "\n".join(["--- a/target", "+++ b/target", *body]).rstrip("\n") + "\n"
+
+
+# Generated transform applied by :func:`apply_patch_to_file`.  Runs inside the
+# container via :func:`transform_file_in_container`: writes the file's text and
+# the (normalized) diff to a temp dir and lets ``git apply --recount`` apply it
+# — tolerating off-by-one ``@@`` counts that break a strict parser.
+# ``__DIFF_B64__`` is substituted on the host.
+_GIT_APPLY_TRANSFORM = r'''
+import base64, os, subprocess, tempfile
+
+DIFF = base64.b64decode("__DIFF_B64__").decode("utf-8")
+
+def transform(text):
+    d = tempfile.mkdtemp()
+    target = os.path.join(d, "target")
+    with open(target, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+    patch = os.path.join(d, "patch.diff")
+    with open(patch, "w", encoding="utf-8", newline="") as fh:
+        fh.write(DIFF)
+    errors = []
+    for extra in ([], ["--ignore-whitespace"]):
+        proc = subprocess.run(
+            ["git", "apply", "--recount", "-p1", *extra, patch],
+            cwd=d, capture_output=True, text=True,
+        )
+        if proc.returncode == 0:
+            with open(target, "r", encoding="utf-8") as fh:
+                return fh.read()
+        msg = (proc.stderr or proc.stdout).strip()
+        if msg:
+            errors.append(msg)
+    raise RuntimeError("git apply could not apply the diff: " + " | ".join(errors))
+'''
+
+
 def apply_patch_to_file(
     client: Any,
     container_id: str,
     file_path: str,
     diff_content: str,
 ) -> str:
-    """Apply a unified diff to a file inside the sandbox container."""
+    """Apply a unified diff to a file inside the sandbox container.
+
+    .. deprecated::
+
+       ``apply_patch`` is deprecated for AI-authored edits (see the tool
+       docstring).  This now delegates to :func:`transform_file_in_container`,
+       which runs ``git apply --recount`` **inside the container** — more
+       robust for machine-generated diffs than the previous strict host-side
+       parser, and consolidating diff application onto the imperative edit
+       path.
+    """
+    if not diff_content.strip():
+        return f"Patch applied (no changes) to {file_path} in container {container_id[:12]}"
+
+    normalized = _normalize_diff_for_git(diff_content)
+    if normalized is None:
+        return "Error: failed to apply diff: no hunks (@@) found in diff"
+
+    code = _GIT_APPLY_TRANSFORM.replace(
+        "__DIFF_B64__",
+        base64.b64encode(normalized.encode("utf-8")).decode("ascii"),
+    )
+    result = transform_file_in_container(client, container_id, file_path, code)
+
+    if result.get("status") != "ok":
+        return f"Error: failed to apply diff: {result.get('error')}"
+    if not result.get("changed"):
+        return f"Patch applied (no changes) to {file_path} in container {container_id[:12]}"
+    return f"Patch applied successfully to {file_path} in container {container_id[:12]}"
+
+
+# ---------------------------------------------------------------------------
+# Imperative (programmatic) edit: transform_file
+# ---------------------------------------------------------------------------
+
+# In-container runner.  Reads the target file, runs the caller's
+# ``transform(text) -> text`` against it, writes the result back, and emits a
+# unified diff wrapped in per-call sentinels so stray prints from the caller's
+# code cannot corrupt the result envelope.  ``__FILE_PATH_REPR__`` /
+# ``__CODE_B64__`` / ``__MARK_A__`` / ``__MARK_B__`` are substituted on the host.
+_TRANSFORM_RUNNER = r'''
+import sys, json, base64, difflib, traceback
+
+FILE_PATH = __FILE_PATH_REPR__
+USER_CODE_B64 = "__CODE_B64__"
+MARK_A = "__MARK_A__"
+MARK_B = "__MARK_B__"
+
+def emit(obj):
+    sys.stdout.write(MARK_A + json.dumps(obj) + MARK_B)
+    sys.stdout.flush()
+    sys.exit(0)
+
+try:
+    with open(FILE_PATH, "r", encoding="utf-8", newline="") as fh:
+        original = fh.read()
+except FileNotFoundError:
+    emit({"status": "error", "error": "file not found: " + FILE_PATH})
+except Exception as e:
+    emit({"status": "error", "error": "read failed: " + repr(e)})
+
+try:
+    user_code = base64.b64decode(USER_CODE_B64).decode("utf-8")
+except Exception as e:
+    emit({"status": "error", "error": "could not decode code: " + repr(e)})
+
+ns = {}
+try:
+    exec(user_code, ns)
+except Exception as e:
+    emit({"status": "error",
+          "error": "code failed at definition time: " + type(e).__name__ + ": " + str(e),
+          "traceback": traceback.format_exc()})
+
+transform = ns.get("transform")
+if not callable(transform):
+    emit({"status": "error",
+          "error": "code must define a callable `transform(text: str) -> str`"})
+
+try:
+    new = transform(original)
+except Exception as e:
+    emit({"status": "error",
+          "error": "transform() raised " + type(e).__name__ + ": " + str(e),
+          "traceback": traceback.format_exc()})
+
+if not isinstance(new, str):
+    emit({"status": "error",
+          "error": "transform() must return str, got " + type(new).__name__})
+
+if new == original:
+    emit({"status": "ok", "changed": False, "diff": "", "new_size": len(original)})
+
+try:
+    with open(FILE_PATH, "w", encoding="utf-8", newline="") as fh:
+        fh.write(new)
+except Exception as e:
+    emit({"status": "error", "error": "write failed: " + repr(e)})
+
+diff = "\n".join(difflib.unified_diff(
+    original.splitlines(), new.splitlines(),
+    fromfile=FILE_PATH, tofile=FILE_PATH, lineterm=""))
+emit({"status": "ok", "changed": True, "diff": diff, "new_size": len(new)})
+'''
+
+
+def transform_file_in_container(
+    client: Any,
+    container_id: str,
+    file_path: str,
+    code: str,
+) -> dict[str, Any]:
+    """Apply an imperative ``transform(text) -> text`` to a file in-container.
+
+    The caller's *code* must define a top-level callable
+    ``transform(text: str) -> str``.  It is base64-encoded and executed by a
+    Python runner **inside the disposable sandbox container** (never on the
+    host), the result is written back, and a unified diff of the change is
+    returned so the effect is visible without a separate read-back.
+
+    Returns a dict with ``status`` (``"ok"`` / ``"error"``).  On success:
+    ``changed`` (bool), ``diff`` (str), ``new_size`` (int).  On failure:
+    ``error`` (str) and, when the caller's code raised, ``traceback`` (str).
+    """
+    if not file_path.startswith("/"):
+        return {"status": "error", "error": f"file_path must be absolute: {file_path!r}"}
+    canon = os.path.normpath(file_path)
+    if ".." in canon.split(os.sep):
+        return {"status": "error", "error": f"Path traversal detected: {file_path!r}"}
+
     try:
         container = client.containers.get(container_id)
     except Exception as e:
-        return f"Error: Container {container_id[:12]} not found: {e}"
+        return {"status": "error", "error": f"Container {container_id[:12]} not found: {e}"}
+
+    code_b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    nonce = secrets.token_hex(8)
+    mark_a = f"<<<TF_{nonce}>>>"
+    mark_b = f"<<<END_TF_{nonce}>>>"
+
+    runner = (
+        _TRANSFORM_RUNNER
+        .replace("__FILE_PATH_REPR__", repr(file_path))
+        .replace("__CODE_B64__", code_b64)
+        .replace("__MARK_A__", mark_a)
+        .replace("__MARK_B__", mark_b)
+    )
+    runner_b64 = base64.b64encode(runner.encode("utf-8")).decode("ascii")
+    tmpf = f"/tmp/.tf_{nonce}.py"
+    cmd = (
+        f"echo {shlex.quote(runner_b64)} | base64 -d > {tmpf}"
+        f" && python3 {tmpf}; rc=$?"
+        f"; rm -f {tmpf}"
+        f"; exit $rc"
+    )
+
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", cmd],
+        stdout=True,
+        stderr=True,
+        demux=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    start = stdout_text.find(mark_a)
+    end = stdout_text.find(mark_b)
+    if start == -1 or end == -1:
+        detail = stderr_text.strip() or stdout_text.strip() or "no output"
+        if "python3" in detail and ("not found" in detail or "No such file" in detail):
+            detail = (
+                "python3 is not available in this container; transform_file "
+                "requires a Python interpreter in the sandbox image"
+            )
+        return {"status": "error", "error": f"transform runner produced no result: {detail}"}
 
     try:
-        current = read_file(container, file_path)
-    except ValueError as e:
-        return f"Error: {e}"
+        result: dict[str, Any] = json.loads(stdout_text[start + len(mark_a):end])
+    except json.JSONDecodeError as e:
+        return {"status": "error", "error": f"could not parse runner result: {e}"}
 
-    try:
-        patched = apply_unified_diff(current, diff_content)
-    except ValueError as e:
-        return f"Error: failed to apply diff: {e}"
-
-    try:
-        write_file(container, container_id[:12], file_path, patched)
-    except ValueError as e:
-        return f"Error: {e}"
-
-    return f"Patch applied successfully to {file_path} in container {container_id[:12]}"
+    if result.get("status") == "ok" and result.get("changed"):
+        record_file_write(
+            container_id[:12],
+            os.path.basename(file_path),
+            os.path.dirname(file_path) or "/",
+            int(result.get("new_size", 0)),
+        )
+    return result
 
 
 def read_file_lines(

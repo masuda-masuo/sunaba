@@ -163,7 +163,7 @@ The `--update-spec` flag controls the pip install source (default: `"."` for loc
 
 | Tool | Description |
 |------|-------------|
-| `write_file_sandbox` | Write/update files. Supports full overwrite, line-range replacement, append, and `old_str` replacement. |
+| `write_file_sandbox` | **Primary edit path for AI.** Write/update files. Supports full overwrite, line-range replacement, append, and `old_str` replacement (uniqueness check + whitespace-flexible fallback). |
 | `copy_project` | Copy a local directory into the container (tar archive streaming). |
 | `copy_file` | Copy a single local file into the container. |
 
@@ -171,7 +171,8 @@ The `--update-spec` flag controls the pip install source (default: `"."` for loc
 
 | Tool | Description |
 |------|-------------|
-| `apply_patch` | Apply a unified diff to a file. Sends only the diff, not full file content (1-2 orders of magnitude token reduction). |
+| `transform_file` | **Imperative edit path.** Edit a file by supplying Python `transform(text) -> str` that computes the new content (runs inside the container; returns a unified diff). Best for bulk / repetitive / structural / computed edits where `old_str` would need many calls and a diff would be huge. Single `code` string — no shell escaping. |
+| `apply_patch` | **Deprecated for AI-authored edits.** Apply a unified diff to a file. LLM-written diffs almost always fail on `@@` header counts / context whitespace, and each failed retry costs a full round-trip — making it *more* expensive, not less. For AI editing use `write_file_sandbox` with `old_str` (the default edit path) or `transform_file`. Reserve `apply_patch` for **machine-generated** diffs (`git diff` / `diff -u`). |
 | `read_file_range` | Read `limit` lines starting at `offset`. Returns JSON with pagination metadata. |
 | `lint_in_container` | Run linter on a file (`.py` → ruff/pylint, `.js/.ts/.jsx/.tsx` → eslint). |
 | `type_check_in_container` | Run type checker on a file (`.py` → mypy/pyright, `.ts/.tsx` → tsc). |

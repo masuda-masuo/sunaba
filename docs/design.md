@@ -123,19 +123,27 @@
 
 **コア（これだけでループが閉じる）**
 - **`search_in_container`**: `mode: lexical|structural` で ripgrep / ast-grep を切り替え。`{file, line, text}` 配列を返す。`max_results` 上限付き。理想ループの起点。
-- **`apply_patch`**: unified diff を当てる（**主役**）。ファイル全文の送受信を避けトークンを1〜2桁削減。
 - **`read_file_range`**: `offset` / `limit` で該当箇所だけ読む。
+- **`write_file_sandbox`（編集の主役）**: 既知の新テキストを渡す宣言的編集。`overwrite` / 行範囲 / `append` / `old_str`（文字列置換）の各モードを束ねる。LLM 著作編集の既定経路。
 - **`verify`**: lint（ruff）＋ type_check（pyright/mypy）＋ test（pytest/jest/go test）＋ scan（semgrep）を **1コールで強制実行**。各ツールの出力を `{file, line, rule, severity, message}` に統一。`submit` の内部ゲートでも必ず再実行（構造的強制）。ゲート閾値: lint error / pytest fail / semgrep ERROR で push 拒否。型エラーと semgrep WARNING は設定で変更可能。
 
+**編集の2モダリティ（宣言的 / 命令的の直交2本）**
+
+編集は「新バイト列を*渡す*」か「*計算するコードを渡す*」かの直交2本に集約する（§0 affordance の非増殖原則）。
+
+- **宣言的 = `write_file_sandbox`**（上記コア）: 新テキストが既知のとき。点編集の主役。
+- **命令的 = `transform_file`**: 新バイト列をコードで計算するとき（regex 一括 / 構造書換 / 計算的編集 / 機械生成 diff の `git apply`）。`code` は**単一トップレベル文字列**で受け内部 base64 化（multibyte/改行のエスケープ問題を構造的に回避）、**結果 diff を返す**ことで read-modify-write-verify を一体化（サイレント破壊の可視化）。
+- **`apply_patch` は deprecated**: かつて「主役」と位置づけたが誤り。LLM 手書き unified diff は失敗率が高く、失敗時の往復で**トークン経済が反転する**。「フルファイル送信比で1〜2桁削減」は baseline が誤りで、真の競合は `old_str`（そこに対しペイロード優位はほぼ無く、コンテキスト行ぶん出力が増えることすらある）。機械生成 diff の適用は `transform_file` の `git apply` 経路に委譲し、apply_patch は1リリースの間 deprecated な薄いラッパーとして残す（即削除はしない）。
+
 **二次（需要が出てから）**
-- `sd`（テキスト/設定/Markdown の正規表現置換）/ `ast-grep`(rewrite)（コード構造書換）。`apply_patch` で届かない場面用。§1改訂の通りコンテナ内 CLI なので可。
+- `sd`（テキスト/設定/Markdown の正規表現置換）/ `ast-grep`(rewrite)（コード構造書換）。`transform_file` の内部実装に吸収可。§1改訂の通りコンテナ内 CLI なので可。
 - `format_in_container` / `tree_in_container` / `git_diff_in_container`。
 
 **スコープ境界**: 対象は使い捨てサンドボックス内のファイルのみ。ユーザの実リポジトリ作業ツリーは対象外。**コア4点が主役**、二次は後追い。
 
 **理想ループ（最小コンテキスト）**
 ```
-search_in_container → read_file_range → apply_patch → verify → submit
+search_in_container → read_file_range → write_file_sandbox(old_str) | transform_file → verify → submit
 ```
 
 ---
@@ -237,9 +245,9 @@ else:
 
 **payload 非通過フロー**:
 ```
-issue_view →(要約)→ search_in_container → read_file_range → apply_patch → verify → submit
+issue_view →(要約)→ search_in_container → read_file_range → write_file_sandbox(old_str) | transform_file → verify → submit
 ```
-issue 本文も diff もコンテナ内に留まり、LLM は run_id / ハンドル / 構造化サマリだけ運ぶ。
+issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンドル / 構造化サマリだけ運ぶ。
 
 **スコープ境界**: 触るのはコンテナ内クローンのみ（§5 維持）。issue 一覧管理・レビュー運用・projects は入れない。
 

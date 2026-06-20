@@ -35,6 +35,7 @@ from code_sandbox_mcp.edit_verify import (
     read_file_lines,
     run_verify,
     search_files,
+    transform_file_in_container,
     type_check_file,
     write_file,
 )
@@ -923,9 +924,13 @@ def write_file_sandbox(
 
     .. hint::
 
-       For large structural edits, prefer :func:`apply_patch` (diff-based)
-       to avoid sending the full file.  Use :func:`read_file_range` first
-       to inspect the target area before editing.
+       ``old_str`` mode is the default edit path for AI — it is robust
+       (uniqueness check + whitespace-flexible fallback) and avoids the
+       ``@@`` header errors that make hand-written diffs fail.  Use
+       :func:`read_file_range` first to inspect the target area before
+       editing.  For bulk / repetitive / structural / computed changes use
+       :func:`transform_file` (imperative).  Reserve :func:`apply_patch` for
+       *machine-generated* diffs.
 
     Args:
         container_id: 12-character container ID prefix.
@@ -942,8 +947,10 @@ def write_file_sandbox(
         Success or error message.
 
     See also:
-        :func:`apply_patch` — diff-based editing for large changes.
         :func:`read_file_range` — inspect file content before editing.
+        :func:`transform_file` — imperative edits (bulk / structural / computed).
+        :func:`apply_patch` — machine-generated diffs only (deprecated for
+        AI-authored edits).
     """
     client = _docker()
     try:
@@ -1516,17 +1523,19 @@ def run_container_and_exec(
 def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
     """Apply a unified diff to a file inside the sandbox container.
 
+    .. warning::
+
+       **Deprecated for AI-authored edits.**  Hand-written unified diffs
+       almost always fail on ``@@`` header line counts or context-line
+       whitespace, and each failed retry costs a full round-trip — making
+       this *more* expensive than the alternatives, not less.  For AI
+       editing use :func:`write_file_sandbox` with ``old_str`` (the default
+       edit path) or :func:`transform_file` (imperative).  Reserve
+       ``apply_patch`` for **machine-generated** diffs (``git diff`` /
+       ``diff -u``), where the diff is byte-exact.
+
     Reads the current file from the container, applies the unified diff,
-    and writes the result back.  The caller sends only a compact diff
-    instead of the full file content, reducing token cost by 1-2 orders
-    of magnitude.
-
-    .. hint::
-
-       For simple string replacements use :func:`write_file_sandbox`
-       with ``old_str`` instead — it avoids ``@@`` header errors.
-       For full file rewrites use :func:`write_file_sandbox` without
-       partial-mode arguments.
+    and writes the result back.
 
     Args:
         container_id: 12-character container ID prefix.
@@ -1549,6 +1558,93 @@ def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
         return f"Error: {e}"
 
     return apply_patch_to_file(client, container_id, file_path, diff_content)
+
+
+@mcp.tool()
+def transform_file(
+    container_id: str,
+    file_path: str,
+    code: str,
+    max_lines: int = 200,
+    offset: int = 0,
+    limit: int = 100,
+) -> str:
+    """Edit a file imperatively by running Python that computes the new text.
+
+    The **imperative** edit path: instead of providing the new bytes
+    (:func:`write_file_sandbox`) or a diff (:func:`apply_patch`), you provide
+    *code* that transforms the file's content.  Ideal for edits that the
+    declarative tools handle poorly — bulk / repetitive / structural / computed
+    changes (e.g. a regex applied to every occurrence, renaming a symbol,
+    re-indenting, applying a value derived from the existing text).
+
+    *code* must define a top-level callable ``transform(text: str) -> str``.
+    It is base64-encoded and executed by a Python runner **inside the
+    disposable sandbox container** (never on the host), the result is written
+    back, and a **unified diff of the change is returned** so you can verify
+    the effect without a separate read-back.
+
+    Passing the program as a single ``code`` string (not a shell command) means
+    multibyte characters, quotes, and newlines need no escaping.
+
+    .. hint::
+
+       For a single known string replacement prefer :func:`write_file_sandbox`
+       with ``old_str``.  Reach for ``transform_file`` when the edit is better
+       expressed as logic than as literal text — many occurrences, a pattern,
+       or a value computed from the file.  Always check the returned ``diff``;
+       an over-broad pattern can change more than intended.
+
+    Args:
+        container_id: 12-character container ID prefix.
+        file_path: Absolute path to the file inside the container.
+        code: Python source defining ``transform(text: str) -> str``.
+        max_lines: Maximum diff lines to show (summary truncation).
+        offset: Line offset for paging through a large diff (0-indexed).
+        limit: Maximum diff lines per page.
+
+    Returns:
+        JSON string.  On success: ``status="ok"``, ``changed`` (bool),
+        ``diff`` (str, paginated) and diff metadata (``shown``,
+        ``total_lines``, ``truncated``, ``next_offset``, ``has_more``).
+        On failure: ``status="error"`` with ``error`` (and ``traceback`` when
+        the caller's code raised).
+
+    See also:
+        :func:`write_file_sandbox` — declarative edits (the default path).
+        :func:`read_file_range` — inspect file content before editing.
+    """
+    client = _docker()
+    try:
+        _ = client.containers.get(container_id)
+    except NotFound:
+        return json.dumps(
+            {"status": "error", "error": f"container {container_id[:12]} not found"}
+        )
+    except Exception as e:
+        return json.dumps({"status": "error", "error": str(e)})
+
+    result = transform_file_in_container(client, container_id, file_path, code)
+
+    if result.get("status") == "ok" and result.get("changed"):
+        display, meta = truncate_output(
+            result.get("diff", ""),
+            max_lines=max_lines,
+            verbose="full",
+        )
+        page = paginate_output(display, offset=offset, limit=limit)
+        return json.dumps({
+            "status": "ok",
+            "changed": True,
+            "diff": page.content,
+            "shown": meta.shown,
+            "total_lines": meta.total_lines,
+            "truncated": meta.truncated,
+            "next_offset": page.next_offset,
+            "has_more": page.has_more,
+        })
+
+    return json.dumps(result)
 
 
 @mcp.tool()

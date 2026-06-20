@@ -23,6 +23,8 @@ from typing import Any
 
 _CACHE_DIR: Path = Path.home() / ".code-sandbox-mcp" / "cache"
 _CACHE_TTL_SECONDS: int = 86400 * 7  # 7 days
+_MAX_CACHE_ENTRIES: int = 1000
+_MAX_CACHE_SIZE_BYTES: int = 50 * 1024 * 1024  # 50 MB
 
 #: Module-level lock for thread-safe cache operations.
 _lock: threading.Lock = threading.Lock()
@@ -101,6 +103,30 @@ def get_cached_result(key: str) -> dict[str, Any] | None:
     return entry.get("result")
 
 
+def _evict_oldest() -> None:
+    """Evict the oldest entries when cache limits are exceeded."""
+    paths = sorted(
+        _CACHE_DIR.glob("*.json"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    # Enforce entry count limit
+    while len(paths) > _MAX_CACHE_ENTRIES:
+        try:
+            paths[0].unlink(missing_ok=True)
+            paths.pop(0)
+        except OSError:
+            break
+    # Enforce total size limit
+    total_size = sum(p.stat().st_size for p in paths)
+    while total_size > _MAX_CACHE_SIZE_BYTES and len(paths) > 1:
+        try:
+            total_size -= paths[0].stat().st_size
+            paths[0].unlink(missing_ok=True)
+            paths.pop(0)
+        except OSError:
+            break
+
+
 def set_cached_result(
     key: str,
     result: dict[str, Any],
@@ -125,6 +151,9 @@ def set_cached_result(
     with _lock:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(entry, f, ensure_ascii=False)
+
+    # Enforce cache limits (evict oldest if exceeded)
+    _evict_oldest()
 
 
 def invalidate_cache(key: str | None = None) -> int:
@@ -169,16 +198,8 @@ def get_cache_stats() -> dict[str, Any]:
         ``oldest_entry_ts``, ``newest_entry_ts``.
     """
     _ensure_cache_dir()
-    entries: list[dict[str, Any]] = []
-    for path in _CACHE_DIR.glob("*.json"):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                entry = json.load(f)
-                entries.append(entry)
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    if not entries:
+    paths = list(_CACHE_DIR.glob("*.json"))
+    if not paths:
         return {
             "total_entries": 0,
             "total_size_bytes": 0,
@@ -186,12 +207,27 @@ def get_cache_stats() -> dict[str, Any]:
             "newest_entry_ts": None,
         }
 
-    timestamps = [e.get("ts", 0) for e in entries]
-    total_size = sum(e.get("size_bytes", 0) for e in entries)
+    sizes = []
+    mtimes = []
+    for path in paths:
+        try:
+            st = path.stat()
+            sizes.append(st.st_size)
+            mtimes.append(st.st_mtime)
+        except OSError:
+            pass
+
+    if not sizes:
+        return {
+            "total_entries": 0,
+            "total_size_bytes": 0,
+            "oldest_entry_ts": None,
+            "newest_entry_ts": None,
+        }
 
     return {
-        "total_entries": len(entries),
-        "total_size_bytes": total_size,
-        "oldest_entry_ts": min(timestamps),
-        "newest_entry_ts": max(timestamps),
+        "total_entries": len(sizes),
+        "total_size_bytes": sum(sizes),
+        "oldest_entry_ts": min(mtimes),
+        "newest_entry_ts": max(mtimes),
     }

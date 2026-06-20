@@ -409,7 +409,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 1 for _ in read_journal()
                 if _.get("cached") is True
             )
-            cache_hit_rate = f"{cached_count / (total_ops + cached_count) * 100:.1f}%"
+            cache_hit_rate = f"{cached_count / total_ops * 100:.1f}%"
 
         html_content = _DASHBOARD_HTML.format(
             total_runs=len(runs),

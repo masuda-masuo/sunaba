@@ -525,6 +525,9 @@ def compress_failures(text: str) -> str:
         FAILED test_login
         [×5] FAILED test_login  (isomorphic failures compressed)
 
+    Handles both single-line failures and multi-line failure blocks
+    (e.g. tracebacks) by computing fingerprints on failure blocks.
+
     Args:
         text: Output text with potential repeated failures.
 
@@ -535,32 +538,87 @@ def compress_failures(text: str) -> str:
     if len(lines) < 3:
         return text
 
-    # Group consecutive lines that contain failure patterns
-    result: list[str] = []
+    # ---- Phase 1: Build failure blocks ----
+    # A failure block is one or more consecutive lines that belong
+    # to the same failure instance.  Rules:
+    # - Lines with the SAME fingerprint as the block start are new
+    #   blocks (repeated single-line failures).
+    # - Lines with a DIFFERENT fingerprint extend the current block
+    #   (multi-line failures like tracebacks).
+    # - Lines without a fingerprint end the current block.
+    blocks: list[tuple[int, int, str, str]] = []  # (start, end_excl, fp, text)
     i = 0
     while i < len(lines):
         line = lines[i]
         fp = compute_failure_fingerprint(line)
         if not fp:
-            result.append(line)
             i += 1
             continue
 
-        # Count consecutive lines with the same fingerprint
-        count = 1
+        block_start = i
+        block_start_fp = fp
         j = i + 1
         while j < len(lines):
             next_fp = compute_failure_fingerprint(lines[j])
-            if next_fp == fp:
+            if not next_fp:
+                # Non-failure line ends the block
+                break
+            if next_fp == block_start_fp:
+                # Same fingerprint as block start: new block starting
+                break
+            # Different fingerprint: extends multi-line block (traceback)
+            j += 1
+        block_text = "\n".join(lines[block_start:j])
+        # Compute fingerprint of the full block text for multi-line matching
+        block_fp = compute_failure_fingerprint(block_text) or block_start_fp
+        blocks.append((block_start, j, block_fp, block_text))
+        i = j
+
+    if not blocks:
+        return "\n".join(lines)
+
+    # ---- Phase 2: Compress repeated blocks ----
+    # Walk through blocks and compress consecutive blocks with the same
+    # fingerprint.
+    result: list[tuple[int, int, str]] = []  # (start, end_excl, compressed_text)
+    bi = 0
+    while bi < len(blocks):
+        blk_start, blk_end, blk_fp, blk_text = blocks[bi]
+
+        # Count consecutive blocks with the same fingerprint
+        count = 1
+        bj = bi + 1
+        while bj < len(blocks):
+            nxt_start, nxt_end, nxt_fp, nxt_text = blocks[bj]
+            if nxt_fp == blk_fp and nxt_text == blk_text:
                 count += 1
-                j += 1
+                bj += 1
             else:
                 break
 
         if count >= 3:
-            result.append(f"[×{count}] {line}  (isomorphic failures compressed)")
+            # Compress: keep only the first line of the block with a summary
+            first_line = blk_text.split("\n")[0]
+            compressed = f"[×{count}] {first_line}  (isomorphic failures compressed)"
+            last_end = blocks[bj - 1][1]
+            result.append((blk_start, last_end, compressed))
         else:
-            result.extend(lines[i:j])
-        i = j
+            for k in range(bi, bj):
+                result.append((blocks[k][0], blocks[k][1], blocks[k][3]))
+        bi = bj
 
-    return "\n".join(result)
+    # ---- Phase 3: Rebuild output ----
+    # Merge compressed blocks with non-failure lines
+    i = 0
+    out: list[str] = []
+    block_idx = 0
+    while i < len(lines):
+        if block_idx < len(result) and i == result[block_idx][0]:
+            out.append(result[block_idx][2])
+            i = result[block_idx][1]
+            block_idx += 1
+        else:
+            out.append(lines[i])
+            i += 1
+
+    return "\n".join(out)

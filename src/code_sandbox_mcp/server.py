@@ -665,6 +665,7 @@ def sandbox_exec(
     limit: int = 50,
     timeout: int = 0,
     max_output_tokens: int = 0,
+    input_hash: str = "",
 ) -> str:
     """Execute commands inside a running sandbox container.
 
@@ -733,7 +734,7 @@ def sandbox_exec(
         image_ref = str(raw) if not isinstance(raw, str) else raw
     except Exception:
         image_ref = container_id[:12]
-    cache_key = compute_cache_key(image_ref, commands)
+    cache_key = compute_cache_key(image_ref, commands, input_hash=input_hash)
     cached = get_cached_result(cache_key)
     if cached is not None:
         # Journal the cache hit
@@ -1673,6 +1674,7 @@ def run_container_and_exec(
     pip_extras: str | None = "[dev]",
     timeout: int = 0,
     max_output_tokens: int = 0,
+    input_hash: str = "",
 ) -> str:
     """Start a container, execute commands, then remove it (one-shot).
 
@@ -1926,7 +1928,7 @@ def run_container_and_exec(
         result["pr_warning"] = pr_error
 
     # Cache the result
-    cache_key = compute_cache_key(image, commands)
+    cache_key = compute_cache_key(image, commands, input_hash=input_hash)
     set_cached_result(cache_key, result)
 
     journal_record_exec(
@@ -2112,6 +2114,7 @@ def sandbox_exec_diff(
     verbose: str = "summary",
     timeout: int = 0,
     max_output_tokens: int = 0,
+    input_hash: str = "",
 ) -> str:
     """Execute commands and return only the diff from the cached result.
 
@@ -2144,7 +2147,7 @@ def sandbox_exec_diff(
         image_ref = str(raw) if not isinstance(raw, str) else raw
     except Exception:
         image_ref = container_id[:12]
-    cache_key = "diff:" + compute_cache_key(image_ref, commands)
+    cache_key = "diff:" + compute_cache_key(image_ref, commands, input_hash=input_hash)
     previous = get_cached_result(cache_key)
 
     joined = " && ".join(commands)

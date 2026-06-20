@@ -442,6 +442,7 @@ class TestSubmit:
 
         # Mock: git add (0), git commit (0), git push (0), git rev-parse (0)
         container = _make_container_mock([
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
             (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
@@ -493,6 +494,7 @@ class TestSubmit:
         }
 
         container = _make_container_mock([
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
             (0, b"pushed", b""),  # git push
@@ -546,6 +548,7 @@ class TestSubmit:
         }
 
         container = _make_container_mock([
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (0, b"nothing to commit, working tree clean", b""),  # git commit (no changes)
             (0, b"Everything up-to-date", b""),  # git push (already up to date)
@@ -594,6 +597,7 @@ class TestSubmit:
         }
 
         container = _make_container_mock([
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (0, b"[fix/x abc1234] Fix", b""),  # git commit
             (1, b"", b"remote rejected: permission denied"),  # git push (fail)
@@ -680,6 +684,7 @@ class TestSubmit:
         }
 
         container = _make_container_mock([
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
             (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
@@ -700,7 +705,7 @@ class TestSubmit:
         assert result["status"] == "pushed"
 
         # Verify the git commit command includes default identity
-        commit_call = container.exec_run.call_args_list[1]
+        commit_call = container.exec_run.call_args_list[2]
         commit_cmd = commit_call[0][0][2]
         assert "user.name" in commit_cmd
         assert "code-sandbox-mcp[bot]" in commit_cmd
@@ -735,6 +740,7 @@ class TestSubmit:
         }
 
         container = _make_container_mock([
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
             (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
@@ -757,7 +763,7 @@ class TestSubmit:
         assert result["status"] == "pushed"
 
         # Verify the git commit command includes custom identity
-        commit_call = container.exec_run.call_args_list[1]
+        commit_call = container.exec_run.call_args_list[2]
         commit_cmd = commit_call[0][0][2]
         assert "user.name" in commit_cmd
         assert "'Custom User'" in commit_cmd

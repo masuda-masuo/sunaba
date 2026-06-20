@@ -946,3 +946,21 @@ class TestSandboxCreatePr:
         )
         assert result["status"] == "pushed_no_pr"
         assert "pr_create_error" in result
+
+    @patch("code_sandbox_mcp.server._docker")
+    def test_invalid_branch_name(self, mock_docker: MagicMock) -> None:
+        container = _make_container_mock([])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(
+            sandbox_create_pr(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="feat;rm -rf /",
+                pr_title="Test PR",
+            )
+        )
+        assert result["status"] == "error"
+        assert "invalid" in result["error"]
+

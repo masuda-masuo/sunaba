@@ -2896,6 +2896,9 @@ def submit(
 
 
 
+_REPO_FORMAT_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+
 _SANDBOX_CREATE_PR_SCRIPT = '''
 import base64, json, os, subprocess, sys, tempfile
 
@@ -3037,6 +3040,12 @@ def sandbox_create_pr(
        tree matches the HEAD tree and whose parent is the current tip of
        *branch* (or the default branch if *branch* is new).
 
+    .. warning::
+
+       Unlike :func:`submit`, this tool has **no verify gate** (no
+       lint/type-check/test run before push).  Ensure the sandbox passes
+       all checks before calling this tool.
+
     Args:
         container_id: 12-character container ID prefix.
         repo: Repository in ``'owner/repo'`` format.
@@ -3068,6 +3077,13 @@ def sandbox_create_pr(
             "error": "repo must be in owner/repo format",
         })
 
+    _BRANCH_RE = re.compile(r"^[\w./-]+$")
+    if not _BRANCH_RE.match(branch):
+        return json.dumps({
+            "status": "error",
+            "error": "branch contains invalid characters",
+        })
+
     def _run(cmd: str) -> tuple[int, str, str]:
         exit_code, output = container.exec_run(
             ["sh", "-c", cmd],
@@ -3090,6 +3106,7 @@ def sandbox_create_pr(
     # Execute: push via GitHub API
     ec, out, _ = _run(
         f"python3 /tmp/_sandbox_create_pr.py {shlex.quote(repo)} {shlex.quote(branch)} {shlex.quote(working_dir)}"
+        f" ; _ec=$? ; rm -f /tmp/_sandbox_create_pr.py ; exit $_ec"
     )
     if ec != 0:
         return json.dumps({"status": "error", "step": "api_push", "error": out})
@@ -3155,9 +3172,6 @@ def sandbox_create_pr(
 # ---------------------------------------------------------------------------
 # Repository exploration tools (Issue #86)
 # ---------------------------------------------------------------------------
-
-_REPO_FORMAT_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
-
 
 @mcp.tool()
 def clone_repo(

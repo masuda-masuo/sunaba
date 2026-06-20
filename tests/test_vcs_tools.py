@@ -650,6 +650,119 @@ class TestSubmit:
         assert "cd /home/sandbox" in call_args[2]
 
 
+    # -- Git identity tests --
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.verify_and_consume")
+    @patch("code_sandbox_mcp.server.run_verify")
+    @patch("code_sandbox_mcp.server.record_boundary_crossing")
+    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    def test_execute_uses_default_identity(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_verify_fn: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Default identity should be used when author_name/email are None."""
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "submit",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+        mock_verify_fn.return_value = {
+            "status": "ok",
+            "gate_passed": True,
+        }
+
+        container = _make_container_mock([
+            (0, b"", b""),  # git add
+            (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
+            (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
+            (0, b"abc1234def5678", b""),  # git rev-parse
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=False,
+            token="tok_good",
+        ))
+
+        assert result["status"] == "pushed"
+
+        # Verify the git commit command includes default identity
+        commit_call = container.exec_run.call_args_list[1]
+        commit_cmd = commit_call[0][0][2]
+        assert "user.name" in commit_cmd
+        assert "code-sandbox-mcp[bot]" in commit_cmd
+        assert "code-sandbox-mcp[bot]@users.noreply.github.com" in commit_cmd
+        assert "'code-sandbox-mcp[bot]'" in commit_cmd
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.verify_and_consume")
+    @patch("code_sandbox_mcp.server.run_verify")
+    @patch("code_sandbox_mcp.server.record_boundary_crossing")
+    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    def test_execute_with_custom_identity(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_verify_fn: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Custom author_name/email should override the defaults."""
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "submit",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+        mock_verify_fn.return_value = {
+            "status": "ok",
+            "gate_passed": True,
+        }
+
+        container = _make_container_mock([
+            (0, b"", b""),  # git add
+            (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
+            (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
+            (0, b"abc1234def5678", b""),  # git rev-parse
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=False,
+            token="tok_good",
+            author_name="Custom User",
+            author_email="custom@example.com",
+        ))
+
+        assert result["status"] == "pushed"
+
+        # Verify the git commit command includes custom identity
+        commit_call = container.exec_run.call_args_list[1]
+        commit_cmd = commit_call[0][0][2]
+        assert "user.name" in commit_cmd
+        assert "'Custom User'" in commit_cmd
+        assert "custom@example.com" in commit_cmd
+
 # ---------------------------------------------------------------------------
 # Token flow integration tests
 # ---------------------------------------------------------------------------

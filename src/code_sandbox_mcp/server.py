@@ -2013,6 +2013,8 @@ def submit(
     gate_on_test_fail: bool = True,
     gate_on_scan_error: bool = True,
     gate_on_scan_warning: bool = False,
+    author_name: str | None = None,
+    author_email: str | None = None,
     language: str | None = None,
 ) -> str:
     """Stage, commit, push, and optionally create a PR.
@@ -2054,6 +2056,15 @@ def submit(
             verify gate.
         gate_on_scan_warning: Whether semgrep WARNING findings fail the
             verify gate.
+        author_name: Git commit author name.  When set, takes precedence
+            over the image-level default configured in
+            ``docker/Dockerfile.sandbox`` (``code-sandbox-mcp[bot]``).
+            When ``None``, the image-level default is used.
+        author_email: Git commit author email.  When set, takes precedence
+            over the image-level default configured in
+            ``docker/Dockerfile.sandbox``
+            (``code-sandbox-mcp[bot]@users.noreply.github.com``).
+            When ``None``, the image-level default is used.
 
     Returns:
         JSON string with operation result.
@@ -2195,9 +2206,16 @@ def submit(
             "error": add_err or add_out,
         })
 
-    commit_ec, commit_out, commit_err = _run(
-        f"git commit -m {shlex.quote(message)}"
+    # --- Git identity: set before commit ---
+    name_to_use = author_name if author_name is not None else "code-sandbox-mcp[bot]"
+    email_to_use = author_email if author_email is not None else f"code-sandbox-mcp[bot]@users.noreply.github.com"
+    safe_name = shlex.quote(name_to_use)
+    safe_email = shlex.quote(email_to_use)
+    git_commit_cmd = (
+        f"git -c user.name={safe_name} -c user.email={safe_email} commit -m {shlex.quote(message)}"
     )
+
+    commit_ec, commit_out, commit_err = _run(git_commit_cmd)
     if commit_ec != 0:
         # No changes to commit is OK if everything is already committed
         if "nothing to commit" in (commit_out + commit_err).lower():

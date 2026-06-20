@@ -87,6 +87,12 @@ RUN set -ex; \
 # ── Python ツール (root 権限が必要なものをここで) ────────────────────
 RUN uv pip install --system pytest pytest-json-report
 
+# ── Git identity ─────────────────────────────────────────────────
+# 既定の commit author — submit が identity 未設定で失敗するのを防ぐ
+# ユーザーが明示的に指定した場合はそちらが優先される（server.py submit 参照）
+RUN git config --system user.name "code-sandbox-mcp[bot]" \
+ && git config --system user.email "code-sandbox-mcp[bot]@users.noreply.github.com"
+
 # ── 非 root ユーザ ─────────────────────────────────────────────────
 # § 2.1 静的ガードレール: 非 root 実行を既定強制
 RUN groupadd -r sandbox && useradd -r -g sandbox -m -d /home/sandbox sandbox

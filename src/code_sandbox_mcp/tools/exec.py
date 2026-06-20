@@ -348,5 +348,3 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
     )
 
     return stdout_text if stdout_text else ""
-
-

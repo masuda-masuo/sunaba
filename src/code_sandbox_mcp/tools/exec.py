@@ -7,8 +7,6 @@ import json
 import os
 import shlex
 import time
-from typing import Any
-
 from docker.errors import NotFound
 
 from code_sandbox_mcp.journal import record_exec as journal_record_exec
@@ -26,14 +24,7 @@ from code_sandbox_mcp.result_cache import (
     get_cached_result,
     set_cached_result,
 )
-
-
-def _docker() -> Any:
-    """Lazy-import docker and return a Docker client."""
-    import docker
-
-    return docker.from_env()
-
+from code_sandbox_mcp.tools.common import _docker
 
 def sandbox_exec(
     container_id: str,
@@ -229,7 +220,6 @@ def sandbox_exec(
     return json.dumps(result)
 
 
-
 def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
     """Execute commands in the background inside a running sandbox container.
 
@@ -281,7 +271,6 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
         stderr=False,
     )
     return job_id
-
 
 
 def sandbox_exec_check(container_id: str, job_id: str) -> str:

@@ -154,11 +154,7 @@ mcp = FastMCP("code-sandbox-mcp")
 # ---------------------------------------------------------------------------
 
 
-def _docker() -> Any:
-    """Lazy-import docker and return a Docker client."""
-    import docker
-
-    return docker.from_env()
+from code_sandbox_mcp.tools.common import _docker
 
 
 def _container_env(inject_vcs_token: bool = False) -> dict[str, str]:

@@ -317,14 +317,12 @@ class TestRerunFailed:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        with patch("code_sandbox_mcp.server.get_cached_result", return_value=None), \
-             patch("code_sandbox_mcp.server.set_cached_result"):
-            result = self._decode(rerun_failed(
-                container_id="abc123",
-                run_id="run1",
-                commands=["true"],
-            ))
-            assert result["status"] == "ok"
+        result = self._decode(rerun_failed(
+            container_id="abc123",
+            run_id="run1",
+            commands=["true"],
+        ))
+        assert result["status"] == "ok"
 
 
 # =======================================================================
@@ -380,13 +378,12 @@ class TestSandboxExecDiff:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        with patch("code_sandbox_mcp.server.set_cached_result"):
-            result = self._decode(sandbox_exec_diff(
-                container_id="abc123",
-                commands=["echo first"],
-            ))
-            assert result["status"] == "ok"
-            assert result["has_diff"] is False
+        result = self._decode(sandbox_exec_diff(
+            container_id="abc123",
+            commands=["echo first"],
+        ))
+        assert result["status"] == "ok"
+        assert result["has_diff"] is False
 
     @patch("code_sandbox_mcp.server._docker")
     @patch("code_sandbox_mcp.server.get_cached_result")
@@ -403,12 +400,11 @@ class TestSandboxExecDiff:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        with patch("code_sandbox_mcp.server.set_cached_result"):
-            result = self._decode(sandbox_exec_diff(
-                container_id="abc123",
-                commands=["echo second"],
-            ))
-            assert result["status"] == "ok"
+        result = self._decode(sandbox_exec_diff(
+            container_id="abc123",
+            commands=["echo second"],
+        ))
+        assert result["status"] == "ok"
 
 
 # =======================================================================
@@ -463,13 +459,12 @@ class TestRerunFailedGetCachedResult:
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        with patch("code_sandbox_mcp.server.set_cached_result"):
-            result = self._decode(rerun_failed(
-                container_id="abc123",
-                run_id="run1",
-                commands=["true"],
-            ))
-            assert result["status"] == "ok"
+        result = self._decode(rerun_failed(
+            container_id="abc123",
+            run_id="run1",
+            commands=["true"],
+        ))
+        assert result["status"] == "ok"
 
 
 

@@ -95,7 +95,7 @@ from code_sandbox_mcp.token import (
 #:   # 取得した sha256 を下の文字列に貼り付けてテスト
 #:
 #: Refs: Issue #56, docs/design.md §2.1, §11, §12
-_DEFAULT_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:749832ed0d5c642574688e3ad0cc9179f1649495bd2bbc0179e11e25b32b8271"
+_DEFAULT_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:1bc3a1d3bba23e7f38cb511269efdbf0bca03497ee483a0ba25d7e308b34ec09"
 
 #: Stdio proxy - shared with launcher via this module variable.
 _TERMINAL: str | None = None

@@ -2895,6 +2895,263 @@ def submit(
     return json.dumps(result)
 
 
+
+_SANDBOX_CREATE_PR_SCRIPT = '''
+import base64, json, os, subprocess, sys, tempfile
+
+
+def _run(cmd):
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+def _gh_api(method, path, body):
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(body, f)
+        tmpfile = f.name
+    try:
+        r = subprocess.run(
+            ["gh", "api", "-X", method, path, "--input", tmpfile],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr or r.stdout)
+        return json.loads(r.stdout)
+    finally:
+        os.unlink(tmpfile)
+
+
+repo, branch, working_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+os.chdir(working_dir)
+
+# 1. Collect local commit info
+ec, head_sha, _ = _run("git rev-parse HEAD")
+if ec != 0:
+    print(json.dumps({"error": "git rev-parse HEAD failed", "detail": head_sha}))
+    sys.exit(1)
+
+_, commit_msg, _ = _run("git log -1 --format=%B")
+_, author_name, _ = _run("git log -1 --format=%an")
+_, author_email, _ = _run("git log -1 --format=%ae")
+
+# 2. Get all files in HEAD
+_, files_out, _ = _run("git ls-tree -r --name-only HEAD")
+files = [f for f in files_out.split("\n") if f]
+
+# 3. Create blobs
+tree_items = []
+for filepath in files:
+    _, mode_line, _ = _run(f"git ls-tree HEAD -- {filepath}")
+    parts = mode_line.split()
+    mode = parts[0] if parts else "100644"
+    try:
+        with open(filepath, "rb") as fh:
+            file_content = base64.b64encode(fh.read()).decode()
+    except OSError as e:
+        print(json.dumps({"error": f"read {filepath}: {e}"}))
+        sys.exit(1)
+    blob = _gh_api(
+        "POST",
+        f"repos/{repo}/git/blobs",
+        {"content": file_content, "encoding": "base64"},
+    )
+    tree_items.append(
+        {"path": filepath, "mode": mode, "type": "blob", "sha": blob["sha"]}
+    )
+
+# 4. Create tree
+tree = _gh_api("POST", f"repos/{repo}/git/trees", {"tree": tree_items})
+
+# 5. Resolve parent SHA on GitHub (existing branch > main > master)
+parent_sha = None
+for ref in [f"refs/heads/{branch}", "refs/heads/main", "refs/heads/master"]:
+    ec2, ref_out, _ = _run(f"gh api repos/{repo}/git/{ref} 2>/dev/null")
+    if ec2 == 0:
+        try:
+            parent_sha = json.loads(ref_out)["object"]["sha"]
+            break
+        except Exception:
+            continue
+
+# 6. Create commit
+commit_body = {
+    "message": commit_msg,
+    "tree": tree["sha"],
+    "author": {"name": author_name, "email": author_email},
+}
+if parent_sha:
+    commit_body["parents"] = [parent_sha]
+commit = _gh_api("POST", f"repos/{repo}/git/commits", commit_body)
+new_sha = commit["sha"]
+
+# 7. Create or update branch ref
+try:
+    _gh_api(
+        "PATCH",
+        f"repos/{repo}/git/refs/heads/{branch}",
+        {"sha": new_sha, "force": True},
+    )
+except RuntimeError:
+    _gh_api(
+        "POST",
+        f"repos/{repo}/git/refs",
+        {"ref": f"refs/heads/{branch}", "sha": new_sha},
+    )
+
+print(json.dumps({"sha": new_sha, "tree_sha": tree["sha"], "parent_sha": parent_sha}))
+'''
+
+
+@mcp.tool()
+def sandbox_create_pr(
+    container_id: str,
+    repo: str,
+    branch: str,
+    pr_title: str,
+    pr_body: str = "",
+    base_branch: str = "",
+    working_dir: str = "/home/sandbox",
+) -> str:
+    """Push the current branch via GitHub API and create a PR.
+
+    Unlike :func:`submit`, this tool uses the GitHub Objects API
+    (blob → tree → commit → ref) to push the branch, which works when
+    the injected token cannot push via HTTPS git (e.g. GitHub App
+    installation tokens).
+
+    Typical flow:
+
+    1. ``sandbox_initialize(allow_network=True, inject_vcs_token=True)``
+    2. ``clone_repo`` / ``gh repo clone`` inside the container
+    3. Make changes, run ``git add -A && git commit``
+    4. ``sandbox_create_pr(...)`` — pushes via API + opens PR
+
+    Requires a container started with ``allow_network=True`` and
+    ``inject_vcs_token=True``.
+
+    .. note::
+
+       Only the most recent committed state (HEAD) is pushed.  Multiple
+       local commits are represented as a single commit on GitHub whose
+       tree matches the HEAD tree and whose parent is the current tip of
+       *branch* (or the default branch if *branch* is new).
+
+    Args:
+        container_id: 12-character container ID prefix.
+        repo: Repository in ``'owner/repo'`` format.
+        branch: Branch name to create or update on GitHub.
+        pr_title: Title for the pull request.
+        pr_body: Body text for the pull request (optional).
+        base_branch: Base branch for the PR (default: repository default
+            branch).
+        working_dir: Directory in the container containing the git
+            repository (default ``'/home/sandbox'``).
+
+    Returns:
+        JSON with ``status``, ``pr_url``, ``branch``, and ``sha``.
+        On error returns ``status='error'`` with an ``error`` field.
+    """
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    cid = container_id[:12]
+
+    if not _REPO_FORMAT_RE.match(repo):
+        return json.dumps({
+            "status": "error",
+            "error": "repo must be in owner/repo format",
+        })
+
+    def _run(cmd: str) -> tuple[int, str, str]:
+        exit_code, output = container.exec_run(
+            ["sh", "-c", cmd],
+            stdout=True,
+            stderr=True,
+            demux=True,
+            workdir=working_dir,
+        )
+        stdout_b, stderr_b = output or (b"", b"")
+        out = stdout_b.decode("utf-8", errors="replace").strip() if stdout_b else ""
+        err = stderr_b.decode("utf-8", errors="replace").strip() if stderr_b else ""
+        return exit_code, out, err
+
+    # Write the API-push script into the container
+    script_b64 = base64.b64encode(
+        _SANDBOX_CREATE_PR_SCRIPT.encode("utf-8")
+    ).decode("ascii")
+    _run(f"echo {script_b64} | base64 -d > /tmp/_sandbox_create_pr.py")
+
+    # Execute: push via GitHub API
+    ec, out, _ = _run(
+        f"python3 /tmp/_sandbox_create_pr.py {shlex.quote(repo)} {shlex.quote(branch)} {shlex.quote(working_dir)}"
+    )
+    if ec != 0:
+        return json.dumps({"status": "error", "step": "api_push", "error": out})
+
+    try:
+        push_result = json.loads(out)
+    except json.JSONDecodeError:
+        return json.dumps({"status": "error", "step": "api_push", "error": out})
+
+    if "error" in push_result:
+        return json.dumps({"status": "error", "step": "api_push", **push_result})
+
+    new_sha = push_result["sha"]
+
+    # Create PR
+    pr_cmd = (
+        f"gh pr create --repo {shlex.quote(repo)}"
+        f" --head {shlex.quote(branch)}"
+        f" --title {shlex.quote(pr_title)}"
+    )
+    if base_branch:
+        pr_cmd += f" --base {shlex.quote(base_branch)}"
+    if pr_body:
+        body_b64 = base64.b64encode(pr_body.encode("utf-8")).decode("ascii")
+        pr_cmd = (
+            f"BODY_FILE=$(mktemp) &&"
+            f" echo {shlex.quote(body_b64)} | base64 -d > \"$BODY_FILE\" &&"
+            f" {pr_cmd} --body-file \"$BODY_FILE\" &&"
+            f" rm -f \"$BODY_FILE\""
+        )
+
+    pr_ec, pr_out, _ = _run(pr_cmd)
+    if pr_ec != 0:
+        return json.dumps({
+            "status": "pushed_no_pr",
+            "branch": branch,
+            "sha": new_sha[:7],
+            "pr_create_error": pr_out,
+        })
+
+    pr_url = ""
+    for line in pr_out.splitlines():
+        line = line.strip()
+        if line.startswith("https://github.com/"):
+            pr_url = line
+            break
+
+    record_boundary_crossing(
+        cid,
+        "sandbox_create_pr",
+        f"repo={repo} branch={branch} sha={new_sha[:7]} pr_url={pr_url}",
+        approved=True,
+        token="",
+    )
+
+    return json.dumps({
+        "status": "ok",
+        "branch": branch,
+        "sha": new_sha[:7],
+        "pr_url": pr_url,
+    })
+
 # ---------------------------------------------------------------------------
 # Repository exploration tools (Issue #86)
 # ---------------------------------------------------------------------------

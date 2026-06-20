@@ -815,3 +815,134 @@ class TestSubmitTokenFlow:
         # Since we already consumed it, the next verify_and_consume will fail.
         second_consume = verify_and_consume(token)
         assert second_consume is None  # Already consumed
+
+# ---------------------------------------------------------------------------
+# sandbox_create_pr tests
+# ---------------------------------------------------------------------------
+
+from code_sandbox_mcp.server import sandbox_create_pr
+
+
+class TestSandboxCreatePr:
+    """Tests for sandbox_create_pr (Issue #152)."""
+
+    @patch("code_sandbox_mcp.server._docker")
+    def test_invalid_repo_format(self, mock_docker: MagicMock) -> None:
+        container = _make_container_mock([])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(
+            sandbox_create_pr(
+                container_id="abc123def456",
+                repo="invalid-repo",
+                branch="feat/x",
+                pr_title="Test PR",
+            )
+        )
+        assert result["status"] == "error"
+        assert "owner/repo" in result["error"]
+
+    @patch("code_sandbox_mcp.server._docker")
+    def test_container_not_found(self, mock_docker: MagicMock) -> None:
+        from docker.errors import NotFound
+
+        client = MagicMock()
+        client.containers.get.side_effect = NotFound("not found")
+        mock_docker.return_value = client
+
+        result = _decode(
+            sandbox_create_pr(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="feat/x",
+                pr_title="Test PR",
+            )
+        )
+        assert "error" in result
+
+    @patch("code_sandbox_mcp.server._docker")
+    def test_api_push_failure_returns_error(self, mock_docker: MagicMock) -> None:
+        """If the python script returns non-zero, status=error is returned."""
+        # exec_run sequence:
+        # 1. write script (success)
+        # 2. run script (fail)
+        container = _make_container_mock([
+            (0, b"", b""),
+            (1, b'{"error": "gh api failed"}', b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(
+            sandbox_create_pr(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="feat/x",
+                pr_title="Test PR",
+            )
+        )
+        assert result["status"] == "error"
+        assert result["step"] == "api_push"
+
+    @patch("code_sandbox_mcp.server.record_boundary_crossing")
+    @patch("code_sandbox_mcp.server._docker")
+    def test_success_returns_pr_url(
+        self, mock_docker: MagicMock, mock_record: MagicMock
+    ) -> None:
+        """Happy path: API push succeeds and gh pr create returns a URL."""
+        push_json = json.dumps(
+            {"sha": "a" * 40, "tree_sha": "b" * 40, "parent_sha": "c" * 40}
+        ).encode()
+        pr_output = b"https://github.com/owner/repo/pull/99\n"
+
+        container = _make_container_mock([
+            (0, b"", b""),   # write script
+            (0, push_json, b""),  # run script
+            (0, pr_output, b""),  # gh pr create
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(
+            sandbox_create_pr(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="feat/x",
+                pr_title="Test PR",
+                pr_body="Body text",
+            )
+        )
+        assert result["status"] == "ok"
+        assert result["pr_url"] == "https://github.com/owner/repo/pull/99"
+        assert result["sha"] == "a" * 7
+        mock_record.assert_called_once()
+
+    @patch("code_sandbox_mcp.server.record_boundary_crossing")
+    @patch("code_sandbox_mcp.server._docker")
+    def test_push_success_pr_fail_returns_pushed_no_pr(
+        self, mock_docker: MagicMock, mock_record: MagicMock
+    ) -> None:
+        """If push succeeds but gh pr create fails, return pushed_no_pr."""
+        push_json = json.dumps(
+            {"sha": "a" * 40, "tree_sha": "b" * 40, "parent_sha": None}
+        ).encode()
+
+        container = _make_container_mock([
+            (0, b"", b""),
+            (0, push_json, b""),
+            (1, b"PR already exists", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(
+            sandbox_create_pr(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="feat/x",
+                pr_title="Test PR",
+            )
+        )
+        assert result["status"] == "pushed_no_pr"
+        assert "pr_create_error" in result

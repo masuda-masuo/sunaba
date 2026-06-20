@@ -2897,10 +2897,11 @@ def submit(
 
 
 _REPO_FORMAT_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+_BRANCH_RE = re.compile(r"^[\w./-]+$")
 
 
 _SANDBOX_CREATE_PR_SCRIPT = '''
-import base64, json, os, subprocess, sys, tempfile
+import base64, json, os, shlex, subprocess, sys, tempfile
 
 
 def _run(cmd):
@@ -2945,7 +2946,7 @@ files = [f for f in files_out.split("\n") if f]
 # 3. Create blobs
 tree_items = []
 for filepath in files:
-    _, mode_line, _ = _run(f"git ls-tree HEAD -- {filepath}")
+    _, mode_line, _ = _run(f"git ls-tree HEAD -- {shlex.quote(filepath)}")
     parts = mode_line.split()
     mode = parts[0] if parts else "100644"
     try:
@@ -3005,6 +3006,10 @@ except RuntimeError:
 print(json.dumps({"sha": new_sha, "tree_sha": tree["sha"], "parent_sha": parent_sha}))
 '''
 
+
+# ---------------------------------------------------------------------------
+# VCS push tools (Issue #152)
+# ---------------------------------------------------------------------------
 
 @mcp.tool()
 def sandbox_create_pr(
@@ -3077,7 +3082,6 @@ def sandbox_create_pr(
             "error": "repo must be in owner/repo format",
         })
 
-    _BRANCH_RE = re.compile(r"^[\w./-]+$")
     if not _BRANCH_RE.match(branch):
         return json.dumps({
             "status": "error",

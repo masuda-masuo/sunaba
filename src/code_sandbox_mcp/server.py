@@ -1682,6 +1682,7 @@ def verify_in_container(
     gate_on_test_fail: bool = True,
     gate_on_scan_error: bool = True,
     gate_on_scan_warning: bool = False,
+    language: str | None = None,
 ) -> str:
     """Run lint + type_check + test + scan as a bundled verification.
 
@@ -1689,16 +1690,20 @@ def verify_in_container(
     call, normalises output to a unified schema, and returns a gate
     decision.
 
+    Supports multi-language verification (Python / JS / TS / Go) with
+    language-aware dispatch.  Auto-detects project language from *path*
+    unless overridden with *language*.
+
     **Layers:**
 
-    =========== ======= ============================
+    =========== ======== ============================
     Layer       Tool    Notes
-    =========== ======= ============================
+    =========== ======== ============================
     lint        ruff    Python lint (``ruff check``)
     type_check  pyright Python type checking
     test        pytest  pytest with json-report
     scan        semgrep Security scanning
-    =========== ======= ============================
+    =========== ======== ============================
 
     **Gate logic:**
 
@@ -1707,6 +1712,7 @@ def verify_in_container(
     * lint errors (E/F/B/RUF rule codes)
     * test failures
     * semgrep ``ERROR`` findings
+    * verification incomplete (tool not available or errored)
 
     Type-check errors and semgrep ``WARNING`` findings are
     configurable via the ``gate_on_*`` parameters.
@@ -1724,12 +1730,16 @@ def verify_in_container(
             (default ``True``).
         gate_on_scan_warning: Whether semgrep WARNING findings fail the gate
             (default ``False``).
+        language: Explicit language override (``"python"``, ``"js"``,
+            ``"ts"``, ``"go"``).  Skips auto-detection.
 
     Returns:
         JSON string with:
 
         * ``status``: ``"ok"`` or ``"failed"``
         * ``gate_passed``: ``True`` if all gate conditions are satisfied
+        * ``incomplete``: ``True`` if any layer was not available / errored
+        * ``detected_languages``: list of detected language keys
         * ``lint``: list of ``{file, line, rule, severity, message}``
         * ``types``: list of ``{file, line, rule, severity, message}``
         * ``tests``: ``{status, passed, failed, duration, failures?}``
@@ -1761,6 +1771,7 @@ def verify_in_container(
         gate_on_test_fail=gate_on_test_fail,
         gate_on_scan_error=gate_on_scan_error,
         gate_on_scan_warning=gate_on_scan_warning,
+        language=language,
     )
     return json.dumps(result)
 
@@ -2002,6 +2013,7 @@ def submit(
     gate_on_test_fail: bool = True,
     gate_on_scan_error: bool = True,
     gate_on_scan_warning: bool = False,
+    language: str | None = None,
 ) -> str:
     """Stage, commit, push, and optionally create a PR.
 
@@ -2157,6 +2169,7 @@ def submit(
         gate_on_test_fail=gate_on_test_fail,
         gate_on_scan_error=gate_on_scan_error,
         gate_on_scan_warning=gate_on_scan_warning,
+        language=language,
     )
 
     if not verify_result.get("gate_passed", False):

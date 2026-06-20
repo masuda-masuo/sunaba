@@ -4,11 +4,14 @@ Provides low-level file editing and verification tools that operate on
 disposable sandbox containers (not the real repository).  These tools
 form the core of the minimal edit loop:
 
-    search_in_container → read_file_range → apply_patch
-    → lint/type_check → rerun_failed
+    search_in_container -> read_file_range -> apply_patch
+    -> lint/type_check -> rerun_failed
 
 By sending only diffs and reading only the needed lines, each iteration
 consumes only hundreds of tokens instead of thousands.
+
+Supports multi-language verification (Python / JS / TS / Go) with
+language-aware dispatch, status envelopes, and proper gate logic.
 """
 
 from __future__ import annotations
@@ -17,9 +20,149 @@ import json
 import os
 import re
 import shlex
+from dataclasses import dataclass, field
 from typing import Any
 
 from code_sandbox_mcp.journal import record_file_write
+
+
+# ===========================================================================
+# Status envelope (design-multilang-support.md S4)
+# ===========================================================================
+
+
+@dataclass
+class VerifyResult:
+    """Status envelope for a single verification layer.
+
+    Each runner (lint / type / test / scan) returns one VerifyResult
+    instead of a bare list of findings, so that errors, missing tools,
+    and intentional skips are never silently treated as "clean".
+    """
+
+    tool: str
+    status: str  # "ok" | "findings" | "not_available" | "error" | "skipped"
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    detail: str = ""
+    exit_code: int = -1
+
+
+def _envelope_ok(tool: str, findings: list[dict[str, Any]] = None, exit_code: int = 0) -> VerifyResult:
+    if findings is None:
+        findings = []
+    return VerifyResult(
+        tool=tool,
+        status="findings" if findings else "ok",
+        findings=findings,
+        exit_code=exit_code,
+    )
+
+
+def _envelope_not_available(tool: str, detail: str = "") -> VerifyResult:
+    return VerifyResult(
+        tool=tool, status="not_available", detail=detail, exit_code=127,
+    )
+
+
+def _envelope_error(tool: str, detail: str, exit_code: int) -> VerifyResult:
+    return VerifyResult(
+        tool=tool, status="error", detail=detail, exit_code=exit_code,
+    )
+
+
+def _envelope_skipped(tool: str, reason: str) -> VerifyResult:
+    return VerifyResult(
+        tool=tool, status="skipped", detail=reason,
+    )
+
+
+# ===========================================================================
+# Language detection (design-multilang-support.md S3)
+# ===========================================================================
+
+_LANGUAGE_EXT_MAP: dict[str, str] = {
+    ".py": "python",
+    ".js": "js",
+    ".jsx": "js",
+    ".mjs": "js",
+    ".cjs": "js",
+    ".ts": "ts",
+    ".tsx": "ts",
+    ".go": "go",
+}
+
+_DIR_MARKERS: dict[str, str] = {
+    "go.mod": "go",
+    "pyproject.toml": "python",
+    "setup.py": "python",
+    "requirements.txt": "python",
+    "Pipfile": "python",
+    "tox.ini": "python",
+    "package.json": "js",
+    "tsconfig.json": "ts",
+}
+
+_EXCLUDE_DIRS: tuple[str, ...] = (
+    "node_modules", ".venv", "vendor", "dist", "build",
+)
+
+
+def detect_languages(
+    container: Any,
+    path: str,
+    language: str | None = None,
+) -> tuple[set[str], str | None]:
+    """Detect languages from a file or directory path inside the container.
+
+    Priority:
+    1. Explicit ``language=`` parameter (skip detection).
+    2. File extension map.
+    3. Directory marker files (``go.mod``, ``package.json``, etc.).
+
+    Returns:
+        ``(language_set, warning)`` where *warning* is a string if the
+        detected languages look suspicious (e.g. no markers found).
+    """
+    if language:
+        return {language}, None
+
+    # File extension match
+    ext = _get_extension(path)
+    if ext in _LANGUAGE_EXT_MAP:
+        return {_LANGUAGE_EXT_MAP[ext]}, None
+
+    # Directory: check marker files (single exec for efficiency)
+    markers_found: set[str] = set()
+    marker_paths = " ".join(
+        shlex.quote(os.path.join(path, m))
+        for m in _DIR_MARKERS
+    )
+    ec, output = container.exec_run(
+        ["/bin/sh", "-c", f"ls -1d {marker_paths} 2>/dev/null"],
+        stdout=True,
+        stderr=True,
+    )
+    if ec == 0:
+        stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+        out = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+        found_markers = set(out.strip().split("\n")) if out.strip() else set()
+        name_to_lang = {os.path.basename(p): lang for p, lang in _DIR_MARKERS.items()}
+        for marker_name in found_markers:
+            basename = os.path.basename(marker_name.rstrip("/"))
+            if basename in name_to_lang:
+                markers_found.add(name_to_lang[basename])
+
+    # tsconfig.json overrides package.json for ts (prefer TypeScript)
+    if "ts" in markers_found:
+        markers_found.discard("js")
+
+    if markers_found:
+        return markers_found, None
+
+    return {"unknown"}, (
+        "No recognized project markers found in path. "
+        "Use language= parameter to force a specific toolchain."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -77,17 +220,17 @@ def apply_unified_diff(content: str, diff_text: str) -> str:
             (e.g. context lines do not match).
     """
     if not diff_text.strip():
-        return content  # Empty diff → no change
+        return content  # Empty diff -> no change
 
     hunks = _parse_hunks(diff_text)
     if not hunks:
-        return content  # No hunks → no change
+        return content  # No hunks -> no change
 
     original_ends_with_newline = content.endswith("\n")
     lines = content.split("\n")
 
     # When the original content ends with \n, split() produces a trailing
-    # empty element (e.g. "a\nb\n" → ["a", "b", ""]).  Removing it here
+    # empty element (e.g. "a\nb\n" -> ["a", "b", ""]).  Removing it here
     # avoids double trailing newlines after join.
     if original_ends_with_newline and lines and lines[-1] == "":
         lines = lines[:-1]
@@ -245,7 +388,7 @@ def search_files(
         pattern: Search pattern (regex for ``lexical``,
             AST pattern for ``structural``).
         path: Directory or file path to search within (default ``"/"``).
-        mode: ``"lexical"`` (ripgrep → grep fallback) or
+        mode: ``"lexical"`` (ripgrep -> grep fallback) or
             ``"structural"`` (ast-grep).
         max_results: Maximum results to return (default 50).
 
@@ -579,6 +722,478 @@ def read_file_lines(
     }
 
 
+# ---------------------------------------------------------------------------
+# Extension helper
+# ---------------------------------------------------------------------------
+
+
+def _get_extension(file_path: str) -> str:
+    """Return the lowercase file extension including the dot."""
+    _, dot_ext = file_path.rstrip("/").rsplit(".", 1) if "." in file_path else ("", "")
+    return f".{dot_ext.lower()}" if dot_ext else ""
+
+
+# ---------------------------------------------------------------------------
+# Linter / Type checker / Test / Scan runners
+# ---------------------------------------------------------------------------
+# Each runner now returns a VerifyResult envelope.  The ``|| true`` and
+# ``2>/dev/null`` silencing has been removed: exit codes are inspected
+# directly, and stderr is captured (not discarded).
+#
+# Runner return semantics:
+# - exit 0   + output -> status "findings" (parse output)
+# - exit 0   + no output -> status "ok" (clean)
+# - exit 1   (many tools use this for "findings") -> status "findings"
+# - exit 127             -> status "not_available"
+# - exit other           -> status "error" (unexpected failure)
+# - "skipped" is only for intentional non-execution (e.g. go type layer)
+
+
+def _run_ruff_verify(container: Any, path: str) -> VerifyResult:
+    """Run ruff on *path*.  Returns VerifyResult envelope."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}ruff check --output-format json {_quote_path(path)}",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    if ec == 127:
+        return _envelope_not_available("ruff", "ruff not installed in container")
+    if ec not in (0, 1):
+        return _envelope_error("ruff", stderr_text.strip() or f"exit code {ec}", ec)
+
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    findings = _parse_ruff_output(stdout_text, path)
+    for r in findings:
+        r["severity"] = _determine_lint_severity(r.get("rule", ""))
+    return _envelope_ok("ruff", findings, ec)
+
+
+def _run_eslint_verify(container: Any, path: str) -> VerifyResult:
+    """Run eslint on *path*.  Returns VerifyResult envelope."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}eslint --format json {_quote_path(path)}",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    if ec == 127:
+        return _envelope_not_available("eslint", "eslint not installed in container")
+    if ec not in (0, 1, 2):
+        # eslint exit 2 = runtime error
+        return _envelope_error("eslint", stderr_text.strip() or f"exit code {ec}", ec)
+
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    findings = _parse_eslint_output(stdout_text, path)
+    for r in findings:
+        r["severity"] = _determine_lint_severity(r.get("rule", ""))
+    return _envelope_ok("eslint", findings, ec)
+
+
+def _run_golangci_lint_verify(container: Any, path: str) -> VerifyResult:
+    """Run golangci-lint on *path*.  Falls back to go vet."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}golangci-lint run --out-format json {_quote_path(path)}",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    if ec == 127:
+        return _run_go_vet_verify(container, path)
+
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    if ec not in (0, 1):
+        # golangci-lint uses exit 2 for execution errors (config issues, etc.)
+        return _envelope_error("golangci-lint", stderr_text.strip() or f"exit code {ec}", ec)
+
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    findings = _parse_golangci_lint_output(stdout_text, path)
+    for r in findings:
+        r["severity"] = "error"
+    return _envelope_ok("golangci-lint", findings, ec)
+
+
+def _run_go_vet_verify(container: Any, path: str) -> VerifyResult:
+    """Run go vet on *path*."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}go vet {_quote_path(path)}",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    if ec == 127:
+        return _envelope_not_available("go vet", "go not installed in container")
+    if ec not in (0, 1):
+        return _envelope_error("go vet", stderr_text.strip() or f"exit code {ec}", ec)
+
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    findings = _parse_go_vet_output(stdout_text + "\n" + stderr_text, path)
+    for r in findings:
+        r["severity"] = "error"
+    return _envelope_ok("go vet", findings, ec)
+
+
+def _parse_golangci_lint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
+    """Parse golangci-lint JSON output (when available)."""
+    raw = raw.strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    results: list[dict[str, Any]] = []
+    if isinstance(data, dict):
+        for issue in data.get("Issues", []):
+            pos = issue.get("Pos", {})
+            results.append({
+                "file": pos.get("Filename", ""),
+                "line": int(pos.get("Line", 0)),
+                "rule": issue.get("FromLinter", "unknown"),
+                "message": issue.get("Text", ""),
+            })
+    return results
+
+
+def _parse_go_vet_output(raw: str, file_path: str) -> list[dict[str, Any]]:
+    """Parse go vet text output (file:line:col: message)."""
+    results: list[dict[str, Any]] = []
+    pat = re.compile(r"^(.+?):(\d+):\d+:\s*(.+)$")
+    for line in raw.split("\n"):
+        m = pat.match(line.strip())
+        if m:
+            results.append({
+                "file": m.group(1),
+                "line": int(m.group(2)),
+                "rule": "go-vet",
+                "message": m.group(3),
+            })
+    return results
+
+
+def _run_pyright_verify(container: Any, path: str) -> VerifyResult:
+    """Run pyright on *path*.  Returns VerifyResult envelope."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}pyright --outputjson {_quote_path(path)}",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    if ec == 127:
+        return _envelope_not_available("pyright", "pyright not installed in container")
+    if ec not in (0, 1):
+        return _envelope_error("pyright", stderr_text.strip() or f"exit code {ec}", ec)
+
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    findings = _parse_pyright_output(stdout_text, path)
+    for r in findings:
+        r["severity"] = "error"
+    return _envelope_ok("pyright", findings, ec)
+
+
+def _run_mypy_verify(container: Any, path: str) -> VerifyResult:
+    """Run mypy on *path* (fallback for pyright).  Returns VerifyResult envelope."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}mypy --show-error-codes {_quote_path(path)}",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    if ec == 127:
+        return _envelope_not_available("mypy", "mypy not installed in container")
+    if ec not in (0, 1):
+        return _envelope_error("mypy", stderr_text.strip() or f"exit code {ec}", ec)
+
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    findings = _parse_mypy_output(stdout_text, path)
+    for r in findings:
+        r["severity"] = "error"
+    return _envelope_ok("mypy", findings, ec)
+
+
+def _run_tsc_verify(container: Any, path: str) -> VerifyResult:
+    """Run tsc --noEmit on *path*.  Returns VerifyResult envelope."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}npx tsc --noEmit {_quote_path(path)} 2>&1",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    combined = ""
+    if stdout_part:
+        combined += stdout_part.decode("utf-8", errors="replace")
+    if stderr_part:
+        combined += stderr_part.decode("utf-8", errors="replace")
+
+    if ec == 127:
+        return _envelope_not_available("tsc", "typescript (tsc) not installed in container")
+    if ec not in (0, 1, 2):
+        return _envelope_error("tsc", combined.strip() or f"exit code {ec}", ec)
+
+    findings = _parse_tsc_text(combined, path)
+    if not findings:
+        findings = _parse_tsc_json(combined, path)
+    for r in findings:
+        r["severity"] = "error"
+    return _envelope_ok("tsc", findings, ec)
+
+
+def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
+    """Run pytest --json-report on *path*.  Returns VerifyResult envelope."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}python3 -m pytest --json-report --json-report-file=- {_quote_path(path)}",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    if ec == 127:
+        return _envelope_not_available("pytest", "python3 not found in container")
+    if ec == 5:
+        # pytest exit 5 = no tests collected
+        return _envelope_skipped("pytest", "no tests found")
+    if ec not in (0, 1):
+        return _envelope_error("pytest", stderr_text.strip() or f"exit code {ec}", ec)
+
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+
+    if not stdout_text.strip():
+        return _envelope_skipped("pytest", "no test output produced")
+
+    try:
+        from code_sandbox_mcp.test_report import PytestAdapter
+
+        report = PytestAdapter.parse_json(stdout_text)
+        d = report.to_dict()
+        status = d.get("status", "ok")
+        return VerifyResult(
+            tool="pytest",
+            status="findings" if status == "failed" else "ok",
+            findings=[],
+            detail=json.dumps(d),
+            exit_code=ec,
+        )
+    except Exception:
+        return _envelope_error(
+            "pytest", "failed to parse pytest output", ec,
+        )
+
+
+def _run_jest_verify(container: Any, path: str) -> VerifyResult:
+    """Run jest --json on *path*.  Returns VerifyResult envelope."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}npx jest --json --passWithNoTests {_quote_path(path)}",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    if ec == 127:
+        return _envelope_not_available("jest", "jest not installed in container")
+    if ec not in (0, 1):
+        return _envelope_error("jest", stderr_text.strip() or f"exit code {ec}", ec)
+
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+
+    if not stdout_text.strip():
+        return _envelope_skipped("jest", "no test output produced")
+
+    try:
+        from code_sandbox_mcp.test_report import JestAdapter
+
+        report = JestAdapter.parse_json(stdout_text)
+        d = report.to_dict()
+        status = d.get("status", "ok")
+        return VerifyResult(
+            tool="jest",
+            status="findings" if status == "failed" else "ok",
+            findings=[],
+            detail=json.dumps(d),
+            exit_code=ec,
+        )
+    except Exception:
+        return _envelope_error(
+            "jest", "failed to parse jest output", ec,
+        )
+
+
+def _run_go_test_verify(container: Any, path: str) -> VerifyResult:
+    """Run go test -json on *path*.  Returns VerifyResult envelope."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}go test -json {_quote_path(path)}",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    if ec == 127:
+        return _envelope_not_available("go test", "go not installed in container")
+    if ec not in (0, 1):
+        return _envelope_error("go test", stderr_text.strip() or f"exit code {ec}", ec)
+
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+
+    if not stdout_text.strip():
+        return _envelope_skipped("go test", "no test output produced")
+
+    try:
+        from code_sandbox_mcp.test_report import GoTestAdapter
+
+        report = GoTestAdapter.parse_json(stdout_text)
+        d = report.to_dict()
+        status = d.get("status", "ok")
+        return VerifyResult(
+            tool="go test",
+            status="findings" if status == "failed" else "ok",
+            findings=[],
+            detail=json.dumps(d),
+            exit_code=ec,
+        )
+    except Exception:
+        return _envelope_error(
+            "go test", "failed to parse go test output", ec,
+        )
+
+
+def _run_semgrep_verify(container: Any, path: str, lang_config: str = "p/python") -> VerifyResult:
+    """Run semgrep scan on *path* with language-specific config."""
+    ec, output = container.exec_run(
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}semgrep scan --config {lang_config} --config p/security-audit "
+            f"--json {_quote_path(path)}",
+        ],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    if ec == 127:
+        return _envelope_not_available("semgrep", "semgrep not installed in container")
+    if ec not in (0, 1, 2):
+        # semgrep exit 2 = findings found (normal)
+        return _envelope_error("semgrep", stderr_text.strip() or f"exit code {ec}", ec)
+
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    findings = _parse_semgrep_output(stdout_text, path)
+    if not findings and stdout_text.strip() and ec >= 2:
+        return _envelope_error(
+            "semgrep",
+            f"parse error: semgrep output was non-empty but could not be parsed (exit {ec})",
+            ec,
+        )
+    return _envelope_ok("semgrep", findings, ec)
+
+
+# ---------------------------------------------------------------------------
+# Unified dispatch table
+# ---------------------------------------------------------------------------
+# Maps language -> layer -> runner function.
+# Python type layer tries pyright first, falls back to mypy.
+# Go lint tries golangci-lint first, falls back to go vet.
+# JS has no type layer (skipped).  Go type is covered by go vet/build.
+
+
+_DISPATCH: dict[str, dict[str, Any]] = {
+    "python": {
+        "lint": _run_ruff_verify,
+        "type": _run_pyright_verify,  # primary
+        "type_fallback": _run_mypy_verify,
+        "test": _run_pytest_verify,
+        "scan": lambda c, p: _run_semgrep_verify(c, p, "p/python"),
+    },
+    "js": {
+        "lint": _run_eslint_verify,
+        "type": None,  # skipped
+        "type_fallback": None,
+        "test": _run_jest_verify,
+        "scan": lambda c, p: _run_semgrep_verify(c, p, "p/javascript"),
+    },
+    "ts": {
+        "lint": _run_eslint_verify,
+        "type": _run_tsc_verify,
+        "type_fallback": None,
+        "test": _run_jest_verify,
+        "scan": lambda c, p: _run_semgrep_verify(c, p, "p/typescript"),
+    },
+    "go": {
+        "lint": _run_golangci_lint_verify,
+        "type": None,  # skipped: build/vet covers typing
+        "type_fallback": None,
+        "test": _run_go_test_verify,
+        "scan": lambda c, p: _run_semgrep_verify(c, p, "p/go"),
+    },
+    "unknown": {
+        "lint": None,
+        "type": None,
+        "type_fallback": None,
+        "test": None,
+        "scan": None,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# lint_file / type_check_file (single-file, backward-compatible)
+# ---------------------------------------------------------------------------
+
+
 def lint_file(
     client: Any,
     container_id: str,
@@ -598,8 +1213,8 @@ def lint_file(
     descriptive message listing the expected tools.
 
     Supported:
-    - ``.py`` files → ``ruff check`` (falls back to ``pylint``)
-    - ``.js``, ``.ts``, ``.jsx``, ``.tsx`` files → ``eslint``
+    - ``.py`` files -> ``ruff check`` (falls back to ``pylint``)
+    - ``.js``, ``.ts``, ``.jsx``, ``.tsx`` files -> ``eslint``
     """
     try:
         container = client.containers.get(container_id)
@@ -625,12 +1240,11 @@ def lint_file(
 
 def _run_python_linter(container: Any, file_path: str) -> list[dict[str, Any]]:
     """Try ruff, fall back to pylint. Report tool absence clearly."""
-    # ruff (primary)
-    ruff_result = _run_ruff(container, file_path)
-    if ruff_result is not None:
-        return ruff_result  # ruff ran (results may be empty = clean file)
+    result = _run_ruff_verify(container, file_path)
+    if result.status not in ("not_available", "error"):
+        return result.findings
 
-    # pylint (fallback)
+    # ruff not available, try pylint
     pylint_result = _run_pylint(container, file_path)
     if pylint_result is not None:
         return pylint_result
@@ -651,9 +1265,9 @@ def _run_python_linter(container: Any, file_path: str) -> list[dict[str, Any]]:
 
 def _run_js_linter(container: Any, file_path: str) -> list[dict[str, Any]]:
     """Try eslint."""
-    eslint_result = _run_eslint(container, file_path)
-    if eslint_result is not None:
-        return eslint_result
+    result = _run_eslint_verify(container, file_path)
+    if result.status not in ("not_available", "error"):
+        return result.findings
 
     return [
         {
@@ -680,8 +1294,8 @@ def type_check_file(
     If no type checker is installed, returns ``rule: "no-typechecker"``.
 
     Supported:
-    - ``.py`` files → ``mypy`` (falls back to ``pyright``)
-    - ``.ts``, ``.tsx`` files → ``tsc --noEmit``
+    - ``.py`` files -> ``pyright`` (falls back to ``mypy``)
+    - ``.ts``, ``.tsx`` files -> ``tsc --noEmit``
     """
     try:
         container = client.containers.get(container_id)
@@ -706,14 +1320,16 @@ def type_check_file(
 
 
 def _run_python_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
-    """Try mypy, fall back to pyright."""
-    mypy_result = _run_mypy(container, file_path)
-    if mypy_result is not None:
-        return mypy_result
+    """Try pyright, fall back to mypy. Matches _DISPATCH priority."""
+    # Try pyright first (primary, matches _DISPATCH)
+    pyright_result = _run_pyright_verify(container, file_path)
+    if pyright_result.status not in ("not_available", "error"):
+        return pyright_result.findings
 
-    pyright_result = _run_pyright(container, file_path)
-    if pyright_result is not None:
-        return pyright_result
+    # Fall back to mypy
+    mypy_result = _run_mypy_verify(container, file_path)
+    if mypy_result.status not in ("not_available", "error"):
+        return mypy_result.findings
 
     return [
         {
@@ -730,10 +1346,10 @@ def _run_python_typecheck(container: Any, file_path: str) -> list[dict[str, Any]
 
 
 def _run_ts_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
-    """Try tsc."""
-    tsc_result = _run_tsc(container, file_path)
-    if tsc_result is not None:
-        return tsc_result
+    """Try tsc. Uses unified runner."""
+    tsc_result = _run_tsc_verify(container, file_path)
+    if tsc_result.status not in ("not_available", "error"):
+        return tsc_result.findings
 
     return [
         {
@@ -750,38 +1366,71 @@ def _run_ts_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Extension helper
-# ---------------------------------------------------------------------------
-
-
-def _get_extension(file_path: str) -> str:
-    """Return the lowercase file extension including the dot."""
-    _, dot_ext = file_path.rstrip("/").rsplit(".", 1) if "." in file_path else ("", "")
-    return f".{dot_ext.lower()}" if dot_ext else ""
-
-
-# ---------------------------------------------------------------------------
-# Linter runners
+# Legacy single-tool runners (kept for backward compat with old callers)
 # ---------------------------------------------------------------------------
 
 
 def _run_ruff(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``ruff check --output-format json``. Returns None if ruff is not installed."""
+    result = _run_ruff_verify(container, file_path)
+    if result.status == "not_available":
+        return None
+    return result.findings
+
+
+def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
+    """Run ``pylint --output-format json``. Returns None if pylint is not installed."""
     exit_code, output = container.exec_run(
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}ruff check --output-format json {_quote_path(file_path)} 2>/dev/null || true",
+            f"{_SANDBOX_ENV}pylint --output-format json {_quote_path(file_path)} 2>/dev/null || true",
         ],
         stdout=True,
         stderr=True,
     )
-    # exit_code 127 = command not found
     if exit_code == 127:
         return None
     stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    return _parse_ruff_output(stdout_text, file_path)
+    return _parse_pylint_output(stdout_text, file_path)
+
+
+def _run_eslint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
+    """Run ``eslint --format json``. Returns None if eslint is not installed."""
+    result = _run_eslint_verify(container, file_path)
+    if result.status == "not_available":
+        return None
+    return result.findings
+
+
+def _run_mypy(container: Any, file_path: str) -> list[dict[str, Any]] | None:
+    """Run ``mypy --show-error-codes``. Returns None if mypy is not installed."""
+    result = _run_mypy_verify(container, file_path)
+    if result.status == "not_available":
+        return None
+    return result.findings
+
+
+def _run_pyright(container: Any, file_path: str) -> list[dict[str, Any]] | None:
+    """Run ``pyright --outputjson``. Returns None if pyright is not installed."""
+    result = _run_pyright_verify(container, file_path)
+    if result.status == "not_available":
+        return None
+    return result.findings
+
+
+def _run_tsc(container: Any, file_path: str) -> list[dict[str, Any]] | None:
+    """Run ``tsc --noEmit``. Returns None if tsc is not installed."""
+    result = _run_tsc_verify(container, file_path)
+    if result.status == "not_available":
+        return None
+    return result.findings
+
+
+# ---------------------------------------------------------------------------
+# Parsers (unchanged)
+# ---------------------------------------------------------------------------
 
 
 def _parse_ruff_output(raw: str, file_path: str) -> list[dict[str, Any]]:
@@ -809,24 +1458,6 @@ def _parse_ruff_output(raw: str, file_path: str) -> list[dict[str, Any]]:
     return results
 
 
-def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
-    """Run ``pylint --output-format json``. Returns None if pylint is not installed."""
-    exit_code, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            f"{_SANDBOX_ENV}pylint --output-format json {_quote_path(file_path)} 2>/dev/null || true",
-        ],
-        stdout=True,
-        stderr=True,
-    )
-    if exit_code == 127:
-        return None
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    return _parse_pylint_output(stdout_text, file_path)
-
-
 def _parse_pylint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
     """Parse pylint JSON output into the common result format."""
     raw = raw.strip()
@@ -850,24 +1481,6 @@ def _parse_pylint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
             }
         )
     return results
-
-
-def _run_eslint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
-    """Run ``eslint --format json``. Returns None if eslint is not installed."""
-    exit_code, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            f"{_SANDBOX_ENV}eslint --format json {_quote_path(file_path)} 2>/dev/null || true",
-        ],
-        stdout=True,
-        stderr=True,
-    )
-    if exit_code == 127:
-        return None
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    return _parse_eslint_output(stdout_text, file_path)
 
 
 def _parse_eslint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
@@ -897,29 +1510,6 @@ def _parse_eslint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
     return results
 
 
-# ---------------------------------------------------------------------------
-# Type checker runners
-# ---------------------------------------------------------------------------
-
-
-def _run_mypy(container: Any, file_path: str) -> list[dict[str, Any]] | None:
-    """Run ``mypy --show-error-codes``. Returns None if mypy is not installed."""
-    exit_code, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            f"{_SANDBOX_ENV}mypy --show-error-codes {_quote_path(file_path)} 2>/dev/null || true",
-        ],
-        stdout=True,
-        stderr=True,
-    )
-    if exit_code == 127:
-        return None
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    return _parse_mypy_output(stdout_text, file_path)
-
-
 #: Regex for mypy output: ``file:line:column: severity: message [error-code]``
 _MYPY_LINE_RE = re.compile(
     r"^(.+?):(\d+):\d+:\s*(error|warning|note):\s*(.+?)(?:\s+\[([^\]]+)\])?\s*$"
@@ -943,24 +1533,6 @@ def _parse_mypy_output(raw: str, file_path: str) -> list[dict[str, Any]]:
     return results
 
 
-def _run_pyright(container: Any, file_path: str) -> list[dict[str, Any]] | None:
-    """Run ``pyright --outputjson``. Returns None if pyright is not installed."""
-    exit_code, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            f"{_SANDBOX_ENV}pyright --outputjson {_quote_path(file_path)} 2>/dev/null || true",
-        ],
-        stdout=True,
-        stderr=True,
-    )
-    if exit_code == 127:
-        return None
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    return _parse_pyright_output(stdout_text, file_path)
-
-
 def _parse_pyright_output(raw: str, file_path: str) -> list[dict[str, Any]]:
     """Parse pyright JSON output into the common result format."""
     raw = raw.strip()
@@ -982,28 +1554,6 @@ def _parse_pyright_output(raw: str, file_path: str) -> list[dict[str, Any]]:
             }
         )
     return results
-
-
-def _run_tsc(container: Any, file_path: str) -> list[dict[str, Any]] | None:
-    """Run ``tsc --noEmit``. Returns None if tsc is not installed."""
-    exit_code, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            f"{_SANDBOX_ENV}npx tsc --noEmit {_quote_path(file_path)} 2>&1 || true",
-        ],
-        stdout=True,
-        stderr=True,
-    )
-    if exit_code == 127:
-        return None
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-
-    parsed = _parse_tsc_json(stdout_text, file_path)
-    if not parsed:
-        parsed = _parse_tsc_text(stdout_text, file_path)
-    return parsed
 
 
 #: Regex for tsc text output: ``file(line,col): error TSXXXX: message``
@@ -1101,140 +1651,289 @@ def _determine_lint_severity(rule: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Verify: bundled lint + type_check + test + scan   (Issue #54)
-# TODO: consider parallel execution with ThreadPoolExecutor for large projects
+# Language-layer dispatch for verify
 # ---------------------------------------------------------------------------
 
 
-def _run_ruff_verify(container: Any, path: str) -> list[dict[str, Any]]:
-    """Run ruff on *path* for verify.  Single-tool, no fallback."""
-    exit_code, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            f"{_SANDBOX_ENV}ruff check --output-format json "
-            f"{_quote_path(path)} 2>/dev/null || true",
-        ],
-        stdout=True,
-        stderr=True,
-    )
-    if exit_code == 127:
-        return [
-            {
-                "file": path,
-                "line": 0,
-                "rule": "no-linter",
-                "severity": "info",
-                "message": "ruff not installed",
-            }
-        ]
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    results = _parse_ruff_output(stdout_text, path)
-    for r in results:
-        r["severity"] = _determine_lint_severity(r.get("rule", ""))
-    return results
+def _dispatch_layer(
+    container: Any,
+    path: str,
+    language: str,
+    layer: str,
+) -> VerifyResult:
+    """Run a single verification layer for a given language.
 
-
-def _run_pyright_verify(container: Any, path: str) -> list[dict[str, Any]]:
-    """Run pyright on *path* for verify.  Single-tool, no fallback."""
-    exit_code, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            f"{_SANDBOX_ENV}pyright --outputjson "
-            f"{_quote_path(path)} 2>/dev/null || true",
-        ],
-        stdout=True,
-        stderr=True,
-    )
-    if exit_code == 127:
-        return [
-            {
-                "file": path,
-                "line": 0,
-                "rule": "no-typechecker",
-                "severity": "info",
-                "message": "pyright not installed",
-            }
-        ]
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    results = _parse_pyright_output(stdout_text, path)
-    for r in results:
-        r["severity"] = "error"
-    return results
-
-
-def _run_pytest_verify(container: Any, path: str) -> dict[str, Any]:
-    """Run pytest with json-report on *path*.
-
-    Returns a dict with keys ``status``, ``passed``, ``failed``,
-    ``duration``, and optionally ``failures``, matching
-    :class:`code_sandbox_mcp.test_report.TestReport.to_dict`.
+    Returns a VerifyResult envelope, including ``skipped`` for
+    languages that don't have a given layer (e.g. JS type checking).
     """
-    exit_code, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            (
-                f"python3 -m pytest --json-report "
-                f"--json-report-file=- {_quote_path(path)} 2>/dev/null || true"
-            ),
-        ],
-        stdout=True,
-        stderr=True,
-    )
-    if exit_code == 127:
-        return {"status": "skipped", "message": "python3 not found"}
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    entry = _DISPATCH.get(language, _DISPATCH["unknown"])
+    runner = entry.get(layer)
+    if runner is None:
+        if language == "unknown":
+            return _envelope_skipped(
+                f"{language}-{layer}",
+                f"language '{language}' has no verification layers",
+            )
+        return _envelope_skipped(
+            f"{language}-{layer}",
+            f"language '{language}' has no {layer} layer",
+        )
 
-    if not stdout_text.strip():
-        return {"status": "skipped", "message": "no test output"}
+    result = runner(container, path)
 
+    # For type layer: try fallback if primary failed with not_available
+    if layer == "type" and result.status == "not_available":
+        fallback = entry.get("type_fallback")
+        if fallback is not None:
+            result = fallback(container, path)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# verify: bundled lint + type_check + test + scan  (Issue #54)
+# ---------------------------------------------------------------------------
+
+
+def run_verify(
+    client: Any,
+    container_id: str,
+    path: str,
+    gate_on_lint_error: bool = True,
+    gate_on_type_error: bool = False,
+    gate_on_test_fail: bool = True,
+    gate_on_scan_error: bool = True,
+    gate_on_scan_warning: bool = False,
+    language: str | None = None,
+) -> dict[str, Any]:
+    """Run lint + type_check + test + scan with language-aware dispatch.
+
+    Detects project languages from *path* (or uses explicit *language=*
+    parameter), dispatches each verification layer to the appropriate
+    tool, and computes a gate decision based on the findings.
+
+    Each layer returns a status envelope with one of:
+    - ``"ok"`` — ran, no findings
+    - ``"findings"`` — ran, findings present
+    - ``"not_available"`` — tool not installed in container
+    - ``"error"`` — tool ran but failed (unexpected exit, parse error)
+    - ``"skipped"`` — intentionally not run (no layer for this language)
+
+    Gate logic:
+    - **strict** (submit): any ``"not_available"`` or ``"error"``
+      status causes ``gate_passed=false`` with reason
+      ``"verification incomplete: <tool> <status>"``.
+    - **lenient** (interactive verify): passes but returns
+      ``incomplete: true``.
+
+    Args:
+        client: Docker client.
+        container_id: 12-character container ID prefix.
+        path: File or directory path inside the container.
+        gate_on_lint_error: Whether lint errors fail the gate
+            (default ``True``).
+        gate_on_type_error: Whether type-check errors fail the gate
+            (default ``False``).
+        gate_on_test_fail: Whether test failures fail the gate
+            (default ``True``).
+        gate_on_scan_error: Whether semgrep ERROR findings fail the gate
+            (default ``True``).
+        gate_on_scan_warning: Whether semgrep WARNING findings fail the gate
+            (default ``False``).
+        language: Explicit language override (``"python"``, ``"js"``,
+            ``"ts"``, ``"go"``).  Skips auto-detection.
+
+    Returns:
+        A dict with:
+        - ``status``: ``"ok"`` or ``"failed"``
+        - ``gate_passed``: ``True`` if all gate conditions are satisfied
+        - ``incomplete``: ``True`` if any layer was not available / errored
+        - ``detected_languages``: list of detected language keys
+        - ``layers``: dict of ``{layer: {language: VerifyResult}}``
+        - ``gate_fail_reasons`` (optional): list of human-readable reasons
+    """
     try:
-        from code_sandbox_mcp.test_report import PytestAdapter
-
-        report = PytestAdapter.parse_json(stdout_text)
-        return report.to_dict()
-    except Exception:
+        container = client.containers.get(container_id)
+    except Exception as e:
         return {
-            "status": "skipped",
-            "message": "pytest not installed or no tests found",
+            "status": "error",
+            "gate_passed": False,
+            "error": f"Container {container_id[:12]} not found: {e}",
         }
 
+    # --- Language detection ---
+    detected, detection_warning = detect_languages(container, path, language)
 
-def _run_semgrep_verify(container: Any, path: str) -> list[dict[str, Any]]:
-    """Run semgrep scan on *path* for verify.
+    # --- Run all layers for all detected languages ---
+    layers: dict[str, list[VerifyResult]] = {
+        "lint": [],
+        "type": [],
+        "test": [],
+        "scan": [],
+    }
 
-    Uses Python and security-audit rule sets.
+    for lang in sorted(detected):
+        for layer_name in ("lint", "type", "test", "scan"):
+            vr = _dispatch_layer(container, path, lang, layer_name)
+            layers[layer_name].append(vr)
+
+    # --- Gate logic ---
+    gate_fail_reasons: list[str] = []
+    incomplete = False
+
+    for layer_name, results in layers.items():
+        for vr in results:
+            if vr.status in ("not_available", "error"):
+                incomplete = True
+                # strict gate: verification incomplete -> fail
+                gate_fail_reasons.append(
+                    f"verification incomplete: {vr.tool} {vr.status}"
+                    + (f" ({vr.detail})" if vr.detail else "")
+                )
+
+    # Lint error gate
+    if gate_on_lint_error:
+        for vr in layers["lint"]:
+            if vr.status == "findings":
+                lint_errors = [
+                    r for r in vr.findings
+                    if r.get("severity") == "error"
+                    and r.get("rule") not in ("no-linter", "error")
+                ]
+                if lint_errors:
+                    gate_fail_reasons.append(
+                        f"lint ({vr.tool}): {len(lint_errors)} error(s)"
+                    )
+
+    # Type error gate
+    if gate_on_type_error:
+        for vr in layers["type"]:
+            if vr.status == "findings":
+                type_errors = [
+                    r for r in vr.findings
+                    if r.get("severity") == "error"
+                    and r.get("rule") not in ("no-typechecker", "error")
+                ]
+                if type_errors:
+                    gate_fail_reasons.append(
+                        f"type_check ({vr.tool}): {len(type_errors)} error(s)"
+                    )
+
+    # Test failure gate
+    if gate_on_test_fail:
+        for vr in layers["test"]:
+            if vr.detail:
+                try:
+                    test_report = json.loads(vr.detail)
+                    if test_report.get("status") == "failed":
+                        gate_fail_reasons.append(
+                            f"tests ({vr.tool}): "
+                            f"{test_report.get('failed', 0)} failure(s)"
+                        )
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+    # Scan error gate
+    if gate_on_scan_error:
+        for vr in layers["scan"]:
+            if vr.status == "findings":
+                scan_errors = [
+                    r for r in vr.findings
+                    if r.get("severity") == "ERROR"
+                    and r.get("rule") not in ("no-scanner",)
+                ]
+                if scan_errors:
+                    gate_fail_reasons.append(
+                        f"scan ({vr.tool}): {len(scan_errors)} ERROR(s)"
+                    )
+
+    # Scan warning gate
+    if gate_on_scan_warning:
+        for vr in layers["scan"]:
+            if vr.status == "findings":
+                scan_warnings = [
+                    r for r in vr.findings
+                    if r.get("severity") == "WARNING"
+                ]
+                if scan_warnings:
+                    gate_fail_reasons.append(
+                        f"scan ({vr.tool}): {len(scan_warnings)} WARNING(s)"
+                    )
+
+    gate_passed = len(gate_fail_reasons) == 0
+    overall_status = "failed" if not gate_passed else "ok"
+
+    # --- Build result ---
+    # Flatten layers for backward compatibility with existing consumers
+    result: dict[str, Any] = {
+        "status": overall_status,
+        "gate_passed": gate_passed,
+        "detected_languages": sorted(detected),
+        "incomplete": incomplete,
+        "lint": _flatten_layer(layers["lint"]),
+        "types": _flatten_layer(layers["type"]),
+        "tests": _flatten_test_layer(layers["test"]),
+        "scan": _flatten_layer(layers["scan"]),
+    }
+
+    if detection_warning:
+        result["detection_warning"] = detection_warning
+    if gate_fail_reasons:
+        result["gate_fail_reasons"] = gate_fail_reasons
+
+    return result
+
+
+def _flatten_layer(results: list[VerifyResult]) -> list[dict[str, Any]]:
+    """Flatten a list of VerifyResults into a single findings list.
+
+    For backward compatibility: existing consumers expect
+    ``lint`` / ``types`` / ``scan`` to be a flat list of findings.
     """
-    exit_code, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            (
-                f"semgrep scan --config p/python --config p/security-audit "
-                f"--json {_quote_path(path)} 2>/dev/null || true"
-            ),
-        ],
-        stdout=True,
-        stderr=True,
-    )
-    if exit_code == 127:
-        return [
-            {
-                "file": path,
-                "line": 0,
-                "rule": "no-scanner",
-                "severity": "info",
-                "message": "semgrep not installed",
-            }
-        ]
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    return _parse_semgrep_output(stdout_text, path)
+    all_findings: list[dict[str, Any]] = []
+    for vr in results:
+        all_findings.extend(vr.findings)
+    return all_findings
+
+
+def _flatten_test_layer(results: list[VerifyResult]) -> dict[str, Any]:
+    """Flatten test VerifyResults into a compatible dict.
+
+    For backward compat: existing consumers expect ``tests`` to be
+    a dict with ``status``, ``passed``, ``failed``, etc.
+    """
+    if not results:
+        return {"status": "skipped", "message": "no test runner assigned"}
+
+    # Merge multiple test results (polyglot)
+    merged: dict[str, Any] = {"status": "ok", "passed": 0, "failed": 0, "duration": 0.0}
+    any_run = False
+    for vr in results:
+        if vr.status in ("skipped", "not_available"):
+            continue
+        any_run = True
+        if vr.detail:
+            try:
+                tr = json.loads(vr.detail)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            merged["passed"] = merged.get("passed", 0) + tr.get("passed", 0)
+            merged["failed"] = merged.get("failed", 0) + tr.get("failed", 0)
+            merged["duration"] = merged.get("duration", 0) + tr.get("duration", 0)
+            if tr.get("status") == "failed":
+                merged["status"] = "failed"
+            if "failures" in tr:
+                merged.setdefault("failures", []).extend(tr["failures"])
+
+    if not any_run:
+        return {"status": "skipped", "message": "no test output"}
+
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Semgrep output parser
+# ---------------------------------------------------------------------------
 
 
 def _parse_semgrep_output(raw: str, file_path: str) -> list[dict[str, Any]]:
@@ -1263,130 +1962,3 @@ def _parse_semgrep_output(raw: str, file_path: str) -> list[dict[str, Any]]:
             }
         )
     return results
-
-
-def run_verify(
-    client: Any,
-    container_id: str,
-    path: str,
-    gate_on_lint_error: bool = True,
-    gate_on_type_error: bool = False,
-    gate_on_test_fail: bool = True,
-    gate_on_scan_error: bool = True,
-    gate_on_scan_warning: bool = False,
-) -> dict[str, Any]:
-    """Run lint + type_check + test + scan and return unified results.
-
-    This is the core of the Issue #54 verify tool.  It bundles four
-    analysis layers into a single call, normalises output, and
-    computes a gate decision.
-
-    Args:
-        client: Docker client.
-        container_id: 12-character container ID prefix.
-        path: File or directory path inside the container.
-        gate_on_lint_error: Whether lint errors fail the gate
-            (default ``True``).
-        gate_on_type_error: Whether type-check errors fail the gate
-            (default ``False``).
-        gate_on_test_fail: Whether test failures fail the gate
-            (default ``True``).
-        gate_on_scan_error: Whether semgrep ERROR findings fail the gate
-            (default ``True``).
-        gate_on_scan_warning: Whether semgrep WARNING findings fail the gate
-            (default ``False``).
-
-    Returns:
-        A dict with:
-
-        - ``status``: ``"ok"`` or ``"failed"``
-        - ``gate_passed``: ``True`` if all gate conditions are satisfied
-        - ``lint``: list of lint findings
-        - ``types``: list of type-check findings
-        - ``tests``: test report dict
-        - ``scan``: list of semgrep findings
-        - ``gate_fail_reasons`` (optional): list of human-readable reasons
-          why the gate failed
-    """
-    try:
-        container = client.containers.get(container_id)
-    except Exception as e:
-        return {
-            "status": "error",
-            "gate_passed": False,
-            "error": f"Container {container_id[:12]} not found: {e}",
-        }
-
-    lint_results = _run_ruff_verify(container, path)
-    type_results = _run_pyright_verify(container, path)
-    test_results = _run_pytest_verify(container, path)
-    scan_results = _run_semgrep_verify(container, path)
-
-    gate_fail_reasons: list[str] = []
-
-    if gate_on_lint_error:
-        lint_errors = [
-            r for r in lint_results
-            if r.get("severity") == "error"
-            # "error" rule is a safety net for unexpected paths;
-            # _run_ruff_verify never produces it today.
-            and r.get("rule") not in ("no-linter", "error")
-        ]
-        if lint_errors:
-            gate_fail_reasons.append(
-                f"lint: {len(lint_errors)} error(s)"
-            )
-
-    if gate_on_type_error:
-        type_errors = [
-            r for r in type_results
-            if r.get("severity") == "error"
-            and r.get("rule") not in ("no-typechecker", "error")
-        ]
-        if type_errors:
-            gate_fail_reasons.append(
-                f"type_check: {len(type_errors)} error(s)"
-            )
-
-    if gate_on_test_fail:
-        if test_results.get("status") == "failed":
-            gate_fail_reasons.append(
-                f"tests: {test_results.get('failed', 0)} failure(s)"
-            )
-
-    if gate_on_scan_error:
-        scan_errors = [
-            r for r in scan_results
-            if r.get("severity") == "ERROR"
-            and r.get("rule") not in ("no-scanner",)
-        ]
-        if scan_errors:
-            gate_fail_reasons.append(
-                f"scan: {len(scan_errors)} ERROR(s)"
-            )
-
-    if gate_on_scan_warning:
-        scan_warnings = [
-            r for r in scan_results
-            if r.get("severity") == "WARNING"
-        ]
-        if scan_warnings:
-            gate_fail_reasons.append(
-                f"scan: {len(scan_warnings)} WARNING(s)"
-            )
-
-    gate_passed = len(gate_fail_reasons) == 0
-    overall_status = "failed" if not gate_passed else "ok"
-
-    result: dict[str, Any] = {
-        "status": overall_status,
-        "gate_passed": gate_passed,
-        "lint": lint_results,
-        "types": type_results,
-        "tests": test_results,
-        "scan": scan_results,
-    }
-    if gate_fail_reasons:
-        result["gate_fail_reasons"] = gate_fail_reasons
-
-    return result

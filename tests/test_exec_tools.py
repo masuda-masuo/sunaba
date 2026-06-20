@@ -298,7 +298,51 @@ class TestSandboxExec:
         assert result["status"] == "error"
         assert "error details" in result["output"]
 
+    @patch("code_sandbox_mcp.server._docker")
+    def test_timeout_status_on_exit_124(self, mock_docker: MagicMock) -> None:
+        """Issue #131: timeout=N returns status 'timeout' when exit_code is 124."""
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (124, (b"", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
 
+        result = self._decode(sandbox_exec(
+            container_id="abc123def456",
+            commands=["sleep 60"],
+            timeout=5,
+        ))
+        assert result["status"] == "timeout"
+        assert result["exit_code"] == 124
+
+    @patch("code_sandbox_mcp.server._docker")
+    def test_timeout_zero_not_applied(self, mock_docker: MagicMock) -> None:
+        """timeout=0 (default) does not wrap command with timeout(1)."""
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"ok", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        sandbox_exec(container_id="abc123def456", commands=["echo ok"])
+
+        cmd = mock_container.exec_run.call_args[0][0][-1]
+        assert "timeout" not in cmd
+
+    @patch("code_sandbox_mcp.server._docker")
+    def test_exit_124_without_timeout_is_error(self, mock_docker: MagicMock) -> None:
+        """exit_code=124 without timeout set is status 'error', not 'timeout'."""
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (124, (b"", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = self._decode(sandbox_exec(
+            container_id="abc123def456",
+            commands=["exit 124"],
+        ))
+        assert result["status"] == "error"
 
 
 

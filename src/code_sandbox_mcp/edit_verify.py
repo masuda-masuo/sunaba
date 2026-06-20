@@ -206,7 +206,7 @@ def _find_tsconfig_upward(container: Any, file_path: str) -> str | None:
     current = os.path.dirname(os.path.abspath(file_path))
     while True:
         ec, output = container.exec_run(
-            ["/bin/sh", "-c", f"test -f {shlex.quote(os.path.join(current, "tsconfig.json"))} && echo found || echo notfound"],
+            ["/bin/sh", "-c", f'test -f {shlex.quote(os.path.join(current, "tsconfig.json"))} && echo found || echo notfound'],
             stdout=True,
             stderr=True,
         )

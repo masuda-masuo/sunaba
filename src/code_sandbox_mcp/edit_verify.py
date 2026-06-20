@@ -2034,12 +2034,14 @@ def run_verify(
     gate_passed = len(gate_fail_reasons) == 0
     overall_status = "failed" if not gate_passed else "ok"
 
+    detection_warning = detected.reason if not detected.languages else None
+
     # --- Build result ---
     # Flatten layers for backward compatibility with existing consumers
     result: dict[str, Any] = {
         "status": overall_status,
         "gate_passed": gate_passed,
-        "detected_languages": sorted(detected),
+        "detected_languages": sorted(detected.languages),
         "incomplete": incomplete,
         "lint": _flatten_layer(layers["lint"]),
         "types": _flatten_layer(layers["type"]),

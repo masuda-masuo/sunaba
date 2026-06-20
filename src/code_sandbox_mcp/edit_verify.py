@@ -16,10 +16,12 @@ language-aware dispatch, status envelopes, and proper gate logic.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import shlex
+import secrets
 import fnmatch
 from dataclasses import dataclass, field
 from typing import Any
@@ -218,133 +220,6 @@ def _find_tsconfig_upward(container: Any, file_path: str) -> str | None:
         if parent == current:
             return None
         current = parent
-
-
-# ---------------------------------------------------------------------------
-# Unified diff parsing and application
-# ---------------------------------------------------------------------------
-
-#: Regex for unified diff hunk headers: ``@@ -old_start,old_count +new_start,new_count @@``
-_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-
-#: Regex for hunk body lines: `` ` ` (context), ``-`` (remove), ``+`` (add)
-_HUNK_LINE_RE = re.compile(r"^([ +\-])")
-
-
-def _parse_hunks(diff_text: str) -> list[dict[str, Any]]:
-    """Parse a unified diff string into a list of hunk dicts.
-
-    Each hunk dict has:
-    - ``old_start`` (int): 1-indexed start line in original file
-    - ``old_count`` (int): number of original lines in hunk
-    - ``new_start`` (int): 1-indexed start line in new file
-    - ``new_count`` (int): number of new lines in hunk
-    - ``lines`` (list[str]): hunk body lines with ``+``, ``-``, `` `` prefixes
-    """
-    hunks: list[dict[str, Any]] = []
-    for line in diff_text.split("\n"):
-        m = _HUNK_HEADER_RE.match(line)
-        if m:
-            hunks.append(
-                {
-                    "old_start": int(m.group(1)),
-                    "old_count": int(m.group(2) or 1),
-                    "new_start": int(m.group(3)),
-                    "new_count": int(m.group(4) or 1),
-                    "lines": [],
-                }
-            )
-            continue
-        if hunks and _HUNK_LINE_RE.match(line):
-            hunks[-1]["lines"].append(line)
-    return hunks
-
-
-def apply_unified_diff(content: str, diff_text: str) -> str:
-    """Apply a unified diff to *content* and return the result.
-
-    Args:
-        content: Original file content (string with newlines).
-        diff_text: Unified diff string.
-
-    Returns:
-        The patched content.
-
-    Raises:
-        ValueError: If the diff is malformed or cannot be applied
-            (e.g. context lines do not match).
-    """
-    if not diff_text.strip():
-        return content  # Empty diff -> no change
-
-    hunks = _parse_hunks(diff_text)
-    if not hunks:
-        return content  # No hunks -> no change
-
-    original_ends_with_newline = content.endswith("\n")
-    lines = content.split("\n")
-
-    # When the original content ends with \n, split() produces a trailing
-    # empty element (e.g. "a\nb\n" -> ["a", "b", ""]).  Removing it here
-    # avoids double trailing newlines after join.
-    if original_ends_with_newline and lines and lines[-1] == "":
-        lines = lines[:-1]
-
-    # Apply hunks in reverse order (bottom to top) so line offsets in
-    # earlier hunks remain valid.
-    for hunk in reversed(hunks):
-        old_start = hunk["old_start"] - 1  # Convert to 0-indexed
-        old_count = hunk["old_count"]
-        hunk_lines = hunk["lines"]
-
-        # --- Validate context ---
-        idx = old_start
-        for hline in hunk_lines:
-            if idx >= len(lines) and not hline.startswith("+"):
-                raise ValueError(
-                    f"Hunk references line {idx + 1} but file has only "
-                    f"{len(lines)} line(s)"
-                )
-            if hline.startswith(" ") or hline.startswith("-"):
-                expected = hline[1:]  # Strip prefix
-                actual = lines[idx]
-                if actual != expected:
-                    raise ValueError(
-                        f"Context mismatch at line {idx + 1}:\n"
-                        f"  expected: {expected!r}\n"
-                        f"  actual:   {actual!r}"
-                    )
-                idx += 1
-            elif hline.startswith("+"):
-                pass  # Addition, nothing to check
-            elif hline.startswith("\\"):
-                pass  # No-newline marker, skip
-
-        # --- Apply the hunk ---
-        before = lines[:old_start]
-        after = (
-            lines[old_start + old_count :]
-            if old_start + old_count <= len(lines)
-            else []
-        )
-
-        new_lines: list[str] = []
-        for hline in hunk_lines:
-            if hline.startswith(" ") or hline.startswith("-"):
-                if not hline.startswith("-"):
-                    new_lines.append(hline[1:])  # Context: keep
-                # Removal: skip
-            elif hline.startswith("+"):
-                new_lines.append(hline[1:])  # Addition: insert
-            # \\ no-newline markers are ignored
-
-        lines = before + new_lines + after
-
-    # Preserve trailing newline behaviour
-    result = "\n".join(lines)
-    if original_ends_with_newline:
-        result += "\n"
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -691,34 +566,269 @@ _SANDBOX_ENV: str = (
 # ---------------------------------------------------------------------------
 
 
+def _normalize_diff_for_git(diff_content: str) -> str | None:
+    """Reduce an arbitrary unified diff to a clean single-file patch.
+
+    Drops all pre-hunk metadata (``diff --git`` / ``index`` / original
+    ``---`` / ``+++`` lines) and re-emits deterministic ``a/target`` /
+    ``b/target`` headers so ``git apply -p1`` targets a known basename
+    regardless of how the caller wrote the original headers.  Everything from
+    the first ``@@`` onward (all hunks) is preserved verbatim — ``git apply
+    --recount`` fixes any wrong line counts.  Returns ``None`` when the diff
+    contains no hunks or spans multiple files.
+    """
+    body: list[str] = []
+    in_body = False
+    for line in diff_content.split("\n"):
+        if line.startswith("@@"):
+            in_body = True
+        if in_body:  # not elif: @@ line must also be appended to body
+            # A '--- ' or '+++ ' line inside the body signals a second file
+            # header (multi-file diff). apply_patch targets a single file only.
+            if body and (line.startswith("--- ") or line.startswith("+++ ")):
+                return None
+            body.append(line)
+    if not body:
+        return None
+    return "\n".join(["--- a/target", "+++ b/target", *body]).rstrip("\n") + "\n"
+
+
+# Generated transform applied by :func:`apply_patch_to_file`.  Runs inside the
+# container via :func:`transform_file_in_container`: writes the file's text and
+# the (normalized) diff to a temp dir and lets ``git apply --recount`` apply it
+# — tolerating off-by-one ``@@`` counts that break a strict parser.
+# ``__DIFF_B64__`` is substituted on the host.
+_GIT_APPLY_TRANSFORM = r'''
+import base64, os, subprocess, tempfile
+
+DIFF = base64.b64decode("__DIFF_B64__").decode("utf-8")
+
+def transform(text):
+    d = tempfile.mkdtemp()
+    target = os.path.join(d, "target")
+    with open(target, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+    patch = os.path.join(d, "patch.diff")
+    with open(patch, "w", encoding="utf-8", newline="") as fh:
+        fh.write(DIFF)
+    errors = []
+    for extra in ([], ["--ignore-whitespace"]):
+        try:
+            proc = subprocess.run(
+                ["git", "apply", "--recount", "-p1", *extra, patch],
+                cwd=d, capture_output=True, text=True,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("git is not available in this container")
+        if proc.returncode == 0:
+            with open(target, "r", encoding="utf-8") as fh:
+                return fh.read()
+        msg = (proc.stderr or proc.stdout).strip()
+        if msg:
+            errors.append(msg)
+    raise RuntimeError("git apply could not apply the diff: " + " | ".join(errors))
+'''
+
+
 def apply_patch_to_file(
     client: Any,
     container_id: str,
     file_path: str,
     diff_content: str,
 ) -> str:
-    """Apply a unified diff to a file inside the sandbox container."""
+    """Apply a unified diff to a file inside the sandbox container.
+
+    .. deprecated::
+
+       ``apply_patch`` is deprecated for AI-authored edits (see the tool
+       docstring).  This now delegates to :func:`transform_file_in_container`,
+       which runs ``git apply --recount`` **inside the container** — more
+       robust for machine-generated diffs than the previous strict host-side
+       parser, and consolidating diff application onto the imperative edit
+       path.
+    """
+    if not diff_content.strip():
+        return f"Patch applied (no changes) to {file_path} in container {container_id[:12]}"
+
+    normalized = _normalize_diff_for_git(diff_content)
+    if normalized is None:
+        return (
+            "Error: failed to apply diff: no hunks (@@) found, or diff spans "
+            "multiple files (apply_patch targets a single file)"
+        )
+
+    code = _GIT_APPLY_TRANSFORM.replace(
+        "__DIFF_B64__",
+        base64.b64encode(normalized.encode("utf-8")).decode("ascii"),
+    )
+    result = transform_file_in_container(client, container_id, file_path, code)
+
+    if result.get("status") != "ok":
+        return f"Error: failed to apply diff: {result.get('error')}"
+    if not result.get("changed"):
+        return f"Patch applied (no changes) to {file_path} in container {container_id[:12]}"
+    return f"Patch applied successfully to {file_path} in container {container_id[:12]}"
+
+
+# ---------------------------------------------------------------------------
+# Imperative (programmatic) edit: transform_file
+# ---------------------------------------------------------------------------
+
+# In-container runner.  Reads the target file, runs the caller's
+# ``transform(text) -> text`` against it, writes the result back, and emits a
+# unified diff wrapped in per-call sentinels so stray prints from the caller's
+# code cannot corrupt the result envelope.  ``__FILE_PATH_REPR__`` /
+# ``__CODE_B64__`` / ``__MARK_A__`` / ``__MARK_B__`` are substituted on the host.
+_TRANSFORM_RUNNER = r'''
+import sys, json, base64, difflib, traceback
+
+FILE_PATH = __FILE_PATH_REPR__
+USER_CODE_B64 = "__CODE_B64__"
+MARK_A = "__MARK_A__"
+MARK_B = "__MARK_B__"
+
+def emit(obj):
+    sys.stdout.write(MARK_A + json.dumps(obj) + MARK_B)
+    sys.stdout.flush()
+    sys.exit(0)
+
+try:
+    with open(FILE_PATH, "r", encoding="utf-8", newline="") as fh:
+        original = fh.read()
+except FileNotFoundError:
+    emit({"status": "error", "error": "file not found: " + FILE_PATH})
+except Exception as e:
+    emit({"status": "error", "error": "read failed: " + repr(e)})
+
+try:
+    user_code = base64.b64decode(USER_CODE_B64).decode("utf-8")
+except Exception as e:
+    emit({"status": "error", "error": "could not decode code: " + repr(e)})
+
+ns = {}
+try:
+    exec(user_code, ns)
+except Exception as e:
+    emit({"status": "error",
+          "error": "code failed at definition time: " + type(e).__name__ + ": " + str(e),
+          "traceback": traceback.format_exc()})
+
+transform = ns.get("transform")
+if not callable(transform):
+    emit({"status": "error",
+          "error": "code must define a callable `transform(text: str) -> str`"})
+
+try:
+    new = transform(original)
+except Exception as e:
+    emit({"status": "error",
+          "error": "transform() raised " + type(e).__name__ + ": " + str(e),
+          "traceback": traceback.format_exc()})
+
+if not isinstance(new, str):
+    emit({"status": "error",
+          "error": "transform() must return str, got " + type(new).__name__})
+
+if new == original:
+    emit({"status": "ok", "changed": False, "diff": "", "new_size": len(original)})
+
+try:
+    with open(FILE_PATH, "w", encoding="utf-8", newline="") as fh:
+        fh.write(new)
+except Exception as e:
+    emit({"status": "error", "error": "write failed: " + repr(e)})
+
+diff = "\n".join(difflib.unified_diff(
+    original.splitlines(), new.splitlines(),
+    fromfile=FILE_PATH, tofile=FILE_PATH, lineterm=""))
+emit({"status": "ok", "changed": True, "diff": diff, "new_size": len(new)})
+'''
+
+
+def transform_file_in_container(
+    client: Any,
+    container_id: str,
+    file_path: str,
+    code: str,
+) -> dict[str, Any]:
+    """Apply an imperative ``transform(text) -> text`` to a file in-container.
+
+    The caller's *code* must define a top-level callable
+    ``transform(text: str) -> str``.  It is base64-encoded and executed by a
+    Python runner **inside the disposable sandbox container** (never on the
+    host), the result is written back, and a unified diff of the change is
+    returned so the effect is visible without a separate read-back.
+
+    Returns a dict with ``status`` (``"ok"`` / ``"error"``).  On success:
+    ``changed`` (bool), ``diff`` (str), ``new_size`` (int).  On failure:
+    ``error`` (str) and, when the caller's code raised, ``traceback`` (str).
+    """
+    if not file_path.startswith("/"):
+        return {"status": "error", "error": f"file_path must be absolute: {file_path!r}"}
+    canon = os.path.normpath(file_path)
+    if ".." in canon.split(os.sep):
+        return {"status": "error", "error": f"Path traversal detected: {file_path!r}"}
+
     try:
         container = client.containers.get(container_id)
     except Exception as e:
-        return f"Error: Container {container_id[:12]} not found: {e}"
+        return {"status": "error", "error": f"Container {container_id[:12]} not found: {e}"}
+
+    code_b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    nonce = secrets.token_hex(8)
+    mark_a = f"<<<TF_{nonce}>>>"
+    mark_b = f"<<<END_TF_{nonce}>>>"
+
+    runner = (
+        _TRANSFORM_RUNNER
+        .replace("__FILE_PATH_REPR__", repr(file_path))
+        .replace("__CODE_B64__", code_b64)
+        .replace("__MARK_A__", mark_a)
+        .replace("__MARK_B__", mark_b)
+    )
+    runner_b64 = base64.b64encode(runner.encode("utf-8")).decode("ascii")
+    tmpf = f"/tmp/.tf_{nonce}.py"
+    cmd = (
+        f"echo {shlex.quote(runner_b64)} | base64 -d > {tmpf}"
+        f" && python3 {tmpf}; rc=$?"
+        f"; rm -f {tmpf}"
+        f"; exit $rc"
+    )
+
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", cmd],
+        stdout=True,
+        stderr=True,
+        demux=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    start = stdout_text.find(mark_a)
+    end = stdout_text.find(mark_b)
+    if start == -1 or end == -1:
+        detail = stderr_text.strip() or stdout_text.strip() or "no output"
+        if "python3" in detail and ("not found" in detail or "No such file" in detail):
+            detail = (
+                "python3 is not available in this container; transform_file "
+                "requires a Python interpreter in the sandbox image"
+            )
+        return {"status": "error", "error": f"transform runner produced no result: {detail}"}
 
     try:
-        current = read_file(container, file_path)
-    except ValueError as e:
-        return f"Error: {e}"
+        result: dict[str, Any] = json.loads(stdout_text[start + len(mark_a):end])
+    except json.JSONDecodeError as e:
+        return {"status": "error", "error": f"could not parse runner result: {e}"}
 
-    try:
-        patched = apply_unified_diff(current, diff_content)
-    except ValueError as e:
-        return f"Error: failed to apply diff: {e}"
-
-    try:
-        write_file(container, container_id[:12], file_path, patched)
-    except ValueError as e:
-        return f"Error: {e}"
-
-    return f"Patch applied successfully to {file_path} in container {container_id[:12]}"
+    if result.get("status") == "ok" and result.get("changed"):
+        record_file_write(
+            container_id[:12],
+            os.path.basename(file_path),
+            os.path.dirname(file_path) or "/",
+            int(result.get("new_size", 0)),
+        )
+    return result
 
 
 def read_file_lines(

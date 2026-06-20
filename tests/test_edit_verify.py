@@ -1,7 +1,6 @@
 """Tests for the Edit/Verify subsystem (edit_verify.py).
 
 Tests cover:
-- ``apply_unified_diff`` — unified diff parsing and application
 - ``lint_file`` — linter dispatch and output parsing (ruff, pylint, eslint)
 - ``type_check_file`` — type checker dispatch and output parsing (mypy, pyright, tsc)
 - ``read_file_lines`` — range reading with offset/limit
@@ -12,10 +11,8 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from src.code_sandbox_mcp.edit_verify import (
-    apply_unified_diff,
+    transform_file_in_container,
     _determine_lint_severity,
     _parse_eslint_output,
     _parse_grep_output,
@@ -30,211 +27,6 @@ from src.code_sandbox_mcp.edit_verify import (
     read_file_lines,
 )
 
-
-# ===================================================================
-# apply_unified_diff tests
-# ===================================================================
-
-
-class TestApplyUnifiedDiff:
-    """Tests for unified diff application."""
-
-    def test_empty_diff(self) -> None:
-        """Empty diff returns content unchanged."""
-        content = "line1\nline2\nline3\n"
-        assert apply_unified_diff(content, "") == content
-
-    def test_no_hunks(self) -> None:
-        """Diff with only headers and no hunks returns content unchanged."""
-        diff = "--- a/file.py\n+++ b/file.py\n"
-        content = "line1\nline2\n"
-        assert apply_unified_diff(content, diff) == content
-
-    def test_add_line_in_middle(self) -> None:
-        """Add a line in the middle of the file."""
-        content = "a\nb\nc\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +1,4 @@
- a
- b
-+inserted
- c
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "a\nb\ninserted\nc\n"
-
-    def test_remove_line(self) -> None:
-        """Remove a line from the middle."""
-        content = "a\nb\nc\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +1,2 @@
- a
--b
- c
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "a\nc\n"
-
-    def test_replace_line(self) -> None:
-        """Replace a line with different content."""
-        content = "a\nold\nc\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +1,3 @@
- a
--old
-+new
- c
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "a\nnew\nc\n"
-
-    def test_multiple_hunks(self) -> None:
-        """Apply multiple hunks in different parts of the file."""
-        content = "a\nb\nc\nd\ne\nf\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +1,4 @@
- a
- b
-+insert1
- c
-@@ -4,3 +5,4 @@
- d
- e
-+insert2
- f
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "a\nb\ninsert1\nc\nd\ne\ninsert2\nf\n"
-
-    def test_preserve_trailing_newline(self) -> None:
-        """When original has trailing newline, result also has it."""
-        content = "line1\nline2\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,2 +1,3 @@
- line1
- line2
-+line3
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "line1\nline2\nline3\n"
-        assert result.endswith("\n")
-
-    def test_no_trailing_newline_input(self) -> None:
-        """When original has no trailing newline, result also lacks it."""
-        content = "line1\nline2"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,2 +1,3 @@
- line1
- line2
-+line3
-"""
-        result = apply_unified_diff(content, diff)
-        expected = "line1\nline2\nline3"
-        assert result == expected
-        assert not result.endswith("\n")
-
-    def test_context_mismatch_raises(self) -> None:
-        """When context line does not match, raises ValueError."""
-        content = "a\nb\nc\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +1,3 @@
- a
--WRONG
-+new
- c
-"""
-        with pytest.raises(ValueError, match="Context mismatch"):
-            apply_unified_diff(content, diff)
-
-    def test_add_at_beginning(self) -> None:
-        """Add lines at the beginning of the file."""
-        content = "old1\nold2\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,2 +1,4 @@
-+new1
-+new2
- old1
- old2
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "new1\nnew2\nold1\nold2\n"
-
-    def test_add_at_end(self) -> None:
-        """Add lines at the end of the file."""
-        content = "a\nb\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,2 +1,4 @@
- a
- b
-+c
-+d
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "a\nb\nc\nd\n"
-
-    def test_remove_all_lines(self) -> None:
-        """Remove all lines from the file."""
-        content = "a\nb\nc\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +0,0 @@
--a
--b
--c
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "\n"  # Empty file with trailing newline
-
-    def test_complex_patch(self) -> None:
-        """More realistic patch: reorder and modify."""
-        content = """\
-def old_name():
-    \"\"\"Old docstring.\"\"\"
-    x = 1
-    return x
-
-
-def helper():
-    return 42
-"""
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,5 +1,7 @@
--def old_name():
--    \"\"\"Old docstring.\"\"\"
-+def new_name(param: int) -> int:
-+    \"\"\"New docstring.\"\"\"
-+    # New comment
-     x = 1
-     return x
-+
-"""
-        result = apply_unified_diff(content, diff)
-        assert "def new_name(param: int) -> int:" in result
-        assert '"""New docstring."""' in result
-        assert "# New comment" in result
-        assert "def old_name()" not in result
-        assert "Old docstring" not in result
 
 
 # ===================================================================
@@ -1489,3 +1281,251 @@ class TestDetectLanguages:
         assert result.languages == {"ts"}
         # Scope should be the file path itself when no tsconfig found
         assert result.scope.get("ts") == "/app/src/standalone.ts"
+
+
+# ===================================================================
+# transform_file_in_container tests
+# ===================================================================
+
+
+class _FakeContainer:
+    """Emulates the in-container shell for the transform runner.
+
+    The real tool runs ``echo <b64> | base64 -d > tmp && python3 tmp`` inside
+    the container.  This fake extracts the base64 runner from that command,
+    decodes it, and executes it on the host (capturing stdout) so the full
+    runner-generation / marker-extraction / JSON-parse path is exercised
+    without Docker.
+
+    ``path_map`` maps the absolute posix path the tool was given (e.g.
+    ``/sandbox/x.py``) to a real file on the host, so the test stays
+    OS-portable while ``transform_file_in_container`` still sees a posix path.
+    """
+
+    def __init__(self, path_map=None) -> None:  # noqa: ANN001
+        self.ran = False
+        self.path_map = path_map or {}
+
+    def exec_run(self, cmd, **kwargs):  # noqa: ANN001
+        import base64 as _b64
+        import io
+        import sys
+
+        self.ran = True
+        shell_cmd = cmd[-1]
+        # extract the quoted base64 blob: echo '<b64>' | base64 -d > ...
+        blob = shell_cmd.split("echo ", 1)[1].split(" | base64 -d", 1)[0].strip("'")
+        runner_src = _b64.b64decode(blob).decode("utf-8")
+
+        real_open = open
+        pm = self.path_map
+
+        def mapped_open(path, *a, **k):  # noqa: ANN001
+            return real_open(pm.get(path, path), *a, **k)
+
+        buf = io.StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            try:
+                exec(compile(runner_src, "<runner>", "exec"), {"open": mapped_open})
+            except SystemExit:
+                pass
+        finally:
+            sys.stdout = old
+        return 0, (buf.getvalue().encode("utf-8"), b"")
+
+
+class _FakeClient:
+    def __init__(self, container) -> None:  # noqa: ANN001
+        self._c = container
+
+    class _Containers:
+        def __init__(self, c) -> None:  # noqa: ANN001
+            self._c = c
+
+        def get(self, _cid):  # noqa: ANN001
+            return self._c
+
+    @property
+    def containers(self):
+        return _FakeClient._Containers(self._c)
+
+
+class TestTransformFileInContainer:
+    """Tests for the imperative transform_file edit path."""
+
+    _POSIX = "/sandbox/x.py"
+
+    def _run(self, real_path, code):  # noqa: ANN001
+        """Invoke with a fixed posix path mapped to *real_path* on the host."""
+        client = _FakeClient(_FakeContainer({self._POSIX: str(real_path)}))
+        return transform_file_in_container(client, "abc123", self._POSIX, code)
+
+    def test_rejects_relative_path(self) -> None:
+        out = transform_file_in_container(
+            _FakeClient(_FakeContainer()), "abc123", "rel/path.py", "x"
+        )
+        assert out["status"] == "error"
+        assert "absolute" in out["error"]
+
+    def test_applies_transform_and_returns_diff(self, tmp_path, monkeypatch) -> None:
+        writes: list = []
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify.record_file_write",
+            lambda *a, **k: writes.append(a),
+        )
+        f = tmp_path / "x.py"
+        f.write_text("aaa\nbbb\n", encoding="utf-8")
+
+        code = "def transform(text):\n    return text.replace('a', 'z')\n"
+        out = self._run(f, code)
+
+        assert out["status"] == "ok"
+        assert out["changed"] is True
+        assert "-aaa" in out["diff"] and "+zzz" in out["diff"]
+        assert f.read_text(encoding="utf-8") == "zzz\nbbb\n"
+        assert writes, "a successful change should be journaled"
+
+    def test_no_change_is_reported(self, tmp_path, monkeypatch) -> None:
+        writes: list = []
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify.record_file_write",
+            lambda *a, **k: writes.append(a),
+        )
+        f = tmp_path / "x.py"
+        f.write_text("hello\n", encoding="utf-8")
+
+        out = self._run(f, "def transform(text):\n    return text\n")
+
+        assert out["status"] == "ok"
+        assert out["changed"] is False
+        assert not writes, "an unchanged file should not be journaled"
+
+    def test_missing_transform_callable(self, tmp_path) -> None:
+        f = tmp_path / "x.py"
+        f.write_text("hello\n", encoding="utf-8")
+        out = self._run(f, "y = 1\n")
+        assert out["status"] == "error"
+        assert "transform" in out["error"]
+
+    def test_transform_raises_returns_traceback(self, tmp_path) -> None:
+        f = tmp_path / "x.py"
+        f.write_text("hello\n", encoding="utf-8")
+        out = self._run(
+            f, "def transform(text):\n    raise ValueError('boom')\n"
+        )
+        assert out["status"] == "error"
+        assert "boom" in out["error"]
+        assert "traceback" in out
+
+    def test_file_not_found(self, tmp_path) -> None:
+        missing = tmp_path / "missing.py"
+        out = self._run(missing, "def transform(text):\n    return text\n")
+        assert out["status"] == "error"
+        assert "not found" in out["error"]
+
+
+# ===================================================================
+# _normalize_diff_for_git (pure) + apply_patch_to_file delegation
+# ===================================================================
+
+
+class TestNormalizeDiffForGit:
+    """Pure-function tests for diff normalization (no container/git)."""
+
+    def test_rewrites_headers_to_target(self) -> None:
+        from src.code_sandbox_mcp.edit_verify import _normalize_diff_for_git
+
+        diff = (
+            "diff --git a/foo.py b/foo.py\n"
+            "index 111..222 100644\n"
+            "--- a/foo.py\n"
+            "+++ b/foo.py\n"
+            "@@ -1,2 +1,2 @@\n a\n-b\n+B\n"
+        )
+        out = _normalize_diff_for_git(diff)
+        assert out is not None
+        assert out.startswith("--- a/target\n+++ b/target\n@@")
+        # pre-hunk metadata is dropped
+        assert "diff --git" not in out
+        assert "index 111" not in out
+        assert "foo.py" not in out
+        # hunk body is preserved
+        assert "-b\n+B" in out
+
+    def test_returns_none_without_hunks(self) -> None:
+        from src.code_sandbox_mcp.edit_verify import _normalize_diff_for_git
+
+        assert _normalize_diff_for_git("--- a/x\n+++ b/x\n") is None
+        assert _normalize_diff_for_git("") is None
+
+    def test_returns_none_for_multi_file_diff(self) -> None:
+        from src.code_sandbox_mcp.edit_verify import _normalize_diff_for_git
+
+        multi = (
+            "--- a/file1.py\n"
+            "+++ b/file1.py\n"
+            "@@ -1,2 +1,2 @@\n a\n-b\n+B\n"
+            "--- a/file2.py\n"
+            "+++ b/file2.py\n"
+            "@@ -5,2 +5,2 @@\n x\n-y\n+Y\n"
+        )
+        assert _normalize_diff_for_git(multi) is None
+
+
+class TestApplyPatchToFile:
+    """Integration tests for the git-apply delegation (requires git)."""
+
+    _POSIX = "/sandbox/x.py"
+
+    def _apply(self, real_path, diff, monkeypatch):  # noqa: ANN001
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify.record_file_write",
+            lambda *a, **k: None,
+        )
+        client = _FakeClient(_FakeContainer({self._POSIX: str(real_path)}))
+        from src.code_sandbox_mcp.edit_verify import apply_patch_to_file
+
+        return apply_patch_to_file(client, "abc123", self._POSIX, diff)
+
+    def _read(self, p):  # noqa: ANN001
+        with open(p, encoding="utf-8") as fh:  # universal newlines
+            return fh.read()
+
+    def test_applies_clean_diff(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "x.py"
+        f.write_text("a\nb\nc\n", encoding="utf-8", newline="")
+        diff = "--- a/x.py\n+++ b/x.py\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+        out = self._apply(f, diff, monkeypatch)
+        assert "successfully" in out
+        assert self._read(f) == "a\nB\nc\n"
+
+    def test_recount_tolerates_wrong_hunk_counts(self, tmp_path, monkeypatch) -> None:
+        """--recount fixes off-by-one @@ counts the old strict parser rejected."""
+        f = tmp_path / "x.py"
+        f.write_text("a\nb\nc\n", encoding="utf-8", newline="")
+        diff = "--- a/x.py\n+++ b/x.py\n@@ -1,9 +1,9 @@\n a\n-b\n+B\n c\n"
+        out = self._apply(f, diff, monkeypatch)
+        assert "successfully" in out
+        assert self._read(f) == "a\nB\nc\n"
+
+    def test_context_mismatch_is_error(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "x.py"
+        f.write_text("a\nb\nc\n", encoding="utf-8", newline="")
+        diff = "--- a/x.py\n+++ b/x.py\n@@ -1,3 +1,3 @@\n a\n-WRONG\n+B\n c\n"
+        out = self._apply(f, diff, monkeypatch)
+        assert out.startswith("Error")
+
+    def test_empty_diff_is_noop(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "x.py"
+        f.write_text("a\n", encoding="utf-8", newline="")
+        out = self._apply(f, "   ", monkeypatch)
+        assert "no changes" in out
+
+    def test_diff_without_hunks_is_error(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "x.py"
+        f.write_text("a\n", encoding="utf-8", newline="")
+        out = self._apply(f, "--- a/x\n+++ b/x\n", monkeypatch)
+        assert out.startswith("Error")
+        assert "no hunks" in out

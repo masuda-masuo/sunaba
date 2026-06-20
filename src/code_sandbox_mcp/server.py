@@ -21,8 +21,8 @@ import tarfile
 import tempfile
 import threading
 import time
-from datetime import datetime
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,20 @@ from code_sandbox_mcp.edit_verify import (
     type_check_file,
     write_file,
 )
+from code_sandbox_mcp.journal import (
+    get_journal_path,
+    get_or_create_run_id,
+    get_runs,
+    read_journal,
+    record_boundary_crossing,
+    record_copy,
+    record_initialize,
+    record_stop,
+    record_test_environment,
+)
+from code_sandbox_mcp.journal import (
+    record_exec as journal_record_exec,
+)
 from code_sandbox_mcp.output_control import (
     OutputMetadata,
     compress_failures,
@@ -50,49 +64,37 @@ from code_sandbox_mcp.output_control import (
     truncate_by_tokens,
     truncate_output,
 )
-from code_sandbox_mcp.journal import (
-    get_or_create_run_id,
-    record_boundary_crossing,
-    record_copy,
-    record_exec as journal_record_exec,
-    record_initialize,
-    record_stop,
-    read_journal,
-    record_test_environment,
-    get_runs,
-    get_journal_path,
-)
-from code_sandbox_mcp.trace import (
-    generate_json_trace,
-    generate_html_trace,
-    get_trace_dir,
+from code_sandbox_mcp.result_cache import (
+    compute_cache_key,
+    get_cache_stats,
+    get_cached_result,
+    invalidate_cache,
+    set_cached_result,
 )
 from code_sandbox_mcp.security import (
     DEFAULT_SECURITY_PROFILE,
     build_secure_run_kwargs,
     validate_image_ref,
 )
-from code_sandbox_mcp.result_cache import (
-    compute_cache_key,
-    get_cached_result,
-    set_cached_result,
-    get_cache_stats,
-    invalidate_cache,
-)
 from code_sandbox_mcp.token import (
     generate_token,
+    get_pending_tokens,
+    reject_token,
     verify_and_consume,
     verify_token,
-    reject_token,
-    get_pending_tokens,
 )
+from code_sandbox_mcp.tools.common import _docker
+from code_sandbox_mcp.trace import (
+    generate_html_trace,
+    generate_json_trace,
+    get_trace_dir,
+)
+
 from .tools.exec import (
     sandbox_exec,
     sandbox_exec_background,
     sandbox_exec_check,
 )
-from code_sandbox_mcp.tools.common import _docker
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -3211,8 +3213,8 @@ def _health_check_tcp(host: str, port: int, timeout: float = 2.0) -> bool:
 
 def _health_check_http(url: str, timeout: float = 5.0) -> bool:
     """Check if an HTTP endpoint returns a successful response."""
-    import urllib.request
     import urllib.error
+    import urllib.request
     try:
         resp = urllib.request.urlopen(url, timeout=timeout)
         return 200 <= resp.getcode() < 400
@@ -3482,7 +3484,7 @@ def wait_for_condition(
     interval: float = 2.0,
     container_id: str | None = None,
     log_pattern: str | None = None,
- 
+
     log_tail: int = 100,
 ) -> str:
     """Wait for a condition to be met, with timeout.

@@ -11,25 +11,23 @@ from __future__ import annotations
 import html as _html
 import json
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import unquote
 
 from code_sandbox_mcp.journal import (
     get_active_environments,
+    get_journal_path,
     get_pending_approvals,
     get_runs,
-    get_journal_path,
     read_journal,
     record_boundary_crossing,
 )
 from code_sandbox_mcp.result_cache import get_cache_stats
 from code_sandbox_mcp.token import (
-    verify_and_consume,
-    verify_token,
     reject_token,
+    verify_token,
 )
-
 
 # ---------------------------------------------------------------------------
 # HTML template pages

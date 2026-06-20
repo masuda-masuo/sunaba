@@ -17,17 +17,16 @@ language-aware dispatch, status envelopes, and proper gate logic.
 from __future__ import annotations
 
 import base64
+import fnmatch
 import json
 import os
 import re
-import shlex
 import secrets
-import fnmatch
+import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
 from code_sandbox_mcp.journal import record_file_write
-
 
 # ===========================================================================
 # Status envelope (design-multilang-support.md S4)

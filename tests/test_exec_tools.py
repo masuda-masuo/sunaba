@@ -120,7 +120,7 @@ class TestSandboxExec:
     def _decode(self, result: str) -> dict:
         return json.loads(result)
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_success_returns_ok_with_output(
         self,
         mock_docker: MagicMock,
@@ -139,7 +139,7 @@ class TestSandboxExec:
         assert result["status"] == "ok"
         assert "hello world" in result["output"]
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_success_empty_stdout(
         self,
         mock_docker: MagicMock,
@@ -158,7 +158,7 @@ class TestSandboxExec:
         assert result["status"] == "ok"
         assert result["output"] == ""
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_failure_returns_both_stdout_and_stderr(
         self,
         mock_docker: MagicMock,
@@ -179,7 +179,7 @@ class TestSandboxExec:
         assert "stdout output" in result["output"]
         assert "stderr output" in result["stderr"]
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_failure_preserves_stdout(
         self,
         mock_docker: MagicMock,
@@ -202,7 +202,7 @@ class TestSandboxExec:
         assert "pytest failure summary" in result["output"]
         assert result["exit_code"] == 1
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_container_not_found(
         self,
         mock_docker: MagicMock,
@@ -221,7 +221,7 @@ class TestSandboxExec:
         assert result["status"] == "error"
         assert "not found" in result["error"]
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_docker_exception(
         self,
         mock_docker: MagicMock,
@@ -238,7 +238,7 @@ class TestSandboxExec:
         assert result["status"] == "error"
         assert "connection refused" in result["error"]
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_verbose_full_shows_all_output(
         self,
         mock_docker: MagicMock,
@@ -259,7 +259,7 @@ class TestSandboxExec:
         assert result["shown"] == 3
         assert result["truncated"] is False
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_verbose_error_only_hides_success_output(
         self,
         mock_docker: MagicMock,
@@ -279,7 +279,7 @@ class TestSandboxExec:
         assert result["status"] == "ok"
         assert result["output"] == ""
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_verbose_error_only_shows_on_failure(
         self,
         mock_docker: MagicMock,
@@ -299,7 +299,7 @@ class TestSandboxExec:
         assert result["status"] == "error"
         assert "error details" in result["output"]
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_timeout_status_on_exit_124(
         self,
         mock_docker: MagicMock,
@@ -319,7 +319,7 @@ class TestSandboxExec:
         assert result["status"] == "timeout"
         assert result["exit_code"] == 124
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_timeout_zero_not_applied(
         self,
         mock_docker: MagicMock,
@@ -336,7 +336,7 @@ class TestSandboxExec:
         cmd = mock_container.exec_run.call_args[0][0][-1]
         assert "timeout" not in cmd
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_exit_124_without_timeout_is_error(
         self,
         mock_docker: MagicMock,
@@ -354,7 +354,7 @@ class TestSandboxExec:
         ))
         assert result["status"] == "error"
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_negative_timeout_returns_error(
         self,
         mock_docker: MagicMock,
@@ -370,8 +370,8 @@ class TestSandboxExec:
         mock_docker.assert_not_called()
 
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.get_cached_result")
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("code_sandbox_mcp.tools.exec.get_cached_result")
     def test_cache_hit_returns_cached_result(
         self,
         mock_get_cache: MagicMock,
@@ -391,7 +391,7 @@ class TestSandboxExec:
         assert result.get("cached") is True
         mock_container.exec_run.assert_not_called()
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.exec._docker")
     def test_max_output_tokens_triggers_truncation(
         self,
         mock_docker: MagicMock,

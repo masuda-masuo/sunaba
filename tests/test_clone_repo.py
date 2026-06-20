@@ -422,6 +422,115 @@ class TestRunContainerAndExecCloneRepo:
         assert "clone_warning" not in result
 
 
+class TestRunContainerAndExecTimeout:
+    """Tests for run_container_and_exec with timeout (Issue #138)."""
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.validate_image_ref")
+    def test_timeout_applied_in_cmd(
+        self,
+        mock_validate: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """timeout=N should wrap the script with timeout(1)."""
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_container.exec_run.return_value = (0, (b"ok", b""))
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = json.loads(run_container_and_exec(
+            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            commands=["echo ok"],
+            timeout=5,
+        ))
+
+        assert result["status"] == "ok"
+        cmd = mock_container.exec_run.call_args[0][0][-1]
+        assert "timeout 5" in cmd
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.validate_image_ref")
+    def test_timeout_zero_not_applied(
+        self,
+        mock_validate: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """timeout=0 (default) does not wrap command with timeout(1)."""
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_container.exec_run.return_value = (0, (b"ok", b""))
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = json.loads(run_container_and_exec(
+            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            commands=["echo ok"],
+        ))
+
+        assert result["status"] == "ok"
+        cmd = mock_container.exec_run.call_args[0][0][-1]
+        assert "timeout" not in cmd
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.validate_image_ref")
+    def test_timeout_status_on_exit_124(
+        self,
+        mock_validate: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Issue #138: timeout=N returns status 'timeout' when exit_code is 124."""
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_container.exec_run.return_value = (124, (b"", b""))
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = json.loads(run_container_and_exec(
+            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            commands=["sleep 60"],
+            timeout=5,
+        ))
+
+        assert result["status"] == "timeout"
+        assert result["exit_code"] == 124
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.validate_image_ref")
+    def test_exit_124_without_timeout_is_error(
+        self,
+        mock_validate: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """exit_code=124 without timeout set is status 'error', not 'timeout'."""
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_container.exec_run.return_value = (124, (b"", b""))
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = json.loads(run_container_and_exec(
+            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            commands=["exit 124"],
+        ))
+
+        assert result["status"] == "error"
+
+    def test_negative_timeout_returns_error(self) -> None:
+        """timeout < 0 is rejected immediately with a clear error."""
+        result = json.loads(run_container_and_exec(
+            commands=["echo ok"],
+            timeout=-1,
+        ))
+
+        assert result["status"] == "error"
+        assert "timeout" in result["error"]
+
+
 class TestShioriReposPathArg:
     """Tests for --shiori-repos-path CLI argument."""
 

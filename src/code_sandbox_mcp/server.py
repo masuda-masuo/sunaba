@@ -1604,6 +1604,7 @@ def run_container_and_exec(
     repo: str | None = None,
     pr: int | None = None,
     pip_extras: str | None = "[dev]",
+    timeout: int = 0,
 ) -> str:
     """Start a container, execute commands, then remove it (one-shot).
 
@@ -1652,6 +1653,11 @@ def run_container_and_exec(
         pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
                Pass ``None`` to skip pip install entirely.
                Only used when *pr* is specified.
+        timeout: Maximum seconds to let the command run (``0`` = no
+               limit, the default).  When the timeout expires the process
+               is killed and the tool returns ``status="timeout"`` with
+               ``exit_code=124`` (the standard exit code for
+               ``timeout(1)``).
 
     Returns:
         JSON string with ``status``, ``output`` (or ``error``),
@@ -1667,6 +1673,8 @@ def run_container_and_exec(
     # Validate commands: must not be None or empty
     if not commands:
         return json.dumps({"status": "error", "error": "No commands provided"})
+    if timeout < 0:
+        return json.dumps({"status": "error", "error": "timeout must be >= 0"})
 
     # When pr is specified, implicitly enable network and VCS token
     if pr is not None:
@@ -1744,10 +1752,11 @@ def run_container_and_exec(
         joined = " && ".join(commands)
         encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
         tmpf = f"/tmp/.sx_{os.urandom(4).hex()}.sh"
+        runner = f"timeout {timeout} {tmpf}" if timeout > 0 else tmpf
         cmd = (
             f"echo {shlex.quote(encoded)} | base64 -d > {tmpf}"
             f" && chmod +x {tmpf}"
-            f" && {tmpf}; rc=$?"
+            f" && {runner}; rc=$?"
             f"; rm -f {tmpf}"
             f"; exit $rc"
         )
@@ -1809,7 +1818,7 @@ def run_container_and_exec(
 
     # Build result
     result: dict[str, Any] = {
-        "status": "ok" if exit_code == 0 else "error",
+        "status": "ok" if exit_code == 0 else ("timeout" if timeout > 0 and exit_code == 124 else "error"),
         "output": page.content,
         "shown": meta.shown,
         "total_lines": meta.total_lines,

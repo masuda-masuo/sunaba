@@ -2897,7 +2897,10 @@ def submit(
 
 
 _REPO_FORMAT_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
-_BRANCH_RE = re.compile(r"^[\w./-]+$")
+_BRANCH_RE = re.compile(
+    r"^(?!.*\.\.)(?!.*\.lock$)(?!-)(?!.*@\{)"
+    r"[\w./-]+$"
+)
 
 
 _SANDBOX_CREATE_PR_SCRIPT = '''
@@ -2970,7 +2973,7 @@ tree = _gh_api("POST", f"repos/{repo}/git/trees", {"tree": tree_items})
 # 5. Resolve parent SHA on GitHub (existing branch > main > master)
 parent_sha = None
 for ref_name in [f"heads/{branch}", "heads/main", "heads/master"]:
-    ec2, ref_out, _ = _run(f"gh api repos/{repo}/git/ref/{ref_name} 2>/dev/null")
+    ec2, ref_out, _ = _run(f"gh api repos/{shlex.quote(repo)}/git/ref/{shlex.quote(ref_name)} 2>/dev/null")
     if ec2 == 0:
         try:
             parent_sha = json.loads(ref_out)["object"]["sha"]
@@ -3094,6 +3097,12 @@ def sandbox_create_pr(
         return json.dumps({
             "status": "error",
             "error": "branch contains invalid characters",
+        })
+
+    if base_branch and not _BRANCH_RE.match(base_branch):
+        return json.dumps({
+            "status": "error",
+            "error": "base_branch contains invalid characters",
         })
 
     def _run(cmd: str) -> tuple[int, str, str]:

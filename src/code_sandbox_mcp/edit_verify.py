@@ -163,7 +163,7 @@ def detect_languages(
     for pattern, _ in _DETECTION_MARKERS:
         find_expr_parts.append(f'-name "{pattern}"')
     or_expr = " -o ".join(find_expr_parts)
-    find_cmd = f"find {path} -maxdepth 1 \\( {or_expr} \\) 2>/dev/null"
+    find_cmd = f"find {shlex.quote(path)} -maxdepth 1 \\( {or_expr} \\) 2>/dev/null"
 
     ec, output = container.exec_run(
         ["/bin/sh", "-c", find_cmd],
@@ -206,7 +206,7 @@ def _find_tsconfig_upward(container: Any, file_path: str) -> str | None:
     current = os.path.dirname(os.path.abspath(file_path))
     while True:
         ec, output = container.exec_run(
-            ["/bin/sh", "-c", f"test -f {current}/tsconfig.json && echo found || echo notfound"],
+            ["/bin/sh", "-c", f"test -f {shlex.quote(os.path.join(current, "tsconfig.json"))} && echo found || echo notfound"],
             stdout=True,
             stderr=True,
         )

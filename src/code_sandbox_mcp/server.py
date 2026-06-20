@@ -2595,8 +2595,9 @@ def clone_repo(
     Args:
         container_id: 12-character container ID prefix.
         repo: Repository in ``"owner/repo"`` format.
-        dest_dir: Destination directory in the container
-            (default ``"/home/sandbox"``).
+        dest_dir: Parent directory in the container.  The repo is cloned
+            into ``{dest_dir}/{repo_name}`` (default parent
+            ``"/home/sandbox"``).
         branch: Branch name to clone. Omit for the default branch.
 
     Returns:
@@ -2622,16 +2623,24 @@ def clone_repo(
             {"error": f"Invalid repo format: {repo} (expected owner/repo)"}
         )
 
-    safe_dest = shlex.quote(dest_dir)
+    # ``gh repo clone`` treats its second argument as the clone target
+    # directory itself, not a parent.  Clone into ``{dest_dir}/{repo_name}``
+    # so the default ``dest_dir`` (``/home/sandbox``, an existing non-empty
+    # home directory) works and the target matches the reported
+    # ``clone_path``.
+    repo_name = repo.split("/")[-1]
+    clone_path = f"{dest_dir.rstrip('/')}/{repo_name}"
+
+    safe_target = shlex.quote(clone_path)
     safe_repo = shlex.quote(repo)
 
     if branch:
         cmd = (
-            f"gh repo clone {safe_repo} {safe_dest}"
+            f"gh repo clone {safe_repo} {safe_target}"
             f" -- -b {shlex.quote(branch)}"
         )
     else:
-        cmd = f"gh repo clone {safe_repo} {safe_dest}"
+        cmd = f"gh repo clone {safe_repo} {safe_target}"
 
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
@@ -2649,13 +2658,19 @@ def clone_repo(
         stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
     )
 
-    repo_name = repo.split("/")[-1]
-    clone_path = f"{dest_dir}/{repo_name}"
-
     if exit_code != 0:
+        error_text = stderr_text or stdout_text
+        # Surface a clearer hint when the target already exists, instead of
+        # the bare git "already exists and is not an empty directory" message.
+        if "already exists" in error_text:
+            error_text = (
+                f"{error_text.rstrip()}\n"
+                f"Hint: {repr(clone_path)} already exists. Specify a different "
+                f"dest_dir, or remove the existing directory first."
+            )
         return json.dumps({
             "status": "error",
-            "error": stderr_text or stdout_text,
+            "error": error_text,
             "clone_path": clone_path,
         })
 

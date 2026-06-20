@@ -18,6 +18,8 @@ This MCP routes all AI operations through **disposable Docker containers** with 
 
 The value of this MCP is as much about **what the AI cannot do** as what it can.
 
+For the full design rationale and decision-making principles, see [docs/design.md](docs/design.md).
+
 ### Reducing host permissions
 
 A less obvious but equally important benefit: **this MCP lets you turn off broad host permissions in your AI client.**

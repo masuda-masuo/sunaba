@@ -11,6 +11,18 @@ from code_sandbox_mcp.server import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_update_state():
+    """Reset global update state before and after each test."""
+    import code_sandbox_mcp.server as srv
+    with srv._UPDATE_LOCK:
+        was = srv._CURRENT_UPDATE_LOG_PATH
+        srv._CURRENT_UPDATE_LOG_PATH = None
+    yield
+    with srv._UPDATE_LOCK:
+        srv._CURRENT_UPDATE_LOG_PATH = was
+
+
 class TestSandboxUpdateStart:
     """Tests for sandbox_update_start()."""
 
@@ -18,6 +30,15 @@ class TestSandboxUpdateStart:
         result = sandbox_update_start()
         assert "Update started in background" in result
         assert "Log:" in result
+
+    def test_concurrent_update_returns_error(self) -> None:
+        import code_sandbox_mcp.server as srv
+        with srv._UPDATE_LOCK:
+            srv._CURRENT_UPDATE_LOG_PATH = "/tmp/update.log"
+        result = sandbox_update_start()
+        assert "already in progress" in result
+        with srv._UPDATE_LOCK:
+            srv._CURRENT_UPDATE_LOG_PATH = None
 
 
 

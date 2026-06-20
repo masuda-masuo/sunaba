@@ -1196,6 +1196,12 @@ def _start_update_internal() -> str:
     """
     logger.info("Starting update (spec=%s)", _UPDATE_SPEC)
 
+    # Prevent concurrent updates (PR #130)
+    global _CURRENT_UPDATE_LOG_PATH
+    with _UPDATE_LOCK:
+        if _CURRENT_UPDATE_LOG_PATH is not None:
+            return "Error: an update is already in progress"
+
     # Create a unique log directory for this update
     log_dir: Path
     if _UPDATE_LOG_DIR:
@@ -1206,7 +1212,6 @@ def _start_update_internal() -> str:
         log_dir = Path(tempfile.mkdtemp(dir=base))
 
     log_path = log_dir / "update.log"
-    global _CURRENT_UPDATE_LOG_PATH
     with _UPDATE_LOCK:
         _CURRENT_UPDATE_LOG_PATH = str(log_path)
 

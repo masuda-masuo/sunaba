@@ -2629,7 +2629,7 @@ def clone_repo(
     # home directory) works and the target matches the reported
     # ``clone_path``.
     repo_name = repo.split("/")[-1]
-    clone_path = f"{dest_dir}/{repo_name}"
+    clone_path = f"{dest_dir.rstrip('/')}/{repo_name}"
 
     safe_target = shlex.quote(clone_path)
     safe_repo = shlex.quote(repo)
@@ -2665,7 +2665,7 @@ def clone_repo(
         if "already exists" in error_text:
             error_text = (
                 f"{error_text.rstrip()}\n"
-                f"Hint: '{clone_path}' already exists. Specify a different "
+                f"Hint: {repr(clone_path)} already exists. Specify a different "
                 f"dest_dir, or remove the existing directory first."
             )
         return json.dumps({

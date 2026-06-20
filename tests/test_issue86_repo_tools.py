@@ -82,8 +82,7 @@ class TestCloneRepo:
         assert result["clone_path"] == "/tmp/work/mytool"
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    def test_clone_targets_repo_subdir(self, mock_record, mock_docker):
+    def test_clone_targets_repo_subdir(self, mock_docker):
         """Issue #131: gh clones into {dest_dir}/{repo_name}, not dest_dir.
 
         ``gh repo clone`` treats its second argument as the clone target

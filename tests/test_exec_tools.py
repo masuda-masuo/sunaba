@@ -121,12 +121,8 @@ class TestSandboxExec:
         return json.loads(result)
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_success_returns_ok_with_output(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Success should return JSON with status 'ok' and stdout."""
@@ -144,12 +140,8 @@ class TestSandboxExec:
         assert "hello world" in result["output"]
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_success_empty_stdout(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Success with empty output should return status 'ok' with empty output."""
@@ -167,12 +159,8 @@ class TestSandboxExec:
         assert result["output"] == ""
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_failure_returns_both_stdout_and_stderr(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Failure should return JSON with status 'error', exit_code, stdout, and stderr."""
@@ -192,12 +180,8 @@ class TestSandboxExec:
         assert "stderr output" in result["stderr"]
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_failure_preserves_stdout(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Failure must NOT discard stdout - this is the bug fix (issue #52)."""
@@ -255,12 +239,8 @@ class TestSandboxExec:
         assert "connection refused" in result["error"]
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_verbose_full_shows_all_output(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """verbose='full' should include all output without truncation."""
@@ -280,12 +260,8 @@ class TestSandboxExec:
         assert result["truncated"] is False
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_verbose_error_only_hides_success_output(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """verbose='error_only' should hide output on success."""
@@ -304,12 +280,8 @@ class TestSandboxExec:
         assert result["output"] == ""
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_verbose_error_only_shows_on_failure(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """verbose='error_only' should show output on failure."""
@@ -328,12 +300,8 @@ class TestSandboxExec:
         assert "error details" in result["output"]
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_timeout_status_on_exit_124(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Issue #131: timeout=N returns status 'timeout' when exit_code is 124."""
@@ -352,12 +320,8 @@ class TestSandboxExec:
         assert result["exit_code"] == 124
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_timeout_zero_not_applied(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """timeout=0 (default) does not wrap command with timeout(1)."""
@@ -373,12 +337,8 @@ class TestSandboxExec:
         assert "timeout" not in cmd
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_exit_124_without_timeout_is_error(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """exit_code=124 without timeout set is status 'error', not 'timeout'."""
@@ -395,12 +355,8 @@ class TestSandboxExec:
         assert result["status"] == "error"
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_negative_timeout_returns_error(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """timeout < 0 is rejected immediately with a clear error."""
@@ -414,19 +370,11 @@ class TestSandboxExec:
         mock_docker.assert_not_called()
 
 
-
-
-
-
-
-
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
     @patch("code_sandbox_mcp.server.get_cached_result")
     def test_cache_hit_returns_cached_result(
         self,
         mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         mock_get_cache.return_value = {"status": "ok", "output": "cached output", "exit_code": 0}
@@ -444,12 +392,8 @@ class TestSandboxExec:
         mock_container.exec_run.assert_not_called()
 
     @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.set_cached_result")
-    @patch("code_sandbox_mcp.server.get_cached_result", return_value=None)
     def test_max_output_tokens_triggers_truncation(
         self,
-        mock_get_cache: MagicMock,
-        mock_set_cache: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         long_output = "\n".join(f"line {i}" for i in range(200))
@@ -465,7 +409,6 @@ class TestSandboxExec:
         ))
         assert result["status"] == "ok"
         assert "truncated" in result.get("output", "")
-
 
 
 class TestCopyProject:

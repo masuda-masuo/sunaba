@@ -2969,8 +2969,8 @@ tree = _gh_api("POST", f"repos/{repo}/git/trees", {"tree": tree_items})
 
 # 5. Resolve parent SHA on GitHub (existing branch > main > master)
 parent_sha = None
-for ref in [f"refs/heads/{branch}", "refs/heads/main", "refs/heads/master"]:
-    ec2, ref_out, _ = _run(f"gh api repos/{repo}/git/{ref} 2>/dev/null")
+for ref_name in [f"heads/{branch}", "heads/main", "heads/master"]:
+    ec2, ref_out, _ = _run(f"gh api repos/{repo}/git/ref/{ref_name} 2>/dev/null")
     if ec2 == 0:
         try:
             parent_sha = json.loads(ref_out)["object"]["sha"]

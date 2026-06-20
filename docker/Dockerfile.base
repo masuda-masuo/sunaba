@@ -97,6 +97,12 @@ RUN groupadd -r sandbox && useradd -r -g sandbox -m -d /home/sandbox sandbox
 USER sandbox
 WORKDIR /home/sandbox
 
+# ── Git identity ─────────────────────────────────────────────────
+# 既定の commit author — submit が identity 未設定で失敗するのを防ぐ
+# ユーザーが明示的に指定した場合はそちらが優先される（server.py submit 参照）
+RUN git config --system user.name "code-sandbox-mcp[bot]" \
+ && git config --system user.email "code-sandbox-mcp[bot]@users.noreply.github.com"
+
 # ── ヘルスチェック (base が保有するツールのみ) ────────────────────
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD rg --version && sg --version && semgrep --version && node --version || exit 1

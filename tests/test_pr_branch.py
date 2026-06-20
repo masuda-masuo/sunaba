@@ -125,6 +125,7 @@ class TestSandboxInitializePrParam:
     """Tests for sandbox_initialize with pr parameter."""
 
     @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server._container_env")
     @patch("code_sandbox_mcp.server._ensure_image")
     @patch("code_sandbox_mcp.server.validate_image_ref")
     @patch("code_sandbox_mcp.server._setup_pr_branch")
@@ -133,6 +134,7 @@ class TestSandboxInitializePrParam:
         mock_setup: MagicMock,
         mock_validate: MagicMock,
         mock_ensure_image: MagicMock,
+        mock_container_env: MagicMock,
         mock_docker: MagicMock,
     ):
         mock_container = MagicMock()
@@ -141,6 +143,7 @@ class TestSandboxInitializePrParam:
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
         mock_setup.return_value = "PR #136 (feature) \u2192 /tmp/repo/repo in container abc123"
+        mock_container_env.return_value = {"GITHUB_TOKEN": "fake-token"}
 
         result = sandbox_initialize(
             image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -157,7 +160,7 @@ class TestSandboxInitializePrParam:
         assert args[2] == "owner/repo"
         assert args[3] == 136
         run_kwargs = mock_client.containers.run.call_args[1]
-        assert "GITHUB_TOKEN" in (run_kwargs.get("environment") or {})
+        assert run_kwargs.get("environment", {}).get("GITHUB_TOKEN") == "fake-token"
 
     @patch("code_sandbox_mcp.server._docker")
     @patch("code_sandbox_mcp.server._ensure_image")

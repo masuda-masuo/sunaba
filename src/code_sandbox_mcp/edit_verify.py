@@ -223,133 +223,6 @@ def _find_tsconfig_upward(container: Any, file_path: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Unified diff parsing and application
-# ---------------------------------------------------------------------------
-
-#: Regex for unified diff hunk headers: ``@@ -old_start,old_count +new_start,new_count @@``
-_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-
-#: Regex for hunk body lines: `` ` ` (context), ``-`` (remove), ``+`` (add)
-_HUNK_LINE_RE = re.compile(r"^([ +\-])")
-
-
-def _parse_hunks(diff_text: str) -> list[dict[str, Any]]:
-    """Parse a unified diff string into a list of hunk dicts.
-
-    Each hunk dict has:
-    - ``old_start`` (int): 1-indexed start line in original file
-    - ``old_count`` (int): number of original lines in hunk
-    - ``new_start`` (int): 1-indexed start line in new file
-    - ``new_count`` (int): number of new lines in hunk
-    - ``lines`` (list[str]): hunk body lines with ``+``, ``-``, `` `` prefixes
-    """
-    hunks: list[dict[str, Any]] = []
-    for line in diff_text.split("\n"):
-        m = _HUNK_HEADER_RE.match(line)
-        if m:
-            hunks.append(
-                {
-                    "old_start": int(m.group(1)),
-                    "old_count": int(m.group(2) or 1),
-                    "new_start": int(m.group(3)),
-                    "new_count": int(m.group(4) or 1),
-                    "lines": [],
-                }
-            )
-            continue
-        if hunks and _HUNK_LINE_RE.match(line):
-            hunks[-1]["lines"].append(line)
-    return hunks
-
-
-def apply_unified_diff(content: str, diff_text: str) -> str:
-    """Apply a unified diff to *content* and return the result.
-
-    Args:
-        content: Original file content (string with newlines).
-        diff_text: Unified diff string.
-
-    Returns:
-        The patched content.
-
-    Raises:
-        ValueError: If the diff is malformed or cannot be applied
-            (e.g. context lines do not match).
-    """
-    if not diff_text.strip():
-        return content  # Empty diff -> no change
-
-    hunks = _parse_hunks(diff_text)
-    if not hunks:
-        return content  # No hunks -> no change
-
-    original_ends_with_newline = content.endswith("\n")
-    lines = content.split("\n")
-
-    # When the original content ends with \n, split() produces a trailing
-    # empty element (e.g. "a\nb\n" -> ["a", "b", ""]).  Removing it here
-    # avoids double trailing newlines after join.
-    if original_ends_with_newline and lines and lines[-1] == "":
-        lines = lines[:-1]
-
-    # Apply hunks in reverse order (bottom to top) so line offsets in
-    # earlier hunks remain valid.
-    for hunk in reversed(hunks):
-        old_start = hunk["old_start"] - 1  # Convert to 0-indexed
-        old_count = hunk["old_count"]
-        hunk_lines = hunk["lines"]
-
-        # --- Validate context ---
-        idx = old_start
-        for hline in hunk_lines:
-            if idx >= len(lines) and not hline.startswith("+"):
-                raise ValueError(
-                    f"Hunk references line {idx + 1} but file has only "
-                    f"{len(lines)} line(s)"
-                )
-            if hline.startswith(" ") or hline.startswith("-"):
-                expected = hline[1:]  # Strip prefix
-                actual = lines[idx]
-                if actual != expected:
-                    raise ValueError(
-                        f"Context mismatch at line {idx + 1}:\n"
-                        f"  expected: {expected!r}\n"
-                        f"  actual:   {actual!r}"
-                    )
-                idx += 1
-            elif hline.startswith("+"):
-                pass  # Addition, nothing to check
-            elif hline.startswith("\\"):
-                pass  # No-newline marker, skip
-
-        # --- Apply the hunk ---
-        before = lines[:old_start]
-        after = (
-            lines[old_start + old_count :]
-            if old_start + old_count <= len(lines)
-            else []
-        )
-
-        new_lines: list[str] = []
-        for hline in hunk_lines:
-            if hline.startswith(" ") or hline.startswith("-"):
-                if not hline.startswith("-"):
-                    new_lines.append(hline[1:])  # Context: keep
-                # Removal: skip
-            elif hline.startswith("+"):
-                new_lines.append(hline[1:])  # Addition: insert
-            # \\ no-newline markers are ignored
-
-        lines = before + new_lines + after
-
-    # Preserve trailing newline behaviour
-    result = "\n".join(lines)
-    if original_ends_with_newline:
-        result += "\n"
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Container file operations
 # ---------------------------------------------------------------------------
 
@@ -702,7 +575,7 @@ def _normalize_diff_for_git(diff_content: str) -> str | None:
     regardless of how the caller wrote the original headers.  Everything from
     the first ``@@`` onward (all hunks) is preserved verbatim — ``git apply
     --recount`` fixes any wrong line counts.  Returns ``None`` when the diff
-    contains no hunks.
+    contains no hunks or spans multiple files.
     """
     body: list[str] = []
     in_body = False
@@ -710,6 +583,10 @@ def _normalize_diff_for_git(diff_content: str) -> str | None:
         if line.startswith("@@"):
             in_body = True
         if in_body:
+            # A '--- ' or '+++ ' line inside the body signals a second file
+            # header (multi-file diff). apply_patch targets a single file only.
+            if body and (line.startswith("--- ") or line.startswith("+++ ")):
+                return None
             body.append(line)
     if not body:
         return None
@@ -772,7 +649,10 @@ def apply_patch_to_file(
 
     normalized = _normalize_diff_for_git(diff_content)
     if normalized is None:
-        return "Error: failed to apply diff: no hunks (@@) found in diff"
+        return (
+            "Error: failed to apply diff: no hunks (@@) found, or diff spans "
+            "multiple files (apply_patch targets a single file)"
+        )
 
     code = _GIT_APPLY_TRANSFORM.replace(
         "__DIFF_B64__",

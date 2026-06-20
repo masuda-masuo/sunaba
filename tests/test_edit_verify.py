@@ -1,7 +1,6 @@
 """Tests for the Edit/Verify subsystem (edit_verify.py).
 
 Tests cover:
-- ``apply_unified_diff`` — unified diff parsing and application
 - ``lint_file`` — linter dispatch and output parsing (ruff, pylint, eslint)
 - ``type_check_file`` — type checker dispatch and output parsing (mypy, pyright, tsc)
 - ``read_file_lines`` — range reading with offset/limit
@@ -12,10 +11,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from src.code_sandbox_mcp.edit_verify import (
-    apply_unified_diff,
     transform_file_in_container,
     _determine_lint_severity,
     _parse_eslint_output,
@@ -31,211 +27,6 @@ from src.code_sandbox_mcp.edit_verify import (
     read_file_lines,
 )
 
-
-# ===================================================================
-# apply_unified_diff tests
-# ===================================================================
-
-
-class TestApplyUnifiedDiff:
-    """Tests for unified diff application."""
-
-    def test_empty_diff(self) -> None:
-        """Empty diff returns content unchanged."""
-        content = "line1\nline2\nline3\n"
-        assert apply_unified_diff(content, "") == content
-
-    def test_no_hunks(self) -> None:
-        """Diff with only headers and no hunks returns content unchanged."""
-        diff = "--- a/file.py\n+++ b/file.py\n"
-        content = "line1\nline2\n"
-        assert apply_unified_diff(content, diff) == content
-
-    def test_add_line_in_middle(self) -> None:
-        """Add a line in the middle of the file."""
-        content = "a\nb\nc\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +1,4 @@
- a
- b
-+inserted
- c
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "a\nb\ninserted\nc\n"
-
-    def test_remove_line(self) -> None:
-        """Remove a line from the middle."""
-        content = "a\nb\nc\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +1,2 @@
- a
--b
- c
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "a\nc\n"
-
-    def test_replace_line(self) -> None:
-        """Replace a line with different content."""
-        content = "a\nold\nc\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +1,3 @@
- a
--old
-+new
- c
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "a\nnew\nc\n"
-
-    def test_multiple_hunks(self) -> None:
-        """Apply multiple hunks in different parts of the file."""
-        content = "a\nb\nc\nd\ne\nf\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +1,4 @@
- a
- b
-+insert1
- c
-@@ -4,3 +5,4 @@
- d
- e
-+insert2
- f
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "a\nb\ninsert1\nc\nd\ne\ninsert2\nf\n"
-
-    def test_preserve_trailing_newline(self) -> None:
-        """When original has trailing newline, result also has it."""
-        content = "line1\nline2\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,2 +1,3 @@
- line1
- line2
-+line3
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "line1\nline2\nline3\n"
-        assert result.endswith("\n")
-
-    def test_no_trailing_newline_input(self) -> None:
-        """When original has no trailing newline, result also lacks it."""
-        content = "line1\nline2"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,2 +1,3 @@
- line1
- line2
-+line3
-"""
-        result = apply_unified_diff(content, diff)
-        expected = "line1\nline2\nline3"
-        assert result == expected
-        assert not result.endswith("\n")
-
-    def test_context_mismatch_raises(self) -> None:
-        """When context line does not match, raises ValueError."""
-        content = "a\nb\nc\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +1,3 @@
- a
--WRONG
-+new
- c
-"""
-        with pytest.raises(ValueError, match="Context mismatch"):
-            apply_unified_diff(content, diff)
-
-    def test_add_at_beginning(self) -> None:
-        """Add lines at the beginning of the file."""
-        content = "old1\nold2\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,2 +1,4 @@
-+new1
-+new2
- old1
- old2
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "new1\nnew2\nold1\nold2\n"
-
-    def test_add_at_end(self) -> None:
-        """Add lines at the end of the file."""
-        content = "a\nb\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,2 +1,4 @@
- a
- b
-+c
-+d
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "a\nb\nc\nd\n"
-
-    def test_remove_all_lines(self) -> None:
-        """Remove all lines from the file."""
-        content = "a\nb\nc\n"
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,3 +0,0 @@
--a
--b
--c
-"""
-        result = apply_unified_diff(content, diff)
-        assert result == "\n"  # Empty file with trailing newline
-
-    def test_complex_patch(self) -> None:
-        """More realistic patch: reorder and modify."""
-        content = """\
-def old_name():
-    \"\"\"Old docstring.\"\"\"
-    x = 1
-    return x
-
-
-def helper():
-    return 42
-"""
-        diff = """\
---- a/file.py
-+++ b/file.py
-@@ -1,5 +1,7 @@
--def old_name():
--    \"\"\"Old docstring.\"\"\"
-+def new_name(param: int) -> int:
-+    \"\"\"New docstring.\"\"\"
-+    # New comment
-     x = 1
-     return x
-+
-"""
-        result = apply_unified_diff(content, diff)
-        assert "def new_name(param: int) -> int:" in result
-        assert '"""New docstring."""' in result
-        assert "# New comment" in result
-        assert "def old_name()" not in result
-        assert "Old docstring" not in result
 
 
 # ===================================================================
@@ -1668,6 +1459,19 @@ class TestNormalizeDiffForGit:
 
         assert _normalize_diff_for_git("--- a/x\n+++ b/x\n") is None
         assert _normalize_diff_for_git("") is None
+
+    def test_returns_none_for_multi_file_diff(self) -> None:
+        from src.code_sandbox_mcp.edit_verify import _normalize_diff_for_git
+
+        multi = (
+            "--- a/file1.py\n"
+            "+++ b/file1.py\n"
+            "@@ -1,2 +1,2 @@\n a\n-b\n+B\n"
+            "--- a/file2.py\n"
+            "+++ b/file2.py\n"
+            "@@ -5,2 +5,2 @@\n x\n-y\n+Y\n"
+        )
+        assert _normalize_diff_for_git(multi) is None
 
 
 class TestApplyPatchToFile:

@@ -1548,6 +1548,8 @@ def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
     See also:
         :func:`write_file_sandbox` — full overwrite / line-range /
         append / string-replace modes.
+        :func:`transform_file` — recommended imperative edit path; also the
+        actual implementation that ``apply_patch`` now delegates to.
     """
     client = _docker()
     try:
@@ -1599,6 +1601,9 @@ def transform_file(
         container_id: 12-character container ID prefix.
         file_path: Absolute path to the file inside the container.
         code: Python source defining ``transform(text: str) -> str``.
+            Executed as a **full Python interpreter** (not a restricted DSL):
+            ``__builtins__``, ``open()``, ``import``, ``subprocess``, etc.
+            are all available inside the disposable sandbox container.
         max_lines: Maximum diff lines to show (summary truncation).
         offset: Line offset for paging through a large diff (0-indexed).
         limit: Maximum diff lines per page.

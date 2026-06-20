@@ -323,6 +323,32 @@ The dashboard (`--dashboard-port 8766`) runs on localhost, auto-refreshes every 
 
 > This is the HITL layer that design.md §8-9 describes: the human's final control shifts from pre-execution approval to **post-hoc audit**, and the dashboard makes that audit practical rather than theoretical.
 
+## Development
+
+### Setting up a local development environment
+
+```bash
+git clone https://github.com/masuda-masuo/code-sandbox-mcp.git
+cd code-sandbox-mcp
+pip install -e .[test]
+```
+
+`pip install -e .` (editable install) ensures that your source tree under `src/` is used at runtime and in tests. **Do not use a plain `pip install .`** alongside an editable install — having both a regular and an editable installation of the same package causes non-deterministic import resolution where Python may load the stale `site-packages` copy instead of your working tree.
+
+If you previously installed the package without `-e` (e.g. via `pip install git+https://...`), remove it first:
+
+```bash
+pip uninstall code-sandbox-mcp   # repeat until "not installed"
+pip install -e .[test]
+```
+
+Verify that imports resolve to the source tree:
+
+```bash
+python -c "import inspect, code_sandbox_mcp.server; print(inspect.getfile(code_sandbox_mcp.server))"
+# Expected: .../code-sandbox-mcp/src/code_sandbox_mcp/server.py
+```
+
 ## Known limitations
 
 - **Job state is in-memory**: Background job results are lost on server restart. Job IDs become invalid after `sandbox_update_start()`.

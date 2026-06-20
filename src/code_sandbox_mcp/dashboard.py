@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from code_sandbox_mcp.journal import (
+    get_active_environments,
     get_pending_approvals,
     get_runs,
     get_journal_path,
@@ -53,6 +54,8 @@ h1 {{ font-size: 20px; color: #58a6ff; margin-bottom: 8px; }}
 .badge.ok {{ background: #1b3820; color: #7ee787; }}
 .badge.err {{ background: #381620; color: #f97583; }}
 .badge.boundary {{ background: #382a10; color: #ffa657; }}
+.badge.svc-starting {{ background: #382a10; color: #ffa657; }}
+.badge.svc-ready {{ background: #1b3820; color: #7ee787; }}
 table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
 th, td {{ padding: 6px 10px; text-align: left; border-bottom: 1px solid #21262d; }}
 th {{ color: #8b949e; font-weight: 600; }}
@@ -83,8 +86,10 @@ button:hover {{ opacity: 0.8; }}
     <div class="val">{total_ops}</div>
     <div class="meta" style="margin-top:8px">Boundary Crossings</div>
     <div class="val">{boundary_count}</div>
-    <div class="meta" style="margin-top:8px">VCS Operations (issue_view / submit)</div>
+    <div class="meta" style="margin-top:8px">VCS Operations</div>
     <div class="val">{vcs_ops}</div>
+    <div class="meta" style="margin-top:8px">Running Services</div>
+    <div class="val">{running_services}</div>
   </div>
 
   <div class="card">
@@ -100,6 +105,8 @@ button:hover {{ opacity: 0.8; }}
     {approval_section}
   </div>
 </div>
+
+{active_environments}
 
 <h2 style="font-size: 16px; color: #8b949e; margin-bottom: 12px;">Recent Runs</h2>
 <table>
@@ -158,6 +165,7 @@ tr:hover {{ background: #161b22; }}
 .op.boundary_crossing {{ color: #ffa657; }}
 .op.write_file {{ color: #d2a8ff; }}
 .op.copy_project, .op.copy_file {{ color: #a5d6ff; }}
+.op.test_environment {{ color: #7ee787; }}
 .crossing {{ color: #ffa657; font-weight: 600; }}
 .exit-ok {{ color: #7ee787; }}
 .exit-err {{ color: #f97583; }}
@@ -233,6 +241,32 @@ def _render_approval_queue() -> str:
 </div>""")
 
     return "\n".join(cards)
+
+
+def _render_active_environments() -> str:
+    """Render active test environments section."""
+    environments = get_active_environments()
+    if not environments:
+        return ""
+
+    rows: list[str] = []
+    for env in environments:
+        cid = _escape(env.get("container_id", ""))
+        status = _escape(env.get("environment_status", "unknown"))
+        status_cls = "svc-ready" if status == "ready" else "svc-starting"
+        services = env.get("services", [])
+        svc_names = ", ".join(s.get("name", "?") for s in services)
+        rows.append(f"""<div class="card" style="margin-bottom:8px">
+    <h2>Environment <span class="mono">{cid}</span> <span class="badge {status_cls}">{status}</span></h2>
+    <div class="meta">Services: {_escape(svc_names)}</div>
+</div>""")
+
+    return f"""<div class="grid">
+  <div class="card" style="grid-column: span 2;">
+    <h2>Active Environments</h2>
+    {"".join(rows)}
+  </div>
+</div>"""
 
 
 class _DashboardHandler(BaseHTTPRequestHandler):
@@ -337,6 +371,11 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+        active_envs = get_active_environments()
+        running_services = sum(
+            len(env.get("services", [])) for env in active_envs
+        )
+
         run_rows_parts: list[str] = []
         for r in runs[:20]:  # show last 20 runs
             status = r.get("status", "running")
@@ -355,16 +394,19 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             ))
 
         approval_section = _render_approval_queue()
+        active_section = _render_active_environments()
 
         html_content = _DASHBOARD_HTML.format(
             total_runs=len(runs),
             total_ops=total_ops,
             boundary_count=boundary_count,
             vcs_ops=vcs_ops,
+            running_services=running_services,
             journal_path=str(get_journal_path()),
             journal_entries=journal_entries,
             run_rows="\n".join(run_rows_parts) if run_rows_parts else '<tr><td colspan="7" class="empty">No runs recorded</td></tr>',
             approval_section=approval_section,
+            active_environments=active_section,
         )
         self._send_html(html_content)
 
@@ -449,6 +491,11 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 details = f'{_escape(e.get("file_name",""))} → {_escape(e.get("dest_dir",""))} ({e.get("byte_count",0)} bytes)'
             elif op in ("copy_project", "copy_file"):
                 details = f'{_escape(e.get("local_src",""))} → {_escape(e.get("dest_dir",""))}'
+            elif op == "test_environment":
+                svcs = e.get("services", [])
+                svc_names = [s.get("name", "?") for s in svcs]
+                env_status = e.get("environment_status", "")
+                details = f'services=[{", ".join(_escape(n) for n in svc_names)}] status={_escape(env_status)}'
 
             crossing = "crossing" if e.get("boundary_crossing") else ""
 

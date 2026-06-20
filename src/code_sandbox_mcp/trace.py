@@ -146,9 +146,13 @@ def generate_html_trace(run_id: str) -> str:
             details = f'{_escape(e.get("file_name",""))} → {_escape(e.get("dest_dir",""))} ({e.get("byte_count",0)} bytes)'
         elif op in ("copy_project", "copy_file"):
             details = f'{_escape(e.get("local_src",""))} → {_escape(e.get("dest_dir",""))}'
+        elif op == "test_environment":
+            svcs = e.get("services", [])
+            svc_names = [s.get("name", "?") for s in svcs]
+            env_status = e.get("environment_status", "")
+            details = f'services=[{", ".join(_escape(n) for n in svc_names)}] status={_escape(env_status)}'
 
         crossing = "crossing" if e.get("boundary_crossing") else ""
-
         rows_parts.append(
             f'<tr>'
             f'<td>{_escape(e.get("ts", ""))}</td>'

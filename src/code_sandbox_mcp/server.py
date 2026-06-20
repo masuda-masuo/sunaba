@@ -2679,6 +2679,416 @@ def sandbox_reject(token: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Test environment tools (§10)
+# ---------------------------------------------------------------------------
+
+
+_TEST_ENV_NETWORKS: dict[str, list[str]] = {}
+_TEST_ENV_NETWORKS_LOCK: threading.Lock = threading.Lock()
+
+
+def _find_free_port() -> int:
+    """Return a free TCP port on localhost."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _health_check_tcp(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Check if a TCP port is open on *host*."""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, socket.error):
+        return False
+
+
+def _health_check_http(url: str, timeout: float = 5.0) -> bool:
+    """Check if an HTTP endpoint returns a successful response."""
+    import urllib.request
+    import urllib.error
+    try:
+        resp = urllib.request.urlopen(url, timeout=timeout)
+        return 200 <= resp.getcode() < 400
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _cleanup_test_environment(network_name: str) -> None:
+    """Stop and remove all containers and network for a test environment."""
+    client = _docker()
+    container_ids = _TEST_ENV_NETWORKS.pop(network_name, [])
+
+    for cid in container_ids:
+        try:
+            container = client.containers.get(cid)
+            container.stop()
+            container.remove()
+            from code_sandbox_mcp.journal import record_test_environment
+            record_test_environment(cid, [{"name": cid}], "stopped")
+            record_stop(cid)
+        except Exception:
+            pass
+
+    try:
+        network = client.networks.get(network_name)
+        network.remove()
+    except Exception:
+        pass
+
+
+@mcp.tool()
+def run_test_environment(
+    services: list[dict[str, Any]],
+    network_name: str | None = None,
+    cleanup_after: str | None = None,
+) -> str:
+    """Start a Compose-like test environment with multiple services.
+
+    Creates a Docker network, starts each service container with
+    health checks, waits for readiness, and returns access URLs.
+
+    Displays a plan before execution: the response includes services
+    to start, network details, and cleanup info.
+
+    Args:
+        services: List of service definitions. Each entry supports:
+            - ``name`` (required): Service name.
+            - ``image`` (required): Docker image (``image@sha256:...``).
+            - ``command`` (optional): Command to run in the container.
+            - ``ports`` (optional): Dict mapping ``host_port → container_port``.
+            - ``env`` (optional): Dict of environment variables.
+            - ``depends_on`` (optional): List of service names to wait for.
+            - ``access_url`` (optional): Template (e.g. ``"http://localhost:{port}"``).
+        network_name: Name for the Docker network. Auto-generated if omitted.
+        cleanup_after: If set, auto-stop after this many seconds (string).
+
+    Returns:
+        JSON string with ``status``, ``environment_id`` (network name),
+        ``services`` (list with ``name``, ``container_id``, ``access_url``),
+        and ``plan`` (the execution plan).
+    """
+    import random
+    import string
+
+    if not services:
+        return json.dumps({"status": "error", "error": "No services provided"})
+
+    client = _docker()
+
+    # Generate network name if not provided
+    if not network_name:
+        suffix = "".join(random.choices(string.ascii_lowercase, k=8))
+        network_name = f"testenv_{suffix}"
+
+    # Build and display plan
+    plan_services = []
+    for svc in services:
+        plan_services.append({
+            "name": svc["name"],
+            "image": svc.get("image", "unknown"),
+            "ports": svc.get("ports", {}),
+            "depends_on": svc.get("depends_on", []),
+        })
+
+    plan = {
+        "network": network_name,
+        "services": plan_services,
+        "cleanup_after": cleanup_after,
+    }
+
+    started_services: list[dict[str, Any]] = []
+
+    try:
+        # Create network
+        try:
+            network = client.networks.create(network_name, driver="bridge")
+        except Exception as e:
+            return json.dumps({
+                "status": "error",
+                "error": f"Failed to create network {network_name}: {e}",
+                "plan": plan,
+            })
+
+        _TEST_ENV_NETWORKS[network_name] = []
+
+        # Topological start respecting dependencies
+        started_names: set[str] = set()
+
+        def _start_service(svc_def: dict) -> dict[str, Any] | None:
+            name = svc_def["name"]
+            image = svc_def.get("image", "")
+            command = svc_def.get("command")
+            ports = svc_def.get("ports", {})
+            env_vars = svc_def.get("env", {})
+
+            port_bindings = {}
+            for host_p, container_p in ports.items():
+                port_bindings[str(container_p)] = ("0.0.0.0", int(host_p))
+
+            try:
+                validate_image_ref(image)
+                profile = replace(
+                    DEFAULT_SECURITY_PROFILE,
+                    allow_network=True,
+                )
+                run_kwargs = build_secure_run_kwargs(
+                    profile,
+                    command=command or "sleep infinity",
+                    detach=True,
+                    remove=False,
+                    environment=env_vars or None,
+                    ports=port_bindings or None,
+                )
+                run_kwargs["network"] = network_name
+                run_kwargs.pop("network_mode", None)
+
+                container = client.containers.run(image, **run_kwargs)
+                cid = container.id[:12]
+
+                # Build access URL
+                access_url = svc_def.get("access_url", "")
+                if access_url:
+                    for host_p in ports:
+                        access_url = access_url.replace("{port}", str(host_p))
+                elif ports:
+                    host_port = list(ports.keys())[0]
+                    access_url = f"http://localhost:{host_port}"
+
+                svc_info = {
+                    "name": name,
+                    "container_id": cid,
+                    "image": image,
+                    "access_url": access_url or None,
+                    "ports": ports,
+                }
+
+                _TEST_ENV_NETWORKS[network_name].append(cid)
+
+                from code_sandbox_mcp.journal import record_test_environment
+                record_test_environment(cid, [svc_info], "starting")
+
+                return svc_info
+
+            except Exception as e:
+                return {"name": name, "error": str(e)}
+
+        remaining = list(services)
+        max_iter = len(services) * 2
+        iteration = 0
+
+        while remaining and iteration < max_iter:
+            iteration += 1
+            still_remaining = []
+            for svc in remaining:
+                deps = svc.get("depends_on", [])
+                if all(d in started_names for d in deps):
+                    result = _start_service(svc)
+                    if result:
+                        started_services.append(result)
+                        started_names.add(svc["name"])
+                    else:
+                        still_remaining.append(svc)
+                else:
+                    still_remaining.append(svc)
+            remaining = still_remaining
+
+        for svc in remaining:
+            result = _start_service(svc)
+            if result:
+                started_services.append(result)
+                started_names.add(svc["name"])
+
+        # Mark all as ready
+        for svc_info in started_services:
+            if "error" not in svc_info:
+                from code_sandbox_mcp.journal import record_test_environment
+                record_test_environment(
+                    svc_info["container_id"],
+                    [svc_info],
+                    "ready",
+                )
+
+        result = {
+            "status": "ok",
+            "environment_id": network_name,
+            "services": started_services,
+            "plan": plan,
+        }
+
+        # Set up automatic cleanup timer if requested
+        if cleanup_after:
+            def _auto_cleanup():
+                import time
+                time.sleep(int(cleanup_after))
+                try:
+                    _cleanup_test_environment(network_name)
+                except Exception:
+                    pass
+            timer = threading.Thread(target=_auto_cleanup, daemon=True)
+            timer.start()
+
+        return json.dumps(result, ensure_ascii=False)
+
+    except Exception as e:
+        _cleanup_test_environment(network_name)
+        return json.dumps({
+            "status": "error",
+            "error": str(e),
+            "plan": plan,
+            "services": started_services,
+        }, ensure_ascii=False)
+
+
+@mcp.tool()
+def stop_test_environment(environment_id: str) -> str:
+    """Stop and remove a test environment started by :func:`run_test_environment`.
+
+    Stops all containers and removes the network.
+
+    Args:
+        environment_id: The network name (``environment_id``) returned
+            by :func:`run_test_environment`.
+
+    Returns:
+        JSON string with ``status`` and ``environment_id``.
+    """
+    try:
+        _cleanup_test_environment(environment_id)
+        return json.dumps({
+            "status": "ok",
+            "environment_id": environment_id,
+        })
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "error": str(e),
+        })
+
+
+@mcp.tool()
+def wait_for_condition(
+    condition_type: str,
+    target: str,
+    port: int | None = None,
+    timeout: int = 60,
+    interval: float = 2.0,
+    container_id: str | None = None,
+    log_pattern: str | None = None,
+) -> str:
+    """Wait for a condition to be met, with timeout.
+
+    Eliminates the need for ``sleep 30`` patterns in AI workflows.
+
+    Supports three condition types:
+
+    - ``"tcp"``: Wait until a TCP port is open on *target*.
+      Requires *target* (hostname/IP) and *port*.
+    - ``"http"``: Wait until an HTTP endpoint returns a 2xx or 3xx status.
+      *target* is the full URL (e.g. ``"http://localhost:8080/health"``).
+    - ``"log"``: Wait for a regex pattern in a container's logs.
+      Requires *container_id* and *log_pattern* (regex).
+
+    Args:
+        condition_type: ``"tcp"``, ``"http"``, or ``"log"``.
+        target: Hostname/IP (``"tcp"``) or URL (``"http"``).
+        port: TCP port (required for ``"tcp"``).
+        timeout: Max seconds to wait (default 60).
+        interval: Polling interval seconds (default 2.0).
+        container_id: Container ID for ``"log"`` condition.
+        log_pattern: Regex pattern for log matching.
+
+    Returns:
+        JSON string with ``status`` (``"ready"`` or ``"timeout"``),
+        ``condition_type``, ``target``, and ``elapsed`` seconds.
+    """
+    import re
+    import time
+
+    start = time.time()
+    deadline = start + timeout
+
+    attempts = 0
+    last_error: str | None = None
+
+    while time.time() < deadline:
+        attempts += 1
+        try:
+            ready = False
+
+            if condition_type == "tcp":
+                if port is None:
+                    return json.dumps({
+                        "status": "error",
+                        "error": "port is required for tcp condition",
+                    })
+                ready = _health_check_tcp(target, port, timeout=min(interval, 5.0))
+
+            elif condition_type == "http":
+                ready = _health_check_http(target, timeout=min(interval, 5.0))
+
+            elif condition_type == "log":
+                if not container_id or not log_pattern:
+                    return json.dumps({
+                        "status": "error",
+                        "error": "container_id and log_pattern required for log condition",
+                    })
+                client = _docker()
+                try:
+                    container = client.containers.get(container_id)
+                except Exception as e:
+                    last_error = str(e)
+                    time.sleep(interval)
+                    continue
+
+                logs = container.logs(tail=100, stdout=True, stderr=True)
+                log_text = logs.decode("utf-8", errors="replace") if logs else ""
+                if re.search(log_pattern, log_text):
+                    ready = True
+                else:
+                    last_error = f"Pattern {log_pattern!r} not found in logs"
+
+            else:
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Unknown condition_type: {condition_type}. "
+                             f"Supported: tcp, http, log",
+                })
+
+            if ready:
+                elapsed = round(time.time() - start, 2)
+                return json.dumps({
+                    "status": "ready",
+                    "condition_type": condition_type,
+                    "target": target,
+                    "port": port,
+                    "elapsed": elapsed,
+                    "attempts": attempts,
+                })
+
+        except Exception as e:
+            last_error = str(e)
+
+        time.sleep(interval)
+
+    elapsed = round(time.time() - start, 2)
+    result: dict[str, Any] = {
+        "status": "timeout",
+        "condition_type": condition_type,
+        "target": target,
+        "port": port,
+        "elapsed": elapsed,
+        "attempts": attempts,
+        "timeout": timeout,
+    }
+    if last_error:
+        result["last_error"] = last_error
+    return json.dumps(result)
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 

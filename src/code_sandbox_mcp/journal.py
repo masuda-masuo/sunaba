@@ -212,6 +212,29 @@ def record_copy(
     })
 
 
+def record_test_environment(
+    container_id: str,
+    services: list[dict[str, str]],
+    status: str,  # "starting" | "ready" | "stopped"
+) -> None:
+    """Record a test environment lifecycle event.
+
+    *services* is a list of dicts with keys ``name``, ``image``,
+    ``access_url`` (if available).
+
+    *status* is one of ``"starting"``, ``"ready"``, or ``"stopped"``.
+    """
+    run_id = get_or_create_run_id(container_id)
+    _append_json({
+        "ts": _utcnow_iso(),
+        "run_id": run_id,
+        "container_id": container_id,
+        "operation": "test_environment",
+        "services": services,
+        "environment_status": status,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Journal reading
 # ---------------------------------------------------------------------------
@@ -272,8 +295,6 @@ def get_pending_approvals() -> list[dict[str, Any]]:
     if not _JOURNAL_PATH.exists():
         return []
 
-    # First pass: collect all boundary_crossing entries
-    # ジャーナルが肥大化した場合は max_entries で打ち切る等の最適化を検討。
     all_entries: list[dict[str, Any]] = []
     with _lock:
         with open(_JOURNAL_PATH, "r", encoding="utf-8") as f:
@@ -288,7 +309,6 @@ def get_pending_approvals() -> list[dict[str, Any]]:
                 if entry.get("operation") == "boundary_crossing":
                     all_entries.append(entry)
 
-    # Second pass: collect tokens that have been resolved
     resolved_tokens: set[str] = set()
     for entry in all_entries:
         if entry.get("approved") is not None:
@@ -296,7 +316,6 @@ def get_pending_approvals() -> list[dict[str, Any]]:
             if token:
                 resolved_tokens.add(token)
 
-    # Third pass: keep only pending entries
     pending: list[dict[str, Any]] = []
     for entry in all_entries:
         if entry.get("approved") is not None:
@@ -340,3 +359,38 @@ def get_runs() -> list[dict[str, Any]]:
                 run["vcs_operations"] += 1
 
     return sorted(runs.values(), key=lambda r: r.get("started", ""), reverse=True)
+
+
+def get_active_environments() -> list[dict[str, Any]]:
+    """Return currently active test environments from journal entries.
+
+    Returns a list of environments with status ``"starting"`` or
+    ``"ready"`` that have no corresponding ``"stopped"`` entry.
+    """
+    if not _JOURNAL_PATH.exists():
+        return []
+
+    env_entries: list[dict[str, Any]] = []
+    with _lock:
+        with open(_JOURNAL_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("operation") == "test_environment":
+                    env_entries.append(entry)
+
+    active: dict[str, dict[str, Any]] = {}
+    for entry in env_entries:
+        cid = entry.get("container_id", "")
+        status = entry.get("environment_status", "")
+        if status == "stopped":
+            active.pop(cid, None)
+        else:
+            active[cid] = entry
+
+    return list(active.values())

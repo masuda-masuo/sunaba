@@ -172,7 +172,7 @@ def sandbox_exec(
             total_lines=original_tokens,
             truncated=original_tokens > max_output_tokens,
         )
-        display += f"\n[resource: run output available via sandbox_read_journal]"
+        display += "\n[resource: run output available via sandbox_read_journal]"
     else:
         display, meta = truncate_output(
             compressed,

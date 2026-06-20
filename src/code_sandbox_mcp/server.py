@@ -21,9 +21,8 @@ import tarfile
 import tempfile
 import threading
 import time
-import hashlib
-from datetime import datetime
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,58 +41,60 @@ from code_sandbox_mcp.edit_verify import (
     type_check_file,
     write_file,
 )
+from code_sandbox_mcp.journal import (
+    get_journal_path,
+    get_or_create_run_id,
+    get_runs,
+    read_journal,
+    record_boundary_crossing,
+    record_copy,
+    record_initialize,
+    record_stop,
+    record_test_environment,
+)
+from code_sandbox_mcp.journal import (
+    record_exec as journal_record_exec,
+)
 from code_sandbox_mcp.output_control import (
     OutputMetadata,
     compress_failures,
     compress_repeated_lines,
-    estimate_tokens,
     paginate_output,
     sanitize_output,
     truncate_by_tokens,
     truncate_output,
 )
-from code_sandbox_mcp.journal import (
-    get_or_create_run_id,
-    record_boundary_crossing,
-    record_copy,
-    record_exec as journal_record_exec,
-    record_initialize,
-    record_stop,
-    read_journal,
-    record_test_environment,
-    get_runs,
-    get_journal_path,
-)
-from code_sandbox_mcp.trace import (
-    generate_json_trace,
-    generate_html_trace,
-    get_trace_dir,
+from code_sandbox_mcp.result_cache import (
+    compute_cache_key,
+    get_cache_stats,
+    get_cached_result,
+    invalidate_cache,
+    set_cached_result,
 )
 from code_sandbox_mcp.security import (
     DEFAULT_SECURITY_PROFILE,
     build_secure_run_kwargs,
     validate_image_ref,
 )
-from code_sandbox_mcp.result_cache import (
-    compute_cache_key,
-    get_cached_result,
-    set_cached_result,
-    get_cache_stats,
-    invalidate_cache,
-)
 from code_sandbox_mcp.token import (
     generate_token,
+    get_pending_tokens,
+    reject_token,
     verify_and_consume,
     verify_token,
-    reject_token,
-    get_pending_tokens,
 )
+from code_sandbox_mcp.tools.common import _docker
+from code_sandbox_mcp.trace import (
+    generate_html_trace,
+    generate_json_trace,
+    get_trace_dir,
+)
+
 from .tools.exec import (
     sandbox_exec,
     sandbox_exec_background,
     sandbox_exec_check,
 )
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -154,7 +155,6 @@ mcp = FastMCP("code-sandbox-mcp")
 # ---------------------------------------------------------------------------
 
 
-from code_sandbox_mcp.tools.common import _docker
 
 
 def _container_env(inject_vcs_token: bool = False) -> dict[str, str]:
@@ -947,7 +947,7 @@ def write_file_sandbox(
     if append or old_str is not None or has_line_range:
         try:
             existing = read_file(container, dest_path)
-        except ValueError as e:
+        except ValueError:
             return f"Error: file {dest_path} not found"
         existing_lines = existing.splitlines()
 
@@ -1732,10 +1732,6 @@ def rerun_failed(
         image_ref = str(raw) if not isinstance(raw, str) else raw
     except Exception:
         image_ref = container_id[:12]
-    original_input_hash = failed[-1].get("input_hash", "")
-    original_cache_key = compute_cache_key(image_ref, target_commands, input_hash=original_input_hash)
-    cached_original = get_cached_result(original_cache_key)
-    original_output = cached_original.get("output", "") if cached_original else ""
     original_status = "failed" if failed[-1].get("exit_code", 0) != 0 else "ok"
     changed = (new_exit_code == 0) if failed[-1].get("exit_code", 0) != 0 else (new_exit_code != 0)
 
@@ -1951,7 +1947,7 @@ def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
     """
     client = _docker()
     try:
-        container = client.containers.get(container_id)
+        client.containers.get(container_id)
     except NotFound:
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
@@ -2774,7 +2770,7 @@ def submit(
 
     # --- Git identity: set before commit ---
     name_to_use = author_name if author_name is not None else "code-sandbox-mcp[bot]"
-    email_to_use = author_email if author_email is not None else f"code-sandbox-mcp[bot]@users.noreply.github.com"
+    email_to_use = author_email if author_email is not None else "code-sandbox-mcp[bot]@users.noreply.github.com"
     safe_name = shlex.quote(name_to_use)
     safe_email = shlex.quote(email_to_use)
     git_commit_cmd = (
@@ -3217,8 +3213,8 @@ def _health_check_tcp(host: str, port: int, timeout: float = 2.0) -> bool:
 
 def _health_check_http(url: str, timeout: float = 5.0) -> bool:
     """Check if an HTTP endpoint returns a successful response."""
-    import urllib.request
     import urllib.error
+    import urllib.request
     try:
         resp = urllib.request.urlopen(url, timeout=timeout)
         return 200 <= resp.getcode() < 400
@@ -3313,7 +3309,7 @@ def run_test_environment(
     try:
         # Create network
         try:
-            network = client.networks.create(network_name, driver="bridge")
+            client.networks.create(network_name, driver="bridge")
         except Exception as e:
             return json.dumps({
                 "status": "error",
@@ -3405,7 +3401,6 @@ def run_test_environment(
 
         # Check for circular / unresolvable dependencies
         if remaining:
-            failed_names = [s['name'] for s in remaining]
             for svc in remaining:
                 result = _start_service(svc)
                 if result and 'error' not in result:
@@ -3489,7 +3484,7 @@ def wait_for_condition(
     interval: float = 2.0,
     container_id: str | None = None,
     log_pattern: str | None = None,
- 
+
     log_tail: int = 100,
 ) -> str:
     """Wait for a condition to be met, with timeout.

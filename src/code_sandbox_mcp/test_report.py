@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Common schema
@@ -108,7 +107,7 @@ def prune_library_frames(
         overridden by callers that need more or less context.
     """
     lines = traceback.split("\n")
-    user_lines = [l for l in lines if not _is_library_frame(l)]
+    user_lines = [line for line in lines if not _is_library_frame(line)]
 
     if not user_lines:
         # Fallback: keep the last N lines (often the actual error).

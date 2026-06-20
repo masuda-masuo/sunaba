@@ -19,3 +19,14 @@ code-sandbox-mcp-launcher = "code_sandbox_mcp.launcher:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["code_sandbox_mcp*"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # line-too-long: CSS/HTML template strings make this impractical

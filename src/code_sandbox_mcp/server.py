@@ -118,7 +118,7 @@ from .tools.exec import (
 #:   # 取得した sha256 を下の文字列に貼り付けてテスト
 #:
 #: Refs: Issue #56, docs/design.md §2.1, §11, §12
-_DEFAULT_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:1bc3a1d3bba23e7f38cb511269efdbf0bca03497ee483a0ba25d7e308b34ec09"
+_DEFAULT_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:a03d4c8efbf4e7dd43d49e9666b9dcd56bbcd9237d229c9e1953b563d560fb16"
 
 #: Stdio proxy - shared with launcher via this module variable.
 _TERMINAL: str | None = None

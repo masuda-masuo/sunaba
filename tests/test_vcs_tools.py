@@ -40,8 +40,8 @@ def _decode(result: str) -> dict:
 class TestIssueView:
     """Tests for issue_view."""
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     def test_successful_fetch(
         self,
         mock_record: MagicMock,
@@ -80,7 +80,7 @@ class TestIssueView:
         assert call_args[0][1] == "issue_view"
         assert call_args[1]["approved"] is None
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_container_not_found(
         self,
         mock_docker: MagicMock,
@@ -101,7 +101,7 @@ class TestIssueView:
         assert "error" in result
         assert "not found" in result["error"]
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_gh_command_failure(
         self,
         mock_docker: MagicMock,
@@ -122,7 +122,7 @@ class TestIssueView:
         assert "error" in result
         assert "could not find issue" in result["error"]
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_invalid_json_from_gh(
         self,
         mock_docker: MagicMock,
@@ -143,8 +143,8 @@ class TestIssueView:
         assert "error" in result
         assert "parse" in result["error"].lower()
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     def test_custom_save_path(
         self,
         mock_record: MagicMock,
@@ -173,8 +173,8 @@ class TestIssueView:
         assert result["file"] == "/home/sandbox/issue.md"
         assert result["size_bytes"] == len("Simple body".encode())
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     def test_empty_body(
         self,
         mock_record: MagicMock,
@@ -213,10 +213,10 @@ class TestSubmit:
 
     # -- dry_run=True tests --
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.generate_token")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.generate_token")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_dry_run_returns_token(
         self,
         mock_run_id: MagicMock,
@@ -259,9 +259,9 @@ class TestSubmit:
         assert record_kwargs["approved"] is None
         assert record_kwargs["token"] == "tok_abc123"
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_dry_run_no_changes(
         self,
         mock_run_id: MagicMock,
@@ -288,10 +288,10 @@ class TestSubmit:
         assert result["status"] == "dry_run"
         assert "no changes" in result["diff_summary"].lower()
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.generate_token")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.generate_token")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_dry_run_with_create_pr(
         self,
         mock_run_id: MagicMock,
@@ -324,7 +324,7 @@ class TestSubmit:
 
     # -- dry_run=False (execute) tests --
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_execute_without_token(
         self,
         mock_docker: MagicMock,
@@ -344,10 +344,10 @@ class TestSubmit:
         assert result["status"] == "error"
         assert "token" in result["error"].lower()
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.run_verify")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_invalid_token(
         self,
         mock_run_id: MagicMock,
@@ -373,11 +373,11 @@ class TestSubmit:
         assert result["status"] == "error"
         assert "invalid" in result["error"].lower()
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.run_verify")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_verify_gate_fails(
         self,
         mock_run_id: MagicMock,
@@ -416,11 +416,11 @@ class TestSubmit:
         assert result["reason"] == "verify_gate_failed"
         assert result["verify_result"]["gate_passed"] is False
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.run_verify")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_successful_push(
         self,
         mock_run_id: MagicMock,
@@ -469,11 +469,11 @@ class TestSubmit:
         assert result["sha"] == "abc1234"
         assert result["verify_result"]["gate_passed"] is True
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.run_verify")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_successful_push_with_pr(
         self,
         mock_run_id: MagicMock,
@@ -523,11 +523,11 @@ class TestSubmit:
         assert result["status"] == "pushed"
         assert result["pr_url"] == "https://github.com/owner/repo/pull/99"
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.run_verify")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_commit_nothing_to_commit_is_ok(
         self,
         mock_run_id: MagicMock,
@@ -572,11 +572,11 @@ class TestSubmit:
 
         assert result["status"] == "pushed"
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.run_verify")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_push_failure(
         self,
         mock_run_id: MagicMock,
@@ -623,10 +623,10 @@ class TestSubmit:
         assert result["step"] == "git_push"
         assert "permission denied" in result["error"]
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.generate_token")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.generate_token")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_dry_run_default_working_dir(
         self,
         mock_run_id: MagicMock,
@@ -659,11 +659,11 @@ class TestSubmit:
 
     # -- Git identity tests --
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.run_verify")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_uses_default_identity(
         self,
         mock_run_id: MagicMock,
@@ -715,11 +715,11 @@ class TestSubmit:
         assert "code-sandbox-mcp[bot]@users.noreply.github.com" in commit_cmd
         assert "'code-sandbox-mcp[bot]'" in commit_cmd
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.run_verify")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_with_custom_identity(
         self,
         mock_run_id: MagicMock,
@@ -780,7 +780,7 @@ class TestSubmit:
 class TestSubmitTokenFlow:
     """Integration tests for the dry_run → approve → execute flow."""
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_dry_run_generates_usable_token(
         self,
         mock_docker: MagicMock,
@@ -826,7 +826,7 @@ from code_sandbox_mcp.server import sandbox_create_pr
 class TestSandboxCreatePr:
     """Tests for sandbox_create_pr (Issue #152, dry_run flow Issue #169)."""
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_invalid_repo_format(self, mock_docker: MagicMock) -> None:
         container = _make_container_mock([])
         client = _make_client_mock(container)
@@ -843,7 +843,7 @@ class TestSandboxCreatePr:
         assert result["status"] == "error"
         assert "owner/repo" in result["error"]
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
         from docker.errors import NotFound
 
@@ -863,10 +863,10 @@ class TestSandboxCreatePr:
 
     # -- dry_run=True --
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.generate_token")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.generate_token")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_dry_run_returns_token(
         self,
         mock_run_id: MagicMock,
@@ -908,7 +908,7 @@ class TestSandboxCreatePr:
 
     # -- dry_run=False (execute) --
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_execute_without_token(self, mock_docker: MagicMock) -> None:
         """dry_run=False without token returns an error before pushing."""
         container = _make_container_mock([])
@@ -926,9 +926,9 @@ class TestSandboxCreatePr:
         assert result["status"] == "error"
         assert "token" in result["error"].lower()
 
-    @patch("code_sandbox_mcp.server._docker")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_invalid_token(
         self,
         mock_run_id: MagicMock,
@@ -954,10 +954,10 @@ class TestSandboxCreatePr:
         assert result["status"] == "error"
         assert "invalid" in result["error"].lower()
 
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_api_push_failure_returns_error(
         self,
         mock_docker: MagicMock,
@@ -988,10 +988,10 @@ class TestSandboxCreatePr:
         assert result["step"] == "api_push"
         mock_record.assert_called_once()
 
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_success_returns_pr_url(
         self,
         mock_docker: MagicMock,
@@ -1030,10 +1030,10 @@ class TestSandboxCreatePr:
         assert result["sha"] == "a" * 7
         mock_record.assert_called_once()
 
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_push_success_pr_fail_returns_pushed_no_pr(
         self,
         mock_docker: MagicMock,
@@ -1071,7 +1071,7 @@ class TestSandboxCreatePr:
         call_kwargs = mock_record.call_args[1]
         assert call_kwargs["approved"] is True
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_invalid_branch_name(self, mock_docker: MagicMock) -> None:
         container = _make_container_mock([])
         client = _make_client_mock(container)
@@ -1088,7 +1088,7 @@ class TestSandboxCreatePr:
         assert result["status"] == "error"
         assert "invalid" in result["error"]
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_invalid_base_branch_name(self, mock_docker: MagicMock) -> None:
         container = _make_container_mock([])
         client = _make_client_mock(container)
@@ -1106,10 +1106,10 @@ class TestSandboxCreatePr:
         assert result["status"] == "error"
         assert "base_branch" in result["error"]
 
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_json_parse_error_returns_error(
         self,
         mock_docker: MagicMock,
@@ -1141,10 +1141,10 @@ class TestSandboxCreatePr:
         mock_record.assert_called_once()
         assert mock_record.call_args[1]["approved"] is False
 
-    @patch("code_sandbox_mcp.server.get_or_create_run_id")
-    @patch("code_sandbox_mcp.server.verify_and_consume")
-    @patch("code_sandbox_mcp.server.record_boundary_crossing")
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_push_result_error_key_returns_error(
         self,
         mock_docker: MagicMock,

@@ -55,7 +55,7 @@ from code_sandbox_mcp.security import (
     build_secure_run_kwargs,
     validate_image_ref,
 )
-from code_sandbox_mcp.tools.common import _docker
+from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _docker
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -71,15 +71,18 @@ _SHIORI_REPOS_PATH: str | None = None
 
 _CLONE_REPO_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9._-]+$")
 
-_SENSITIVE_FILE_BASENAMES: frozenset[str] = frozenset({
-    ".env",
-    ".git-credentials",
-    ".gitconfig",
-    "node_modules",
-    ".venv",
-    "venv",
-    "__pycache__",
-})
+_SENSITIVE_FILE_BASENAMES: frozenset[str] = frozenset(
+    {
+        ".env",
+        ".git-credentials",
+        ".gitconfig",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+    }
+)
+
 
 def _container_env(inject_vcs_token: bool = False) -> dict[str, str]:
     """Build environment variables to pass to sandbox containers.
@@ -102,6 +105,7 @@ def _container_env(inject_vcs_token: bool = False) -> dict[str, str]:
                 logger.info("Injected VCS env var %s into container environment", key)
     return env
 
+
 def _ensure_image(image: str) -> None:
     """Ensure the specified Docker image is available locally.
 
@@ -116,6 +120,7 @@ def _ensure_image(image: str) -> None:
         logger.info("Pulling image %s...", image)
         client.images.pull(image)
 
+
 def _validate_clone_repo(clone_repo: str) -> tuple[str, str]:
     """Validate *clone_repo* as ``owner/name`` format.
 
@@ -129,16 +134,14 @@ def _validate_clone_repo(clone_repo: str) -> tuple[str, str]:
         raise ValueError("clone_repo must not be empty")
     parts = clone_repo.split("/")
     if len(parts) != 2 or not all(parts):
-        raise ValueError(
-            f"clone_repo must be 'owner/name' format, got: {clone_repo!r}"
-        )
+        raise ValueError(f"clone_repo must be 'owner/name' format, got: {clone_repo!r}")
     owner, name = parts
     if not _CLONE_REPO_PATTERN.match(owner) or not _CLONE_REPO_PATTERN.match(name):
         raise ValueError(
-            f"clone_repo must be 'owner/name' format with alphanumeric "
-            f"characters (._- allowed), got: {clone_repo!r}"
+            f"clone_repo must be 'owner/name' format with alphanumeric characters (._- allowed), got: {clone_repo!r}"
         )
     return owner, name
+
 
 def _shiori_preclone_exists(clone_repo: str) -> bool:
     """Return True when the Shiori pre-clone for *clone_repo* is present on disk.
@@ -156,6 +159,7 @@ def _shiori_preclone_exists(clone_repo: str) -> bool:
     # directory.  Bare clones and git-worktree secondaries (where .git is
     # a file) are not used by Shiori, so is_dir() is the right check.
     return clone_path.is_dir() and (clone_path / ".git").is_dir()
+
 
 def _clone_shiori_repo_to_container(
     container: Any,
@@ -181,15 +185,10 @@ def _clone_shiori_repo_to_container(
 
     # Validate clone_dest is a safe path inside the container
     if not clone_dest.startswith("/tmp/"):
-        raise ValueError(
-            f"clone_dest must start with /tmp/, got: {clone_dest!r}"
-        )
+        raise ValueError(f"clone_dest must start with /tmp/, got: {clone_dest!r}")
 
     if not _SHIORI_REPOS_PATH:
-        raise ValueError(
-            "Shiori repos path is not configured. "
-            "Set --shiori-repos-path or SHIORI_REPOS_PATH env var."
-        )
+        raise ValueError("Shiori repos path is not configured. Set --shiori-repos-path or SHIORI_REPOS_PATH env var.")
 
     _validate_clone_repo(clone_repo)
 
@@ -204,21 +203,19 @@ def _clone_shiori_repo_to_container(
     try:
         resolved_from.relative_to(repos_root)
     except ValueError:
-        raise ValueError(
-            f"Path traversal detected: {clone_from} is outside {repos_root}"
-        )
+        raise ValueError(f"Path traversal detected: {clone_from} is outside {repos_root}")
 
     if not resolved_from.is_dir():
         raise ValueError(f"Repository clone not found: {resolved_from}")
 
     if not (resolved_from / ".git").exists():
-        raise ValueError(
-            f"Repository clone at {resolved_from} has no .git directory"
-        )
+        raise ValueError(f"Repository clone at {resolved_from} has no .git directory")
 
     logger.info(
         "Copying Shiori clone %s → container %s:%s",
-        resolved_from, container_id[:12], clone_dest,
+        resolved_from,
+        container_id[:12],
+        clone_dest,
     )
 
     # -- Copy via put_archive (same mechanism as copy_project) --
@@ -265,25 +262,23 @@ def _clone_shiori_repo_to_container(
             demux=True,
         )
         stdout_part, stderr_part = output
-        fetch_output = (
-            stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-        )
+        fetch_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
         if exit_code != 0:
             logger.warning(
                 "git fetch --unshallow failed (exit=%d): %s",
-                exit_code, fetch_output.strip(),
+                exit_code,
+                fetch_output.strip(),
             )
         else:
             logger.info(
-                "git fetch --unshallow succeeded: %s", fetch_output.strip(),
+                "git fetch --unshallow succeeded: %s",
+                fetch_output.strip(),
             )
     except Exception as e:
         logger.warning("git fetch --unshallow error: %s", e)
 
-    return (
-        f"Copied Shiori clone of {clone_repo} → {clone_dest}/repo "
-        f"in container {container_id[:12]}"
-    )
+    return f"Copied Shiori clone of {clone_repo} → {clone_dest}/repo in container {container_id[:12]}"
+
 
 def _clone_repo_via_network(
     container,
@@ -320,22 +315,17 @@ def _clone_repo_via_network(
         detail = output.decode("utf-8", errors="replace").strip()
         hint = ""
         if not inject_vcs_token:
-            hint = (
-                " (if this is a private repository, retry with"
-                " inject_vcs_token=True so gh can authenticate)"
-            )
-        raise RuntimeError(
-            f"gh repo clone failed (exit {exit_code}): {detail}{hint}"
-        )
-    return "Cloned {} via network into {} in container {}".format(
-        clone_repo, clone_path, container_id[:12]
-    )
+            hint = " (if this is a private repository, retry with inject_vcs_token=True so gh can authenticate)"
+        raise RuntimeError(f"gh repo clone failed (exit {exit_code}): {detail}{hint}")
+    return "Cloned {} via network into {} in container {}".format(clone_repo, clone_path, container_id[:12])
+
 
 class CloneResult(NamedTuple):
     """Return value of :func:`_try_clone_into_container`."""
 
     msg: str | None
     error: str | None
+
 
 def _try_clone_into_container(
     container: Any,
@@ -356,17 +346,24 @@ def _try_clone_into_container(
     try:
         if not _shiori_preclone_exists(clone_repo):
             msg = _clone_repo_via_network(
-                container, container_id, clone_repo, clone_dest,
+                container,
+                container_id,
+                clone_repo,
+                clone_dest,
                 inject_vcs_token,
             )
         else:
             msg = _clone_shiori_repo_to_container(
-                container, container_id, clone_repo, clone_dest,
+                container,
+                container_id,
+                clone_repo,
+                clone_dest,
             )
         return CloneResult(msg, None)
     except Exception as e:
         logger.warning("Clone failed: %s", e)
         return CloneResult(None, str(e))
+
 
 def _setup_pr_branch(
     container: Any,
@@ -399,10 +396,7 @@ def _setup_pr_branch(
     safe_repo = shlex.quote(repo)
 
     # Step 1: Get PR head branch info
-    gh_info_cmd = (
-        f"gh pr view {pr_number} --repo {safe_repo}"
-        f" --json headRefName"
-    )
+    gh_info_cmd = f"gh pr view {pr_number} --repo {safe_repo} --json headRefName"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", gh_info_cmd],
         stdout=True,
@@ -414,30 +408,21 @@ def _setup_pr_branch(
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if exit_code != 0:
-        raise RuntimeError(
-            f"Failed to fetch PR #{pr_number} from {repo}: {stderr_text or stdout_text}"
-        )
+        raise RuntimeError(f"Failed to fetch PR #{pr_number} from {repo}: {stderr_text or stdout_text}")
 
     try:
         pr_info = json.loads(stdout_text)
     except json.JSONDecodeError:
-        raise RuntimeError(
-            f"Failed to parse PR info JSON: {stdout_text[:200]}"
-        )
+        raise RuntimeError(f"Failed to parse PR info JSON: {stdout_text[:200]}")
 
     head_ref = pr_info.get("headRefName", "")
     if not head_ref:
-        raise RuntimeError(
-            f"Incomplete PR info: head_ref={head_ref!r}"
-        )
+        raise RuntimeError(f"Incomplete PR info: head_ref={head_ref!r}")
 
     # Step 2: Clone the base repo
     # Clone the base repo (not head/fork) so that gh pr checkout
     # works correctly with the PR number from the base repository.
-    clone_cmd = (
-        f"gh repo clone {safe_repo}"
-        f" {safe_dest}"
-    )
+    clone_cmd = f"gh repo clone {safe_repo} {safe_dest}"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", clone_cmd],
         stdout=True,
@@ -449,9 +434,7 @@ def _setup_pr_branch(
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if exit_code != 0:
-        raise RuntimeError(
-            f"Failed to clone repo {repo}: {stderr_text or clone_output}"
-        )
+        raise RuntimeError(f"Failed to clone repo {repo}: {stderr_text or clone_output}")
 
     logger.info("Cloned %s → %s in container %s", safe_repo, safe_dest, cid)
 
@@ -468,13 +451,14 @@ def _setup_pr_branch(
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if exit_code != 0:
-        raise RuntimeError(
-            f"Failed to checkout PR #{pr_number}: {stderr_text or co_output}"
-        )
+        raise RuntimeError(f"Failed to checkout PR #{pr_number}: {stderr_text or co_output}")
 
     logger.info(
         "Checked out PR #%s (%s) → %s in container %s",
-        pr_number, head_ref, safe_dest, cid,
+        pr_number,
+        head_ref,
+        safe_dest,
+        cid,
     )
 
     # Step 4: Install dev dependencies (non-fatal)
@@ -493,7 +477,9 @@ def _setup_pr_branch(
         if exit_code != 0:
             logger.warning(
                 "pip install deps failed (extras=%s, exit=%d): %s",
-                pip_extras, exit_code, (stderr_text or install_output).strip(),
+                pip_extras,
+                exit_code,
+                (stderr_text or install_output).strip(),
             )
 
     record_copy(
@@ -503,10 +489,8 @@ def _setup_pr_branch(
         safe_dest,
     )
 
-    return (
-        f"PR #{pr_number} ({head_ref}) → {clone_dest}/repo "
-        f"in container {cid}"
-    )
+    return f"PR #{pr_number} ({head_ref}) → {clone_dest}/repo in container {cid}"
+
 
 def sandbox_initialize(
     image: str | None = None,
@@ -517,6 +501,8 @@ def sandbox_initialize(
     repo: str | None = None,
     pr: int | None = None,
     pip_extras: str | None = "[dev]",
+    mem_limit: str | None = None,
+    cpus: float | None = None,
 ) -> str:
     """Start a new Docker sandbox container.
 
@@ -567,6 +553,15 @@ def sandbox_initialize(
         pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
                Pass ``None`` to skip pip install entirely.
                Only used when *pr* is specified.
+        mem_limit: Optional memory-limit override (e.g. ``"2g"``).
+               The default profile caps containers at 512MB with swap
+               disabled, which OOM-thrashes heavy installs (e.g. torch)
+               into an unhealthy state (Issue #181).  Raise this when a
+               workload legitimately needs more.  ``memswap_limit`` is
+               automatically pinned to this value so swap stays
+               disabled at the new ceiling.
+        cpus: Optional CPU-limit override in cores (e.g. ``2.0``).
+               Defaults to the profile's 0.5-core cap when omitted.
 
     The image must be pulled locally before use: docker pull <image>
 
@@ -605,12 +600,28 @@ def sandbox_initialize(
 
     profile = replace(DEFAULT_SECURITY_PROFILE, allow_network=allow_network)
 
+    # Resource overrides (Issue #181): the default 512MB / 0.5-CPU /
+    # no-swap profile is too small for heavy installs (e.g. torch), which
+    # OOM-thrash the container into an unhealthy state.  Let callers raise
+    # the ceiling when they know they need it.  memswap is pinned to
+    # mem_limit so swap stays disabled at the new ceiling (docker also
+    # requires memswap_limit >= mem_limit).
+    resource_overrides: dict[str, Any] = {}
+    if mem_limit is not None:
+        resource_overrides["mem_limit"] = mem_limit
+        resource_overrides["memswap_limit"] = mem_limit
+    if cpus is not None:
+        if cpus <= 0:
+            return "Error: cpus must be > 0"
+        resource_overrides["cpu_quota"] = int(cpus * profile.cpu_period)
+
     run_kwargs = build_secure_run_kwargs(
         profile,
         command="sleep infinity",
         detach=True,
         remove=False,
         environment=env,
+        **resource_overrides,
     )
 
     try:
@@ -634,7 +645,11 @@ def sandbox_initialize(
     clone_msg = ""
     if clone_repo and pr is None:
         msg, err = _try_clone_into_container(
-            container, cid, clone_repo, clone_dest, inject_vcs_token,
+            container,
+            cid,
+            clone_repo,
+            clone_dest,
+            inject_vcs_token,
         )
         if err is not None:
             clone_msg = f" (clone_repo failed: {err})"
@@ -643,21 +658,25 @@ def sandbox_initialize(
     elif clone_repo and pr is not None:
         logger.info(
             "Skipping clone_repo=%s (pr=%s handles its own clone)",
-            clone_repo, pr,
+            clone_repo,
+            pr,
         )
 
     # -- PR branch setup (Issue #136) --
     pr_msg = ""
     if pr is not None:
         if not repo:
-            logger.warning(
-                "pr parameter requires repo, got repo=None"
-            )
+            logger.warning("pr parameter requires repo, got repo=None")
             pr_msg = " (pr setup failed: repo is required when pr is specified)"
         else:
             try:
                 pr_msg = " " + _setup_pr_branch(
-                    container, cid, repo, pr, clone_dest, pip_extras,
+                    container,
+                    cid,
+                    repo,
+                    pr,
+                    clone_dest,
+                    pip_extras,
                 )
             except Exception as e:
                 # PR setup failure is non-fatal: the container is still usable.
@@ -666,27 +685,50 @@ def sandbox_initialize(
 
     return cid + clone_msg + pr_msg
 
+
 def sandbox_stop(container_id: str) -> str:
     """Stop and remove a running sandbox container.
 
     Args:
         container_id: 12-character container ID prefix.
 
+    Removal is forceful: the container is killed (SIGKILL) and removed
+    with ``force=True`` rather than gracefully stopped.  A graceful
+    ``stop()`` waits for SIGTERM (up to 10s) then SIGKILL, which can
+    itself hang on a wedged or unhealthy container — defeating the
+    purpose of a recovery tool.  Combined with a short Docker API
+    timeout, this guarantees ``sandbox_stop`` stays responsive even when
+    other operations are stuck (Issue #181).
+
     Returns:
         Success message or error message beginning with ``"Error:"``.
     """
-    client = _docker()
+    client = _docker(timeout=RECOVERY_DOCKER_TIMEOUT)
     cid = container_id[:12]
     try:
         container = client.containers.get(container_id)
-        container.stop()
-        container.remove()
-        record_stop(cid)
-        return f"Container {cid} stopped and removed"
     except NotFound:
         return f"Error: container {cid} not found"
     except Exception as e:
         return f"Error: {e}"
+
+    # Kill first (ignore if already stopped), then force-remove so a
+    # still-running or unresponsive container is torn down regardless.
+    try:
+        container.kill()
+    except (NotFound, APIError):
+        # Already stopped / not running — proceed to removal.
+        pass
+    try:
+        container.remove(force=True)
+    except NotFound:
+        pass
+    except Exception as e:
+        return f"Error: {e}"
+
+    record_stop(cid)
+    return f"Container {cid} stopped and removed"
+
 
 def sandbox_update_start() -> str:
     """Start an in-place update in the background.
@@ -707,6 +749,7 @@ def sandbox_update_start() -> str:
       terminal is open.
     """
     return _start_update_internal()
+
 
 def _start_update_internal() -> str:
     """Internal helper that does the actual update start.
@@ -747,6 +790,7 @@ def _start_update_internal() -> str:
 
     return f"Update started in background. Log: {log_path}"
 
+
 def _run_update_background(log_path: str) -> None:
     """Run pip install in a subprocess, streaming output to the log."""
     with open(log_path, "w", buffering=1) as log_f:
@@ -774,6 +818,7 @@ def _run_update_background(log_path: str) -> None:
     with _UPDATE_LOCK:
         if _CURRENT_UPDATE_LOG_PATH == log_path:
             _CURRENT_UPDATE_LOG_PATH = None
+
 
 def _open_update_terminal(terminal: str, log_path: str) -> None:
     """Open a terminal window tailing the update log file."""
@@ -806,6 +851,7 @@ def _open_update_terminal(terminal: str, log_path: str) -> None:
         subprocess.Popen(cmd, shell=False)
     except Exception as e:
         logger.warning("Failed to open terminal: %s", e)
+
 
 def sandbox_update_check() -> str:
     """Poll the status of an update job.
@@ -870,6 +916,7 @@ def sandbox_update_check() -> str:
         return f"Status: error (elapsed: {elapsed_str})"
     else:
         return f"Status: running (elapsed: {elapsed_str})"
+
 
 def run_container_and_exec(
     image: str | None = None,
@@ -1001,9 +1048,7 @@ def run_container_and_exec(
     except ValueError as e:
         return json.dumps({"status": "error", "error": str(e)})
     except Exception as e:
-        return json.dumps(
-            {"status": "error", "error": f"Failed to start container: {e}"}
-        )
+        return json.dumps({"status": "error", "error": f"Failed to start container: {e}"})
 
     container_id = container.id[:12]
     record_initialize(
@@ -1019,26 +1064,34 @@ def run_container_and_exec(
     clone_error: str | None = None
     if clone_repo and pr is None:
         _, clone_error = _try_clone_into_container(
-            container, container_id, clone_repo, clone_dest, inject_vcs_token,
+            container,
+            container_id,
+            clone_repo,
+            clone_dest,
+            inject_vcs_token,
         )
     elif clone_repo and pr is not None:
         logger.info(
             "Skipping clone_repo=%s (pr=%s handles its own clone)",
-            clone_repo, pr,
+            clone_repo,
+            pr,
         )
 
     # --- PR branch setup (Issue #136) ---
     pr_error: str | None = None
     if pr is not None:
         if not repo:
-            logger.warning(
-                "pr parameter requires repo, got repo=None"
-            )
+            logger.warning("pr parameter requires repo, got repo=None")
             pr_error = "repo is required when pr is specified"
         else:
             try:
                 _setup_pr_branch(
-                    container, container_id, repo, pr, clone_dest, pip_extras,
+                    container,
+                    container_id,
+                    repo,
+                    pr,
+                    clone_dest,
+                    pip_extras,
                 )
             except Exception as e:
                 logger.warning("PR branch setup failed: %s", e)
@@ -1064,12 +1117,8 @@ def run_container_and_exec(
             demux=True,
         )
         stdout_part, stderr_part = output
-        stdout_text = (
-            stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-        )
-        stderr_text = (
-            stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-        )
+        stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+        stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
     except Exception as e:
         # Clean up
         try:
@@ -1173,6 +1222,7 @@ def run_container_and_exec(
     record_stop(container_id)
     return json.dumps(result)
 
+
 def rerun_failed(
     container_id: str,
     run_id: str,
@@ -1208,10 +1258,7 @@ def rerun_failed(
         return json.dumps({"status": "error", "error": f"run_id {run_id} not found"})
 
     # Filter to exec entries with non-zero exit codes
-    failed: list[dict[str, Any]] = [
-        e for e in entries
-        if e.get("operation") == "exec" and e.get("exit_code", 0) != 0
-    ]
+    failed: list[dict[str, Any]] = [e for e in entries if e.get("operation") == "exec" and e.get("exit_code", 0) != 0]
     if not failed:
         return json.dumps({"status": "ok", "message": "No failed commands to re-run", "diff": ""})
 
@@ -1244,7 +1291,9 @@ def rerun_failed(
     )
     new_exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
-        stdout=True, stderr=True, demux=True,
+        stdout=True,
+        stderr=True,
+        demux=True,
     )
     stdout_part, stderr_part = output
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
@@ -1261,8 +1310,11 @@ def rerun_failed(
     if new_exit_code != 0:
         compressed = compress_failures(compressed)
     display, meta = truncate_output(
-        compressed, max_lines=max_lines, verbose=verbose,
-        exit_code=new_exit_code, stderr=stderr_text,
+        compressed,
+        max_lines=max_lines,
+        verbose=verbose,
+        exit_code=new_exit_code,
+        stderr=stderr_text,
     )
     page = paginate_output(display, offset=offset, limit=limit)
 
@@ -1303,6 +1355,7 @@ def rerun_failed(
         input_hash=input_hash,
     )
     return json.dumps(result)
+
 
 def sandbox_exec_diff(
     container_id: str,
@@ -1359,7 +1412,9 @@ def sandbox_exec_diff(
     )
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
-        stdout=True, stderr=True, demux=True,
+        stdout=True,
+        stderr=True,
+        demux=True,
     )
     stdout_part, stderr_part = output
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
@@ -1380,11 +1435,15 @@ def sandbox_exec_diff(
     if previous and previous.get("output"):
         prev_lines = previous["output"].split("\n")
         curr_lines = compressed.split("\n")
-        diff_lines = list(difflib.unified_diff(
-            prev_lines, curr_lines,
-            fromfile="previous", tofile="current",
-            lineterm="",
-        ))
+        diff_lines = list(
+            difflib.unified_diff(
+                prev_lines,
+                curr_lines,
+                fromfile="previous",
+                tofile="current",
+                lineterm="",
+            )
+        )
         diff = "\n".join(diff_lines)
 
     # Token-budget truncation (takes precedence over line-based)
@@ -1398,8 +1457,11 @@ def sandbox_exec_diff(
         display += "\n[resource: run output available via sandbox_read_journal]"
     else:
         display, meta = truncate_output(
-            compressed, max_lines=100, verbose=verbose,
-            exit_code=exit_code, stderr=stderr_text,
+            compressed,
+            max_lines=100,
+            verbose=verbose,
+            exit_code=exit_code,
+            stderr=stderr_text,
         )
 
     result: dict[str, Any] = {
@@ -1419,11 +1481,15 @@ def sandbox_exec_diff(
     journal_record_exec(container_id[:12], commands, exit_code, verbose=verbose)
     return json.dumps(result)
 
+
 _TEST_ENV_NETWORKS: dict[str, list[str]] = {}
 _TEST_ENV_NETWORKS_LOCK: threading.Lock = threading.Lock()
+
+
 def _health_check_tcp(host: str, port: int, timeout: float = 2.0) -> bool:
     """Check if a TCP port is open on *host*."""
     import socket
+
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
@@ -1435,6 +1501,7 @@ def _health_check_http(url: str, timeout: float = 5.0) -> bool:
     """Check if an HTTP endpoint returns a successful response."""
     import urllib.error
     import urllib.request
+
     try:
         resp = urllib.request.urlopen(url, timeout=timeout)
         return 200 <= resp.getcode() < 400
@@ -1462,6 +1529,7 @@ def _cleanup_test_environment(network_name: str) -> None:
         network.remove()
     except Exception:
         pass
+
 
 def run_test_environment(
     services: list[dict[str, Any]],
@@ -1509,12 +1577,14 @@ def run_test_environment(
     # Build and display plan
     plan_services = []
     for svc in services:
-        plan_services.append({
-            "name": svc["name"],
-            "image": svc.get("image", "unknown"),
-            "ports": svc.get("ports", {}),
-            "depends_on": svc.get("depends_on", []),
-        })
+        plan_services.append(
+            {
+                "name": svc["name"],
+                "image": svc.get("image", "unknown"),
+                "ports": svc.get("ports", {}),
+                "depends_on": svc.get("depends_on", []),
+            }
+        )
 
     plan = {
         "network": network_name,
@@ -1529,11 +1599,13 @@ def run_test_environment(
         try:
             client.networks.create(network_name, driver="bridge")
         except Exception as e:
-            return json.dumps({
-                "status": "error",
-                "error": f"Failed to create network {network_name}: {e}",
-                "plan": plan,
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"Failed to create network {network_name}: {e}",
+                    "plan": plan,
+                }
+            )
 
         with _TEST_ENV_NETWORKS_LOCK:
             _TEST_ENV_NETWORKS[network_name] = []
@@ -1621,11 +1693,11 @@ def run_test_environment(
         if remaining:
             for svc in remaining:
                 result = _start_service(svc)
-                if result and 'error' not in result:
+                if result and "error" not in result:
                     started_services.append(result)
-                    started_names.add(svc['name'])
+                    started_names.add(svc["name"])
                 else:
-                    started_services.append({'name': svc['name'], 'error': 'unresolvable dependency'})
+                    started_services.append({"name": svc["name"], "error": "unresolvable dependency"})
 
         # Mark all as ready
         for svc_info in started_services:
@@ -1645,13 +1717,16 @@ def run_test_environment(
 
         # Set up automatic cleanup timer if requested
         if cleanup_after:
+
             def _auto_cleanup():
                 import time
+
                 time.sleep(int(cleanup_after))
                 try:
                     _cleanup_test_environment(network_name)
                 except Exception:
                     pass
+
             timer = threading.Thread(target=_auto_cleanup, daemon=True)
             timer.start()
 
@@ -1659,12 +1734,16 @@ def run_test_environment(
 
     except Exception as e:
         _cleanup_test_environment(network_name)
-        return json.dumps({
-            "status": "error",
-            "error": str(e),
-            "plan": plan,
-            "services": started_services,
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "status": "error",
+                "error": str(e),
+                "plan": plan,
+                "services": started_services,
+            },
+            ensure_ascii=False,
+        )
+
 
 def stop_test_environment(environment_id: str) -> str:
     """Stop and remove a test environment started by :func:`run_test_environment`.
@@ -1680,15 +1759,20 @@ def stop_test_environment(environment_id: str) -> str:
     """
     try:
         _cleanup_test_environment(environment_id)
-        return json.dumps({
-            "status": "ok",
-            "environment_id": environment_id,
-        })
+        return json.dumps(
+            {
+                "status": "ok",
+                "environment_id": environment_id,
+            }
+        )
     except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "error": str(e),
-        })
+        return json.dumps(
+            {
+                "status": "error",
+                "error": str(e),
+            }
+        )
+
 
 def wait_for_condition(
     condition_type: str,
@@ -1698,7 +1782,6 @@ def wait_for_condition(
     interval: float = 2.0,
     container_id: str | None = None,
     log_pattern: str | None = None,
-
     log_tail: int = 100,
 ) -> str:
     """Wait for a condition to be met, with timeout.
@@ -1743,10 +1826,12 @@ def wait_for_condition(
 
             if condition_type == "tcp":
                 if port is None:
-                    return json.dumps({
-                        "status": "error",
-                        "error": "port is required for tcp condition",
-                    })
+                    return json.dumps(
+                        {
+                            "status": "error",
+                            "error": "port is required for tcp condition",
+                        }
+                    )
                 ready = _health_check_tcp(target, port, timeout=min(interval, 5.0))
 
             elif condition_type == "http":
@@ -1754,10 +1839,12 @@ def wait_for_condition(
 
             elif condition_type == "log":
                 if not container_id or not log_pattern:
-                    return json.dumps({
-                        "status": "error",
-                        "error": "container_id and log_pattern required for log condition",
-                    })
+                    return json.dumps(
+                        {
+                            "status": "error",
+                            "error": "container_id and log_pattern required for log condition",
+                        }
+                    )
                 client = _docker()
                 try:
                     container = client.containers.get(container_id)
@@ -1774,22 +1861,25 @@ def wait_for_condition(
                     last_error = f"Pattern {log_pattern!r} not found in logs"
 
             else:
-                return json.dumps({
-                    "status": "error",
-                    "error": f"Unknown condition_type: {condition_type}. "
-                             f"Supported: tcp, http, log",
-                })
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error": f"Unknown condition_type: {condition_type}. Supported: tcp, http, log",
+                    }
+                )
 
             if ready:
                 elapsed = round(time.time() - start, 2)
-                return json.dumps({
-                    "status": "ready",
-                    "condition_type": condition_type,
-                    "target": target,
-                    "port": port,
-                    "elapsed": elapsed,
-                    "attempts": attempts,
-                })
+                return json.dumps(
+                    {
+                        "status": "ready",
+                        "condition_type": condition_type,
+                        "target": target,
+                        "port": port,
+                        "elapsed": elapsed,
+                        "attempts": attempts,
+                    }
+                )
 
         except Exception as e:
             last_error = str(e)
@@ -1809,4 +1899,3 @@ def wait_for_condition(
     if last_error:
         result["last_error"] = last_error
     return json.dumps(result)
-

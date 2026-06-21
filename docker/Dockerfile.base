@@ -102,6 +102,7 @@ RUN git config --system user.name "code-sandbox-mcp[bot]" \
  && git config --system user.email "code-sandbox-mcp[bot]@users.noreply.github.com"
 USER sandbox
 WORKDIR /home/sandbox
+ENV PATH="/home/sandbox/.local/bin:${PATH}"
 
 # ── ヘルスチェック (base が保有するツールのみ) ────────────────────
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

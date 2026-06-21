@@ -24,5 +24,6 @@ RUN uv pip install --system pytest pytest-json-report
 RUN groupadd -r sandbox && useradd -r -g sandbox -m -d /home/sandbox sandbox
 USER sandbox
 WORKDIR /home/sandbox
+ENV PATH="/home/sandbox/.local/bin:${PATH}"
 
 CMD ["bash"]

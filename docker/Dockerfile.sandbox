@@ -98,9 +98,9 @@ RUN git config --system user.name "code-sandbox-mcp[bot]" \
 RUN groupadd -r sandbox && useradd -r -g sandbox -m -d /home/sandbox sandbox
 USER sandbox
 WORKDIR /home/sandbox
+ENV PATH="/home/sandbox/.local/bin:${PATH}"
 
 # ── uv ツールのインストール (sandbox ユーザの ~/.local/bin に配置) ──
-# これにより ruff / pyright / semgrep が sandbox ユーザの PATH に自動で含まれる
 RUN uv tool install ruff \
  && uv tool install pyright \
  && uv tool install semgrep

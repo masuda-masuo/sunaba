@@ -3362,7 +3362,7 @@ def sandbox_create_pr(
         record_boundary_crossing(
             cid, "sandbox_create_pr",
             f"repo={repo} branch={branch} step=api_push error={out[:200]}",
-            approved=False, token="",
+            approved=False, token=token,
         )
         return json.dumps({"status": "error", "step": "api_push", "error": out})
 
@@ -3372,7 +3372,7 @@ def sandbox_create_pr(
         record_boundary_crossing(
             cid, "sandbox_create_pr",
             f"repo={repo} branch={branch} step=api_push json_parse_error",
-            approved=False, token="",
+            approved=False, token=token,
         )
         return json.dumps({"status": "error", "step": "api_push", "error": out})
 
@@ -3380,7 +3380,7 @@ def sandbox_create_pr(
         record_boundary_crossing(
             cid, "sandbox_create_pr",
             f"repo={repo} branch={branch} step=api_push error={push_result.get('error', ''):.200}",
-            approved=False, token="",
+            approved=False, token=token,
         )
         return json.dumps({"status": "error", "step": "api_push", **push_result})
 
@@ -3410,7 +3410,7 @@ def sandbox_create_pr(
         record_boundary_crossing(
             cid, "sandbox_create_pr",
             f"repo={repo} branch={branch} sha={new_sha[:7]} step=pr_create error={pr_out[:200]}",
-            approved=True, token="",
+            approved=True, token=token,
         )
         return json.dumps({
             "status": "pushed_no_pr",

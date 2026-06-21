@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 from code_sandbox_mcp.journal import (
     generate_run_id,
-    get_or_create_run_id,
     get_journal_path,
+    get_or_create_run_id,
     get_runs,
     read_journal,
     record_boundary_crossing,

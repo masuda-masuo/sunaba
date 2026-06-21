@@ -993,6 +993,11 @@ class TestWriteFileIsTestDetection:
         assert _is_test_file("/root/main_test.py") is True
         assert _is_test_file("/root/utils_test.go") is True
 
+    def test_test_variant_suffix_is_test(self) -> None:
+        from code_sandbox_mcp.edit_verify import _is_test_file
+        assert _is_test_file("/root/utils_test_v2.go") is True
+        assert _is_test_file("/root/model_test_v3.py") is True
+
     def test_dot_test_dot_is_test(self) -> None:
         from code_sandbox_mcp.edit_verify import _is_test_file
         assert _is_test_file("/root/app.test.js") is True

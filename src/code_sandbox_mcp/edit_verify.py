@@ -258,7 +258,7 @@ def _is_test_file(file_path: str) -> bool:
     """Check whether *file_path* follows test-file naming/directory conventions.
 
     Heuristic:
-    - File basename starts with ``test_`` or ends with ``_test`` (Python/Go).
+    - File basename starts with ``test_`` or contains ``_test`` in its stem (Python/Go).
     - File basename contains ``.test.`` or ``.spec.`` (JS/TS).
     - Path contains ``/tests/``, ``/test/``, or ``/__tests__/`` segment.
     """
@@ -266,7 +266,7 @@ def _is_test_file(file_path: str) -> bool:
     basename = os.path.basename(norm)
     # Strip the extension so suffix matching works for e.g. ``utils_test.go``.
     stem = basename.rsplit(".", 1)[0]
-    if stem.startswith("test_") or stem.endswith("_test"):
+    if stem.startswith("test_") or "_test" in stem:
         return True
     if ".test." in basename or ".spec." in basename:
         return True

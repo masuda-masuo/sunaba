@@ -1236,11 +1236,15 @@ def _run_tsc_verify(container: Any, path: str) -> VerifyResult:
 
 def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
     """Run pytest --json-report on *path*.  Returns VerifyResult envelope."""
+    _json_file = "/tmp/_pytest_report.json"
     ec, output = container.exec_run(
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}python3 -m pytest --json-report --json-report-file=- {_quote_path(path)}",
+            f"{_SANDBOX_ENV}python3 -m pytest --json-report --json-report-file={_json_file} "
+            f"-q {_quote_path(path)} >/dev/null 2>&1; "
+            f"_ec=$?; cat {_json_file} 2>/dev/null; "
+            f"rm -f {_json_file}; exit $_ec",
         ],
         stdout=True,
         stderr=True,

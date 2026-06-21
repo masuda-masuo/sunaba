@@ -126,6 +126,21 @@ class TestCloneRepo:
         assert "dest_dir" in result["error"]
 
 
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.record_boundary_crossing")
+    def test_clone_succeeds_when_auth_setup_fails(self, mock_record, mock_docker):
+        """gh auth setup-git failure is ignored; clone still proceeds."""
+        container = _make_container([
+            (1, b"", b"gh: not logged in\n"),  # gh auth setup-git fails
+            (0, b"Cloning into 'mytool'...\n", b""),  # clone succeeds
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        result = json.loads(clone_repo("abc123def456", "owner/mytool"))
+        assert result["status"] == "ok"
+        assert result["clone_path"] == "/home/sandbox/mytool"
+
+
 class TestReadFileRange:
     """Issue #131: read_file_range must not raise NameError."""
 

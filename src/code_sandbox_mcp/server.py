@@ -3394,13 +3394,17 @@ def clone_repo(
     safe_target = shlex.quote(clone_path)
     safe_repo = shlex.quote(repo)
 
-    # Configure gh as git credential helper so that ``git push`` works
-    # with the injected token without requiring interactive auth.
-    container.exec_run(
+    # Best-effort: configure gh as git credential helper so that
+    # ``git push`` works with the injected token.  Failure is intentionally
+    # ignored — when inject_vcs_token=False (no GH_TOKEN in env) the command
+    # exits non-zero but cloning public repos still succeeds.  If push later
+    # fails with an auth error the cause will be clear from that message.
+    _auth_ec, _ = container.exec_run(
         ["/bin/sh", "-c", "gh auth setup-git"],
         stdout=True,
         stderr=True,
     )
+    del _auth_ec  # intentionally ignored; see comment above
 
     if branch:
         cmd = (

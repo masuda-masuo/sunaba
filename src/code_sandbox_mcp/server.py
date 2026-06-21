@@ -237,7 +237,10 @@ def _shiori_preclone_exists(clone_repo: str) -> bool:
         return False
     repos_root = Path(_SHIORI_REPOS_PATH).resolve()
     clone_path = (repos_root / clone_repo).resolve()
-    return clone_path.is_dir() and (clone_path / ".git").exists()
+    # Shiori pre-clones are produced by a normal git clone, so .git is a
+    # directory.  Bare clones and git-worktree secondaries (where .git is
+    # a file) are not used by Shiori, so is_dir() is the right check.
+    return clone_path.is_dir() and (clone_path / ".git").is_dir()
 
 
 def _clone_shiori_repo_to_container(
@@ -432,34 +435,26 @@ def _try_clone_into_container(
 ) -> CloneResult:
     """Attempt to clone a repo into the container; return (msg, error).
 
-    Runs the full chain: Shiori fast-path -> network fallback when
-    the pre-clone is absent (``_SHIORI_REPOS_PATH`` unset or specific repo
-    directory missing) -> non-fatal error capture (Issue #178).
+    Selects the clone path up front via ``_shiori_preclone_exists``:
 
-    Returns:
-        ``(clone_msg, None)`` on success, ``(None, error_str)`` on failure.
+    - pre-clone present  -> Shiori fast-path
+    - pre-clone absent   -> network fallback (Issue #178)
+
+    Returns ``(clone_msg, None)`` on success, ``(None, error_str)`` on failure.
     """
     try:
-        msg = _clone_shiori_repo_to_container(
-            container, container_id, clone_repo, clone_dest,
-        )
-        return CloneResult(msg, None)
-    except ValueError as e:
         if not _shiori_preclone_exists(clone_repo):
-            try:
-                msg = _clone_repo_via_network(
-                    container, container_id, clone_repo, clone_dest,
-                    inject_vcs_token,
-                )
-                return CloneResult(msg, None)
-            except Exception as e2:
-                logger.warning("Network clone fallback failed: %s", e2)
-                return CloneResult(None, str(e2))
+            msg = _clone_repo_via_network(
+                container, container_id, clone_repo, clone_dest,
+                inject_vcs_token,
+            )
         else:
-            logger.warning("Shiori clone copy failed: %s", e)
-            return CloneResult(None, str(e))
+            msg = _clone_shiori_repo_to_container(
+                container, container_id, clone_repo, clone_dest,
+            )
+        return CloneResult(msg, None)
     except Exception as e:
-        logger.warning("Shiori clone copy failed: %s", e)
+        logger.warning("Clone failed: %s", e)
         return CloneResult(None, str(e))
 
 

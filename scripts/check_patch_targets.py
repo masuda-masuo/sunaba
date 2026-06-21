@@ -24,10 +24,6 @@ import importlib
 import sys
 from pathlib import Path
 
-# ``patch`` variants that do NOT take a dotted-string target as the first
-# positional argument, so they must be skipped.
-_NON_STRING_PATCH_ATTRS = {"object", "dict", "multiple", "stopall"}
-
 
 class PatchTargetError:
     """A single unresolved patch target."""
@@ -45,13 +41,14 @@ class PatchTargetError:
 def _is_patch_call(func: ast.expr) -> bool:
     """Return True for ``patch(...)`` / ``mock.patch(...)`` style calls.
 
-    Excludes ``patch.object`` / ``patch.dict`` / ``patch.multiple`` and other
-    variants whose first argument is not a dotted string target.
+    ``patch.object(...)`` / ``patch.dict(...)`` / ``patch.multiple(...)`` are
+    excluded automatically: their ``func`` node has ``attr="object"`` (etc.),
+    not ``attr="patch"``, so the check below is False.
     """
     if isinstance(func, ast.Name):
         return func.id == "patch"
     if isinstance(func, ast.Attribute):
-        return func.attr == "patch" and func.attr not in _NON_STRING_PATCH_ATTRS
+        return func.attr == "patch"
     return False
 
 
@@ -102,7 +99,15 @@ def _import_target_owner(dotted: str):
 
 
 def resolve_patch_target(target: str) -> str | None:
-    """Return None when ``target`` resolves, else a human-readable reason."""
+    """Return None when ``target`` resolves, else a human-readable reason.
+
+    .. note::
+        Resolution imports the owner module (and its transitive dependencies),
+        which executes module-level code.  Side effects such as DB connections
+        or network calls in module scope will run.  In a typical CI environment
+        this is acceptable; avoid scanning untrusted third-party code with
+        side-effectful module initialisation.
+    """
     module_path, _, attribute = target.rpartition(".")
     if not module_path:
         return "is not a dotted path (expected 'module.attr')"

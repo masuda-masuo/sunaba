@@ -20,7 +20,10 @@ class TestResolvePatchTarget:
     """resolve_patch_target returns None for valid targets, a reason otherwise."""
 
     def test_existing_attribute_resolves(self) -> None:
-        assert cpt.resolve_patch_target("code_sandbox_mcp.server._docker") is None
+        # Use a stable stdlib target so this unit test does not self-destruct
+        # when internal attributes are renamed or moved.  The repo-wide guard
+        # in TestCheckTestSuite covers actual production patch targets.
+        assert cpt.resolve_patch_target("pathlib.Path.exists") is None
 
     def test_missing_attribute_is_reported(self) -> None:
         reason = cpt.resolve_patch_target(

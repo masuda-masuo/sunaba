@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import base64
 import fnmatch
+import io
 import json
 import os
 import re
 import secrets
 import shlex
+import tarfile
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -263,23 +266,50 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
     if ".." in canon.split(os.sep):
         raise ValueError(f"Path traversal detected: {file_path!r}")
 
-    import base64
+    # Stream the content via a tar archive (put_archive) instead of embedding
+    # it in the shell argv.  Passing the (base64-encoded) bytes as a single
+    # argv string trips Linux's MAX_ARG_STRLEN limit (128 KiB per argument),
+    # which made writes of large files fail with "argument list too long"
+    # (Issue #144).  put_archive streams over the Docker HTTP API body and has
+    # no such limit.
+    parent_dir = os.path.dirname(file_path) or "/"
 
-    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    parent = _quote_path(os.path.dirname(file_path) or ".")
-    cmd = f"mkdir -p {parent} && echo {encoded} | base64 -d > {_quote_path(file_path)}"
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", cmd],
+    # Ensure the parent directory exists (no file content in argv here).
+    mk_code, mk_out = container.exec_run(
+        ["/bin/sh", "-c", f"mkdir -p {_quote_path(parent_dir)}"],
         stdout=True,
         stderr=True,
     )
-    _, stderr_part = output if isinstance(output, tuple) else (None, output)
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-
-    if exit_code != 0:
+    if mk_code != 0:
+        _, mk_err = mk_out if isinstance(mk_out, tuple) else (None, mk_out)
+        mk_text = mk_err.decode("utf-8", errors="replace") if mk_err else ""
         raise ValueError(
-            f"Failed to write {file_path}: exit code {exit_code}\n{stderr_text}"
+            f"Failed to create parent dir for {file_path}: "
+            f"exit code {mk_code}\n{mk_text}"
         )
+
+    # Preserve ownership/mode: keep an existing file's, otherwise inherit the
+    # parent directory's owner so the new file is not left owned by root.
+    uid, gid, mode = _owner_for_write(container, file_path, parent_dir)
+
+    data = content.encode("utf-8")
+    tar_stream = io.BytesIO()
+    with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+        info = tarfile.TarInfo(name=os.path.basename(file_path))
+        info.size = len(data)
+        info.mode = mode
+        info.uid = uid
+        info.gid = gid
+        info.mtime = int(time.time())
+        tar.addfile(info, io.BytesIO(data))
+
+    try:
+        ok = container.put_archive(parent_dir, tar_stream.getvalue())
+    except Exception as e:
+        raise ValueError(f"Failed to write {file_path}: {e}")
+    if not ok:
+        raise ValueError(f"Failed to write {file_path}: put_archive returned False")
+
     record_file_write(
         container_id_short,
         os.path.basename(file_path),
@@ -291,6 +321,45 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
 def _quote_path(path: str) -> str:
     """Shell-escape a file path for use in a command string."""
     return shlex.quote(path)
+
+
+def _owner_for_write(
+    container: Any, file_path: str, parent_dir: str
+) -> tuple[int, int, int]:
+    """Resolve ``(uid, gid, mode)`` for a file about to be written via put_archive.
+
+    ``put_archive`` extracts tar entries with the ownership recorded in the
+    archive (root:root by default), so we set it explicitly: an existing file
+    keeps its own uid/gid/mode; a new file inherits its parent directory's
+    owner with a default mode of ``0o644``.  Falls back to ``0, 0, 0o644`` when
+    ``stat`` is unavailable.
+    """
+    def _stat(path: str, fmt: str) -> list[str] | None:
+        code, out = container.exec_run(
+            ["/bin/sh", "-c", f"stat -c {shlex.quote(fmt)} {_quote_path(path)}"],
+            stdout=True,
+            stderr=True,
+        )
+        stdout_part = out[0] if isinstance(out, tuple) else out
+        if code != 0 or not stdout_part:
+            return None
+        return stdout_part.decode("utf-8", errors="replace").split()
+
+    existing = _stat(file_path, "%u %g %a")
+    if existing and len(existing) == 3:
+        try:
+            return int(existing[0]), int(existing[1]), int(existing[2], 8)
+        except ValueError:
+            pass
+
+    parent = _stat(parent_dir, "%u %g")
+    if parent and len(parent) == 2:
+        try:
+            return int(parent[0]), int(parent[1]), 0o644
+        except ValueError:
+            pass
+
+    return 0, 0, 0o644
 
 
 # ---------------------------------------------------------------------------

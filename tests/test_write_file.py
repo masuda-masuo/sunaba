@@ -14,8 +14,7 @@ import io
 import tarfile
 from unittest.mock import MagicMock, patch
 
-from code_sandbox_mcp.edit_verify import apply_patch_to_file
-from code_sandbox_mcp.server import write_file_sandbox
+from code_sandbox_mcp.tools.file import write_file_sandbox
 
 
 def _exec_run_for(
@@ -78,7 +77,7 @@ def _get_written_member(mock_container: MagicMock) -> tarfile.TarInfo:
 class TestWriteFileSandboxFullOverwrite:
     """Tests for the original full-overwrite behaviour (backward compatibility)."""
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_full_overwrite(self, mock_docker: MagicMock) -> None:
         """Existing full overwrite still works."""
         mock_container = MagicMock()
@@ -99,7 +98,7 @@ class TestWriteFileSandboxFullOverwrite:
         mock_container.put_archive.assert_called_once()
         assert _get_written_content(mock_container) == "new content"
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_full_overwrite_container_not_found(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -117,7 +116,7 @@ class TestWriteFileSandboxFullOverwrite:
         assert "Error" in result
         assert "not found" in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_full_overwrite_exec_run_fails(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -135,7 +134,7 @@ class TestWriteFileSandboxFullOverwrite:
         )
         assert "Error" in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_full_overwrite_default_dest_dir(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -157,7 +156,7 @@ class TestWriteFileSandboxFullOverwrite:
         mock_container.put_archive.assert_called_once()
 
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_absolute_file_name_ignores_dest_dir(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -178,7 +177,7 @@ class TestWriteFileSandboxFullOverwrite:
         assert "/tmp/repo/src/foo.py" in result
         assert "/home/sandbox" not in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_relative_subpath_file_name_joined_with_dest_dir(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -215,7 +214,7 @@ class TestWriteFileSandboxLineRange:
         mock_docker.return_value = mock_client
         return mock_container
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_replace_middle_lines(self, mock_docker: MagicMock) -> None:
         """Replacing middle lines preserves surrounding lines."""
         existing = "line1\nline2\nline3\nline4\nline5\n"
@@ -233,7 +232,7 @@ class TestWriteFileSandboxLineRange:
         assert "Written" in result
         assert _get_written_content(mock_container) == "line1\nREPLACED\nline5\n"
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_replace_from_start(self, mock_docker: MagicMock) -> None:
         """Omitting start_line defaults to line 1."""
         existing = "line1\nline2\nline3\n"
@@ -250,7 +249,7 @@ class TestWriteFileSandboxLineRange:
         assert "Written" in result
         assert _get_written_content(mock_container) == "NEWSTART\nline3\n"
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_replace_to_end(self, mock_docker: MagicMock) -> None:
         """Omitting end_line defaults to last line."""
         existing = "line1\nline2\nline3\n"
@@ -267,7 +266,7 @@ class TestWriteFileSandboxLineRange:
         assert "Written" in result
         assert _get_written_content(mock_container) == "line1\nEND\n"
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_start_line_exceeds_length(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -285,7 +284,7 @@ class TestWriteFileSandboxLineRange:
         assert "Error" in result
         assert "exceeds file length" in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_end_line_exceeds_length(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -304,7 +303,7 @@ class TestWriteFileSandboxLineRange:
         assert "Error" in result
         assert "exceeds file length" in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_start_line_greater_than_end_line(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -323,7 +322,7 @@ class TestWriteFileSandboxLineRange:
         assert "Error" in result
         assert "greater than" in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_start_line_zero_error(self, mock_docker: MagicMock) -> None:
         """start_line=0 returns an error (must be >= 1)."""
         existing = "line1\nline2\n"
@@ -339,7 +338,7 @@ class TestWriteFileSandboxLineRange:
         assert "Error" in result
         assert "must be >= 1" in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_replace_single_line(self, mock_docker: MagicMock) -> None:
         """Replacing a single line with start_line == end_line."""
         existing = "keep\nreplace_me\nkeep\n"
@@ -372,7 +371,7 @@ class TestWriteFileSandboxAppend:
         mock_docker.return_value = mock_client
         return mock_container
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_append_to_existing_file(self, mock_docker: MagicMock) -> None:
         """append=True appends file_contents to end of file."""
         existing = "line1\nline2\n"
@@ -391,7 +390,7 @@ class TestWriteFileSandboxAppend:
         assert "Written" in result
         assert _get_written_content(mock_container) == "line1\nline2\nappended\n"
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_append_to_empty_file(self, mock_docker: MagicMock) -> None:
         """Appending to an empty file works."""
         existing = ""
@@ -425,7 +424,7 @@ class TestWriteFileSandboxReplace:
         mock_docker.return_value = mock_client
         return mock_container
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_replace_first_occurrence(self, mock_docker: MagicMock) -> None:
         """old_str replaces a unique occurrence (exact match)."""
         existing = "hello world, hello universe\n"
@@ -444,7 +443,7 @@ class TestWriteFileSandboxReplace:
         assert "Written" in result
         assert _get_written_content(mock_container) == "GOODBYE, hello universe\n"
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_replace_multi_line(self, mock_docker: MagicMock) -> None:
         """old_str can span multiple lines."""
         existing = "before\nOLD\nBLOCK\nafter\n"
@@ -463,7 +462,7 @@ class TestWriteFileSandboxReplace:
         assert "Written" in result
         assert _get_written_content(mock_container) == "before\nNEW\nCONTENT\nafter\n"
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_replace_old_str_not_found(self, mock_docker: MagicMock) -> None:
         """Error when old_str is not found in the file."""
         existing = "some content\n"
@@ -479,7 +478,7 @@ class TestWriteFileSandboxReplace:
         assert "Error" in result
         assert "not found" in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_replace_old_str_empty(self, mock_docker: MagicMock) -> None:
         """Empty old_str returns an error."""
         existing = "some content\n"
@@ -512,7 +511,7 @@ class TestWriteFileSandboxReplaceEnhanced:
 
     # --- uniqueness check ---
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_multiple_exact_matches_error(self, mock_docker: MagicMock) -> None:
         """Multiple exact matches are rejected with line numbers."""
         existing = "hello\nworld\nhello\n"
@@ -530,7 +529,7 @@ class TestWriteFileSandboxReplaceEnhanced:
         assert "lines 1, 3" in result
         assert "unique" in result.lower()
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_single_exact_match_still_works(self, mock_docker: MagicMock) -> None:
         """A single exact match succeeds (backward compat)."""
         existing = "line1\nline2\nline3\n"
@@ -551,7 +550,7 @@ class TestWriteFileSandboxReplaceEnhanced:
 
     # --- whitespace-flexible fallback ---
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_whitespace_mismatch_fallback(self, mock_docker: MagicMock) -> None:
         """Whitespace difference is tolerated via fallback."""
         existing = "    def foo():\n        pass\n"
@@ -572,7 +571,7 @@ class TestWriteFileSandboxReplaceEnhanced:
         # new_str should be re-indented to match file's indentation
         assert _get_written_content(mock_container) == "    def bar():\n        pass\n"
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_whitespace_flexible_multiple_matches(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -593,7 +592,7 @@ class TestWriteFileSandboxReplaceEnhanced:
         assert "matches at 2 locations" in result
         assert "whitespace normalization" in result.lower()
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_whitespace_flexible_trailing(self, mock_docker: MagicMock) -> None:
         """Trailing whitespace is ignored in flexible match."""
         existing = "  hello world  \n  next line\n"
@@ -616,7 +615,7 @@ class TestWriteFileSandboxReplaceEnhanced:
 
     # --- near-miss echo ---
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_near_miss_shows_context(self, mock_docker: MagicMock) -> None:
         """When old_str is not found, near-miss context is returned."""
         existing = "def foo():\n    pass\n\ndef bar():\n    pass\n"
@@ -639,7 +638,7 @@ class TestWriteFileSandboxReplaceEnhanced:
 class TestWriteFileSandboxMutualExclusivity:
     """Tests that partial-update modes are mutually exclusive."""
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_start_line_and_append(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -657,7 +656,7 @@ class TestWriteFileSandboxMutualExclusivity:
         assert "Error" in result
         assert "mutually exclusive" in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_start_line_and_old_str(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -675,7 +674,7 @@ class TestWriteFileSandboxMutualExclusivity:
         assert "Error" in result
         assert "mutually exclusive" in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_append_and_old_str(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -693,7 +692,7 @@ class TestWriteFileSandboxMutualExclusivity:
         assert "Error" in result
         assert "mutually exclusive" in result
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_all_together(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -717,7 +716,7 @@ class TestWriteFileSandboxMutualExclusivity:
 class TestWriteFileSandboxFileNotFound:
     """Tests for file-not-found errors in partial-update modes."""
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_file_not_found_for_line_range(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -749,7 +748,7 @@ class TestWriteFileSandboxFileNotFound:
 class TestWriteFileSandboxJournal:
     """Tests that write_file_sandbox records journal entries via write_file (Issue #96)."""
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     @patch("code_sandbox_mcp.edit_verify.record_file_write")
     def test_full_overwrite_records_journal(
         self, mock_record: MagicMock, mock_docker: MagicMock,
@@ -776,62 +775,6 @@ class TestWriteFileSandboxJournal:
         assert kwargs.get("is_test") is False  # not a test file
 
 
-class TestApplyPatchJournal:
-    """Tests that apply_patch_to_file records journal entries (Issue #96)."""
-
-    @patch("code_sandbox_mcp.edit_verify.record_file_write")
-    def test_apply_patch_records_journal(
-        self, mock_record: MagicMock, tmp_path
-    ) -> None:
-        # apply_patch_to_file now delegates to the in-container Python runner +
-        # `git apply`.  Emulate the container by executing that runner on the
-        # host against a real file (git is available in CI), mapping the posix
-        # path the tool sees to a real temp file for OS-portability.
-        import base64
-        import io
-        import sys
-
-        real = tmp_path / "test.py"
-        real.write_text("hello\n", encoding="utf-8", newline="")
-        posix = "/root/test.py"
-
-        class _RunnerContainer:
-            def exec_run(self, cmd, **kwargs):  # noqa: ANN001
-                blob = cmd[-1].split("echo ", 1)[1].split(" | base64 -d", 1)[0].strip("'")
-                src = base64.b64decode(blob).decode("utf-8")
-                real_open = open
-
-                def mapped_open(p, *a, **k):  # noqa: ANN001
-                    return real_open(str(real) if p == posix else p, *a, **k)
-
-                buf = io.StringIO()
-                old = sys.stdout
-                sys.stdout = buf
-                try:
-                    try:
-                        exec(compile(src, "<runner>", "exec"), {"open": mapped_open})
-                    except SystemExit:
-                        pass
-                finally:
-                    sys.stdout = old
-                return 0, (buf.getvalue().encode("utf-8"), b"")
-
-        mock_client = MagicMock()
-        mock_client.containers.get.return_value = _RunnerContainer()
-
-        diff = "--- a/test.py\n+++ b/test.py\n@@ -1,1 +1,1 @@\n-hello\n+world\n"
-        result = apply_patch_to_file(mock_client, "abc123", posix, diff)
-        assert "Error" not in result
-        assert real.read_text(encoding="utf-8") == "world\n"
-        mock_record.assert_called_once()
-        args, kwargs = mock_record.call_args
-        assert args[0] == "abc123"
-        assert args[1] == "test.py"
-        assert "/root" in args[2]
-        assert args[3] > 0
-        assert kwargs.get("is_test") is False
-
-
 class TestWriteFileLargeFile:
     """Regression tests for Issue #144.
 
@@ -841,7 +784,7 @@ class TestWriteFileLargeFile:
     ``argument list too long``.  Content is now streamed via ``put_archive``.
     """
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_large_overwrite_uses_put_archive_not_argv(
         self, mock_docker: MagicMock,
     ) -> None:
@@ -875,7 +818,7 @@ class TestWriteFileLargeFile:
             joined = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
             assert len(joined) < 128 * 1024, "file content leaked into argv"
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_large_old_str_edit(self, mock_docker: MagicMock) -> None:
         """A line-range/old_str edit of a large file also succeeds."""
         existing = ("y" * 100 + "\n") * 2000 + "TARGET\n"
@@ -940,7 +883,7 @@ class TestWriteFileOwnership:
         uid, gid, mode = _owner_for_write(container, "/x/f", "/x")
         assert (uid, gid, mode) == (0, 0, 0o644)
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     def test_write_carries_existing_owner_into_archive(
         self, mock_docker: MagicMock
     ) -> None:
@@ -974,10 +917,7 @@ class TestWriteFileOwnership:
 class TestWriteFileIsTestDetection:
     """Tests that write_file correctly classifies test files (Issue #96)."""
 
-    @patch("code_sandbox_mcp.edit_verify.record_file_write")
-    def test_regular_file_is_not_test(
-        self, mock_record: MagicMock,
-    ) -> None:
+    def test_regular_file_is_not_test(self) -> None:
         from code_sandbox_mcp.edit_verify import _is_test_file
         assert _is_test_file("/root/main.py") is False
         assert _is_test_file("/home/src/app.py") is False
@@ -1009,7 +949,7 @@ class TestWriteFileIsTestDetection:
         assert _is_test_file("/app/test/test_main.py") is True
         assert _is_test_file("/app/__tests__/test_main.js") is True
 
-    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.tools.file._docker")
     @patch("code_sandbox_mcp.edit_verify.record_file_write")
     def test_write_file_sandbox_detects_test_file(
         self, mock_record: MagicMock, mock_docker: MagicMock,
@@ -1019,8 +959,6 @@ class TestWriteFileIsTestDetection:
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-
-        from code_sandbox_mcp.server import write_file_sandbox
 
         write_file_sandbox(
             container_id="abc123",

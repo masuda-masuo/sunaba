@@ -824,7 +824,7 @@ from code_sandbox_mcp.server import sandbox_create_pr
 
 
 class TestSandboxCreatePr:
-    """Tests for sandbox_create_pr (Issue #152)."""
+    """Tests for sandbox_create_pr (Issue #152, dry_run flow Issue #169)."""
 
     @patch("code_sandbox_mcp.server._docker")
     def test_invalid_repo_format(self, mock_docker: MagicMock) -> None:
@@ -861,13 +861,113 @@ class TestSandboxCreatePr:
         )
         assert "error" in result
 
+    # -- dry_run=True --
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.generate_token")
+    @patch("code_sandbox_mcp.server.record_boundary_crossing")
+    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    def test_dry_run_returns_token(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_gen_token: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """dry_run=True returns a HEAD preview + token without pushing."""
+        mock_run_id.return_value = "run123"
+        mock_gen_token.return_value = "tok_create_pr"
+
+        container = _make_container_mock([
+            (0, b"abc1234 Add feature", b""),                # git log -1
+            (0, b" file.py | 2 ++\n 1 file changed", b""),   # git show --stat
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(
+            sandbox_create_pr(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="feat/x",
+                pr_title="Test PR",
+                dry_run=True,
+            )
+        )
+        assert result["status"] == "dry_run"
+        assert result["confirmation_token"] == "tok_create_pr"
+        assert result["branch"] == "feat/x"
+        assert result["pr_title"] == "Test PR"
+        assert "Add feature" in result["diff_summary"]
+
+        mock_gen_token.assert_called_once()
+        assert mock_gen_token.call_args[1]["operation"] == "sandbox_create_pr"
+        mock_record.assert_called_once()
+        assert mock_record.call_args[1]["approved"] is None
+        assert mock_record.call_args[1]["token"] == "tok_create_pr"
+
+    # -- dry_run=False (execute) --
+
+    @patch("code_sandbox_mcp.server._docker")
+    def test_execute_without_token(self, mock_docker: MagicMock) -> None:
+        """dry_run=False without token returns an error before pushing."""
+        container = _make_container_mock([])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(
+            sandbox_create_pr(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="feat/x",
+                pr_title="Test PR",
+            )
+        )
+        assert result["status"] == "error"
+        assert "token" in result["error"].lower()
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.verify_and_consume")
+    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    def test_execute_invalid_token(
+        self,
+        mock_run_id: MagicMock,
+        mock_consume: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """dry_run=False with an invalid/expired token returns an error."""
+        mock_run_id.return_value = "run123"
+        mock_consume.return_value = None  # token invalid
+        container = _make_container_mock([])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(
+            sandbox_create_pr(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="feat/x",
+                pr_title="Test PR",
+                token="bad_token",
+            )
+        )
+        assert result["status"] == "error"
+        assert "invalid" in result["error"].lower()
+
+    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.server.verify_and_consume")
     @patch("code_sandbox_mcp.server.record_boundary_crossing")
     @patch("code_sandbox_mcp.server._docker")
-    def test_api_push_failure_returns_error(self, mock_docker: MagicMock, mock_record: MagicMock) -> None:
+    def test_api_push_failure_returns_error(
+        self,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+        mock_consume: MagicMock,
+        mock_run_id: MagicMock,
+    ) -> None:
         """If the python script returns non-zero, status=error is returned."""
-        # exec_run sequence:
-        # 1. write script (success)
-        # 2. run script (fail)
+        mock_run_id.return_value = "run123"
+        mock_consume.return_value = {"token": "tok_good", "operation": "sandbox_create_pr"}
         container = _make_container_mock([
             (0, b"", b""),
             (1, b'{"error": "gh api failed"}', b""),
@@ -881,27 +981,36 @@ class TestSandboxCreatePr:
                 repo="owner/repo",
                 branch="feat/x",
                 pr_title="Test PR",
+                token="tok_good",
             )
         )
         assert result["status"] == "error"
         assert result["step"] == "api_push"
         mock_record.assert_called_once()
 
+    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.server.verify_and_consume")
     @patch("code_sandbox_mcp.server.record_boundary_crossing")
     @patch("code_sandbox_mcp.server._docker")
     def test_success_returns_pr_url(
-        self, mock_docker: MagicMock, mock_record: MagicMock
+        self,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+        mock_consume: MagicMock,
+        mock_run_id: MagicMock,
     ) -> None:
         """Happy path: API push succeeds and gh pr create returns a URL."""
+        mock_run_id.return_value = "run123"
+        mock_consume.return_value = {"token": "tok_good", "operation": "sandbox_create_pr"}
         push_json = json.dumps(
             {"sha": "a" * 40, "tree_sha": "b" * 40, "parent_sha": "c" * 40}
         ).encode()
         pr_output = b"https://github.com/owner/repo/pull/99\n"
 
         container = _make_container_mock([
-            (0, b"", b""),   # write script
-            (0, push_json, b""),  # run script
-            (0, pr_output, b""),  # gh pr create
+            (0, b"", b""),         # write script
+            (0, push_json, b""),   # run script
+            (0, pr_output, b""),   # gh pr create
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -913,6 +1022,7 @@ class TestSandboxCreatePr:
                 branch="feat/x",
                 pr_title="Test PR",
                 pr_body="Body text",
+                token="tok_good",
             )
         )
         assert result["status"] == "ok"
@@ -920,12 +1030,20 @@ class TestSandboxCreatePr:
         assert result["sha"] == "a" * 7
         mock_record.assert_called_once()
 
+    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.server.verify_and_consume")
     @patch("code_sandbox_mcp.server.record_boundary_crossing")
     @patch("code_sandbox_mcp.server._docker")
     def test_push_success_pr_fail_returns_pushed_no_pr(
-        self, mock_docker: MagicMock, mock_record: MagicMock
+        self,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+        mock_consume: MagicMock,
+        mock_run_id: MagicMock,
     ) -> None:
         """If push succeeds but gh pr create fails, return pushed_no_pr."""
+        mock_run_id.return_value = "run123"
+        mock_consume.return_value = {"token": "tok_good", "operation": "sandbox_create_pr"}
         push_json = json.dumps(
             {"sha": "a" * 40, "tree_sha": "b" * 40, "parent_sha": None}
         ).encode()
@@ -944,6 +1062,7 @@ class TestSandboxCreatePr:
                 repo="owner/repo",
                 branch="feat/x",
                 pr_title="Test PR",
+                token="tok_good",
             )
         )
         assert result["status"] == "pushed_no_pr"
@@ -987,12 +1106,20 @@ class TestSandboxCreatePr:
         assert result["status"] == "error"
         assert "base_branch" in result["error"]
 
+    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.server.verify_and_consume")
     @patch("code_sandbox_mcp.server.record_boundary_crossing")
     @patch("code_sandbox_mcp.server._docker")
     def test_json_parse_error_returns_error(
-        self, mock_docker: MagicMock, mock_record: MagicMock
+        self,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+        mock_consume: MagicMock,
+        mock_run_id: MagicMock,
     ) -> None:
-        """If the push script exits 0 but outputs invalid JSON, status=error is returned."""
+        """If the push script exits 0 but outputs invalid JSON, status=error."""
+        mock_run_id.return_value = "run123"
+        mock_consume.return_value = {"token": "tok_good", "operation": "sandbox_create_pr"}
         container = _make_container_mock([
             (0, b"", b""),
             (0, b"not-json", b""),
@@ -1006,6 +1133,7 @@ class TestSandboxCreatePr:
                 repo="owner/repo",
                 branch="feat/x",
                 pr_title="Test PR",
+                token="tok_good",
             )
         )
         assert result["status"] == "error"
@@ -1013,12 +1141,20 @@ class TestSandboxCreatePr:
         mock_record.assert_called_once()
         assert mock_record.call_args[1]["approved"] is False
 
+    @patch("code_sandbox_mcp.server.get_or_create_run_id")
+    @patch("code_sandbox_mcp.server.verify_and_consume")
     @patch("code_sandbox_mcp.server.record_boundary_crossing")
     @patch("code_sandbox_mcp.server._docker")
     def test_push_result_error_key_returns_error(
-        self, mock_docker: MagicMock, mock_record: MagicMock
+        self,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+        mock_consume: MagicMock,
+        mock_run_id: MagicMock,
     ) -> None:
-        """If the push script exits 0 but JSON contains 'error' key, status=error is returned."""
+        """If the push script exits 0 but JSON contains 'error', status=error."""
+        mock_run_id.return_value = "run123"
+        mock_consume.return_value = {"token": "tok_good", "operation": "sandbox_create_pr"}
         container = _make_container_mock([
             (0, b"", b""),
             (0, b'{"error": "blob creation failed"}', b""),
@@ -1032,6 +1168,7 @@ class TestSandboxCreatePr:
                 repo="owner/repo",
                 branch="feat/x",
                 pr_title="Test PR",
+                token="tok_good",
             )
         )
         assert result["status"] == "error"

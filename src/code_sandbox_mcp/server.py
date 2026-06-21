@@ -2666,6 +2666,83 @@ def issue_view(
     })
 
 
+# ---------------------------------------------------------------------------
+# Shared dry_run / confirmation-token flow for boundary-crossing writes
+# (Issue #169).  Both ``submit`` and ``sandbox_create_pr`` route their
+# dry_run -> token -> execute flow through these helpers so the logic has a
+# single implementation and cannot drift between the two tools.
+# ---------------------------------------------------------------------------
+
+
+def _dry_run_response(
+    operation: str,
+    cid: str,
+    run_id: str,
+    details: str,
+    payload: dict[str, Any],
+) -> str:
+    """Generate a confirmation token and return the ``dry_run`` response.
+
+    Generates a one-time confirmation token, records a pending
+    (``approved=None``) boundary crossing in the journal, and returns the
+    standard ``dry_run`` JSON envelope merged with *payload*.
+
+    Args:
+        operation: Operation type recorded on the token and journal
+            (e.g. ``"submit"``, ``"sandbox_create_pr"``).
+        cid: 12-character container ID prefix.
+        run_id: Run identifier from the journal.
+        details: Human-readable summary of what execution will do.
+        payload: Extra fields merged into the response (e.g.
+            ``diff_summary``, ``branch``, ``pr_title``).
+
+    Returns:
+        JSON string with ``status="dry_run"``, ``confirmation_token``,
+        and the *payload* fields.
+    """
+    conf_token = generate_token(
+        operation=operation,
+        details=details,
+        container_id=cid,
+        run_id=run_id,
+    )
+    record_boundary_crossing(
+        cid,
+        operation,
+        details,
+        approved=None,
+        token=conf_token,
+    )
+    return json.dumps({
+        "status": "dry_run",
+        "confirmation_token": conf_token,
+        **payload,
+    })
+
+
+def _consume_confirmation_token(
+    token: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate and consume a confirmation token for execution.
+
+    Returns ``(token_meta, None)`` when the token is valid (and now
+    consumed), or ``(None, error_json)`` with a ready-to-return error
+    response when the token is missing, invalid, expired, or already used.
+    """
+    if not token:
+        return None, json.dumps({
+            "status": "error",
+            "error": "Token required for execution.  Run with dry_run=True first.",
+        })
+    result = verify_and_consume(token)
+    if result is None:
+        return None, json.dumps({
+            "status": "error",
+            "error": "Token invalid, expired, or already used",
+        })
+    return result, None
+
+
 @mcp.tool()
 def submit(
     container_id: str,
@@ -2796,31 +2873,19 @@ def submit(
         if create_pr:
             details += f" pr_title={pr_title[:60]}"
 
-        conf_token = generate_token(
-            operation="submit",
-            details=details,
-            container_id=cid,
-            run_id=run_id,
-        )
-
-        # Record pending boundary crossing
-        record_boundary_crossing(
-            cid,
+        return _dry_run_response(
             "submit",
+            cid,
+            run_id,
             details,
-            approved=None,
-            token=conf_token,
+            {
+                "diff_summary": diff_summary,
+                "branch": branch,
+                "message": message,
+                "create_pr": create_pr,
+                "pr_title": pr_title if create_pr else None,
+            },
         )
-
-        return json.dumps({
-            "status": "dry_run",
-            "diff_summary": diff_summary,
-            "branch": branch,
-            "message": message,
-            "confirmation_token": conf_token,
-            "create_pr": create_pr,
-            "pr_title": pr_title if create_pr else None,
-        })
 
     # ------------------------------------------------------------------
     # EXECUTE — require token + verify gate
@@ -2864,12 +2929,9 @@ def submit(
         })
 
     # --- Consume token (after gate passes) ---
-    token_result = verify_and_consume(token)
-    if token_result is None:
-        return json.dumps({
-            "status": "error",
-            "error": "Token invalid, expired, or already used",
-        })
+    token_result, token_error = _consume_confirmation_token(token)
+    if token_error is not None:
+        return token_error
 
     # --- Git branch check/create ---
     _run(f"git checkout -b {shlex.quote(branch)} 2>/dev/null || git checkout {shlex.quote(branch)}")
@@ -3140,6 +3202,8 @@ def sandbox_create_pr(
     pr_body: str = "",
     base_branch: str = "",
     working_dir: str = "/home/sandbox",
+    dry_run: bool = False,
+    token: str = "",
 ) -> str:
     """Push the current branch via GitHub API and create a PR.
 
@@ -3153,7 +3217,13 @@ def sandbox_create_pr(
     1. ``sandbox_initialize(allow_network=True, inject_vcs_token=True)``
     2. ``clone_repo`` / ``gh repo clone`` inside the container
     3. Make changes, run ``git add -A && git commit``
-    4. ``sandbox_create_pr(...)`` — pushes via API + opens PR
+    4. ``sandbox_create_pr(dry_run=True)`` — preview + confirmation token
+    5. ``sandbox_create_pr(token=...)`` — pushes via API + opens PR
+
+    Like :func:`submit`, execution is a two-step flow: call once with
+    ``dry_run=True`` to get a preview of the HEAD commit and a
+    confirmation token, then call again with that ``token`` to push and
+    open the PR.
 
     Requires a container started with ``allow_network=True`` and
     ``inject_vcs_token=True``.
@@ -3189,6 +3259,11 @@ def sandbox_create_pr(
             branch).
         working_dir: Directory in the container containing the git
             repository (default ``'/home/sandbox'``).
+        dry_run: When ``True``, returns a preview of the HEAD commit that
+            would be pushed plus a confirmation token, without pushing or
+            creating a PR.
+        token: Confirmation token from a previous ``dry_run`` call.
+            Required for execution (``dry_run=False``).
 
     Returns:
         JSON with ``status``, ``pr_url``, ``branch``, and ``sha``.
@@ -3234,6 +3309,43 @@ def sandbox_create_pr(
         out = stdout_b.decode("utf-8", errors="replace").strip() if stdout_b else ""
         err = stderr_b.decode("utf-8", errors="replace").strip() if stderr_b else ""
         return exit_code, out, err
+
+    run_id = get_or_create_run_id(cid)
+
+    # ------------------------------------------------------------------
+    # DRY RUN — preview push plan and generate confirmation token
+    # ------------------------------------------------------------------
+    if dry_run:
+        # HEAD is what gets pushed (see note above): preview that commit.
+        _ec, log_out, _ = _run("git log -1 --pretty='%h %s' HEAD")
+        _ec2, stat_out, _ = _run("git show --stat --pretty='' HEAD")
+        diff_summary = (log_out + "\n" + stat_out).strip()
+        if not diff_summary:
+            diff_summary = "(no committed HEAD to push)"
+
+        details = (
+            f"repo={repo} branch={branch} pr_title={pr_title[:60]}"
+            f" base={base_branch or 'default'}"
+        )
+        return _dry_run_response(
+            "sandbox_create_pr",
+            cid,
+            run_id,
+            details,
+            {
+                "diff_summary": diff_summary,
+                "branch": branch,
+                "pr_title": pr_title,
+                "base_branch": base_branch or None,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # EXECUTE — require confirmation token from a prior dry_run
+    # ------------------------------------------------------------------
+    _token_meta, token_error = _consume_confirmation_token(token)
+    if token_error is not None:
+        return token_error
 
     # Write the API-push script into the container
     script_b64 = base64.b64encode(

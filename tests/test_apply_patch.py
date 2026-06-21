@@ -12,11 +12,11 @@ class TestApplyPatchJournal:
     def test_apply_patch_records_journal(
         self, mock_record: MagicMock, tmp_path
     ) -> None:
-        from code_sandbox_mcp.edit_verify import apply_patch_to_file
-
         import base64
         import io
         import sys
+
+        from code_sandbox_mcp.edit_verify import apply_patch_to_file
 
         real = tmp_path / "test.py"
         real.write_text("hello\n", encoding="utf-8", newline="")

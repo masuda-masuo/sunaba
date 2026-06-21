@@ -69,18 +69,18 @@ from .tools.exec import (
     sandbox_exec_background,
     sandbox_exec_check,
 )
-from .tools.vcs import (
-    clone_repo,
-    issue_view,
-    sandbox_create_pr,
-    submit,
-)
 from .tools.file import (
     copy_file,
     copy_project,
     list_files,
     read_file_range,
     write_file_sandbox,
+)
+from .tools.vcs import (
+    clone_repo,
+    issue_view,
+    sandbox_create_pr,
+    submit,
 )
 
 logger: logging.Logger = logging.getLogger(__name__)

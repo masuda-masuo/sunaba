@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -146,8 +145,9 @@ class TestCopyProject:
         tmp_path: Path,
     ) -> None:
         """Should return error when put_archive raises an APIError."""
-        from docker.errors import APIError
         from unittest.mock import Mock
+
+        from docker.errors import APIError
         src_dir = tmp_path / "testproj"
         src_dir.mkdir()
         (src_dir / "f.txt").write_text("data")

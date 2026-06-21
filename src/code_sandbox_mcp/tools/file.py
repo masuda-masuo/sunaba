@@ -17,7 +17,6 @@ from code_sandbox_mcp.edit_verify import read_file, read_file_lines, write_file
 from code_sandbox_mcp.journal import record_copy
 from code_sandbox_mcp.tools.common import _docker
 
-
 # ---------------------------------------------------------------------------
 # write_file_sandbox  --  old_str helper functions
 # ---------------------------------------------------------------------------

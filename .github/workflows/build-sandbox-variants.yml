@@ -87,7 +87,7 @@ jobs:
           source /tmp/healthcheck.sh
           BASE_DIGEST="${{ steps.base.outputs.digest }}"
           BASE_REF="ghcr.io/${{ github.repository }}/sandbox@${BASE_DIGEST}"
-          cat <<DOCKERFILE | docker build --build-arg BASE="${BASE_REF}" --tag "broken-base" -f- .
+          cat <<'DOCKERFILE' | docker build --build-arg BASE="${BASE_REF}" --tag "broken-base" -f- .
           ARG BASE
           FROM ${BASE}
           USER root

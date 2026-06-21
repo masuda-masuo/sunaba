@@ -399,6 +399,45 @@ def _clone_repo_via_network(
     )
 
 
+def _try_clone_into_container(
+    container: Any,
+    container_id: str,
+    clone_repo: str,
+    clone_dest: str,
+    inject_vcs_token: bool = False,
+) -> tuple[str | None, str | None]:
+    """Attempt to clone a repo into the container; return (msg, error).
+
+    Runs the full chain: Shiori fast-path -> network fallback when
+    ``_SHIORI_REPOS_PATH`` is unset -> non-fatal error capture.
+
+    Returns:
+        ``(clone_msg, None)`` on success, ``(None, error_str)`` on failure.
+    """
+    try:
+        msg = _clone_shiori_repo_to_container(
+            container, container_id, clone_repo, clone_dest,
+        )
+        return msg, None
+    except ValueError as e:
+        if not _SHIORI_REPOS_PATH:
+            try:
+                msg = _clone_repo_via_network(
+                    container, container_id, clone_repo, clone_dest,
+                    inject_vcs_token,
+                )
+                return msg, None
+            except Exception as e2:
+                logger.warning("Network clone fallback failed: %s", e2)
+                return None, str(e2)
+        else:
+            logger.warning("Shiori clone copy failed: %s", e)
+            return None, str(e)
+    except Exception as e:
+        logger.warning("Shiori clone copy failed: %s", e)
+        return None, str(e)
+
+
 # ---------------------------------------------------------------------------
 # PR branch setup helper (Issue #136)
 # ---------------------------------------------------------------------------
@@ -676,27 +715,13 @@ def sandbox_initialize(
     # so skip the Shiori clone copy to avoid redundant clone.
     clone_msg = ""
     if clone_repo and pr is None:
-        try:
-            clone_msg = " " + _clone_shiori_repo_to_container(
-                container, cid, clone_repo, clone_dest,
-            )
-        except ValueError as e:
-            if not _SHIORI_REPOS_PATH:
-                try:
-                    clone_msg = " " + _clone_repo_via_network(
-                        container, cid, clone_repo, clone_dest,
-                        inject_vcs_token,
-                    )
-                except Exception as e2:
-                    logger.warning("Network clone fallback failed: %s", e2)
-                    clone_msg = f" (clone_repo failed: {e2})"
-            else:
-                logger.warning("Shiori clone copy failed: %s", e)
-                clone_msg = f" (clone_repo failed: {e})"
-        except Exception as e:
-            # Clone failure is non-fatal: the container is still usable.
-            logger.warning("Shiori clone copy failed: %s", e)
-            clone_msg = f" (clone_repo failed: {e})"
+        msg, err = _try_clone_into_container(
+            container, cid, clone_repo, clone_dest, inject_vcs_token,
+        )
+        if err is not None:
+            clone_msg = f" (clone_repo failed: {err})"
+        else:
+            clone_msg = " " + msg
     elif clone_repo and pr is not None:
         logger.info(
             "Skipping clone_repo=%s (pr=%s handles its own clone)",
@@ -1553,26 +1578,9 @@ def run_container_and_exec(
     # so skip the Shiori clone copy to avoid redundant clone.
     clone_error: str | None = None
     if clone_repo and pr is None:
-        try:
-            _clone_shiori_repo_to_container(
-                container, container_id, clone_repo, clone_dest,
-            )
-        except ValueError as e:
-            if not _SHIORI_REPOS_PATH:
-                try:
-                    _clone_repo_via_network(
-                        container, container_id, clone_repo, clone_dest,
-                        inject_vcs_token,
-                    )
-                except Exception as e2:
-                    logger.warning("Network clone fallback failed: %s", e2)
-                    clone_error = str(e2)
-            else:
-                logger.warning("Shiori clone copy failed: %s", e)
-                clone_error = str(e)
-        except Exception as e:
-            logger.warning("Shiori clone copy failed: %s", e)
-            clone_error = str(e)
+        _, clone_error = _try_clone_into_container(
+            container, container_id, clone_repo, clone_dest, inject_vcs_token,
+        )
     elif clone_repo and pr is not None:
         logger.info(
             "Skipping clone_repo=%s (pr=%s handles its own clone)",

@@ -49,7 +49,9 @@ stdio トランスポート + MCP クライアントの制約による複合:
 ## 構造的な対策（推奨）
 
 issue 本文も指摘する通り、stdio の ~60s 天井を構造的に外すのは
-`--transport sse` / `--transport http`。重いインストールや長時間操作を伴う
+`--transport sse` / `--transport http`。SSE トランスポートは stdio と異なり
+リクエストが多重化されるため、1 つのツール呼び出しがブロックしても他の
+呼び出しに影響しない。重いインストールや長時間操作を伴う
 ワークロードではこちらを推奨。`sandbox_exec_background` + `sandbox_exec_check`
 （短タイムアウト poll）との併用で、stdio でも実務上は回避できる。
 

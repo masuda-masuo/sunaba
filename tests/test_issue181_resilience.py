@@ -6,14 +6,15 @@ Covers:
 - ``sandbox_initialize`` ``mem_limit`` / ``cpus`` resource overrides.
 - ``sandbox_exec_check`` using the short recovery timeout.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
 from docker.errors import APIError, NotFound
 
-from code_sandbox_mcp.tools.container import sandbox_initialize, sandbox_stop
 from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _docker
+from code_sandbox_mcp.tools.container import sandbox_initialize, sandbox_stop
 from code_sandbox_mcp.tools.exec import sandbox_exec_check
 
 _IMG = "python@sha256:" + "0" * 64
@@ -38,9 +39,7 @@ class TestSandboxStopForceKill:
 
     @patch("code_sandbox_mcp.tools.container.record_stop")
     @patch("code_sandbox_mcp.tools.container._docker")
-    def test_kill_then_force_remove(
-        self, mock_docker: MagicMock, mock_record: MagicMock
-    ) -> None:
+    def test_kill_then_force_remove(self, mock_docker: MagicMock, mock_record: MagicMock) -> None:
         container = MagicMock()
         client = MagicMock()
         client.containers.get.return_value = container
@@ -57,9 +56,7 @@ class TestSandboxStopForceKill:
 
     @patch("code_sandbox_mcp.tools.container.record_stop")
     @patch("code_sandbox_mcp.tools.container._docker")
-    def test_kill_apierror_still_removes(
-        self, mock_docker: MagicMock, mock_record: MagicMock
-    ) -> None:
+    def test_kill_apierror_still_removes(self, mock_docker: MagicMock, mock_record: MagicMock) -> None:
         container = MagicMock()
         container.kill.side_effect = APIError("not running")
         client = MagicMock()

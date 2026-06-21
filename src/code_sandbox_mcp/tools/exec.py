@@ -95,9 +95,7 @@ def sandbox_exec(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps(
-            {"status": "error", "error": f"container {container_id[:12]} not found"}
-        )
+        return json.dumps({"status": "error", "error": f"container {container_id[:12]} not found"})
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -256,11 +254,7 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
     encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
     tmpf = f"/tmp/.sx_{os.urandom(4).hex()}.sh"
     inner_cmd = (
-        f"echo {shlex.quote(encoded)} | base64 -d > {tmpf}"
-        f" && chmod +x {tmpf}"
-        f" && {tmpf}; rc=$?"
-        f"; rm -f {tmpf}"
-        f"; exit $rc"
+        f"echo {shlex.quote(encoded)} | base64 -d > {tmpf} && chmod +x {tmpf} && {tmpf}; rc=$?; rm -f {tmpf}; exit $rc"
     )
     bg_cmd = (
         f"nohup /bin/sh -c {shlex.quote(inner_cmd)} "
@@ -325,9 +319,7 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
         stdout=True,
         stderr=True,
     )
-    stdout_text = (
-        stdout_result[1].decode("utf-8", errors="replace") if stdout_result[1] else ""
-    )
+    stdout_text = stdout_result[1].decode("utf-8", errors="replace") if stdout_result[1] else ""
 
     if exit_code != 0:
         stderr_result = container.exec_run(
@@ -335,11 +327,7 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
             stdout=True,
             stderr=True,
         )
-        stderr_text = (
-            stderr_result[1].decode("utf-8", errors="replace")
-            if stderr_result[1]
-            else ""
-        )
+        stderr_text = stderr_result[1].decode("utf-8", errors="replace") if stderr_result[1] else ""
         return f"Error: exit code {exit_code}\n{stderr_text}"
 
     # Clean up temp files

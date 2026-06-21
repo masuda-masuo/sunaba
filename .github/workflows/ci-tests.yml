@@ -32,6 +32,10 @@ jobs:
       - name: Lint (ruff)
         run: ruff check src/
 
+      - name: Check patch targets (issue #166)
+        run: |
+          python scripts/check_patch_targets.py tests
+
       - name: Run tests
         run: |
           python -m pytest -v

@@ -231,6 +231,7 @@ class TestCloneShioriRepoToContainer:
 class TestSandboxInitializeCloneRepo:
     """Tests for sandbox_initialize with clone_repo."""
 
+    @patch("code_sandbox_mcp.server._shiori_preclone_exists", return_value=True)
     @patch("code_sandbox_mcp.server._clone_shiori_repo_to_container")
     @patch("code_sandbox_mcp.server._docker")
     @patch("code_sandbox_mcp.server._ensure_image")
@@ -241,6 +242,7 @@ class TestSandboxInitializeCloneRepo:
         mock_ensure_image: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
+        mock_preclone_exists: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -310,6 +312,7 @@ class TestSandboxInitializeCloneRepo:
         assert result == "abc123def456"
         mock_clone.assert_not_called()
 
+    @patch("code_sandbox_mcp.server._shiori_preclone_exists", return_value=True)
     @patch("code_sandbox_mcp.server._clone_shiori_repo_to_container")
     @patch("code_sandbox_mcp.server._docker")
     @patch("code_sandbox_mcp.server._ensure_image")
@@ -320,6 +323,7 @@ class TestSandboxInitializeCloneRepo:
         mock_ensure_image: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
+        mock_preclone_exists: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -382,6 +386,7 @@ class TestSandboxInitializeCloneRepo:
 class TestRunContainerAndExecCloneRepo:
     """Tests for run_container_and_exec with clone_repo."""
 
+    @patch("code_sandbox_mcp.server._shiori_preclone_exists", return_value=True)
     @patch("code_sandbox_mcp.server._clone_shiori_repo_to_container")
     @patch("code_sandbox_mcp.server._docker")
     @patch("code_sandbox_mcp.server.validate_image_ref")
@@ -390,6 +395,7 @@ class TestRunContainerAndExecCloneRepo:
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
+        mock_preclone_exists: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -411,6 +417,7 @@ class TestRunContainerAndExecCloneRepo:
         assert result["status"] == "ok"
         mock_clone.assert_called_once()
 
+    @patch("code_sandbox_mcp.server._shiori_preclone_exists", return_value=True)
     @patch("code_sandbox_mcp.server._clone_shiori_repo_to_container")
     @patch("code_sandbox_mcp.server._docker")
     @patch("code_sandbox_mcp.server.validate_image_ref")
@@ -420,9 +427,12 @@ class TestRunContainerAndExecCloneRepo:
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
+        mock_preclone_exists: MagicMock,
     ) -> None:
-        # When Shiori IS configured but the clone fails with ValueError,
-        # the error should be reported as clone_warning (Issue #84).
+        # When Shiori IS configured, pre-clone exists, but the copy step
+        # fails with ValueError, the error is reported as clone_warning
+        # (Issue #84).  _shiori_preclone_exists is stubbed True so that
+        # _try_clone_into_container does not attempt the network fallback.
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
         mock_container.exec_run.return_value = (0, (b"test output", b""))
@@ -498,6 +508,41 @@ class TestRunContainerAndExecCloneRepo:
         mock_clone.assert_not_called()
         assert "clone_warning" not in result
 
+
+    @patch("code_sandbox_mcp.server._shiori_preclone_exists", return_value=False)
+    @patch("code_sandbox_mcp.server._clone_repo_via_network")
+    @patch("code_sandbox_mcp.server._clone_shiori_repo_to_container")
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.server.validate_image_ref")
+    def test_preclone_absent_falls_back_to_network(
+        self,
+        mock_validate: MagicMock,
+        mock_docker: MagicMock,
+        mock_shiori_clone: MagicMock,
+        mock_net_clone: MagicMock,
+        mock_preclone_exists: MagicMock,
+    ) -> None:
+        # When _shiori_preclone_exists returns False (pre-clone absent),
+        # _try_clone_into_container should fall back to network clone
+        # (Issue #178).  The helper is mocked directly for robustness.
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_container.exec_run.return_value = (0, (b"test output", b""))
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_shiori_clone.side_effect = ValueError("Repository clone not found: /some/repos/owner/repo")
+        mock_net_clone.return_value = "Cloned owner/repo via network into /tmp/repo/repo in container abc123def456"
+
+        result = json.loads(run_container_and_exec(
+            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            commands=["echo hello"],
+            clone_repo="owner/repo",
+        ))
+
+        assert result["status"] == "ok"
+        assert "clone_warning" not in result
+        mock_net_clone.assert_called_once()
 
 class TestRunContainerAndExecTimeout:
     """Tests for run_container_and_exec with timeout (Issue #138)."""

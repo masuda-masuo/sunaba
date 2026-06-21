@@ -224,6 +224,25 @@ def _validate_clone_repo(clone_repo: str) -> tuple[str, str]:
     return owner, name
 
 
+
+def _shiori_preclone_exists(clone_repo: str) -> bool:
+    """Return True when the Shiori pre-clone for *clone_repo* is present on disk.
+
+    Returns False when ``_SHIORI_REPOS_PATH`` is unset or when the specific
+    repository directory (with a ``.git`` sub-directory) is absent.  Used to
+    decide whether network access must be auto-enabled before container start,
+    and whether the network fallback should run (Issue #178).
+    """
+    if not _SHIORI_REPOS_PATH:
+        return False
+    repos_root = Path(_SHIORI_REPOS_PATH).resolve()
+    clone_path = (repos_root / clone_repo).resolve()
+    # Shiori pre-clones are produced by a normal git clone, so .git is a
+    # directory.  Bare clones and git-worktree secondaries (where .git is
+    # a file) are not used by Shiori, so is_dir() is the right check.
+    return clone_path.is_dir() and (clone_path / ".git").is_dir()
+
+
 def _clone_shiori_repo_to_container(
     container: Any,
     container_id: str,
@@ -374,10 +393,11 @@ def _clone_repo_via_network(
         ``inject_vcs_token=True``; when the clone fails without a token
         the raised error suggests doing so.
     """
-    # Not redundant with the callers: this fallback runs only when
-    # _SHIORI_REPOS_PATH is unset, and _clone_shiori_repo_to_container
-    # raises on that *before* it calls _validate_clone_repo.  So this is
-    # the only validation on the network-fallback path (PR #170 review).
+    # Not redundant with the callers: on the network-fallback path the
+    # caller may skip _clone_shiori_repo_to_container entirely (when
+    # _SHIORI_REPOS_PATH is unset) or that function raises before reaching
+    # _validate_clone_repo (when the specific pre-clone is absent, Issue #178).
+    # Either way this is the only validation on the network-fallback path.
     _validate_clone_repo(clone_repo)
     repo_name = clone_repo.split("/")[-1]
     clone_path = clone_dest.rstrip("/") + "/" + repo_name
@@ -415,33 +435,26 @@ def _try_clone_into_container(
 ) -> CloneResult:
     """Attempt to clone a repo into the container; return (msg, error).
 
-    Runs the full chain: Shiori fast-path -> network fallback when
-    ``_SHIORI_REPOS_PATH`` is unset -> non-fatal error capture.
+    Selects the clone path up front via ``_shiori_preclone_exists``:
 
-    Returns:
-        ``(clone_msg, None)`` on success, ``(None, error_str)`` on failure.
+    - pre-clone present  -> Shiori fast-path
+    - pre-clone absent   -> network fallback (Issue #178)
+
+    Returns ``(clone_msg, None)`` on success, ``(None, error_str)`` on failure.
     """
     try:
-        msg = _clone_shiori_repo_to_container(
-            container, container_id, clone_repo, clone_dest,
-        )
-        return CloneResult(msg, None)
-    except ValueError as e:
-        if not _SHIORI_REPOS_PATH:
-            try:
-                msg = _clone_repo_via_network(
-                    container, container_id, clone_repo, clone_dest,
-                    inject_vcs_token,
-                )
-                return CloneResult(msg, None)
-            except Exception as e2:
-                logger.warning("Network clone fallback failed: %s", e2)
-                return CloneResult(None, str(e2))
+        if not _shiori_preclone_exists(clone_repo):
+            msg = _clone_repo_via_network(
+                container, container_id, clone_repo, clone_dest,
+                inject_vcs_token,
+            )
         else:
-            logger.warning("Shiori clone copy failed: %s", e)
-            return CloneResult(None, str(e))
+            msg = _clone_shiori_repo_to_container(
+                container, container_id, clone_repo, clone_dest,
+            )
+        return CloneResult(msg, None)
     except Exception as e:
-        logger.warning("Shiori clone copy failed: %s", e)
+        logger.warning("Clone failed: %s", e)
         return CloneResult(None, str(e))
 
 
@@ -675,11 +688,11 @@ def sandbox_initialize(
         allow_network = True
         inject_vcs_token = True
 
-    # Auto-enable network when Shiori is not configured (Issue #146)
-    if clone_repo and pr is None and not _SHIORI_REPOS_PATH:
+    # Auto-enable network when pre-clone is absent (Issue #146, #178)
+    if clone_repo and pr is None and not _shiori_preclone_exists(clone_repo):
         allow_network = True
         logger.info(
-            "clone_repo=%r: Shiori path not configured, auto-enabling network access",
+            "clone_repo=%r: pre-clone absent, auto-enabling network access",
             clone_repo,
         )
 
@@ -1541,11 +1554,11 @@ def run_container_and_exec(
         allow_network = True
         inject_vcs_token = True
 
-    # Auto-enable network when Shiori is not configured (Issue #146)
-    if clone_repo and pr is None and not _SHIORI_REPOS_PATH:
+    # Auto-enable network when pre-clone is absent (Issue #146, #178)
+    if clone_repo and pr is None and not _shiori_preclone_exists(clone_repo):
         allow_network = True
         logger.info(
-            "clone_repo=%r: Shiori path not configured, auto-enabling network access",
+            "clone_repo=%r: pre-clone absent, auto-enabling network access",
             clone_repo,
         )
 

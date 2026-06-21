@@ -392,6 +392,7 @@ class TestCloneRepoPrInteraction:
         # _setup_pr_branch SHOULD be called
         mock_setup.assert_called_once()
 
+    @patch("code_sandbox_mcp.server._shiori_preclone_exists", return_value=True)
     @patch("code_sandbox_mcp.server._docker")
     @patch("code_sandbox_mcp.server._container_env")
     @patch("code_sandbox_mcp.server._ensure_image")
@@ -406,6 +407,7 @@ class TestCloneRepoPrInteraction:
         mock_ensure_image: MagicMock,
         mock_container_env: MagicMock,
         mock_docker: MagicMock,
+        mock_preclone_exists: MagicMock,
     ):
         mock_container = MagicMock()
         mock_container.id = "abc123def456"

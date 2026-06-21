@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 from code_sandbox_mcp.journal import (
     generate_run_id,
-    get_or_create_run_id,
     get_journal_path,
+    get_or_create_run_id,
     get_runs,
     read_journal,
     record_boundary_crossing,
@@ -152,6 +152,20 @@ class TestJournalWrite:
         assert entries[0]["operation"] == "write_file"
         assert entries[0]["file_name"] == "test.py"
         assert entries[0]["byte_count"] == 42
+        assert entries[0]["is_test"] is False
+
+    def test_record_file_write_is_test(self, tmp_path: Path):
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            record_file_write("abc123", "test_foo.py", "/tests", byte_count=42, is_test=True)
+
+        entries = _read_log(log_path)
+        assert entries[0]["operation"] == "write_file"
+        assert entries[0]["is_test"] is True
 
     def test_record_copy_project(self, tmp_path: Path):
         journal_dir = tmp_path / "journal"
@@ -195,6 +209,7 @@ class TestJournalWrite:
         assert len(entries) == 6
         ops = [e["operation"] for e in entries]
         assert ops == ["initialize", "exec", "write_file", "boundary_crossing", "exec", "stop"]
+        assert entries[2]["is_test"] is False
 
 
 class TestJournalRead:

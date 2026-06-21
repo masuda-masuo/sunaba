@@ -1,0 +1,8 @@
+fix(#192): broaden _test suffix detection to "_test" in stem
+
+Addresses review feedback:
+1. Change `stem.endswith("_test")` to `"_test" in stem` so that
+   `utils_test_v2.go` and similar variant names are also classified
+   as test files.
+2. Add test case for variant _test suffix (`_test_v2`, `_test_v3`).
+3. Fix import ordering (I001) in tests/test_journal.py.

@@ -768,11 +768,12 @@ class TestWriteFileSandboxJournal:
         )
         assert "Error" not in result
         mock_record.assert_called_once()
-        args, _ = mock_record.call_args
+        args, kwargs = mock_record.call_args
         assert args[0] == "abc123"  # container_id
         assert args[1] == "test.py"  # file_name
         assert "/root" in args[2]  # dest_dir
         assert args[3] > 0  # byte_count
+        assert kwargs.get("is_test") is False  # not a test file
 
 
 class TestApplyPatchJournal:
@@ -823,11 +824,12 @@ class TestApplyPatchJournal:
         assert "Error" not in result
         assert real.read_text(encoding="utf-8") == "world\n"
         mock_record.assert_called_once()
-        args, _ = mock_record.call_args
+        args, kwargs = mock_record.call_args
         assert args[0] == "abc123"
         assert args[1] == "test.py"
         assert "/root" in args[2]
         assert args[3] > 0
+        assert kwargs.get("is_test") is False
 
 
 class TestWriteFileLargeFile:
@@ -967,3 +969,85 @@ class TestWriteFileOwnership:
 
         member = _get_written_member(mock_container)
         assert (member.uid, member.gid, member.mode) == (1000, 1000, 0o600)
+
+
+class TestWriteFileIsTestDetection:
+    """Tests that write_file correctly classifies test files (Issue #96)."""
+
+    @patch("code_sandbox_mcp.edit_verify.record_file_write")
+    def test_regular_file_is_not_test(
+        self, mock_record: MagicMock,
+    ) -> None:
+        from code_sandbox_mcp.edit_verify import _is_test_file
+        assert _is_test_file("/root/main.py") is False
+        assert _is_test_file("/home/src/app.py") is False
+        assert _is_test_file("/root/utils.js") is False
+
+    def test_test_prefix_is_test(self) -> None:
+        from code_sandbox_mcp.edit_verify import _is_test_file
+        assert _is_test_file("/root/test_main.py") is True
+        assert _is_test_file("/home/tests/test_utils.py") is True
+
+    def test_test_suffix_is_test(self) -> None:
+        from code_sandbox_mcp.edit_verify import _is_test_file
+        assert _is_test_file("/root/main_test.py") is True
+        assert _is_test_file("/root/utils_test.go") is True
+
+    def test_test_variant_suffix_is_test(self) -> None:
+        from code_sandbox_mcp.edit_verify import _is_test_file
+        assert _is_test_file("/root/utils_test_v2.go") is True
+        assert _is_test_file("/root/model_test_v3.py") is True
+
+    def test_dot_test_dot_is_test(self) -> None:
+        from code_sandbox_mcp.edit_verify import _is_test_file
+        assert _is_test_file("/root/app.test.js") is True
+        assert _is_test_file("/root/component.spec.ts") is True
+
+    def test_tests_directory_is_test(self) -> None:
+        from code_sandbox_mcp.edit_verify import _is_test_file
+        assert _is_test_file("/app/tests/test_main.py") is True
+        assert _is_test_file("/app/test/test_main.py") is True
+        assert _is_test_file("/app/__tests__/test_main.js") is True
+
+    @patch("code_sandbox_mcp.server._docker")
+    @patch("code_sandbox_mcp.edit_verify.record_file_write")
+    def test_write_file_sandbox_detects_test_file(
+        self, mock_record: MagicMock, mock_docker: MagicMock,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        from code_sandbox_mcp.server import write_file_sandbox
+
+        write_file_sandbox(
+            container_id="abc123",
+            file_name="test_foo.py",
+            file_contents="def test_foo(): pass",
+            dest_dir="/tests",
+        )
+        mock_record.assert_called_once()
+        _, kwargs = mock_record.call_args
+        assert kwargs.get("is_test") is True
+
+    @patch("code_sandbox_mcp.edit_verify.record_file_write")
+    def test_write_file_uses_is_test(
+        self, mock_record: MagicMock,
+    ) -> None:
+        from code_sandbox_mcp.edit_verify import write_file
+
+        container = MagicMock()
+        container.exec_run.return_value = (0, (b"", b""))
+
+        write_file(container, "abc123", "/tests/test_main.py", "def test_main(): pass")
+        mock_record.assert_called_once()
+        _, kwargs = mock_record.call_args
+        assert kwargs.get("is_test") is True
+
+        mock_record.reset_mock()
+        write_file(container, "abc123", "/root/main.py", "def main(): pass")
+        mock_record.assert_called_once()
+        _, kwargs = mock_record.call_args
+        assert kwargs.get("is_test") is False

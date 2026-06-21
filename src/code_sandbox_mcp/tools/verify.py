@@ -245,7 +245,7 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
     Returns the same format as :func:`lint_in_container`.
 
     Supported:
-    - ``.py`` → ``mypy`` (falls back to ``pyright``)
+    - ``.py`` → ``pyright``
     - ``.ts``, ``.tsx`` → ``tsc --noEmit``
 
     Args:

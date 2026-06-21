@@ -647,8 +647,7 @@ def _parse_sg_json(raw: str, max_results: int) -> list[dict[str, Any]]:
 #: a read-only ``/``, so cache directories must point to ``/tmp``.
 _SANDBOX_ENV: str = (
     "RUFF_CACHE_DIR=/tmp/.ruff_cache "
-    "MYPY_CACHE_DIR=/tmp/.mypy_cache "
-    "mkdir -p /tmp/.ruff_cache /tmp/.mypy_cache 2>/dev/null; "
+    "mkdir -p /tmp/.ruff_cache 2>/dev/null; "
 )
 
 
@@ -1406,7 +1405,7 @@ def _run_semgrep_verify(container: Any, path: str, lang_config: str = "p/python"
 # Unified dispatch table
 # ---------------------------------------------------------------------------
 # Maps language -> layer -> runner function.
-# Python type layer tries pyright first, falls back to mypy.
+# Python type layer uses pyright.
 # Go lint tries golangci-lint first, falls back to go vet.
 # JS has no type layer (skipped).  Go type is covered by go vet/build.
 
@@ -1415,35 +1414,30 @@ _DISPATCH: dict[str, dict[str, Any]] = {
     "python": {
         "lint": _run_ruff_verify,
         "type": _run_pyright_verify,  # primary
-        "type_fallback": _run_mypy_verify,
         "test": _run_pytest_verify,
         "scan": lambda c, p: _run_semgrep_verify(c, p, "p/python"),
     },
     "js": {
         "lint": _run_eslint_verify,
         "type": None,  # skipped
-        "type_fallback": None,
         "test": _run_jest_verify,
         "scan": lambda c, p: _run_semgrep_verify(c, p, "p/javascript"),
     },
     "ts": {
         "lint": _run_eslint_verify,
         "type": _run_tsc_verify,
-        "type_fallback": None,
         "test": _run_jest_verify,
         "scan": lambda c, p: _run_semgrep_verify(c, p, "p/typescript"),
     },
     "go": {
         "lint": _run_golangci_lint_verify,
         "type": None,  # skipped: build/vet covers typing
-        "type_fallback": None,
         "test": _run_go_test_verify,
         "scan": lambda c, p: _run_semgrep_verify(c, p, "p/go"),
     },
     "unknown": {
         "lint": None,
         "type": None,
-        "type_fallback": None,
         "test": None,
         "scan": None,
     },
@@ -1555,7 +1549,7 @@ def type_check_file(
     If no type checker is installed, returns ``rule: "no-typechecker"``.
 
     Supported:
-    - ``.py`` files -> ``pyright`` (falls back to ``mypy``)
+    - ``.py`` files -> ``pyright``
     - ``.ts``, ``.tsx`` files -> ``tsc --noEmit``
     """
     try:
@@ -1581,16 +1575,10 @@ def type_check_file(
 
 
 def _run_python_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
-    """Try pyright, fall back to mypy. Matches _DISPATCH priority."""
-    # Try pyright first (primary, matches _DISPATCH)
+    """Try pyright for Python type checking."""
     pyright_result = _run_pyright_verify(container, file_path)
     if pyright_result.status not in ("not_available", "error"):
         return pyright_result.findings
-
-    # Fall back to mypy
-    mypy_result = _run_mypy_verify(container, file_path)
-    if mypy_result.status not in ("not_available", "error"):
-        return mypy_result.findings
 
     return [
         {
@@ -1599,7 +1587,7 @@ def _run_python_typecheck(container: Any, file_path: str) -> list[dict[str, Any]
             "rule": "no-typechecker",
             "message": (
                 "No Python type checker found in container. "
-                "Install mypy or pyright, or use a custom image "
+                "Install pyright, or use a custom image "
                 "(pass --default-image to the server)."
             ),
         }
@@ -1660,14 +1648,6 @@ def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
 def _run_eslint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``eslint --format json``. Returns None if eslint is not installed."""
     result = _run_eslint_verify(container, file_path)
-    if result.status == "not_available":
-        return None
-    return result.findings
-
-
-def _run_mypy(container: Any, file_path: str) -> list[dict[str, Any]] | None:
-    """Run ``mypy --show-error-codes``. Returns None if mypy is not installed."""
-    result = _run_mypy_verify(container, file_path)
     if result.status == "not_available":
         return None
     return result.findings
@@ -1941,12 +1921,6 @@ def _dispatch_layer(
         )
 
     result = runner(container, path)
-
-    # For type layer: try fallback if primary failed with not_available
-    if layer == "type" and result.status == "not_available":
-        fallback = entry.get("type_fallback")
-        if fallback is not None:
-            result = fallback(container, path)
 
     return result
 

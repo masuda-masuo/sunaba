@@ -254,6 +254,28 @@ def read_file(container: Any, file_path: str) -> str:
     return stdout_text
 
 
+def _is_test_file(file_path: str) -> bool:
+    """Check whether *file_path* follows test-file naming/directory conventions.
+
+    Heuristic:
+    - File basename starts with ``test_`` or ends with ``_test`` (Python/Go).
+    - File basename contains ``.test.`` or ``.spec.`` (JS/TS).
+    - Path contains ``/tests/``, ``/test/``, or ``/__tests__/`` segment.
+    """
+    norm = os.path.normpath(file_path)
+    basename = os.path.basename(norm)
+    # Strip the extension so suffix matching works for e.g. ``utils_test.go``.
+    stem = basename.rsplit(".", 1)[0]
+    if stem.startswith("test_") or stem.endswith("_test"):
+        return True
+    if ".test." in basename or ".spec." in basename:
+        return True
+    parts = norm.split(os.sep)
+    if "tests" in parts or "test" in parts or "__tests__" in parts:
+        return True
+    return False
+
+
 def write_file(container: Any, container_id_short: str, file_path: str, content: str) -> None:
     """Write *content* to *file_path* in the sandbox container.
 
@@ -315,6 +337,7 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
         os.path.basename(file_path),
         os.path.dirname(file_path) or "/",
         len(content),
+        is_test=_is_test_file(file_path),
     )
 
 
@@ -895,6 +918,7 @@ def transform_file_in_container(
             os.path.basename(file_path),
             os.path.dirname(file_path) or "/",
             int(result.get("new_size", 0)),
+            is_test=_is_test_file(file_path),
         )
     return result
 

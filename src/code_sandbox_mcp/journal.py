@@ -189,8 +189,15 @@ def record_file_write(
     file_name: str,
     dest_dir: str,
     byte_count: int,
+    is_test: bool = False,
 ) -> None:
-    """Record a file write event into the container."""
+    """Record a file write event into the container.
+
+    *is_test* indicates whether the written file is a test file
+    (based on path conventions such as ``test_`` prefix or
+    ``tests/`` directory).  This enables the submit flow to
+    flag "test changes" as a first-class signal (Issue #96).
+    """
     run_id = get_or_create_run_id(container_id)
     _append_json({
         "ts": _utcnow_iso(),
@@ -200,6 +207,7 @@ def record_file_write(
         "file_name": file_name,
         "dest_dir": dest_dir,
         "byte_count": byte_count,
+        "is_test": is_test,
     })
 
 

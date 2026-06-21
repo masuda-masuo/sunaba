@@ -609,6 +609,8 @@ class TestWriteFileSandboxReplaceEnhanced:
         )
         assert "Error" not in result
         assert "Written" in result
+        # Trailing whitespace is stripped for matching; replacement uses
+        # file's leading indentation only (trailing spaces are not preserved).
         assert _get_written_content(mock_container) == "  goodbye\n  next line\n"
 
     # --- near-miss echo ---
@@ -967,3 +969,23 @@ class TestWriteFileIsTestDetection:
         mock_record.assert_called_once()
         _, kwargs = mock_record.call_args
         assert kwargs.get("is_test") is True
+
+    @patch("code_sandbox_mcp.edit_verify.record_file_write")
+    def test_write_file_uses_is_test(
+        self, mock_record: MagicMock,
+    ) -> None:
+        from code_sandbox_mcp.edit_verify import write_file
+
+        container = MagicMock()
+        container.exec_run.return_value = (0, (b"", b""))
+
+        write_file(container, "abc123", "/tests/test_main.py", "def test_main(): pass")
+        mock_record.assert_called_once()
+        _, kwargs = mock_record.call_args
+        assert kwargs.get("is_test") is True
+
+        mock_record.reset_mock()
+        write_file(container, "abc123", "/root/main.py", "def main(): pass")
+        mock_record.assert_called_once()
+        _, kwargs = mock_record.call_args
+        assert kwargs.get("is_test") is False

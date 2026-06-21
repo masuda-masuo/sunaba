@@ -52,7 +52,6 @@ class TestCopyProject:
         tar_data = call_args[0][1]
         tar_data.seek(0)
         import tarfile
-        import io
         with tarfile.open(fileobj=tar_data, mode="r") as tar:
             names = tar.getnames()
         assert all(
@@ -94,7 +93,6 @@ class TestCopyProject:
         tar_data = call_args[0][1]
         tar_data.seek(0)
         import tarfile
-        import io
         with tarfile.open(fileobj=tar_data, mode="r") as tar:
             names = tar.getnames()
         assert "myapp/app.py" in names

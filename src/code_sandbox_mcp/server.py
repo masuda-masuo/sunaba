@@ -24,7 +24,7 @@ import time
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from docker.errors import APIError, NotFound
 from fastmcp import FastMCP
@@ -399,13 +399,20 @@ def _clone_repo_via_network(
     )
 
 
+class CloneResult(NamedTuple):
+    """Return value of :func:`_try_clone_into_container`."""
+
+    msg: str | None
+    error: str | None
+
+
 def _try_clone_into_container(
     container: Any,
     container_id: str,
     clone_repo: str,
     clone_dest: str,
     inject_vcs_token: bool = False,
-) -> tuple[str | None, str | None]:
+) -> CloneResult:
     """Attempt to clone a repo into the container; return (msg, error).
 
     Runs the full chain: Shiori fast-path -> network fallback when
@@ -418,7 +425,7 @@ def _try_clone_into_container(
         msg = _clone_shiori_repo_to_container(
             container, container_id, clone_repo, clone_dest,
         )
-        return msg, None
+        return CloneResult(msg, None)
     except ValueError as e:
         if not _SHIORI_REPOS_PATH:
             try:
@@ -426,16 +433,16 @@ def _try_clone_into_container(
                     container, container_id, clone_repo, clone_dest,
                     inject_vcs_token,
                 )
-                return msg, None
+                return CloneResult(msg, None)
             except Exception as e2:
                 logger.warning("Network clone fallback failed: %s", e2)
-                return None, str(e2)
+                return CloneResult(None, str(e2))
         else:
             logger.warning("Shiori clone copy failed: %s", e)
-            return None, str(e)
+            return CloneResult(None, str(e))
     except Exception as e:
         logger.warning("Shiori clone copy failed: %s", e)
-        return None, str(e)
+        return CloneResult(None, str(e))
 
 
 # ---------------------------------------------------------------------------

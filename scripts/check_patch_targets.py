@@ -52,8 +52,13 @@ def _is_patch_call(func: ast.expr) -> bool:
     return False
 
 
-def iter_patch_targets(tree: ast.AST):
-    """Yield ``(lineno, target)`` for every string ``patch(...)`` target."""
+def iter_patch_target_nodes(tree: ast.AST):
+    """Yield the ``ast.Constant`` node of every string ``patch(...)`` target.
+
+    Callers that only need the value/lineno can use :func:`iter_patch_targets`;
+    the codemod in ``fix_patch_targets.py`` needs the node itself for its source
+    column span, so the node-level walk lives here as the single source of truth.
+    """
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not _is_patch_call(node.func):
             continue
@@ -66,7 +71,13 @@ def iter_patch_targets(tree: ast.AST):
                     target_node = kw.value
                     break
         if isinstance(target_node, ast.Constant) and isinstance(target_node.value, str):
-            yield node.lineno, target_node.value
+            yield target_node
+
+
+def iter_patch_targets(tree: ast.AST):
+    """Yield ``(lineno, target)`` for every string ``patch(...)`` target."""
+    for node in iter_patch_target_nodes(tree):
+        yield node.lineno, node.value
 
 
 def _dot_lookup(thing, comp: str, import_path: str):

@@ -6,37 +6,28 @@ This module defines the FastMCP server and all tool handlers.
 from __future__ import annotations
 
 import argparse
-import difflib
-import io
 import json
 import logging
 import os
-import shlex
-import tarfile
-import tempfile
 import time
 from pathlib import Path
 
-from docker.errors import APIError, NotFound
+from docker.errors import NotFound
 from fastmcp import FastMCP
 
 from code_sandbox_mcp.edit_verify import (
     apply_patch_to_file,
     lint_file,
-    read_file,
-    read_file_lines,
     run_verify,
     search_files,
     transform_file_in_container,
     type_check_file,
-    write_file,
 )
 from code_sandbox_mcp.journal import (
     get_journal_path,
     get_runs,
     read_journal,
     record_boundary_crossing,
-    record_copy,
 )
 from code_sandbox_mcp.output_control import (
     paginate_output,
@@ -84,6 +75,13 @@ from .tools.vcs import (
     sandbox_create_pr,
     submit,
 )
+from .tools.file import (
+    copy_file,
+    copy_project,
+    list_files,
+    read_file_range,
+    write_file_sandbox,
+)
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -112,460 +110,12 @@ run_test_environment = mcp.tool()(run_test_environment)
 stop_test_environment = mcp.tool()(stop_test_environment)
 wait_for_condition = mcp.tool()(wait_for_condition)
 
-
-# ---------------------------------------------------------------------------
-# write_file_sandbox -- old_str helper functions
-# ---------------------------------------------------------------------------
-
-
-def _find_all_matches(text: str, pattern: str) -> list[tuple[int, int]]:
-    """Find all non-overlapping occurrences of *pattern* in *text*.
-
-    Returns a list of ``(offset, line_number)`` tuples.
-    """
-    matches: list[tuple[int, int]] = []
-    idx = 0
-    while True:
-        idx = text.find(pattern, idx)
-        if idx == -1:
-            break
-        line_no = text[:idx].count("\n") + 1
-        matches.append((idx, line_no))
-        idx += 1
-    return matches
-
-
-def _get_line_indent(line: str) -> int:
-    """Return the leading whitespace length of *line*."""
-    return len(line) - len(line.lstrip())
-
-
-def _reindent_lines(lines: list[str], delta: int) -> list[str]:
-    """Apply an indentation *delta* (number of spaces) to each line.
-
-    Empty/whitespace-only lines are passed through unchanged.
-    A positive *delta* adds leading spaces; a negative *delta* removes them.
-    """
-    result: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            result.append("")
-            continue
-        if delta >= 0:
-            result.append(" " * delta + line)
-        else:
-            remove = min(-delta, _get_line_indent(line))
-            result.append(line[remove:])
-    return result
-
-
-def _try_whitespace_flexible(
-    existing: str, old_str: str, new_str: str,
-) -> str | None:
-    """Attempt whitespace-flexible matching.
-
-    Strips leading/trailing whitespace from each line of *old_str* and
-    slides over the file looking for a block whose stripped lines match.
-    When found the file's original indentation is preserved and *new_str*
-    is re-indented to fit.
-
-    Returns the new file content on success, or ``None`` if no match
-    was found.
-    """
-    existing_lines = existing.splitlines()
-    old_lines = old_str.splitlines()
-    old_stripped = [line.strip() for line in old_lines]
-
-    if len(old_lines) > len(existing_lines):
-        return None
-
-    matches: list[int] = []
-    for i in range(len(existing_lines) - len(old_lines) + 1):
-        chunk = existing_lines[i : i + len(old_lines)]
-        if [line.strip() for line in chunk] == old_stripped:
-            matches.append(i)
-
-    if not matches:
-        return None
-
-    if len(matches) > 1:
-        line_nos = ", ".join(str(m + 1) for m in matches[:10])
-        suffix = "..." if len(matches) > 10 else ""
-        return (
-            f"Error: old_str matches at {len(matches)} locations "
-            f"(lines {line_nos}{suffix}) after whitespace normalization. "
-            "Add more surrounding context to make it unique."
-        )
-
-    i = matches[0]
-    chunk = existing_lines[i : i + len(old_lines)]
-    file_first_indent = _get_line_indent(chunk[0])
-    old_first_indent = _get_line_indent(old_lines[0])
-    delta = file_first_indent - old_first_indent
-    reindented = _reindent_lines(new_str.splitlines(), delta)
-    new_content = "\n".join(reindented)
-
-    # Build character offsets to do a string-level replacement
-    # (preserves trailing whitespace and file structure).
-    pos = 0
-    line_starts: list[int] = []
-    for line in existing_lines:
-        line_starts.append(pos)
-        pos += len(line) + 1  # +1 for newline
-    # offset right after the last matched line
-    start_offset = line_starts[i]
-    end_idx = i + len(old_lines)
-    if end_idx < len(line_starts):
-        end_offset = line_starts[end_idx]
-    else:
-        end_offset = len(existing)
-
-    result = existing[:start_offset] + new_content + existing[end_offset:]
-    if existing.endswith("\n") and not result.endswith("\n"):
-        result += "\n"
-    return result
-
-
-def _build_near_miss_echo(existing: str, old_str: str, dest_path: str) -> str:
-    """Build a near-miss error message with the most similar file region.
-
-    Uses :mod:`difflib` to locate the area that best matches *old_str*
-    and shows it with line numbers as context for the caller.
-    """
-    existing_lines = existing.splitlines()
-
-    sm = difflib.SequenceMatcher(None, existing, old_str)
-    match = sm.find_longest_match(0, len(existing), 0, len(old_str))
-
-    lines_to_show: list[str] = []
-
-    if match.size >= max(5, len(old_str) * 0.3):
-        match_line = existing[: match.a].count("\n") + 1
-        match_end = existing[match.a : match.a + match.size].count("\n") + match_line
-
-        ctx_start = max(0, match_line - 4)
-        ctx_end = min(len(existing_lines), match_end + 3)
-
-        for i in range(ctx_start, ctx_end):
-            prefix = ">>>" if match_line - 1 <= i < match_end else "   "
-            lines_to_show.append(f"{prefix} {i + 1:4d} | {existing_lines[i]}")
-    else:
-        for i in range(min(8, len(existing_lines))):
-            lines_to_show.append(f"    {i + 1:4d} | {existing_lines[i]}")
-
-    context_block = "\n".join(lines_to_show)
-
-    return (
-        f"Error: old_str not found in {dest_path}.\n"
-        f"Most relevant file area:\n"
-        f"{context_block}\n"
-        "Tip: Use read_file_range first to confirm the exact content "
-        "(including whitespace)."
-    )
-
-
-# ---------------------------------------------------------------------------
-# write_file_sandbox
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def write_file_sandbox(
-    container_id: str,
-    file_name: str,
-    file_contents: str,
-    dest_dir: str = "/home/sandbox",
-    start_line: int | None = None,
-    end_line: int | None = None,
-    append: bool = False,
-    old_str: str | None = None,
-) -> str:
-    """Write a file to the container. Supports full overwrite and partial updates.
-
-    **Mode selection (pick exactly one):**
-
-    ================= ===================================================
-    Mode              Parameters
-    ================= ===================================================
-    Full overwrite    (none of the below) — writes *file_contents* as-is
-    Line-range        ``start_line`` [+ ``end_line``] — replace lines
-    Append            ``append=True`` — append to existing file
-    String replace    ``old_str`` — replace exact text (see matching below)
-    ================= ===================================================
-
-    **Full overwrite** (default, backward compatible):
-    Writes *file_contents* as the entire file.
-
-    **Line-range replacement** (*start_line* / *end_line*, 1-indexed, inclusive):
-    Replaces the specified line range with *file_contents*. Lines outside the
-    range are preserved.  When *start_line* is omitted it defaults to line 1;
-    when *end_line* is omitted it defaults to the last line of the file.
-
-    **Append** (*append* = True):
-    Appends *file_contents* to the end of the existing file.
-
-    **Replace** (*old_str*):
-    Replaces *old_str* with *file_contents*.  The matching logic is:
-
-    1. **Exact match** -- if *old_str* appears exactly once, it is replaced.
-       If it appears multiple times the call is rejected with the line numbers
-       of each match so the caller can add more surrounding context.
-    2. **Whitespace-flexible fallback** -- if exact matching fails, leading
-       and trailing whitespace is stripped from each line and the search is
-       retried.  On success *file_contents* is re-indented to match the
-       file's original indentation.
-    3. **Near-miss echo** -- if neither strategy finds a match, the most
-       similar region of the file is returned with line numbers via
-       :func:`difflib.SequenceMatcher`.
-
-    *start_line* / *end_line*, *append*, and *old_str* are mutually exclusive.
-    When none of them is specified the file is fully overwritten (original
-    behaviour).
-
-    .. hint::
-
-       ``old_str`` mode is the default edit path for AI — it is robust
-       (uniqueness check + whitespace-flexible fallback) and avoids the
-       ``@@`` header errors that make hand-written diffs fail.  Use
-       :func:`read_file_range` first to inspect the target area before
-       editing.  For bulk / repetitive / structural / computed changes use
-       :func:`transform_file` (imperative).  Reserve :func:`apply_patch` for
-       *machine-generated* diffs.
-
-    Args:
-        container_id: 12-character container ID prefix.
-        file_name: Name of the file to write.
-        file_contents: Content to write.
-        dest_dir: Destination directory in the container (default: ``/home/sandbox``).
-        start_line: Start line for line-range replacement (1-indexed, inclusive).
-        end_line: End line for line-range replacement (1-indexed, inclusive).
-        append: When True, appends to the end of the file.
-        old_str: When specified, replaces this string in the existing file.
-            Performs uniqueness check, whitespace-flexible fallback, and near-miss echo (see above).
-
-    Returns:
-        Success or error message.
-
-    See also:
-        :func:`read_file_range` — inspect file content before editing.
-        :func:`transform_file` — imperative edits (bulk / structural / computed).
-        :func:`apply_patch` — machine-generated diffs only (deprecated for
-        AI-authored edits).
-    """
-    client = _docker()
-    try:
-        container = client.containers.get(container_id)
-    except NotFound:
-        return f"Error: container {container_id[:12]} not found"
-    except Exception as e:
-        return f"Error: {e}"
-
-    dest_path = os.path.join(dest_dir, file_name)
-
-    # Validate mutual exclusivity
-    has_line_range = start_line is not None or end_line is not None
-    mode_count = sum([append, old_str is not None, has_line_range])
-    if mode_count > 1:
-        return "Error: start_line/end_line, append, and old_str are mutually exclusive"
-
-    if old_str is not None and old_str == "":
-        return "Error: old_str must not be empty"
-    if start_line is not None and start_line < 1:
-        return "Error: start_line must be >= 1"
-
-    content = file_contents
-
-    # For partial updates, read existing content
-    if append or old_str is not None or has_line_range:
-        try:
-            existing = read_file(container, dest_path)
-        except ValueError:
-            return f"Error: file {dest_path} not found"
-        existing_lines = existing.splitlines()
-
-        # Validate bounds
-        if start_line is not None and start_line > len(existing_lines):
-            return f"Error: start_line {start_line} exceeds file length ({len(existing_lines)} lines)"
-        if end_line is not None:
-            if end_line > len(existing_lines):
-                return f"Error: end_line {end_line} exceeds file length ({len(existing_lines)} lines)"
-            if start_line is not None and start_line > end_line:
-                return "Error: start_line is greater than end_line"
-
-        if append:
-            sep = "\n" if existing else ""
-            content = existing.rstrip("\n") + sep + file_contents
-        elif old_str is not None:
-            # 1. Exact match with uniqueness check
-            exact_matches = _find_all_matches(existing, old_str)
-            if len(exact_matches) > 1:
-                line_nos = ", ".join(str(m[1]) for m in exact_matches[:10])
-                suffix = "..." if len(exact_matches) > 10 else ""
-                return (
-                    f"Error: old_str matches at {len(exact_matches)} locations "
-                    f"(lines {line_nos}{suffix}). "
-                    "Add more surrounding context to make it unique."
-                )
-            if len(exact_matches) == 1:
-                idx = exact_matches[0][0]
-                content = (
-                    existing[:idx]
-                    + file_contents
-                    + existing[idx + len(old_str) :]
-                )
-            else:
-                # 2. Whitespace-flexible fallback
-                result = _try_whitespace_flexible(
-                    existing, old_str, file_contents,
-                )
-                if result is not None:
-                    if result.startswith("Error:"):
-                        return result
-                    content = result
-                else:
-                    # 3. Near-miss echo
-                    return _build_near_miss_echo(existing, old_str, dest_path)
-        else:
-            start = start_line - 1 if start_line is not None else 0
-            end = end_line if end_line is not None else len(existing_lines)
-            new_lines = file_contents.splitlines()
-            content_lines = existing_lines[:start] + new_lines + existing_lines[end:]
-            content = "\n".join(content_lines)
-            if file_contents.endswith("\n"):
-                content += "\n"
-
-    try:
-        write_file(container, container_id[:12], dest_path, content)
-    except ValueError as e:
-        return f"Error: {e}"
-    return f"Written {len(content)} bytes to {dest_path}"
-
-
-# ---------------------------------------------------------------------------
-# copy_project
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def copy_project(
-    container_id: str,
-    local_src_dir: str,
-    dest_dir: str = "/home/sandbox",
-) -> str:
-    """Copy a local directory (or file) into the container as a tar archive.
-
-    Creates a tar archive of the local path in a temp directory and
-    streams it into the container with ``put_archive``.
-
-    The target directory inside the tar archive is named after the
-    source directory itself (i.e. ``/home/sandbox/source_dir_name/...``).
-
-    .. hint::
-
-       For Git repositories already cloned locally, prefer
-       :func:`sandbox_initialize` with ``clone_repo`` — it copies
-       a pre-cloned repo without network overhead.
-
-    Args:
-        container_id: 12-character container ID prefix.
-        local_src_dir: Path to the local directory to copy.
-        dest_dir: Destination directory in the container (default:
-            ``/home/sandbox``).
-
-    Returns:
-        Success or error message.
-
-    See also:
-        :func:`clone_repo` — clone a remote Git repo inside the container.
-        :func:`copy_file` — copy a single file instead of a directory.
-    """
-    client = _docker()
-    try:
-        container = client.containers.get(container_id)
-    except NotFound:
-        return f"Error: container {container_id[:12]} not found"
-    except Exception as e:
-        return f"Error: {e}"
-
-    src_path = Path(local_src_dir).resolve()
-    if not src_path.exists():
-        return f"Error: {local_src_dir} does not exist"
-    if not src_path.is_dir():
-        return f"Error: {local_src_dir} is not a directory"
-
-    arcname = src_path.name or "project"
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar")
-    try:
-        with tarfile.open(fileobj=tmp.file, mode="w") as tar:
-            tar.add(src_path, arcname=arcname)
-        tmp.file.close()
-        with open(tmp.name, "rb") as f:
-            data = f.read()
-        buf = io.BytesIO(data)
-        try:
-            container.put_archive(dest_dir, buf)
-        except APIError as e:
-            return f"Error: {e}"
-        record_copy(
-            container_id[:12], "copy_project", local_src_dir, f"{dest_dir}/{arcname}"
-        )
-        return (
-            f"Copied {local_src_dir} to {dest_dir}/{arcname} "
-            f"in container {container_id[:12]}"
-        )
-    finally:
-        os.unlink(tmp.name)
-
-
-@mcp.tool()
-def copy_file(
-    container_id: str,
-    local_src_file: str,
-    dest_path: str = "/home/sandbox",
-) -> str:
-    """Copy a single local file into the container.
-
-    Args:
-        container_id: 12-character container ID prefix.
-        local_src_file: Path to the local file to copy.
-        dest_path: Destination directory or path in the container
-            (default: ``/home/sandbox``).
-
-    Returns:
-        Success or error message.
-    """
-    client = _docker()
-    try:
-        container = client.containers.get(container_id)
-    except NotFound:
-        return f"Error: container {container_id[:12]} not found"
-    except Exception as e:
-        return f"Error: {e}"
-
-    src = Path(local_src_file).resolve()
-    if not src.exists():
-        return f"Error: {local_src_file} does not exist"
-    if not src.is_file():
-        return f"Error: {local_src_file} is not a file"
-
-    dest = dest_path
-    if not dest.endswith("/") and not dest.endswith(src.name):
-        # If dest_path is a directory, include the filename
-        dest = str(Path(dest_path) / src.name)
-
-    with open(src, "rb") as f:
-        data = f.read()
-    buf = io.BytesIO(data)
-    try:
-        container.put_archive(dest, buf)
-    except APIError as e:
-        return f"Error: {e}"
-    record_copy(container_id[:12], "copy_file", local_src_file, dest)
-    return f"Copied {local_src_file} to {dest} in container {container_id[:12]}"
-
-
-
+# File tool registrations
+write_file_sandbox = mcp.tool()(write_file_sandbox)
+copy_project = mcp.tool()(copy_project)
+copy_file = mcp.tool()(copy_file)
+read_file_range = mcp.tool()(read_file_range)
+list_files = mcp.tool()(list_files)
 
 
 @mcp.tool()
@@ -728,55 +278,6 @@ def transform_file(
     return json.dumps(result)
 
 
-@mcp.tool()
-def read_file_range(
-    container_id: str,
-    file_path: str,
-    offset: int = 0,
-    limit: int = 50,
-) -> str:
-    """Read lines from *file_path* starting at *offset*.
-
-    Returns a JSON string with:
-    - ``content`` (str): the requested lines
-    - ``total_lines`` (int): total lines in the file
-    - ``shown`` (int): lines returned
-    - ``has_more`` (bool): whether more lines exist after this range
-    - ``next_offset`` (int | None): offset for pagination
-
-    .. hint::
-
-       Use ``limit=-1`` to read all remaining lines from *offset*
-       to end of file in one call.
-
-    Args:
-        container_id: 12-character container ID prefix.
-        file_path: Path to the file inside the container.
-        offset: 0-indexed line offset to start reading from.
-        limit: Maximum number of lines to return.  Use ``-1`` to read
-            all remaining lines from *offset*.
-
-    Returns:
-        JSON string with file content and metadata, or an error
-        message beginning with ``"Error:"``.
-
-    See also:
-        :func:`search_in_container` — find content across files with
-        ripgrep/ast-grep.
-        :func:`write_file_sandbox` — edit files after inspection.
-    """
-    client = _docker()
-    try:
-        _ = client.containers.get(container_id)
-    except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-    result = read_file_lines(
-        _, file_path, offset=offset, limit=limit
-    )
-    return json.dumps(result)
 
 
 @mcp.tool()
@@ -1106,79 +607,6 @@ def sandbox_trace_dir() -> str:
         Absolute path to ``~/.code-sandbox-mcp/traces/``.
     """
     return get_trace_dir()
-
-
-@mcp.tool()
-def list_files(
-    container_id: str,
-    path: str = "/home/sandbox",
-    max_depth: int = 3,
-    pattern: str = "",
-) -> str:
-    """List files inside the container using ``find``.
-
-    Returns a JSON array of file paths sorted alphabetically.
-    Hidden files (dotfiles) and directories under ``.git`` are
-    excluded.
-
-    Args:
-        container_id: 12-character container ID prefix.
-        path: Directory path to list (default ``"/home/sandbox"``).
-        max_depth: Maximum directory depth (default 3).
-        pattern: Optional glob pattern to filter files
-            (e.g. ``"*.py"``, ``"*.md"``).
-
-    Returns:
-        JSON string with ``path``, ``total``, and ``files`` list.
-        On error returns an ``error`` field.
-    """
-    client = _docker()
-    try:
-        container = client.containers.get(container_id)
-    except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-    safe_path = shlex.quote(path)
-
-    name_filter = ""
-    if pattern:
-        name_filter = f" -name {shlex.quote(pattern)}"
-
-    cmd = (
-        f"find {safe_path} -maxdepth {max_depth}"
-        f" -not -path '*/\\.*'"
-        f" -type f{name_filter}"
-        f" | sort"
-    )
-
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", cmd],
-        stdout=True,
-        stderr=True,
-    )
-
-    stdout_part, stderr_part = (
-        output if isinstance(output, tuple) else (output, b"")
-    )
-    stdout_text = (
-        stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    )
-    stderr_text = (
-        stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-    )
-
-    if exit_code != 0:
-        return json.dumps({"error": stderr_text or stdout_text})
-
-    files = [f for f in stdout_text.strip().split("\n") if f]
-
-    return json.dumps({
-        "path": path,
-        "total": len(files),
-        "files": files,
-    })
 
 
 @mcp.tool()

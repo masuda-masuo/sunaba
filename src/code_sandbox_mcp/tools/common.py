@@ -2,17 +2,44 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 #: Short per-request Docker API timeout (seconds) for *recovery* and
 #: *poll* operations (e.g. ``sandbox_stop``, ``sandbox_exec_check``).
 #:
-#: When a container becomes unhealthy or its host is overloaded, an
-#: untimed Docker API call can block indefinitely.  Because the MCP
-#: client processes tool calls serially, one wedged call freezes the
-#: whole session -- including the very tools needed to recover.  A short
-#: timeout makes those calls fail fast instead (Issue #181).
-RECOVERY_DOCKER_TIMEOUT: float = 15.0
+#: A wedged/unhealthy container can make a Docker API call block up to
+#: docker-py's ~60s default -- right around the MCP client's ~60s
+#: timeout.  When a recovery/poll call crosses that client timeout the
+#: stdio JSON-RPC stream can desync and wedge the *whole* session,
+#: including Docker-independent tools such as ``sandbox_list_runs``
+#: (see docs/issue-181-followup.md for the full diagnosis).  Bounding
+#: these calls well under the client timeout keeps recovery answerable.
+#:
+#: Override via the ``CODE_SANDBOX_RECOVERY_DOCKER_TIMEOUT`` env var
+#: (seconds); non-numeric or non-positive values fall back to the
+#: 15s default (Issue #181).
+_DEFAULT_RECOVERY_DOCKER_TIMEOUT: float = 15.0
+
+
+def _recovery_timeout_from_env() -> float:
+    """Resolve :data:`RECOVERY_DOCKER_TIMEOUT` from the environment.
+
+    Reads ``CODE_SANDBOX_RECOVERY_DOCKER_TIMEOUT``; falls back to
+    :data:`_DEFAULT_RECOVERY_DOCKER_TIMEOUT` for unset, non-numeric, or
+    non-positive values.
+    """
+    raw = os.environ.get("CODE_SANDBOX_RECOVERY_DOCKER_TIMEOUT")
+    if raw is None:
+        return _DEFAULT_RECOVERY_DOCKER_TIMEOUT
+    try:
+        val = float(raw)
+    except ValueError:
+        return _DEFAULT_RECOVERY_DOCKER_TIMEOUT
+    return val if val > 0 else _DEFAULT_RECOVERY_DOCKER_TIMEOUT
+
+
+RECOVERY_DOCKER_TIMEOUT: float = _recovery_timeout_from_env()
 
 
 def _docker(timeout: float | None = None) -> Any:

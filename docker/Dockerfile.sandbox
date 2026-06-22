@@ -106,6 +106,10 @@ RUN uv tool install ruff \
  && uv tool install pyright \
  && uv tool install semgrep
 
+# pyright の node ベース本体を sandbox ユーザのキャッシュに warm up
+# ネットワーク off 既定のコンテナでも初回起動時に node を取得しに行かなくて済む
+RUN pyright --version
+
 # ── ヘルスチェック ─────────────────────────────────────────────────
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD rg --version && sg --version && semgrep --version || exit 1

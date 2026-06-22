@@ -134,6 +134,7 @@ def resolve_patch_target(target: str) -> str | None:
 
 
 def check_file(path: Path) -> list[PatchTargetError]:
+    """Return unresolved patch targets found in a single file."""
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     errors: list[PatchTargetError] = []
@@ -153,6 +154,7 @@ def _iter_python_files(paths: list[Path]):
 
 
 def check_paths(paths: list[Path]) -> list[PatchTargetError]:
+    """Return unresolved patch targets across *paths* (files or dirs)."""
     errors: list[PatchTargetError] = []
     for file in _iter_python_files(paths):
         errors.extend(check_file(file))
@@ -168,6 +170,7 @@ def ensure_src_importable() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point; exit non-zero when any patch target is unresolved."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "paths",

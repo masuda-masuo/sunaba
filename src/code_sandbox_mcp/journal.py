@@ -121,6 +121,12 @@ def record_exec(
     max_output_tokens: int | None = None,
     input_hash: str = "",
 ) -> None:
+    """Append an ``exec`` operation entry to the run journal.
+
+    Records the executed commands, exit code, and metadata (cache hit,
+    output size, boundary crossing) under the run id resolved from
+    *container_id*.
+    """
     run_id = get_or_create_run_id(container_id)
     boundary = allow_network or inject_vcs_token
     entry: dict[str, Any] = {

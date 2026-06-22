@@ -6,6 +6,7 @@ import difflib
 import io
 import json
 import os
+import posixpath
 import shlex
 import tarfile
 import tempfile
@@ -264,7 +265,7 @@ def write_file_sandbox(
     except Exception as e:
         return f"Error: {e}"
 
-    dest_path = os.path.join(dest_dir, file_name)
+    dest_path = posixpath.join(dest_dir, file_name)
 
     # Validate mutual exclusivity
     has_line_range = start_line is not None or end_line is not None
@@ -458,7 +459,7 @@ def copy_file(
     dest = dest_path
     if not dest.endswith("/") and not dest.endswith(src.name):
         # If dest_path is a directory, include the filename
-        dest = str(Path(dest_path) / src.name)
+        dest = posixpath.join(dest_path, src.name)
 
     with open(src, "rb") as f:
         data = f.read()

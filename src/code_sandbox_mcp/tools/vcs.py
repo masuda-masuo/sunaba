@@ -5,9 +5,9 @@ from __future__ import annotations
 import base64
 import json
 import os
+import posixpath
 import re
 import shlex
-from pathlib import Path
 from typing import Any
 
 from docker.errors import NotFound
@@ -225,7 +225,7 @@ def issue_view(
 
     # Write body to file in container via base64
     encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
-    dir_part = str(Path(save_to).parent)
+    dir_part = posixpath.dirname(save_to)
     write_cmd = (
         f"mkdir -p {shlex.quote(dir_part)} &&"
         f" echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(save_to)}"

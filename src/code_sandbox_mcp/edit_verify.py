@@ -20,7 +20,7 @@ import base64
 import fnmatch
 import io
 import json
-import os
+import posixpath
 import re
 import secrets
 import shlex
@@ -181,8 +181,8 @@ def detect_languages(
             line_out = line_out.strip()
             if not line_out:
                 continue
-            basename = os.path.basename(line_out)
-            marker_dir = os.path.dirname(line_out)
+            basename = posixpath.basename(line_out)
+            marker_dir = posixpath.dirname(line_out)
             for pattern, marker_lang in _DETECTION_MARKERS:
                 if fnmatch.fnmatch(basename, pattern):
                     lang_scope[marker_lang] = marker_dir
@@ -207,10 +207,10 @@ def _find_tsconfig_upward(container: Any, file_path: str) -> str | None:
 
     Returns the directory containing tsconfig.json, or None if not found.
     """
-    current = os.path.dirname(os.path.abspath(file_path))
+    current = posixpath.dirname(posixpath.abspath(file_path))
     while True:
         ec, output = container.exec_run(
-            ["/bin/sh", "-c", f'test -f {shlex.quote(os.path.join(current, "tsconfig.json"))} && echo found || echo notfound'],
+            ["/bin/sh", "-c", f'test -f {shlex.quote(posixpath.join(current, "tsconfig.json"))} && echo found || echo notfound'],
             stdout=True,
             stderr=True,
         )
@@ -218,7 +218,7 @@ def _find_tsconfig_upward(container: Any, file_path: str) -> str | None:
         out = stdout_part.decode("utf-8", errors="replace").strip() if stdout_part else ""
         if "found" in out:
             return current
-        parent = os.path.dirname(current)
+        parent = posixpath.dirname(current)
         if parent == current:
             return None
         current = parent
@@ -262,15 +262,15 @@ def _is_test_file(file_path: str) -> bool:
     - File basename contains ``.test.`` or ``.spec.`` (JS/TS).
     - Path contains ``/tests/``, ``/test/``, or ``/__tests__/`` segment.
     """
-    norm = os.path.normpath(file_path)
-    basename = os.path.basename(norm)
+    norm = posixpath.normpath(file_path)
+    basename = posixpath.basename(norm)
     # Strip the extension so suffix matching works for e.g. ``utils_test.go``.
     stem = basename.rsplit(".", 1)[0]
     if stem.startswith("test_") or "_test" in stem:
         return True
     if ".test." in basename or ".spec." in basename:
         return True
-    parts = norm.split(os.sep)
+    parts = norm.split(posixpath.sep)
     if "tests" in parts or "test" in parts or "__tests__" in parts:
         return True
     return False
@@ -284,8 +284,8 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
     """
     if not file_path.startswith("/"):
         raise ValueError(f"file_path must be absolute: {file_path!r}")
-    canon = os.path.normpath(file_path)
-    if ".." in canon.split(os.sep):
+    canon = posixpath.normpath(file_path)
+    if ".." in canon.split(posixpath.sep):
         raise ValueError(f"Path traversal detected: {file_path!r}")
 
     # Stream the content via a tar archive (put_archive) instead of embedding
@@ -294,7 +294,7 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
     # which made writes of large files fail with "argument list too long"
     # (Issue #144).  put_archive streams over the Docker HTTP API body and has
     # no such limit.
-    parent_dir = os.path.dirname(file_path) or "/"
+    parent_dir = posixpath.dirname(file_path) or "/"
 
     # Ensure the parent directory exists (no file content in argv here).
     mk_code, mk_out = container.exec_run(
@@ -317,7 +317,7 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
     data = content.encode("utf-8")
     tar_stream = io.BytesIO()
     with tarfile.open(fileobj=tar_stream, mode="w") as tar:
-        info = tarfile.TarInfo(name=os.path.basename(file_path))
+        info = tarfile.TarInfo(name=posixpath.basename(file_path))
         info.size = len(data)
         info.mode = mode
         info.uid = uid
@@ -334,8 +334,8 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
 
     record_file_write(
         container_id_short,
-        os.path.basename(file_path),
-        os.path.dirname(file_path) or "/",
+        posixpath.basename(file_path),
+        posixpath.dirname(file_path) or "/",
         len(content),
         is_test=_is_test_file(file_path),
     )
@@ -855,8 +855,8 @@ def transform_file_in_container(
     """
     if not file_path.startswith("/"):
         return {"status": "error", "error": f"file_path must be absolute: {file_path!r}"}
-    canon = os.path.normpath(file_path)
-    if ".." in canon.split(os.sep):
+    canon = posixpath.normpath(file_path)
+    if ".." in canon.split(posixpath.sep):
         return {"status": "error", "error": f"Path traversal detected: {file_path!r}"}
 
     try:
@@ -914,8 +914,8 @@ def transform_file_in_container(
     if result.get("status") == "ok" and result.get("changed"):
         record_file_write(
             container_id[:12],
-            os.path.basename(file_path),
-            os.path.dirname(file_path) or "/",
+            posixpath.basename(file_path),
+            posixpath.dirname(file_path) or "/",
             int(result.get("new_size", 0)),
             is_test=_is_test_file(file_path),
         )

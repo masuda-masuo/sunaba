@@ -189,6 +189,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point; rewrite stale patch targets in place."""
     args = _parse_args(argv)
     cpt.ensure_src_importable()
 

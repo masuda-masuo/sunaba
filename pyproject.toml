@@ -27,5 +27,8 @@ dev = ["pytest", "ruff"]
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+select = ["E", "F", "W", "I", "D100", "D101", "D102", "D103", "D104"]
 ignore = ["E501"]  # line-too-long: CSS/HTML template strings make this impractical
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D100", "D101", "D102", "D103", "D104"]

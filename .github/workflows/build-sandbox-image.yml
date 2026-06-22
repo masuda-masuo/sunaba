@@ -53,7 +53,7 @@ jobs:
           # _DEFAULT_IMAGE の値を置換（行全体を対象にして誤マッチを防ぐ）
           sed -i \
             "s|^_DEFAULT_IMAGE: str = \".*\"|_DEFAULT_IMAGE: str = \"${NEW_IMAGE}\"|" \
-            src/code_sandbox_mcp/server.py
+            src/code_sandbox_mcp/tools/container.py
 
           # ダイジェストが変わっていなければ PR 不要
           if git diff --quiet; then

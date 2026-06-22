@@ -1,4 +1,4 @@
-"""Container lifecycle tools: init, stop, update, exec, test environment."""
+"""Container lifecycle tools: init, stop, exec, test environment."""
 
 from __future__ import annotations
 
@@ -10,21 +10,16 @@ import logging
 import os
 import re
 import shlex
-import shutil
-import subprocess
-import sys
 import tarfile
 import tempfile
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
 from docker.errors import APIError, NotFound
 
-from code_sandbox_mcp import RESTART_EXIT_CODE
 from code_sandbox_mcp.journal import (
     read_journal,
     record_boundary_crossing,
@@ -61,11 +56,6 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 _DEFAULT_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:a03d4c8efbf4e7dd43d49e9666b9dcd56bbcd9237d229c9e1953b563d560fb16"
 
-_TERMINAL: str | None = None
-_UPDATE_SPEC: str = str(Path(__file__).resolve().parent.parent.parent.parent)
-_UPDATE_LOG_DIR: Path | None = None
-_CURRENT_UPDATE_LOG_PATH: str | None = None
-_UPDATE_LOCK: threading.Lock = threading.Lock()
 
 _SHIORI_REPOS_PATH: str | None = None
 
@@ -728,194 +718,6 @@ def sandbox_stop(container_id: str) -> str:
 
     record_stop(cid)
     return f"Container {cid} stopped and removed"
-
-
-def sandbox_update_start() -> str:
-    """Start an in-place update in the background.
-
-    Runs ``pip install --force-reinstall`` asynchronously and streams
-    the output to a terminal window (if ``--terminal`` is configured)
-    so the human can watch progress in real time.
-
-    On success the server process restarts automatically via the
-    launcher (exit code 42).  The update source is controlled by the
-    ``--update-spec`` CLI flag (default: ``.``).
-
-    **Workflow:**
-    - Call this tool once — a terminal window opens showing pip output.
-    - The human watches the terminal and tells you when it is done.
-    - You do **NOT** need to poll with :func:`sandbox_update_check`
-      unless the human asks for a programmatic status check or no
-      terminal is open.
-    """
-    return _start_update_internal()
-
-
-def _start_update_internal() -> str:
-    """Internal helper that does the actual update start.
-
-    Separated so tests can mock ``_open_update_terminal``.
-    """
-    logger.info("Starting update (spec=%s)", _UPDATE_SPEC)
-
-    # Prevent concurrent updates (PR #130)
-    global _CURRENT_UPDATE_LOG_PATH
-    with _UPDATE_LOCK:
-        if _CURRENT_UPDATE_LOG_PATH is not None:
-            return "Error: an update is already in progress"
-
-    # Create a unique log directory for this update
-    log_dir: Path
-    if _UPDATE_LOG_DIR:
-        log_dir = _UPDATE_LOG_DIR
-    else:
-        base = Path(tempfile.gettempdir()) / "code-sandbox-mcp-updates"
-        base.mkdir(parents=True, exist_ok=True)
-        log_dir = Path(tempfile.mkdtemp(dir=base))
-
-    log_path = log_dir / "update.log"
-    with _UPDATE_LOCK:
-        _CURRENT_UPDATE_LOG_PATH = str(log_path)
-
-    # Open a terminal window if configured
-    if _TERMINAL:
-        _open_update_terminal(_TERMINAL, str(log_path))
-
-    # Run the update in a background thread
-    def _run() -> None:
-        _run_update_background(str(log_path))
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-
-    return f"Update started in background. Log: {log_path}"
-
-
-def _run_update_background(log_path: str) -> None:
-    """Run pip install in a subprocess, streaming output to the log."""
-    with open(log_path, "w", buffering=1) as log_f:
-        log_f.write(f"=== Update started (spec: {_UPDATE_SPEC}) @ {datetime.now().isoformat()} ===\n")
-        log_f.flush()
-
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "pip", "install", "--force-reinstall", _UPDATE_SPEC],
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        proc.wait()
-
-        if proc.returncode == 0:
-            log_f.write("=== Update succeeded ===\n")
-            log_f.flush()
-            logger.info("Update succeeded, restarting...")
-            os._exit(RESTART_EXIT_CODE)
-        else:
-            log_f.write(f"=== Update failed (exit code: {proc.returncode}) ===\n")
-            log_f.flush()
-            logger.error("Update failed with exit code %d", proc.returncode)
-    global _CURRENT_UPDATE_LOG_PATH
-    with _UPDATE_LOCK:
-        if _CURRENT_UPDATE_LOG_PATH == log_path:
-            _CURRENT_UPDATE_LOG_PATH = None
-
-
-def _open_update_terminal(terminal: str, log_path: str) -> None:
-    """Open a terminal window tailing the update log file."""
-    cmd: list[str]
-    if sys.platform == "win32":
-        cmd = [
-            "cmd.exe",
-            "/c",
-            "start",
-            "code-sandbox-mcp Update",
-            "powershell.exe",
-            "-NoExit",
-            "-Command",
-            f"Get-Content -Wait {shlex.quote(log_path)}",
-        ]
-    elif sys.platform == "darwin":
-        quoted = shlex.quote(log_path)
-        cmd = [
-            "osascript",
-            "-e",
-            f'tell application "Terminal" to do script "tail -f {quoted}"',
-        ]
-    else:
-        if shutil.which("xterm"):
-            cmd = ["xterm", "-e", f"tail -f {shlex.quote(log_path)}"]
-        else:
-            logger.warning("No terminal emulator found, log at %s", log_path)
-            return
-    try:
-        subprocess.Popen(cmd, shell=False)
-    except Exception as e:
-        logger.warning("Failed to open terminal: %s", e)
-
-
-def sandbox_update_check() -> str:
-    """Poll the status of an update job.
-
-    Sleeps for a short time and checks the update log for completion
-    status.
-
-    **Note:** if :func:`sandbox_update_start` opened a terminal window,
-    the human can watch pip output directly and tell you when it is
-    done — polling is unnecessary and wastes tokens.  Only call this
-    when the human explicitly asks for a status check or when no
-    terminal is available.
-
-    Returns one of:
-
-    * ``"Status: running (elapsed: Xs)"``
-    * ``"Status: done (elapsed: Xs)"``
-    * ``"Status: error\nError: <message>"``
-    * ``"Error: job {job_id} not found"``
-    """
-    with _UPDATE_LOCK:
-        log_path_str = _CURRENT_UPDATE_LOG_PATH
-    if not log_path_str:
-        return "Error: no update job found"
-
-    log_path = Path(log_path_str)
-    if not log_path.exists():
-        return "Error: update log not found"
-
-    try:
-        log_text = log_path.read_text()
-    except OSError as e:
-        return f"Error: cannot read update log: {e}"
-
-    if not log_text:
-        return "Status: running (elapsed: 0s)"
-
-    # Parse start timestamp from the log header
-    start_ts = None
-    for line in log_text.splitlines():
-        if "@ " in line and "=== Update started" in line:
-            try:
-                ts_str = line.split("@ ")[1].rstrip(" =")
-                start_ts = datetime.fromisoformat(ts_str)
-            except (ValueError, IndexError):
-                pass
-            break
-
-    if start_ts is None:
-        return "Error: no update start marker found in log"
-
-    elapsed = datetime.now() - start_ts
-    total_seconds = int(elapsed.total_seconds())
-    elapsed_str = f"{total_seconds}s"
-
-    if "=== Update succeeded ===" in log_text:
-        return f"Status: done (elapsed: {elapsed_str})"
-    elif "=== Update failed" in log_text:
-        for line in reversed(log_text.splitlines()):
-            if "=== Update failed" in line:
-                return f"Status: error (elapsed: {elapsed_str})\nError: {line.strip()}"
-        return f"Status: error (elapsed: {elapsed_str})"
-    else:
-        return f"Status: running (elapsed: {elapsed_str})"
 
 
 def run_container_and_exec(

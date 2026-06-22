@@ -14,7 +14,6 @@ dependencies = [
 
 [project.scripts]
 code-sandbox-mcp = "code_sandbox_mcp.server:main"
-code-sandbox-mcp-launcher = "code_sandbox_mcp.launcher:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

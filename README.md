@@ -42,12 +42,8 @@ Minimal `claude_desktop_config.json`:
     "code-sandbox-mcp": {
       "command": "python",
       "args": [
-        "-m", "code_sandbox_mcp.launcher",
-        "--pass-through-env", "GITHUB_TOKEN"
-      ],
-      "env": {
-        "GITHUB_TOKEN": "github_pat_xxxx"
-      }
+        "-m", "code_sandbox_mcp.server"
+      ]
     }
   }
 }
@@ -81,11 +77,10 @@ stdio has a ~60 second client timeout. Long operations (`docker pull`, `pip inst
 
 ```json
 "args": [
-  "-m", "code_sandbox_mcp.launcher",
+  "-m", "code_sandbox_mcp.server",
   "--transport", "sse",
   "--host", "127.0.0.1",
-  "--port", "8765",
-  "--pass-through-env", "GITHUB_TOKEN"
+  "--port", "8765"
 ]
 ```
 
@@ -96,31 +91,7 @@ stdio has a ~60 second client timeout. Long operations (`docker pull`, `pip inst
 | `http` | None | Standard HTTP |
 | `streamable-http` | None | MCP spec Streamable HTTP |
 
-For SSE/HTTP transports, the server binds to `127.0.0.1:8765` by default. The launcher manages the server process lifecycle but does not proxy stdio.
-
-### `--pass-through-env`
-
-Forward host environment variables into containers:
-
-```json
-"--pass-through-env", "GITHUB_TOKEN,SLACK_TOKEN"
-```
-
-Only explicitly listed variables are forwarded.
-
-### Optional: terminal window for live logs
-
-```json
-"--terminal", "xterm"
-```
-
-When set, `sandbox_exec_background` opens a terminal window tailing container logs in real time. On Windows, use PowerShell (`powershell.exe`); on macOS use `osascript`; on Linux use `gnome-terminal` or `xterm`.
-
-Use `--terminal-args` to pass custom arguments. `{container_id}` is substituted at runtime:
-
-```json
-"--terminal-args", "-NoExit -Command docker exec {container_id} tail -f /tmp/mcp.log"
-```
+For SSE/HTTP transports, the server binds to `127.0.0.1:8765` by default.
 
 ### Optional: observability dashboard
 
@@ -140,26 +111,6 @@ Starts a local read-only web dashboard at `http://127.0.0.1:8766` showing active
 
 Sends OS desktop notifications (Linux) or webhook notifications on boundary-crossing operations, failure threshold exceeded, or long-running executions.
 
-### In-place update (launcher mode)
-
-Launcher mode (`-m code_sandbox_mcp.launcher`) supports in-place server updates without restarting Claude Desktop:
-
-```
-sandbox_update_start()    → returns job_id
-sandbox_update_check()    → poll until "done"
-```
-
-The `--update-spec` flag controls the pip install source (default: `"."`).
-
-> **Note:** The default `"."` only works when running from a local checkout that contains `pyproject.toml`.
-> If you installed via `pip install git+https://...`, you must explicitly set `--update-spec`:
->
-> ```json
-> "args": ["-m", "code_sandbox_mcp.server", "--update-spec", "git+https://github.com/masuda-masuo/code-sandbox-mcp"]
-> ```
->
-> Without this, `sandbox_update_start` will fail with `Neither 'setup.py' nor 'pyproject.toml' found`.
-
 ## Available tools
 
 ### Lifecycle
@@ -175,7 +126,7 @@ The `--update-spec` flag controls the pip install source (default: `"."`).
 | Tool | Description |
 |------|-------------|
 | `sandbox_exec` | Run commands synchronously. Supports `verbose` (`error_only`/`summary`/`full`), truncation, pagination (`offset`/`limit`). |
-| `sandbox_exec_background` | Run commands with `nohup` in background. Returns `job_id`. Opens terminal window if `--terminal` is set. |
+| `sandbox_exec_background` | Run commands with `nohup` in background. Returns `job_id`. |
 | `sandbox_exec_check` | Poll background job status. Returns `"running"`, stdout on success, or error on failure. |
 
 ### File operations
@@ -195,13 +146,6 @@ The `--update-spec` flag controls the pip install source (default: `"."`).
 | `read_file_range` | Read `limit` lines starting at `offset`. Returns JSON with pagination metadata. |
 | `lint_in_container` | Run linter on a file (`.py` → ruff/pylint, `.js/.ts/.jsx/.tsx` → eslint). |
 | `type_check_in_container` | Run type checker on a file (`.py` → pyright (mypy fallback), `.ts/.tsx` → tsc). |
-
-### In-place update
-
-| Tool | Description |
-|------|-------------|
-| `sandbox_update_start` | Start `pip install --force-reinstall` in background. Opens terminal window if `--terminal` configured. |
-| `sandbox_update_check` | Poll update job status. |
 
 ### Observability
 
@@ -239,17 +183,17 @@ sandbox_initialize(image="my-image@sha256:...")
 
 A minimal variant (`docker/Dockerfile.sandbox.minimal`) with git + python + pytest only is also available for lightweight use.
 
-## Launcher architecture
+## Recommended: mcp-launcher for credential management
+
+For production use, run `code-sandbox-mcp` behind [mcp-launcher](https://github.com/masuda-masuo/mcp-launcher) to keep GitHub tokens in the OS keystore instead of plaintext config files:
 
 ```
-Claude Desktop
-    └─ launcher  ← lightweight, stays alive
-           └─ server  ← actual MCP server (child process)
+AI Tool (Claude Desktop / etc.)
+    └─ mcp-launcher  ← OS keystore, transparent MCP session restart
+           └─ code-sandbox-mcp  ← actual MCP server (child process)
 ```
 
-When `sandbox_update_start()` succeeds, the server exits with exit code 42. The launcher detects this and restarts the server automatically — no Claude Desktop restart needed.
-
-In SSE/HTTP mode, the launcher only manages the server process lifecycle. The client connects directly to the server's TCP port.
+mcp-launcher eliminates PATs from `claude_desktop_config.json`, automatically rotates GitHub App installation tokens, and transparently restarts the MCP session without losing state.
 
 ## VCS token safety
 
@@ -351,7 +295,7 @@ python -c "import inspect, code_sandbox_mcp.server; print(inspect.getfile(code_s
 
 ## Known limitations
 
-- **Job state is in-memory**: Background job results are lost on server restart. Job IDs become invalid after `sandbox_update_start()`.
+- **Job state is in-memory**: Background job results are lost on server restart.
 - **Job dictionary grows unbounded**: Completed job results accumulate in memory. Not an issue for typical short-lived sessions.
 - **SSE transport requires client support**: Not all MCP clients support SSE-based servers.
 - **Background jobs are lost on server restart**: Use `run_container_and_exec` for critical one-shot operations.

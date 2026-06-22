@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import time
-from pathlib import Path
 
 from fastmcp import FastMCP
 
@@ -45,8 +44,6 @@ from .tools.container import (
     sandbox_exec_diff,
     sandbox_initialize,
     sandbox_stop,
-    sandbox_update_check,
-    sandbox_update_start,
     stop_test_environment,
     wait_for_condition,
 )
@@ -95,8 +92,6 @@ clone_repo = mcp.tool()(clone_repo)
 # Container lifecycle tool registrations
 sandbox_initialize = mcp.tool()(sandbox_initialize)
 sandbox_stop = mcp.tool()(sandbox_stop)
-sandbox_update_start = mcp.tool()(sandbox_update_start)
-sandbox_update_check = mcp.tool()(sandbox_update_check)
 run_container_and_exec = mcp.tool()(run_container_and_exec)
 rerun_failed = mcp.tool()(rerun_failed)
 sandbox_exec_diff = mcp.tool()(sandbox_exec_diff)
@@ -353,28 +348,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(description="Code Sandbox MCP Server")
     parser.add_argument(
-        "--terminal",
-        type=str,
-        default=None,
-        help="Terminal emulator for update progress windows",
-    )
-    parser.add_argument(
         "--default-image",
         type=str,
         default=None,
         help="Default Docker image (default: python@sha256:...)",
-    )
-    parser.add_argument(
-        "--update-spec",
-        type=str,
-        default=".",
-        help="Pip install spec for in-place update (default: .)",
-    )
-    parser.add_argument(
-        "--update-log-dir",
-        type=str,
-        default=None,
-        help="Directory for update log files",
     )
     parser.add_argument(
         "--shiori-repos-path",
@@ -444,7 +421,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     """Parse CLI arguments and run the MCP server.
 
-    Supports ``--terminal`` for update progress windows,
     ``--default-image`` for overriding the default Docker image,
     ``--transport`` to select the MCP transport protocol,
     ``--dashboard-port`` for the observability dashboard,
@@ -460,10 +436,6 @@ def main() -> None:
     args = parser.parse_args()
 
     from code_sandbox_mcp.tools import container as _ct_mod
-    _ct_mod._TERMINAL = args.terminal
-    _ct_mod._UPDATE_SPEC = args.update_spec
-    if args.update_log_dir:
-        _ct_mod._UPDATE_LOG_DIR = Path(args.update_log_dir)
     if args.default_image:
         validate_image_ref(args.default_image)
         _ct_mod._DEFAULT_IMAGE = args.default_image

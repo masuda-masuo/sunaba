@@ -65,7 +65,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "${BRANCH}"
-          git add src/code_sandbox_mcp/server.py
+          git add src/code_sandbox_mcp/tools/container.py
           git commit -m "chore: update _DEFAULT_IMAGE to sandbox image
 
           ghcr.io/${REPO}/sandbox@${DIGEST}
@@ -85,7 +85,7 @@ jobs:
 
           ### 変更内容
 
-          \`src/code_sandbox_mcp/server.py\` の \`_DEFAULT_IMAGE\` を
+          \`src/code_sandbox_mcp/tools/container.py\` の \`_DEFAULT_IMAGE\` を
           GHCR 上の最新 sandbox イメージ（git/gh/uv/ripgrep 同梱・\`sandbox\` ユーザー）へ差し替え。
 
           \`\`\`

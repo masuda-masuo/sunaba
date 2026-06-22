@@ -54,7 +54,7 @@ from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _docker
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-_DEFAULT_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:a7c48dfd938a77c33e622b2d8e888b8ff642feac205c058b87cac40be2b9275b"
+_DEFAULT_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:e5271c5ca75042ed71c023ec8a870b928a0ae273691f1f5c961cad17ee1e9f89"
 
 
 _SHIORI_REPOS_PATH: str | None = None

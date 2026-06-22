@@ -36,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fd-find \
     jq \
     universal-ctags \
+    libatomic1 \
   && rm -rf /var/lib/apt/lists/*
 
 # fd-find は fdfind としてインストールされるので fd にシンボリックリンク

@@ -1176,32 +1176,6 @@ def _run_pyright_verify(container: Any, path: str) -> VerifyResult:
     return _envelope_ok("pyright", findings, ec)
 
 
-def _run_mypy_verify(container: Any, path: str) -> VerifyResult:
-    """Run mypy on *path* (fallback for pyright).  Returns VerifyResult envelope."""
-    ec, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            f"{_SANDBOX_ENV}mypy --show-error-codes {_quote_path(path)}",
-        ],
-        stdout=True,
-        stderr=True,
-    )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-
-    if ec == 127:
-        return _envelope_not_available("mypy", "mypy not installed in container")
-    if ec not in (0, 1):
-        return _envelope_error("mypy", stderr_text.strip() or f"exit code {ec}", ec)
-
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    findings = _parse_mypy_output(stdout_text, path)
-    for r in findings:
-        r["severity"] = "error"
-    return _envelope_ok("mypy", findings, ec)
-
-
 def _run_tsc_verify(container: Any, path: str) -> VerifyResult:
     """Run tsc --noEmit on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
@@ -1750,28 +1724,6 @@ def _parse_eslint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
             )
     return results
 
-
-#: Regex for mypy output: ``file:line:column: severity: message [error-code]``
-_MYPY_LINE_RE = re.compile(
-    r"^(.+?):(\d+):\d+:\s*(error|warning|note):\s*(.+?)(?:\s+\[([^\]]+)\])?\s*$"
-)
-
-
-def _parse_mypy_output(raw: str, file_path: str) -> list[dict[str, Any]]:
-    """Parse mypy text output into the common result format."""
-    results: list[dict[str, Any]] = []
-    for line in raw.split("\n"):
-        m = _MYPY_LINE_RE.match(line)
-        if m:
-            results.append(
-                {
-                    "file": m.group(1),
-                    "line": int(m.group(2)),
-                    "rule": m.group(5) or m.group(3),  # error code or severity
-                    "message": m.group(4),
-                }
-            )
-    return results
 
 
 def _parse_pyright_output(raw: str, file_path: str) -> list[dict[str, Any]]:

@@ -2,7 +2,7 @@
 
 Tests cover:
 - ``lint_file`` — linter dispatch and output parsing (ruff, pylint, eslint)
-- ``type_check_file`` — type checker dispatch and output parsing (mypy, pyright, tsc)
+- ``type_check_file`` — type checker dispatch and output parsing (pyright, tsc)
 - ``read_file_lines`` — range reading with offset/limit
 - ``search_files`` — lexical and structural search with output parsers
 """
@@ -16,7 +16,6 @@ from src.code_sandbox_mcp.edit_verify import (
     _determine_lint_severity,
     _parse_eslint_output,
     _parse_grep_output,
-    _parse_mypy_output,
     _parse_pylint_output,
     _parse_rg_json,
     _parse_ruff_output,
@@ -165,48 +164,6 @@ class TestParseEslintOutput:
 
     def test_invalid_json(self) -> None:
         assert _parse_eslint_output("bad", "file.js") == []
-
-
-# ===================================================================
-# _parse_mypy_output tests
-# ===================================================================
-
-
-class TestParseMypyOutput:
-    """Tests for mypy text output parsing.
-
-    Mypy output format: ``file:line:column: severity: message [error-code]``
-    """
-
-    def test_empty_output(self) -> None:
-        assert _parse_mypy_output("", "file.py") == []
-
-    def test_single_error(self) -> None:
-        raw = "file.py:42:5: error: Incompatible return value type [return-value]"
-        result = _parse_mypy_output(raw, "file.py")
-        assert len(result) == 1
-        assert result[0]["file"] == "file.py"
-        assert result[0]["line"] == 42
-        assert result[0]["rule"] == "return-value"
-        assert "Incompatible" in result[0]["message"]
-
-    def test_error_without_code(self) -> None:
-        raw = "src/main.py:5:10: error: Name 'x' is not defined"
-        result = _parse_mypy_output(raw, "file.py")
-        assert len(result) == 1
-        assert result[0]["rule"] == "error"  # falls back to severity
-
-    def test_warning_and_note(self) -> None:
-        raw = "file.py:1:1: warning: Something [W001]\nfile.py:2:1: note: Hint"
-        result = _parse_mypy_output(raw, "file.py")
-        assert len(result) == 2
-        assert result[0]["rule"] == "W001"
-        assert result[1]["rule"] == "note"
-
-    def test_no_match_lines_ignored(self) -> None:
-        raw = "Success: no issues found in 1 source file"
-        result = _parse_mypy_output(raw, "file.py")
-        assert result == []
 
 
 # ===================================================================
@@ -394,8 +351,6 @@ class TestLintFileParsers:
 class TestTypeCheckParsers:
     """Edge cases for type checker output parsers."""
 
-    def test_mypy_no_issues(self) -> None:
-        assert _parse_mypy_output("Success: no issues", "file.py") == []
 
     def test_pyright_no_issues(self) -> None:
         assert _parse_pyright_output('{"generalDiagnostics": []}', "file.py") == []

@@ -834,27 +834,30 @@ def sandbox_create_pr(
     _run(f"echo {shlex.quote(script_b64)} | base64 -d > /tmp/_sandbox_create_pr.py")
 
     # Execute: push via GitHub API
-    ec, out, _ = _run(
+    ec, out, err = _run(
         f"trap 'rm -f /tmp/_sandbox_create_pr.py' EXIT"
         f" && python3 /tmp/_sandbox_create_pr.py {shlex.quote(repo)} {shlex.quote(branch)} {shlex.quote(working_dir)}"
     )
     if ec != 0:
         record_boundary_crossing(
             cid, "sandbox_create_pr",
-            f"repo={repo} branch={branch} step=api_push error={out[:200]}",
+            f"repo={repo} branch={branch} step=api_push error={(err or out)[:200]}",
             approved=False, token=token,
         )
-        return json.dumps({"status": "error", "step": "api_push", "error": out})
+        # err or out — script crashed (ec ≠ 0), stderr has traceback
+        return json.dumps({"status": "error", "step": "api_push", "error": err or out})
 
     try:
         push_result = json.loads(out)
     except json.JSONDecodeError:
+        # json_parse_error: out or err — script exited 0 but stdout isn't JSON.
+        # stdout is the diagnostic (what the script printed instead of JSON)
         record_boundary_crossing(
             cid, "sandbox_create_pr",
             f"repo={repo} branch={branch} step=api_push json_parse_error",
             approved=False, token=token,
         )
-        return json.dumps({"status": "error", "step": "api_push", "error": out})
+        return json.dumps({"status": "error", "step": "api_push", "error": out or err})
 
     if "error" in push_result:
         record_boundary_crossing(
@@ -885,18 +888,19 @@ def sandbox_create_pr(
             f" {base_cmd} --body-file \"$BODY_FILE\""
         )
 
-    pr_ec, pr_out, _ = _run(pr_cmd)
+    pr_ec, pr_out, pr_err = _run(pr_cmd)
     if pr_ec != 0:
         record_boundary_crossing(
             cid, "sandbox_create_pr",
-            f"repo={repo} branch={branch} sha={new_sha[:7]} step=pr_create error={pr_out[:200]}",
+            f"repo={repo} branch={branch} sha={new_sha[:7]} step=pr_create error={(pr_err or pr_out)[:200]}",
             approved=True, token=token,
         )
         return json.dumps({
             "status": "pushed_no_pr",
             "branch": branch,
             "sha": new_sha[:7],
-            "pr_create_error": pr_out,
+            # pr_err or pr_out — gh writes errors to stderr
+            "pr_create_error": pr_err or pr_out,
         })
 
     pr_url = ""

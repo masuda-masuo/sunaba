@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import posixpath
 import re
 import shlex
@@ -495,7 +494,7 @@ def submit(
         })
 
     # --- Verify gate ---
-    if os.path.isabs(verify_path):
+    if posixpath.isabs(verify_path):
         verify_path_full = verify_path
     else:
         verify_path_full = f"{working_dir}/{verify_path}".rstrip("/")

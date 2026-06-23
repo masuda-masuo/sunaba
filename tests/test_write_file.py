@@ -989,3 +989,81 @@ class TestWriteFileIsTestDetection:
         mock_record.assert_called_once()
         _, kwargs = mock_record.call_args
         assert kwargs.get("is_test") is False
+
+
+class TestPosixpathFix:
+    """Tests for posixpath usage in container path operations (Issue #219).
+
+    On Windows hosts, os.path.join uses backslash separators which are invalid
+    in Linux container paths. All container-side path operations must use
+    posixpath to produce forward-slash paths regardless of the host OS.
+    """
+
+    def test_is_test_file_preserves_forward_slash(self) -> None:
+        """_is_test_file must work with POSIX paths on any host OS."""
+        from code_sandbox_mcp.edit_verify import _is_test_file
+
+        assert _is_test_file("/home/sandbox/test_main.py") is True
+        assert _is_test_file("/home/sandbox/main.py") is False
+        assert _is_test_file("/tmp/repo/tests/test_foo.py") is True
+        assert _is_test_file("/tmp/repo/src/bar.py") is False
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_write_file_sandbox_dest_path_uses_forward_slash(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """dest_path constructed by write_file_sandbox must use forward slashes.
+
+        Regression test: os.path.join would produce backslash-separated paths
+        on Windows, causing "file not found" in Linux containers (Issue #219).
+        """
+        mock_container = MagicMock()
+        mock_container.exec_run.side_effect = _exec_run_for(b"existing content\n")
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents="new content",
+            dest_dir="/home/sandbox",
+            old_str="existing content",
+        )
+        assert "Error" not in result
+
+        # Verify the cat command uses forward-slash path (not backslash)
+        cat_calls = [
+            args[0][2] if isinstance(args[0], list) and len(args[0]) > 2 else ""
+            for args, _ in mock_container.exec_run.call_args_list
+            if isinstance(args[0], list) and len(args[0]) > 2
+            and args[0][2].startswith("cat ")
+        ]
+        assert any(
+            "/home/sandbox/test.py" in call
+            for call in cat_calls
+        ), f"Expected forward-slash path in cat calls: {cat_calls}"
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_write_file_sandbox_full_overwrite_path(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """Full overwrite mode also uses correct path (not os.path.join behavior)."""
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_container.put_archive.return_value = True
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="output.txt",
+            file_contents="data",
+            dest_dir="/tmp/repo/src",
+        )
+        assert "Error" not in result
+        parent_dir = mock_container.put_archive.call_args[0][0]
+        assert parent_dir == "/tmp/repo/src", (
+            f"put_archive parent_dir should be forward-slash path, got: {parent_dir!r}"
+        )

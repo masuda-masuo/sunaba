@@ -35,7 +35,6 @@ import calendar
 import logging
 import os
 import time
-from dataclasses import dataclass
 
 import httpx
 import jwt
@@ -51,26 +50,7 @@ ENV_PRIVATE_KEY = "GITHUB_APP_PRIVATE_KEY"
 ENV_PRIVATE_KEY_PATH = "GITHUB_APP_PRIVATE_KEY_PATH"
 
 
-class TokenProvider:
-    """Abstract token supplier. ``get_token()`` returning ``None`` means anonymous."""
-
-    def get_token(self) -> str | None:
-        """Return a token string, or ``None`` for no authentication."""
-        raise NotImplementedError
-
-
-@dataclass
-class StaticTokenProvider(TokenProvider):
-    """A fixed token (e.g. a long-lived PAT or a launcher-injected token)."""
-
-    token: str
-
-    def get_token(self) -> str | None:
-        """Return the static token."""
-        return self.token
-
-
-class AppTokenProvider(TokenProvider):
+class AppTokenProvider:
     """Issue and cache a GitHub App installation access token.
 
     ``get_token()`` re-issues the token when it is missing or within
@@ -116,29 +96,28 @@ class AppTokenProvider(TokenProvider):
                 },
                 timeout=30.0,
             )
+            if resp.status_code == 401:
+                raise RuntimeError(
+                    "GitHub App JWT rejected (401). Check that GITHUB_APP_ID matches"
+                    " the private key and that the server clock is correct."
+                )
+            if resp.status_code == 404:
+                raise RuntimeError(
+                    "Installation not found (404). Check GITHUB_APP_INSTALLATION_ID and"
+                    " that the App is installed on the target repositories."
+                )
+            if resp.status_code == 403:
+                raise RuntimeError(
+                    "Insufficient permissions (403). Check the App's permissions"
+                    " (Contents / Issues / Pull requests) and installed repositories."
+                )
+            resp.raise_for_status()  # 201 is success
         except httpx.HTTPError as exc:
             # Network blip: reuse a still-valid cached token, otherwise fail.
             if self._token and time.time() < self._expires_at:
                 log.warning("token refresh failed, reusing cached token: %s", exc)
                 return
             raise RuntimeError(f"failed to obtain installation token: {exc}") from exc
-
-        if resp.status_code == 401:
-            raise RuntimeError(
-                "GitHub App JWT rejected (401). Check that GITHUB_APP_ID matches the "
-                "private key and that the server clock is correct."
-            )
-        if resp.status_code == 404:
-            raise RuntimeError(
-                "Installation not found (404). Check GITHUB_APP_INSTALLATION_ID and "
-                "that the App is installed on the target repositories."
-            )
-        if resp.status_code == 403:
-            raise RuntimeError(
-                "Insufficient permissions (403). Check the App's permissions "
-                "(Contents / Issues / Pull requests) and installed repositories."
-            )
-        resp.raise_for_status()  # 201 is success
 
         data = resp.json()
         self._token = data["token"]
@@ -152,8 +131,12 @@ def _read_private_key() -> str | None:
     """Return the App private key PEM. PATH wins over inline, else ``None``."""
     path = os.environ.get(ENV_PRIVATE_KEY_PATH)
     if path:
-        with open(path, encoding="utf-8") as fp:
-            return fp.read()
+        try:
+            with open(path, encoding="utf-8") as fp:
+                return fp.read()
+        except FileNotFoundError:
+            log.warning("private key path %s not found, falling back to inline key", path)
+            return os.environ.get(ENV_PRIVATE_KEY)
     return os.environ.get(ENV_PRIVATE_KEY)
 
 

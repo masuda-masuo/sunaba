@@ -9,10 +9,12 @@ import argparse
 import json
 import logging
 import os
+import threading
 import time
 
 from fastmcp import FastMCP
 
+from code_sandbox_mcp.github_auth import setup_github_app_token
 from code_sandbox_mcp.journal import (
     get_journal_path,
     get_runs,
@@ -424,10 +426,6 @@ def _start_github_app_token_refresh(interval_seconds: int = 120) -> None:
     No-op when no GitHub App is configured (the existing ``GITHUB_TOKEN`` is
     preserved), so existing deployments are unaffected (issue #203, PR-A).
     """
-    import threading
-
-    from code_sandbox_mcp.github_auth import setup_github_app_token
-
     try:
         provider = setup_github_app_token()
     except Exception:  # noqa: BLE001 - never block startup on token setup

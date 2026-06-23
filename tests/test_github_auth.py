@@ -18,7 +18,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from code_sandbox_mcp import github_auth
 from code_sandbox_mcp.github_auth import (
     AppTokenProvider,
-    StaticTokenProvider,
     build_app_token_provider,
     setup_github_app_token,
 )
@@ -90,11 +89,6 @@ def test_incomplete_app_env_raises(clean_env):
     clean_env.setenv("GITHUB_APP_ID", "123")  # installation/key missing
     with pytest.raises(ValueError):
         build_app_token_provider()
-
-
-def test_static_provider():
-    p = StaticTokenProvider("ghp_xxx")
-    assert p.get_token() == "ghp_xxx"
 
 
 # --- JWT claims ---------------------------------------------------------------

@@ -844,11 +844,14 @@ def sandbox_create_pr(
             f"repo={repo} branch={branch} step=api_push error={(err or out)[:200]}",
             approved=False, token=token,
         )
+        # err or out — script crashed (ec ≠ 0), stderr has traceback
         return json.dumps({"status": "error", "step": "api_push", "error": err or out})
 
     try:
         push_result = json.loads(out)
     except json.JSONDecodeError:
+        # json_parse_error: out or err — script exited 0 but stdout isn't JSON.
+        # stdout is the diagnostic (what the script printed instead of JSON)
         record_boundary_crossing(
             cid, "sandbox_create_pr",
             f"repo={repo} branch={branch} step=api_push json_parse_error",
@@ -896,6 +899,7 @@ def sandbox_create_pr(
             "status": "pushed_no_pr",
             "branch": branch,
             "sha": new_sha[:7],
+            # pr_err or pr_out — gh writes errors to stderr
             "pr_create_error": pr_err or pr_out,
         })
 

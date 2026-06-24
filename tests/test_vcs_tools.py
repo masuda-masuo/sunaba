@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from code_sandbox_mcp.server import (
     checkpoint,
@@ -1790,3 +1790,125 @@ class TestSubmitApiPushFallback:
         ))
 
         assert result["status"] == "dry_run"
+
+
+# ---------------------------------------------------------------------------
+# submit async + progress notification tests (Issue #253)
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitAsyncProgress:
+    """Tests for the async progress notification path in submit."""
+
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    def test_ctx_is_none_falls_back_to_sync_verify(
+        self,
+        mock_verify_token: MagicMock,
+        mock_docker: MagicMock,
+        mock_run_verify: MagicMock,
+    ) -> None:
+        """When ctx is None, run_verify is called synchronously."""
+        mock_run_verify.return_value = {"gate_passed": True, "status": "ok"}
+        mock_verify_token.return_value = (dict(consumed=True), None)
+
+        container = _make_container_mock([
+            (0, b"", b""),       # git checkout -b
+            (0, b"", b""),       # git add -A
+            (0, b"", b""),       # git commit
+            (0, b"", b""),       # git push
+            (0, b"abc1234", b""),  # git rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/issue-55",
+            message="Fix",
+            dry_run=False,
+            token="tok_valid123",
+            ctx=None,
+        ))
+
+        assert result["status"] == "pushed"
+        mock_run_verify.assert_called_once()
+
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.asyncio.wait_for")
+    @patch("code_sandbox_mcp.tools.vcs.asyncio.shield", side_effect=lambda x: x)
+    @patch("code_sandbox_mcp.tools.vcs.asyncio.get_running_loop")
+    def test_ctx_provided_calls_report_progress(
+        self,
+        mock_get_loop: MagicMock,
+        mock_shield: MagicMock,
+        mock_wait_for: MagicMock,
+        mock_verify_token: MagicMock,
+        mock_docker: MagicMock,
+        mock_run_verify: MagicMock,
+    ) -> None:
+        """When ctx is provided and verify takes time, report_progress is called."""
+        mock_run_verify.return_value = {"gate_passed": True, "status": "ok"}
+        mock_verify_token.return_value = (dict(consumed=True), None)
+
+        # Build a mock future that supports done() / result() / __await__.
+        # asyncio.Future() requires a running event loop in Python 3.12.
+        _verify_result = {"gate_passed": True, "status": "ok"}
+
+        class _ControlledFuture:
+            """Mock asyncio.Future with controlled done() behavior."""
+
+            def __init__(self, result: dict):
+                self._result = result
+                self._done_calls = 0
+
+            def done(self) -> bool:
+                self._done_calls += 1
+                if self._done_calls == 1:
+                    return False
+                return True
+
+            def result(self) -> dict:
+                return self._result
+
+            def __await__(self):
+                return self._result
+                yield  # pragma: no cover
+
+        loop_future = _ControlledFuture(_verify_result)
+
+        mock_loop = MagicMock()
+        mock_loop.run_in_executor.return_value = loop_future
+        mock_get_loop.return_value = mock_loop
+
+        mock_wait_for.side_effect = asyncio.TimeoutError()
+
+        mock_ctx = MagicMock()
+        mock_ctx.report_progress = AsyncMock()
+
+        container = _make_container_mock([
+            (0, b"", b""),       # git checkout -b
+            (0, b"", b""),       # git add -A
+            (0, b"", b""),       # git commit
+            (0, b"", b""),       # git push
+            (0, b"abc1234", b""),  # git rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/issue-55",
+            message="Fix",
+            dry_run=False,
+            token="tok_valid123",
+            ctx=mock_ctx,
+        ))
+
+        assert result["status"] == "pushed"
+        mock_ctx.report_progress.assert_called()

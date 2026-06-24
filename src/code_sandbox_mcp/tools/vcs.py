@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import posixpath
 import re
 import shlex
@@ -18,6 +19,8 @@ from code_sandbox_mcp.edit_verify import run_verify
 from code_sandbox_mcp.journal import get_or_create_run_id, record_boundary_crossing
 from code_sandbox_mcp.token import generate_token, verify_and_consume
 from code_sandbox_mcp.tools.common import _docker
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Validation regexes
@@ -764,9 +767,15 @@ Returns:
                 )
             except asyncio.TimeoutError:
                 elapsed = _time.monotonic() - start
-                await ctx.report_progress(
-                    0, None, f"Verify gate running... ({elapsed:.0f}s)",
-                )
+                try:
+                    await ctx.report_progress(
+                        0, None, f"Verify gate running... ({elapsed:.0f}s)",
+                    )
+                except Exception:
+                    logger.debug(
+                        "report_progress failed for container %s (elapsed %.0fs)",
+                        cid, elapsed, exc_info=True,
+                    )
         verify_result = await verify_future
     else:
         verify_result = run_verify(

@@ -372,46 +372,57 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
-    # --- Timing: get current epoch seconds inside the container ---
-    now_result = container.exec_run(
-        ["/bin/sh", "-c", "date +%s"],
-        stdout=True, stderr=False,
-    )
-    now = int(now_result[1].decode("utf-8").strip())
-
-    # --- Elapsed: read .start file (available for jobs started after 2026-06) ---
-    elapsed_seconds = None
-    start_result = container.exec_run(
-        ["/bin/sh", "-c", f"cat /tmp/{job_id}.start 2>/dev/null || echo ''"],
-        stdout=True, stderr=False,
-    )
-    start_output = start_result[1].decode("utf-8").strip()
-    if start_output:
-        start_epoch = int(start_output)
-        elapsed_seconds = now - start_epoch
-
-    # --- Staleness: time since last output write ---
-    last_output_seconds_ago = None
-    stale_result = container.exec_run(
+    # --- Single exec: gather timing, staleness, and exit status ---
+    status_result = container.exec_run(
         [
             "/bin/sh", "-c",
-            "m1=$(stat -c %Y /tmp/{}.out 2>/dev/null || echo 0); "
-            "m2=$(stat -c %Y /tmp/{}.err 2>/dev/null || echo 0); "
-            "if [ $m1 -gt $m2 ]; then echo $m1; else echo $m2; fi".format(job_id, job_id),
+            "echo NOW=$(date +%s); "
+            "echo START=$(cat /tmp/{}.start 2>/dev/null || echo ''); "
+            "echo OUT_MTIME=$(stat -c %Y /tmp/{}.out 2>/dev/null || echo 0); "
+            "echo ERR_MTIME=$(stat -c %Y /tmp/{}.err 2>/dev/null || echo 0); "
+            "echo EXIT=$(cat /tmp/{}.exit 2>/dev/null || echo 'not_found')".format(
+                job_id, job_id, job_id, job_id,
+            ),
         ],
         stdout=True, stderr=False,
     )
-    last_mtime_str = stale_result[1].decode("utf-8").strip()
-    last_mtime = int(last_mtime_str)
-    if last_mtime > 0:
-        last_output_seconds_ago = now - last_mtime
+    status_output = status_result[1].decode("utf-8").strip()
+    status_kv: dict[str, str] = {}
+    for line in status_output.split("\n"):
+        if "=" in line:
+            k, v = line.split("=", 1)
+            status_kv[k.strip()] = v.strip()
+
+    # --- Parse now (safe) ---
+    now = 0
+    try:
+        now = int(status_kv.get("NOW", "0"))
+    except (ValueError, TypeError):
+        pass
+
+    # --- Elapsed: read .start file (available for jobs started after 2026-06) ---
+    elapsed_seconds = None
+    start_raw = status_kv.get("START", "")
+    if start_raw:
+        try:
+            start_epoch = int(start_raw)
+            elapsed_seconds = now - start_epoch
+        except (ValueError, TypeError):
+            pass
+
+    # --- Staleness: time since last output write ---
+    last_output_seconds_ago = None
+    try:
+        out_mtime = int(status_kv.get("OUT_MTIME", "0"))
+        err_mtime = int(status_kv.get("ERR_MTIME", "0"))
+        last_mtime = out_mtime if out_mtime > err_mtime else err_mtime
+        if last_mtime > 0:
+            last_output_seconds_ago = now - last_mtime
+    except (ValueError, TypeError):
+        pass
 
     # --- Check exit code file ---
-    exit_code_result = container.exec_run(
-        ["/bin/sh", "-c", f"cat /tmp/{job_id}.exit 2>/dev/null || echo 'not_found'"],
-        stdout=True, stderr=False,
-    )
-    exit_code_output = exit_code_result[1].decode("utf-8", errors="replace").strip()
+    exit_code_output = status_kv.get("EXIT", "not_found")
 
     if exit_code_output == "not_found":
         return json.dumps({
@@ -420,7 +431,10 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
             "last_output_seconds_ago": last_output_seconds_ago,
         })
 
-    exit_code = int(exit_code_output) if exit_code_output else 0
+    try:
+        exit_code = int(exit_code_output) if exit_code_output else 0
+    except (ValueError, TypeError):
+        exit_code = -1
 
     # --- Read stdout ---
     stdout_result = container.exec_run(

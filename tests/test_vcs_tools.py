@@ -4,8 +4,14 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from code_sandbox_mcp.server import checkpoint, checkpoint_list, checkpoint_restore, issue_view, sandbox_create_pr, submit
-
+from code_sandbox_mcp.server import (
+    checkpoint,
+    checkpoint_list,
+    checkpoint_restore,
+    issue_view,
+    sandbox_create_pr,
+    submit,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -823,7 +829,6 @@ class TestSubmitTokenFlow:
 # sandbox_create_pr tests
 # ---------------------------------------------------------------------------
 
-from code_sandbox_mcp.server import sandbox_create_pr
 
 
 class TestSandboxCreatePr:
@@ -1178,3 +1183,606 @@ class TestSandboxCreatePr:
         assert "blob creation failed" in result.get("error", "")
         mock_record.assert_called_once()
         assert mock_record.call_args[1]["approved"] is False
+
+# ---------------------------------------------------------------------------
+# checkpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpoint:
+    """Tests for checkpoint."""
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_checkpoint_success(self, mock_docker: MagicMock) -> None:
+        """Happy path: git add + commit succeeds, returns sha."""
+        container = _make_container_mock([
+            (0, b"", b""),
+            (0, b"abc1234\n", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint(
+            container_id="abc123def456",
+            message="my checkpoint",
+        ))
+
+        assert result["status"] == "ok"
+        assert result["sha"] == "abc1234"
+        assert result["message"] == "my checkpoint"
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_checkpoint_git_failure(self, mock_docker: MagicMock) -> None:
+        """Git commit failure should return error."""
+        container = _make_container_mock([
+            (1, b"fatal: not a git repository", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint(
+            container_id="abc123def456",
+            message="my checkpoint",
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "checkpoint"
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_checkpoint_container_not_found(self, mock_docker: MagicMock) -> None:
+        """Container not found should return error."""
+        from docker.errors import NotFound
+        client = MagicMock()
+        client.containers.get.side_effect = NotFound("not found")
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint(
+            container_id="abc123def456",
+            message="test",
+        ))
+
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# checkpoint_list tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointList:
+    """Tests for checkpoint_list."""
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_checkpoint_list_success(self, mock_docker: MagicMock) -> None:
+        """Happy path: returns list of checkpoints."""
+        log_output = (
+            b"abc1234 2026-06-24T10:00:00+00:00 First checkpoint\n"
+            b"def5678 2026-06-24T10:05:00+00:00 Second checkpoint\n"
+        )
+        container = _make_container_mock([
+            (0, log_output, b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint_list(
+            container_id="abc123def456",
+        ))
+
+        assert "checkpoints" in result
+        assert len(result["checkpoints"]) == 2
+        assert result["checkpoints"][0]["sha"] == "abc1234"
+        assert result["checkpoints"][1]["message"] == "Second checkpoint"
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_checkpoint_list_empty(self, mock_docker: MagicMock) -> None:
+        """Empty git log should return empty list."""
+        container = _make_container_mock([
+            (0, b"", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint_list(
+            container_id="abc123def456",
+        ))
+
+        assert result["checkpoints"] == []
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_checkpoint_list_container_not_found(self, mock_docker: MagicMock) -> None:
+        """Container not found should return error."""
+        from docker.errors import NotFound
+        client = MagicMock()
+        client.containers.get.side_effect = NotFound("not found")
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint_list(
+            container_id="abc123def456",
+        ))
+
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# checkpoint_restore tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointRestore:
+    """Tests for checkpoint_restore."""
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_checkpoint_restore_success(self, mock_docker: MagicMock) -> None:
+        """Happy path: git reset --hard succeeds."""
+        container = _make_container_mock([
+            (0, b"HEAD is now at abc1234", b""),
+            (0, b"abc1234\n", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint_restore(
+            container_id="abc123def456",
+            sha="abc1234",
+        ))
+
+        assert result["status"] == "ok"
+        assert result["restored_to"] == "abc1234"
+        assert "warning" in result
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_checkpoint_restore_failure(self, mock_docker: MagicMock) -> None:
+        """Git reset failure should return error."""
+        container = _make_container_mock([
+            (1, b"fatal: ambiguous argument", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint_restore(
+            container_id="abc123def456",
+            sha="badsha",
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "checkpoint_restore"
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_checkpoint_restore_container_not_found(self, mock_docker: MagicMock) -> None:
+        """Container not found should return error."""
+        from docker.errors import NotFound
+        client = MagicMock()
+        client.containers.get.side_effect = NotFound("not found")
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint_restore(
+            container_id="abc123def456",
+            sha="abc1234",
+        ))
+
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Additional submit tests for issue #241 features
+# ---------------------------------------------------------------------------
+
+class TestSubmitOnGateFail:
+    """Tests for submit with on_gate_fail='draft' (Rescue PR path)."""
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_execute_rescue_draft(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_consume: MagicMock,
+        mock_gate: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """on_gate_fail='draft' should call _rescue_pr and return rescue_draft status."""
+        mock_run_id.return_value = "run123"
+        mock_consume.return_value = {
+            "token": "tok_good",
+            "operation": "submit",
+        }
+        mock_gate.return_value = {
+            "status": "failed",
+            "gate_passed": False,
+            "gate_fail_reasons": ["lint: 3 error(s)"],
+            "lint": {"passed": False},
+            "type_check": {"passed": True},
+            "test": {"passed": True},
+            "scan": {"passed": True},
+        }
+
+        push_json = json.dumps({"sha": "a" * 40}).encode()
+        container = _make_container_mock([
+            (0, b"", b""),
+            (0, b"[verify-failing] msg", b""),
+            (0, b"", b""),
+            (0, push_json, b""),
+            (0, b"https://github.com/owner/repo/pull/99\n", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix issue",
+            dry_run=False,
+            token="tok_good",
+            on_gate_fail="draft",
+        ))
+
+        assert result["status"] == "rescue_draft"
+        assert result["gate_passed"] is False
+        assert result["sha"] == "aaaaaaa"
+        assert "pr_url" in result
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_execute_rescue_draft_empty_verify(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_consume: MagicMock,
+        mock_gate: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """_rescue_pr with empty verify_result should use fallback message."""
+        mock_run_id.return_value = "run123"
+        mock_consume.return_value = {
+            "token": "tok_good",
+            "operation": "submit",
+        }
+        mock_gate.return_value = {
+            "status": "failed",
+            "gate_passed": False,
+        }
+
+        push_json = json.dumps({"sha": "a" * 40}).encode()
+        container = _make_container_mock([
+            (0, b"", b""),
+            (0, b"[verify-failing] msg", b""),
+            (0, b"", b""),
+            (0, push_json, b""),
+            (0, b"https://github.com/owner/repo/pull/100\n", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix issue",
+            dry_run=False,
+            token="tok_good",
+            on_gate_fail="draft",
+        ))
+
+        assert result["status"] == "rescue_draft"
+
+
+class TestSubmitSquashCheckpoints:
+    """Tests for submit with squash_checkpoints=True."""
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_execute_squash_checkpoints(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_verify_fn: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """squash_checkpoints=True should reset --soft and re-add."""
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "submit",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+        mock_verify_fn.return_value = {
+            "status": "ok",
+            "gate_passed": True,
+        }
+
+        container = _make_container_mock([
+            (0, b"", b""),
+            (0, b"", b""),
+            (0, b"main\n", b""),
+            (0, b"abc1234 First checkpoint\n", b""),
+            (0, b"", b""),
+            (0, b"", b""),
+            (0, b"[fix/x abc1234] Fix", b""),
+            (0, b"pushed", b""),
+            (0, b"abc1234def5678", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=False,
+            token="tok_good",
+            squash_checkpoints=True,
+        ))
+
+        assert result["status"] == "pushed"
+        reset_calls = [
+            c[0][0][2] for c in container.exec_run.call_args_list
+            if "reset --soft" in c[0][0][2]
+        ]
+        assert len(reset_calls) == 1
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_execute_squash_checkpoints_no_tracking(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_verify_fn: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """squash_checkpoints=True with no tracking branch should skip squash."""
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "submit",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+        mock_verify_fn.return_value = {
+            "status": "ok",
+            "gate_passed": True,
+        }
+
+        container = _make_container_mock([
+            (0, b"", b""),
+            (0, b"", b""),
+            (1, b"", b"no upstream"),
+            (0, b"[fix/x abc1234] Fix", b""),
+            (0, b"pushed", b""),
+            (0, b"abc1234def5678", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=False,
+            token="tok_good",
+            squash_checkpoints=True,
+        ))
+
+        assert result["status"] == "pushed"
+
+
+class TestSubmitAllowForcePush:
+    """Tests for submit with allow_force_push=True."""
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_execute_allow_force_push(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_verify_fn: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """allow_force_push=True should include --force in push command."""
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "submit",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+        mock_verify_fn.return_value = {
+            "status": "ok",
+            "gate_passed": True,
+        }
+
+        container = _make_container_mock([
+            (0, b"", b""),
+            (0, b"", b""),
+            (0, b"[fix/x abc1234] Fix", b""),
+            (0, b"pushed", b""),
+            (0, b"abc1234def5678", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=False,
+            token="tok_good",
+            allow_force_push=True,
+        ))
+
+        assert result["status"] == "pushed"
+        push_calls = [
+            c[0][0][2] for c in container.exec_run.call_args_list
+            if "push origin" in c[0][0][2]
+        ]
+        assert len(push_calls) == 1
+        assert "--force" in push_calls[0]
+
+
+class TestSubmitApiPushFallback:
+    """Tests for submit when git push fails and falls back to _try_api_push."""
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_execute_api_push_fallback_succeeds(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_verify_fn: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When git push fails, _try_api_push should be used as fallback."""
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "submit",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+        mock_verify_fn.return_value = {
+            "status": "ok",
+            "gate_passed": True,
+        }
+
+        push_json = json.dumps({"sha": "b" * 40}).encode()
+        container = _make_container_mock([
+            (0, b"", b""),
+            (0, b"", b""),
+            (0, b"[fix/x abc1234] Fix", b""),
+            (1, b"", b"remote rejected: permission denied"),
+            (0, b"abc1234def5678", b""),
+            (0, b"", b""),
+            (0, push_json, b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=False,
+            token="tok_good",
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["sha"] == "bbbbbbb"
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_execute_api_push_fallback_fails(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_verify_fn: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When both git push and API push fail, return error."""
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "submit",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+        mock_verify_fn.return_value = {
+            "status": "ok",
+            "gate_passed": True,
+        }
+
+        container = _make_container_mock([
+            (0, b"", b""),
+            (0, b"", b""),
+            (0, b"[fix/x abc1234] Fix", b""),
+            (1, b"", b"remote rejected"),
+            (0, b"abc1234def5678", b""),
+            (0, b"", b""),
+            (1, b"", b"API push failed too"),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=False,
+            token="tok_good",
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "git_push"
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_dry_run_with_squash_and_force(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_consume: MagicMock,
+        mock_verify_fn: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Dry run should work with squash_checkpoints and allow_force_push."""
+        mock_run_id.return_value = "run123"
+        mock_verify_fn.return_value = {"gate_passed": True}
+        mock_consume.return_value = {"token": "tok_good"}
+
+        container = _make_container_mock([
+            (0, b"M file.py\n---DIFF---\n 1 file changed", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=True,
+            squash_checkpoints=True,
+            allow_force_push=True,
+        ))
+
+        assert result["status"] == "dry_run"

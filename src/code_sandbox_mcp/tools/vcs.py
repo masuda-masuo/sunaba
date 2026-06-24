@@ -202,7 +202,8 @@ def checkpoint(
         stdout=True,
     )
     if sha_ec == 0:
-        sha = sha_out.decode("utf-8", errors="replace").strip() if sha_out else ""
+        sha_bytes = sha_out[0] if isinstance(sha_out, tuple) else sha_out
+        sha = sha_bytes.decode("utf-8", errors="replace").strip() if sha_bytes else ""
 
     record_boundary_crossing(
         cid,
@@ -353,7 +354,8 @@ def checkpoint_restore(
         stdout=True,
     )
     if sha_ec == 0:
-        current_sha = sha_out.decode("utf-8", errors="replace").strip() if sha_out else ""
+        sha_bytes = sha_out[0] if isinstance(sha_out, tuple) else sha_out
+        current_sha = sha_bytes.decode("utf-8", errors="replace").strip() if sha_bytes else ""
 
     record_boundary_crossing(
         cid,
@@ -767,7 +769,6 @@ Returns:
             container, cid, repo, branch, message,
             working_dir, pr_title, pr_body, base_branch,
             verify_result, author_name, author_email, token,
-            create_pr,
         )
     # --- Git branch check/create ---
     _run(f"git checkout -b {shlex.quote(branch)} 2>/dev/null || git checkout {shlex.quote(branch)}")
@@ -780,6 +781,15 @@ Returns:
             "step": "git_add",
             "error": add_err or add_out,
         })
+
+    # --- Squash unpushed checkpoints into a single commit ---
+    if squash_checkpoints:
+        track_ec, track_out, _ = _run("git rev-parse --abbrev-ref @{u} 2>/dev/null")
+        if track_ec == 0 and track_out.strip():
+            unpushed_ec, unpushed_out, _ = _run("git log --oneline @{u}..HEAD")
+            if unpushed_ec == 0 and unpushed_out.strip():
+                _run("git reset --soft @{u}")
+                _run("git add -A")
 
     # --- Git identity: set before commit ---
     name_to_use = author_name if author_name is not None else "code-sandbox-mcp[bot]"
@@ -984,7 +994,6 @@ def _rescue_pr(
     author_name: str | None,
     author_email: str | None,
     token: str,
-    create_pr: bool,
 ) -> str:
     """Push as a draft PR with ``[verify-failing]`` markers (Rescue PR)."""
     def _run(cmd: str) -> tuple[int, str, str]:
@@ -1018,6 +1027,16 @@ def _rescue_pr(
             rescue_body += f"| {layer} | {icon} |\n"
         else:
             rescue_body += f"| {layer} | :grey_question: |\n"
+
+    # Fallback when verify_result lacks expected keys (boundary case)
+    if not any(
+        isinstance(verify_result.get(layer), dict)
+        for layer in ("lint", "type_check", "test", "scan")
+    ):
+        rescue_body += (
+            "\n> **Note:** verify_result structure unexpected -- "
+            "gate details unavailable.\n"
+        )
 
     if pr_body:
         rescue_body += f"\n{pr_body}"
@@ -1061,8 +1080,8 @@ def _rescue_pr(
 
     # Create draft PR
     pr_url: str | None = None
-    create_pr_flag = create_pr if create_pr else True  # Rescue always creates PR
-    if create_pr_flag:
+    # Rescue PR always creates a draft PR (documented behaviour)
+    if True:
         safe_title = shlex.quote(f"[verify-failing] {pr_title or message}")
         pr_cmd = (
             f"gh pr create --repo {shlex.quote(repo)}"

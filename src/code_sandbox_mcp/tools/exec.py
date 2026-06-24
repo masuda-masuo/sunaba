@@ -111,6 +111,10 @@ def sandbox_exec(
         return json.dumps(
             {"status": "error", "error": "commands and argv are mutually exclusive"}
         )
+    if argv is not None and not argv:
+        return json.dumps(
+            {"status": "error", "error": "argv must be a non-empty list"}
+        )
     if argv is None and not commands:
         return json.dumps(
             {"status": "error", "error": "either commands or argv is required"}

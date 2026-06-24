@@ -599,6 +599,7 @@ class TestSandboxExecArgv:
         # so newlines and shell metacharacters survive literally.
         assert called.args[0] == ["gh", "issue", "create", "--title", "x", "--body", body]
         assert called.args[0][0] != "/bin/sh"
+        assert "shell" not in called.kwargs or not called.kwargs.get("shell")
 
     @patch("code_sandbox_mcp.tools.exec._docker")
     def test_argv_working_dir_uses_exec_workdir(self, mock_docker: MagicMock) -> None:
@@ -653,4 +654,15 @@ class TestSandboxExecArgv:
         result = self._decode(sandbox_exec(container_id="abc123def456"))
         assert result["status"] == "error"
         assert "required" in result["error"]
+        mock_docker.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_empty_argv_is_rejected(self, mock_docker: MagicMock) -> None:
+        """An empty argv list is rejected before touching docker (review #252)."""
+        result = self._decode(sandbox_exec(
+            container_id="abc123def456",
+            argv=[],
+        ))
+        assert result["status"] == "error"
+        assert "non-empty" in result["error"]
         mock_docker.assert_not_called()

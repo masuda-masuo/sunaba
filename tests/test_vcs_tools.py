@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from code_sandbox_mcp.server import issue_view, submit
+from code_sandbox_mcp.server import checkpoint, checkpoint_list, checkpoint_restore, issue_view, sandbox_create_pr, submit
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +605,9 @@ class TestSubmit:
             (0, b"[fix/x abc1234] Fix", b""),  # git commit
             (1, b"", b"remote rejected: permission denied"),  # git push (fail)
             (0, b"abc1234def5678", b""),  # git rev-parse
+            # Transport fallback: _try_api_push
+            (0, b"", b""),  # write API push script
+            (1, b"", b"push failed"),  # API push also fails
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client

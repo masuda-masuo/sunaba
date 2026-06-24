@@ -843,8 +843,20 @@ Returns:
     if track_ec == 0 and track_out.strip():
         unpushed_ec, unpushed_out, _ = _run("git log --oneline @{u}..HEAD")
         if unpushed_ec == 0 and unpushed_out.strip():
-            _run("git reset --soft @{u}")
-            _run("git add -A")
+            reset_ec, reset_out, reset_err = _run("git reset --soft @{u}")
+            if reset_ec != 0:
+                return json.dumps({
+                    "status": "error",
+                    "step": "squash_reset",
+                    "error": reset_err or reset_out,
+                })
+            readd_ec, readd_out, readd_err = _run("git add -A")
+            if readd_ec != 0:
+                return json.dumps({
+                    "status": "error",
+                    "step": "squash_readd",
+                    "error": readd_err or readd_out,
+                })
 
     # --- Git identity: set before commit ---
     name_to_use = author_name if author_name is not None else "code-sandbox-mcp[bot]"

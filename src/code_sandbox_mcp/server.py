@@ -62,6 +62,9 @@ from .tools.file import (
     write_file_sandbox,
 )
 from .tools.vcs import (
+    checkpoint,
+    checkpoint_list,
+    checkpoint_restore,
     clone_repo,
     issue_view,
     sandbox_create_pr,
@@ -87,7 +90,10 @@ sandbox_exec_check = mcp.tool()(sandbox_exec_check)
 
 issue_view = mcp.tool()(issue_view)
 submit = mcp.tool()(submit)
-sandbox_create_pr = mcp.tool()(sandbox_create_pr)
+checkpoint = mcp.tool()(checkpoint)
+checkpoint_list = mcp.tool()(checkpoint_list)
+checkpoint_restore = mcp.tool()(checkpoint_restore)
+sandbox_create_pr = mcp.tool()(sandbox_create_pr)  # deprecated, use submit
 clone_repo = mcp.tool()(clone_repo)
 
 

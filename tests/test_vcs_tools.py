@@ -1780,14 +1780,14 @@ class TestSubmitApiPushFallback:
         mock_verify_fn: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Dry run should work with unpushed checkpoints and allow_force_push."""
+        """Dry run should show checkpoint info when unpushed commits exist."""
         mock_run_id.return_value = "run123"
         mock_verify_fn.return_value = {"gate_passed": True}
         mock_consume.return_value = {"token": "tok_good"}
 
         container = _make_container_mock([
             (0, b"M file.py\n---DIFF---\n 1 file changed", b""),
-            (0, b"", b""),
+            (0, b"abc1234 First checkpoint\ndef5678 Second checkpoint\n", b""),
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -1802,6 +1802,40 @@ class TestSubmitApiPushFallback:
         ))
 
         assert result["status"] == "dry_run"
+        assert "Checkpoints to squash" in result["diff_summary"]
+        assert "2 commit(s)" in result["diff_summary"]
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    def test_dry_run_only_checkpoints(
+        self,
+        mock_consume: MagicMock,
+        mock_verify_fn: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Dry run should work with no working tree changes but unpushed commits."""
+        mock_verify_fn.return_value = {"gate_passed": True}
+        mock_consume.return_value = {"token": "tok_good"}
+
+        container = _make_container_mock([
+            (0, b"---DIFF---", b""),
+            (0, b"abc1234 Only checkpoint\n", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=True,
+        ))
+
+        assert result["status"] == "dry_run"
+        assert "unpushed checkpoints" in result["diff_summary"]
+        assert "Checkpoints to squash: 1 commit(s)" in result["diff_summary"]
 
 
 # ---------------------------------------------------------------------------

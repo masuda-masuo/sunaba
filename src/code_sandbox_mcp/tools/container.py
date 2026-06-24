@@ -730,11 +730,19 @@ def sandbox_initialize(
     return cid + clone_msg + pr_msg
 
 
-def sandbox_stop(container_id: str) -> str:
+def sandbox_stop(
+    container_id: str,
+    force: bool = False,
+    working_dir: str = "/home/sandbox",
+) -> str:
     """Stop and remove a running sandbox container.
 
     Args:
         container_id: 12-character container ID prefix.
+        force: If False (default), warns about unpushed checkpoints
+            in the container's git repo.  Use True to override.
+        working_dir: Directory in the container containing the git
+            repository (default ``"/home/sandbox"``).
 
     Removal is forceful: the container is killed (SIGKILL) and removed
     with ``force=True`` rather than gracefully stopped.  A graceful
@@ -755,6 +763,25 @@ def sandbox_stop(container_id: str) -> str:
         return f"Error: container {cid} not found"
     except Exception as e:
         return f"Error: {e}"
+
+    # Check for unpushed checkpoints (Issue #264)
+    if not force:
+        safe_wd = shlex.quote(working_dir)
+        cmd = f"cd {safe_wd} && git log --oneline --not --remotes -1 2>/dev/null"
+        ec, out = container.exec_run(["/bin/sh", "-c", cmd], stdout=True, stderr=True)
+        stdout, _ = (out if isinstance(out, tuple) else (out, b""))
+        stdout_text = stdout.decode("utf-8", errors="replace") if stdout else ""
+        if ec == 0 and stdout_text.strip():
+            count_cmd = f"cd {safe_wd} && git log --oneline --not --remotes 2>/dev/null | wc -l"
+            _, count_out = container.exec_run(
+                ["/bin/sh", "-c", count_cmd], stdout=True, stderr=True
+            )
+            count_stdout, _ = (
+                count_out if isinstance(count_out, tuple) else (count_out, b"")
+            )
+            count_text = count_stdout.decode("utf-8", errors="replace") if count_stdout else ""
+            count = count_text.strip() or "?"
+            return f"Error: Container has {count} unpushed checkpoint(s). Use force=True to override."
 
     # Kill first (ignore if already stopped), then force-remove so a
     # still-running or unresponsive container is torn down regardless.

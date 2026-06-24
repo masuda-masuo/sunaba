@@ -42,6 +42,8 @@ class TestSandboxStopForceKill:
     @patch("code_sandbox_mcp.tools.container._docker")
     def test_kill_then_force_remove(self, mock_docker: MagicMock, mock_record: MagicMock) -> None:
         container = MagicMock()
+        # Return empty git log so checkpoint check passes
+        container.exec_run.return_value = (0, b"")
         client = MagicMock()
         client.containers.get.return_value = container
         mock_docker.return_value = client
@@ -59,6 +61,8 @@ class TestSandboxStopForceKill:
     @patch("code_sandbox_mcp.tools.container._docker")
     def test_kill_apierror_still_removes(self, mock_docker: MagicMock, mock_record: MagicMock) -> None:
         container = MagicMock()
+        # Return empty git log so checkpoint check passes
+        container.exec_run.return_value = (0, b"")
         container.kill.side_effect = APIError("not running")
         client = MagicMock()
         client.containers.get.return_value = container
@@ -200,3 +204,72 @@ class TestRecoveryTimeoutConfigurable:
         for bad in ("not-a-number", "0", "-5"):
             monkeypatch.setenv("CODE_SANDBOX_RECOVERY_DOCKER_TIMEOUT", bad)
             assert _recovery_timeout_from_env() == 15.0
+
+
+class TestSandboxStopUnpushedCheckpoints:
+    """sandbox_stop warns about unpushed checkpoints unless force=True."""
+
+    @patch("code_sandbox_mcp.tools.container._docker")
+    def test_warns_without_force(self, mock_docker: MagicMock) -> None:
+        container = MagicMock()
+        container.exec_run.side_effect = [
+            (0, b"abc1234 2024-01-01 my checkpoint"),
+            (0, b"1"),
+        ]
+        client = MagicMock()
+        client.containers.get.return_value = container
+        mock_docker.return_value = client
+
+        result = sandbox_stop("abc123def456")
+
+        assert "unpushed checkpoint" in result
+        assert "force=True" in result
+        container.kill.assert_not_called()
+        container.remove.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.container.record_stop")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    def test_force_skips_warning(self, mock_docker: MagicMock, mock_record: MagicMock) -> None:
+        container = MagicMock()
+        container.exec_run.return_value = (
+            0, b"abc1234 2024-01-01 my checkpoint"
+        )
+        client = MagicMock()
+        client.containers.get.return_value = container
+        mock_docker.return_value = client
+
+        result = sandbox_stop("abc123def456", force=True)
+
+        container.kill.assert_called_once_with()
+        container.remove.assert_called_once_with(force=True)
+        assert "stopped and removed" in result
+
+    @patch("code_sandbox_mcp.tools.container.record_stop")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    def test_no_unpushed_proceeds(self, mock_docker: MagicMock, mock_record: MagicMock) -> None:
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"")
+        client = MagicMock()
+        client.containers.get.return_value = container
+        mock_docker.return_value = client
+
+        result = sandbox_stop("abc123def456")
+
+        container.kill.assert_called_once_with()
+        container.remove.assert_called_once_with(force=True)
+        assert "stopped and removed" in result
+
+    @patch("code_sandbox_mcp.tools.container.record_stop")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    def test_no_git_proceeds(self, mock_docker: MagicMock, mock_record: MagicMock) -> None:
+        container = MagicMock()
+        container.exec_run.return_value = (128, b"fatal: not a git repository")
+        client = MagicMock()
+        client.containers.get.return_value = container
+        mock_docker.return_value = client
+
+        result = sandbox_stop("abc123def456")
+
+        container.kill.assert_called_once_with()
+        container.remove.assert_called_once_with(force=True)
+        assert "stopped and removed" in result

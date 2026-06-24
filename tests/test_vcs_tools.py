@@ -6,7 +6,7 @@ import inspect
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from code_sandbox_mcp.server import (
+from code_sandbox_mcp.tools.vcs import (
     checkpoint,
     checkpoint_list,
     checkpoint_restore,

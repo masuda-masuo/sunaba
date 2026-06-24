@@ -234,8 +234,18 @@ def write_file_sandbox(
        ``@@`` header errors that make hand-written diffs fail.  Use
        :func:`read_file_range` first to inspect the target area before
        editing.  For bulk / repetitive / structural / computed changes use
-       :func:`transform_file` (imperative).  Reserve :func:`apply_patch` for
-       *machine-generated* diffs.
+       :func:`transform_file` (imperative).
+
+    .. warning::
+
+       **One operation = one logical unit.**  ``old_str`` matches the
+       *exact string you provide* — if it contains multiple lines,
+       **all** of them are replaced.  A common mistake is including
+       an adjacent line you did not intend to touch (e.g. the line
+       after a tool registration).  When removing a single item,
+       keep ``old_str`` as short as uniquely identifying content.
+       For removing multiple separate lines, use :func:`transform_file`
+       or repeated single-line ``old_str`` calls.
 
     Args:
         container_id: 12-character container ID prefix.
@@ -252,11 +262,8 @@ def write_file_sandbox(
         Success or error message.
 
     See also:
-        :func:`read_file_range` — inspect file content before editing.
         :func:`transform_file` — imperative edits (bulk / structural / computed).
-        :func:`transform_file` — imperative edits (bulk / structural /
-        computed).  For machine-generated diffs, use the internal
-        ``apply_patch`` helper (no longer registered as a tool).
+        :func:`read_file_range` — inspect file content before editing.
     """
     client = _docker()
     try:

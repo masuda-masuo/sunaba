@@ -32,6 +32,7 @@ from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _docker
 def sandbox_exec(
     container_id: str,
     commands: list[str],
+    working_dir: str = "",
     verbose: str = "summary",
     max_lines: int = 100,
     offset: int = 0,
@@ -60,6 +61,9 @@ def sandbox_exec(
     Args:
         container_id: 12-character container ID prefix.
         commands: List of shell commands to execute sequentially.
+        working_dir: Working directory to set before executing commands
+            (default ``""`` = no change).  When specified, ``cd`` to
+            this directory is prepended to the command chain.
         verbose: Output verbosity:
 
             - ``"error_only"``: Show output only on failure.
@@ -90,6 +94,8 @@ def sandbox_exec(
         return json.dumps({"status": "error", "error": "timeout must be >= 0"})
     if max_output_tokens < 0:
         return json.dumps({"status": "error", "error": "max_output_tokens must be >= 0"})
+    if working_dir:
+        commands = [f"cd {shlex.quote(working_dir)}"] + commands
 
     client = _docker()
     try:
@@ -221,7 +227,7 @@ def sandbox_exec(
     return json.dumps(result)
 
 
-def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
+def sandbox_exec_background(container_id: str, commands: list[str], working_dir: str = "") -> str:
     """Execute commands in the background inside a running sandbox container.
 
     The command is started with ``nohup`` so it continues running even
@@ -231,6 +237,8 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
     Args:
         container_id: 12-character container ID prefix.
         commands: List of shell commands to execute sequentially.
+        working_dir: Working directory to set before executing commands
+            (default ``""`` = no change).
 
     Returns:
         Job ID string (container_id + timestamp) that can be used to
@@ -248,6 +256,9 @@ def sandbox_exec_background(container_id: str, commands: list[str]) -> str:
         return f"Error: container {container_id[:12]} not found"
     except Exception as e:
         return f"Error: {e}"
+
+    if working_dir:
+        commands = [f"cd {shlex.quote(working_dir)}"] + commands
 
     job_id = f"{container_id}-{int(time.time())}"
     joined = " && ".join(commands)

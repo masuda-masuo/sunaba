@@ -228,6 +228,34 @@ class TestCloneShioriRepoToContainer:
                 )
 
 
+    def test_repo_name_in_path(self, tmp_path: Path) -> None:
+        repos_root = tmp_path / "repos"
+        repos_root.mkdir()
+        clone_dir = repos_root / "owner" / "myrepo"
+        clone_dir.mkdir(parents=True)
+        (clone_dir / ".git").mkdir()
+        (clone_dir / "README.md").write_text("hello")
+    
+        mock_container = MagicMock()
+        mock_container.put_archive.return_value = True
+        mock_container.exec_run.return_value = (
+            0,
+            (b"remote: Enumerating objects: 42, done.\n", b""),
+        )
+    
+        with patch(
+            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+        ):
+            result = _clone_shiori_repo_to_container(
+                mock_container, "abc123", "owner/myrepo", "/tmp/repo"
+            )
+    
+        assert "Copied Shiori clone" in result
+        assert "/tmp/repo/myrepo" in result
+        mock_container.put_archive.assert_called_once()
+    
+    
+
 class TestSandboxInitializeCloneRepo:
     """Tests for sandbox_initialize with clone_repo."""
 

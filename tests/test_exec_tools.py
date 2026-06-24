@@ -11,6 +11,7 @@ from code_sandbox_mcp.tools.container import (
 )
 from code_sandbox_mcp.server import (
     sandbox_exec,
+    sandbox_exec_background,
 )
 
 
@@ -410,6 +411,92 @@ class TestSandboxExec:
         assert result["status"] == "ok"
         assert "truncated" in result.get("output", "")
 
+
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_working_dir_prepends_cd(
+        self,
+        mock_docker: MagicMock,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.image.tags = ["test-image:latest"]
+        mock_container.exec_run.return_value = (0, (b"hello", b""))
+    
+        result = sandbox_exec(
+            "abc123def456",
+            ["echo done"],
+            working_dir="/tmp/repo/code-sandbox-mcp",
+        )
+    
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+    
+        # Verify cd command was prepended
+        call_args = mock_container.exec_run.call_args
+        cmd = call_args[0][0][2]  # The shell -c argument
+        # Commands are base64-encoded; decode to check
+        import base64
+        # Extract base64 part: between 'echo ' and ' | base64 -d >'
+        b64_start = cmd.index("echo ") + 5
+        b64_end = cmd.index(" | base64 -d")
+        decoded = base64.b64decode(cmd[b64_start:b64_end]).decode()
+        assert "cd /tmp/repo/code-sandbox-mcp" in decoded
+        assert "echo done" in decoded
+    
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_working_dir_empty_does_nothing(
+        self,
+        mock_docker: MagicMock,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.image.tags = ["test-image:latest"]
+        mock_container.exec_run.return_value = (0, (b"hello", b""))
+    
+        result = sandbox_exec(
+            "abc123def456",
+            ["echo done"],
+            working_dir="",
+        )
+    
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+    
+        call_args = mock_container.exec_run.call_args
+        cmd = call_args[0][0][2]
+        assert "cd " not in cmd
+    
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_background_working_dir_prepends_cd(
+        self,
+        mock_docker: MagicMock,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+    
+        sandbox_exec_background(
+            "abc123def456",
+            ["echo done"],
+            working_dir="/tmp/repo/code-sandbox-mcp",
+        )
+    
+        call_args = mock_container.exec_run.call_args
+        cmd = call_args[0][0][2]
+        # Commands are base64-encoded inside the inner_cmd; extract and decode
+        import base64
+        inner_start = cmd.index("echo ") + 5
+        inner_end = cmd.index(" | base64 -d >")
+        decoded = base64.b64decode(cmd[inner_start:inner_end]).decode()
+        assert "cd /tmp/repo/code-sandbox-mcp" in decoded
+        assert "echo done" in decoded
+    
+    
 
 class TestServerArgs:
     """Tests for server argument parsing using the actual parser."""

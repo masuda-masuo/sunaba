@@ -196,6 +196,7 @@ def _clone_shiori_repo_to_container(
         raise ValueError("Shiori repos path is not configured. Set --shiori-repos-path or SHIORI_REPOS_PATH env var.")
 
     _validate_clone_repo(clone_repo)
+    repo_name = clone_repo.split("/")[-1]
 
     repos_root = Path(_SHIORI_REPOS_PATH).resolve()
     if not repos_root.is_dir():
@@ -238,7 +239,7 @@ def _clone_shiori_repo_to_container(
 
     try:
         with tarfile.open(fileobj=tmp.file, mode="w") as tar:
-            tar.add(str(resolved_from), arcname="repo", filter=_filter_sensitive)
+            tar.add(str(resolved_from), arcname=repo_name, filter=_filter_sensitive)
         tmp.file.close()
         with open(tmp.name, "rb") as f:
             data = f.read()
@@ -254,11 +255,11 @@ def _clone_shiori_repo_to_container(
         container_id[:12],
         "clone_shiori_repo",
         str(resolved_from),
-        f"{clone_dest}/repo",
+        f"{clone_dest}/{repo_name}",
     )
 
     # -- Run git fetch --unshallow --
-    safe_dest = shlex.quote(f"{clone_dest}/repo")
+    safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
     try:
         exit_code, output = container.exec_run(
             ["/bin/sh", "-c", f"cd {safe_dest} && git fetch --unshallow 2>&1"],
@@ -282,7 +283,7 @@ def _clone_shiori_repo_to_container(
     except Exception as e:
         logger.warning("git fetch --unshallow error: %s", e)
 
-    return f"Copied Shiori clone of {clone_repo} → {clone_dest}/repo in container {container_id[:12]}"
+    return f"Copied Shiori clone of {clone_repo} → {clone_dest}/{repo_name} in container {container_id[:12]}"
 
 
 def _clone_repo_via_network(
@@ -397,7 +398,8 @@ def _setup_pr_branch(
         Success message string.
     """
     cid = container_id[:12]
-    safe_dest = shlex.quote(f"{clone_dest}/repo")
+    repo_name = repo.split("/")[-1]
+    safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
     safe_repo = shlex.quote(repo)
 
     # Step 1: Get PR head branch info
@@ -494,7 +496,7 @@ def _setup_pr_branch(
         safe_dest,
     )
 
-    return f"PR #{pr_number} ({head_ref}) → {clone_dest}/repo in container {cid}"
+    return f"PR #{pr_number} ({head_ref}) → {clone_dest}/{repo_name} in container {cid}"
 
 
 def sandbox_initialize(
@@ -547,7 +549,7 @@ def sandbox_initialize(
                common case) do not need it.
         clone_dest: Destination directory in the container for the
                cloned repository (default: ``/tmp/repo``).
-               The actual path will be ``{clone_dest}/repo``.
+               The actual path will be ``{clone_dest}/{repo_name}`` where *repo_name* is derived from *clone_repo* or *repo*.
         repo: Repository in ``"owner/name"`` format.
                Required when *pr* is specified.
         pr: Pull request number to clone and check out.
@@ -795,7 +797,7 @@ def run_container_and_exec(
                common case) do not need it.
         clone_dest: Destination directory in the container for the
                cloned repository (default: ``/tmp/repo``).
-               The actual path will be ``{clone_dest}/repo``.
+               The actual path will be ``{clone_dest}/{repo_name}`` where *repo_name* is derived from *clone_repo* or *repo*.
         repo: Repository in ``"owner/name"`` format.
                Required when *pr* is specified.
         pr: Pull request number to clone and check out.

@@ -119,6 +119,26 @@ class TestSetupPrBranch:
             )
 
 
+    def test_repo_name_in_path(self):
+        mock_container = MagicMock()
+        mock_container.exec_run.side_effect = [
+            (0, (b'{"headRefName":"feature-branch"}', b"")),
+            (0, (b"Cloning into '/tmp/repo/myrepo'...", b"")),
+            (0, (b"Switched to branch 'feature-branch'", b"")),
+            (0, (b"Installed", b"")),
+        ]
+        with patch("code_sandbox_mcp.tools.container.record_copy"):
+            result = _setup_pr_branch(
+                mock_container,
+                "abc123def456",
+                "owner/myrepo",
+                42,
+                "/tmp/repo",
+            )
+        assert "PR #42" in result
+        assert "/tmp/repo/myrepo" in result
+
+
 class TestSandboxInitializePrParam:
     """Tests for sandbox_initialize with pr parameter."""
 

@@ -235,7 +235,10 @@ def checkpoint_list(
     working_dir: str = "/home/sandbox",
     limit: int = 20,
 ) -> str:
-    """List local Git checkpoints (no push, no verify, no token).
+    """List unpushed local Git checkpoints (no push, no verify, no token).
+
+    Shows only commits that have not been pushed to any remote.  After
+    :func:`submit` succeeds the list naturally becomes empty.
 
     Args:
         container_id: 12-character container ID prefix.

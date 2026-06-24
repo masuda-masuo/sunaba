@@ -297,7 +297,7 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 
 **checkpoint の squash**
 
-`submit` は `squash_checkpoints=True` のとき、未 push の checkpoint コミットだけを1コミットに畳んでから push する。squash ベースは clone/branch 時に記録した分岐点 ref を使い、デフォルトブランチ名に依存せず push を常に fast-forward に保つ。API push 経路は HEAD ツリーを単一コミット化するため、checkpoint は元から残らない。
+`submit` は常に未 push の checkpoint コミットを1コミットに畳んでから push する（`squash_checkpoints` パラメータは削除済み）。squash ベースは clone/branch 時に記録した分岐点 ref を使い、デフォルトブランチ名に依存せず push を常に fast-forward に保つ。API push 経路は HEAD ツリーを単一コミット化するため、checkpoint は元から残らない。
 
 **Rescue PR（gate 失敗時の保全）**
 

@@ -1,15 +1,13 @@
 """Tests for the content-addressable result cache (Issue #43)."""
 from __future__ import annotations
 
-import json
-import time
 from pathlib import Path
 from unittest.mock import patch
 
 from code_sandbox_mcp.result_cache import (
     compute_cache_key,
-    get_cached_result,
     get_cache_stats,
+    get_cached_result,
     invalidate_cache,
     set_cached_result,
 )

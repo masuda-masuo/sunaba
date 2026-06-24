@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from code_sandbox_mcp.trace import (
-    generate_json_trace,
     generate_html_trace,
+    generate_json_trace,
     get_trace_dir,
 )
 

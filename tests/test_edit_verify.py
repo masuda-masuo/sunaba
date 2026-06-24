@@ -12,21 +12,19 @@ from __future__ import annotations
 import json
 
 from src.code_sandbox_mcp.edit_verify import (
-    transform_file_in_container,
     _determine_lint_severity,
     _parse_eslint_output,
     _parse_grep_output,
     _parse_pylint_output,
+    _parse_pyright_output,
     _parse_rg_json,
     _parse_ruff_output,
-    _parse_pyright_output,
     _parse_semgrep_output,
     _parse_sg_json,
     _parse_tsc_text,
     read_file_lines,
+    transform_file_in_container,
 )
-
-
 
 # ===================================================================
 # _parse_ruff_output tests
@@ -933,6 +931,7 @@ class TestDetectLanguages:
 
     def test_explicit_language_skips_detection(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -944,6 +943,7 @@ class TestDetectLanguages:
 
     def test_file_extension_python(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -953,6 +953,7 @@ class TestDetectLanguages:
 
     def test_file_extension_js(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -961,6 +962,7 @@ class TestDetectLanguages:
 
     def test_file_extension_jsx(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -969,6 +971,7 @@ class TestDetectLanguages:
 
     def test_file_extension_mjs(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -977,6 +980,7 @@ class TestDetectLanguages:
 
     def test_file_extension_cjs(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -985,6 +989,7 @@ class TestDetectLanguages:
 
     def test_file_extension_ts(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -995,6 +1000,7 @@ class TestDetectLanguages:
 
     def test_file_extension_tsx(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1004,6 +1010,7 @@ class TestDetectLanguages:
 
     def test_file_extension_go(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1011,7 +1018,8 @@ class TestDetectLanguages:
         assert result.languages == {"go"}
 
     def test_ts_file_with_tsconfig_upward(self) -> None:
-        from unittest.mock import MagicMock, call
+        from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1032,6 +1040,7 @@ class TestDetectLanguages:
 
     def test_unknown_file_extension_returns_unknown(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1042,6 +1051,7 @@ class TestDetectLanguages:
 
     def test_directory_go_detection(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1054,6 +1064,7 @@ class TestDetectLanguages:
 
     def test_directory_python_detection(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1064,6 +1075,7 @@ class TestDetectLanguages:
 
     def test_directory_js_detection(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1074,6 +1086,7 @@ class TestDetectLanguages:
 
     def test_directory_ts_detection(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1084,6 +1097,7 @@ class TestDetectLanguages:
 
     def test_requirements_glob_pattern(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1094,6 +1108,7 @@ class TestDetectLanguages:
 
     def test_multiple_requirements_files_dedup(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1104,6 +1119,7 @@ class TestDetectLanguages:
 
     def test_polyglot_python_and_js(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1119,6 +1135,7 @@ class TestDetectLanguages:
 
     def test_polyglot_ts_and_js(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1135,6 +1152,7 @@ class TestDetectLanguages:
 
     def test_no_markers_returns_unknown(self) -> None:
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1148,6 +1166,7 @@ class TestDetectLanguages:
     def test_exclude_dirs_not_accidentally_detected(self) -> None:
         """node_modules/.venv etc are excluded by -maxdepth 1 and path scope."""
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1158,7 +1177,8 @@ class TestDetectLanguages:
 
     def test_find_cmd_includes_all_marker_patterns(self) -> None:
         from unittest.mock import MagicMock
-        from src.code_sandbox_mcp.edit_verify import detect_languages, _DETECTION_MARKERS
+
+        from src.code_sandbox_mcp.edit_verify import _DETECTION_MARKERS, detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"/app/go.mod\n", b""))
@@ -1175,6 +1195,7 @@ class TestDetectLanguages:
     def test_scope_path_for_subdir_polyglot(self) -> None:
         """Polyglot project where markers are in different subdirectories."""
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1192,6 +1213,7 @@ class TestDetectLanguages:
     def test_same_language_multiple_markers_single_scope(self) -> None:
         """Multiple markers for the same language should not duplicate."""
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1208,6 +1230,7 @@ class TestDetectLanguages:
     def test_ts_file_detects_tsconfig_in_parent(self) -> None:
         """.ts file with tsconfig.json in a parent directory should detect ts with parent scope."""
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1227,6 +1250,7 @@ class TestDetectLanguages:
     def test_ts_file_without_tsconfig(self) -> None:
         """.ts file without any tsconfig.json should still detect ts with file path scope."""
         from unittest.mock import MagicMock
+
         from src.code_sandbox_mcp.edit_verify import detect_languages
 
         mock_container = MagicMock()
@@ -1509,7 +1533,6 @@ class TestRunVerifyDetectionResult:
 
     def test_python_file_does_not_raise(self, monkeypatch):
         """run_verify with a .py path must not raise TypeError (regression #177)."""
-        from unittest.mock import MagicMock
         from src.code_sandbox_mcp.edit_verify import DetectionResult, VerifyResult, run_verify
 
         client, _container = self._make_client()

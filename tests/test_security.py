@@ -16,8 +16,8 @@ import pytest
 from code_sandbox_mcp.security import (
     DEFAULT_SECURITY_PROFILE,
     SecurityProfile,
-    _is_dangerous_socket,
     _is_allowed_host_path,
+    _is_dangerous_socket,
     _validate_volumes,
     build_secure_run_kwargs,
     validate_image_ref,

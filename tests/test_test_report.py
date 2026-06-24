@@ -17,7 +17,6 @@ from src.code_sandbox_mcp.test_report import (
     prune_library_frames,
 )
 
-
 # ===================================================================
 # Common schema tests
 # ===================================================================

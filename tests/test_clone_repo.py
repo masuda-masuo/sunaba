@@ -201,8 +201,9 @@ class TestCloneShioriRepoToContainer:
         assert "Copied Shiori clone" in result
 
     def test_put_archive_failure(self, tmp_path: Path) -> None:
-        from docker.errors import APIError
         from unittest.mock import Mock
+
+        from docker.errors import APIError
 
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
@@ -235,26 +236,26 @@ class TestCloneShioriRepoToContainer:
         clone_dir.mkdir(parents=True)
         (clone_dir / ".git").mkdir()
         (clone_dir / "README.md").write_text("hello")
-    
+
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
         mock_container.exec_run.return_value = (
             0,
             (b"remote: Enumerating objects: 42, done.\n", b""),
         )
-    
+
         with patch(
             "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", str(repos_root)
         ):
             result = _clone_shiori_repo_to_container(
                 mock_container, "abc123", "owner/myrepo", "/tmp/repo"
             )
-    
+
         assert "Copied Shiori clone" in result
         assert "/tmp/repo/myrepo" in result
         mock_container.put_archive.assert_called_once()
-    
-    
+
+
 
 class TestSandboxInitializeCloneRepo:
     """Tests for sandbox_initialize with clone_repo."""
@@ -698,6 +699,7 @@ class TestShioriReposPathArg:
 
     def test_env_var_default(self) -> None:
         import os
+
         from code_sandbox_mcp.server import _build_arg_parser
         with patch.dict(os.environ, {"SHIORI_REPOS_PATH": "/custom/repos"}):
             parser = _build_arg_parser()

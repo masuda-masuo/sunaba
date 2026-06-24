@@ -5,10 +5,10 @@ import time
 
 from code_sandbox_mcp.token import (
     generate_token,
+    get_pending_tokens,
+    reject_token,
     verify_and_consume,
     verify_token,
-    reject_token,
-    get_pending_tokens,
 )
 
 

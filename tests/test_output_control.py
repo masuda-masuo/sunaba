@@ -15,8 +15,6 @@ from __future__ import annotations
 import pytest
 
 from code_sandbox_mcp.output_control import (
-    OutputMetadata,
-    PageResult,
     compress_repeated_lines,
     mask_tokens,
     paginate_output,
@@ -26,7 +24,6 @@ from code_sandbox_mcp.output_control import (
     strip_timestamps,
     truncate_output,
 )
-
 
 # =======================================================================
 # strip_ansi

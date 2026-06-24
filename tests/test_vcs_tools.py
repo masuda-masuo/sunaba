@@ -240,6 +240,7 @@ class TestSubmit:
 
         container = _make_container_mock([
             (0, b"M modified.py\n?? new.py\n---DIFF---\n 2 files changed", b""),
+            (0, b"", b""),
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -283,6 +284,7 @@ class TestSubmit:
 
         container = _make_container_mock([
             (0, b"---DIFF---", b""),
+            (0, b"", b""),
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -315,6 +317,7 @@ class TestSubmit:
 
         container = _make_container_mock([
             (0, b"M file.py\n---DIFF---\n 1 file changed", b""),
+            (0, b"", b""),
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -457,6 +460,7 @@ class TestSubmit:
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
             (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
             (0, b"abc1234def5678", b""),  # git rev-parse
@@ -509,6 +513,7 @@ class TestSubmit:
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
             (0, b"pushed", b""),  # git push
             (0, b"abc1234def5678", b""),  # git rev-parse
@@ -563,6 +568,7 @@ class TestSubmit:
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"nothing to commit, working tree clean", b""),  # git commit (no changes)
             (0, b"Everything up-to-date", b""),  # git push (already up to date)
             (0, b"abc1234def5678", b""),  # git rev-parse
@@ -612,6 +618,7 @@ class TestSubmit:
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),  # git commit
             (1, b"", b"remote rejected: permission denied"),  # git push (fail)
             (0, b"abc1234def5678", b""),  # git rev-parse
@@ -653,6 +660,7 @@ class TestSubmit:
 
         container = _make_container_mock([
             (0, b"M modified.py\n?? new.py\n---DIFF---\n 2 files changed", b""),
+            (0, b"", b""),
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -702,6 +710,7 @@ class TestSubmit:
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
             (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
             (0, b"abc1234def5678", b""),  # git rev-parse
@@ -721,7 +730,7 @@ class TestSubmit:
         assert result["status"] == "pushed"
 
         # Verify the git commit command includes default identity
-        commit_call = container.exec_run.call_args_list[2]
+        commit_call = container.exec_run.call_args_list[3]
         commit_cmd = commit_call[0][0][2]
         assert "user.name" in commit_cmd
         assert "code-sandbox-mcp[bot]" in commit_cmd
@@ -758,6 +767,7 @@ class TestSubmit:
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
             (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
             (0, b"abc1234def5678", b""),  # git rev-parse
@@ -779,7 +789,7 @@ class TestSubmit:
         assert result["status"] == "pushed"
 
         # Verify the git commit command includes custom identity
-        commit_call = container.exec_run.call_args_list[2]
+        commit_call = container.exec_run.call_args_list[3]
         commit_cmd = commit_call[0][0][2]
         assert "user.name" in commit_cmd
         assert "'Custom User'" in commit_cmd
@@ -801,6 +811,7 @@ class TestSubmitTokenFlow:
         """Token from dry_run should be usable for execute."""
         container = _make_container_mock([
             (0, b"M file.py\n---DIFF---\n 1 file changed", b""),
+            (0, b"", b""),
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -1479,7 +1490,7 @@ class TestSubmitOnGateFail:
 
 
 class TestSubmitSquashCheckpoints:
-    """Tests for submit with squash_checkpoints=True."""
+    """Tests for submit with automatic checkpoint squash."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
@@ -1494,7 +1505,7 @@ class TestSubmitSquashCheckpoints:
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """squash_checkpoints=True should reset --soft and re-add."""
+        """Submit should squash unpushed checkpoints with reset --soft."""
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
@@ -1529,7 +1540,6 @@ class TestSubmitSquashCheckpoints:
             message="Fix",
             dry_run=False,
             token="tok_good",
-            squash_checkpoints=True,
         ))
 
         assert result["status"] == "pushed"
@@ -1552,7 +1562,7 @@ class TestSubmitSquashCheckpoints:
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """squash_checkpoints=True with no tracking branch should skip squash."""
+        """Submit with no tracking branch should skip squash."""
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
@@ -1584,7 +1594,6 @@ class TestSubmitSquashCheckpoints:
             message="Fix",
             dry_run=False,
             token="tok_good",
-            squash_checkpoints=True,
         ))
 
         assert result["status"] == "pushed"
@@ -1623,6 +1632,7 @@ class TestSubmitAllowForcePush:
         container = _make_container_mock([
             (0, b"", b""),
             (0, b"", b""),
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),
             (0, b"pushed", b""),
             (0, b"abc1234def5678", b""),
@@ -1683,6 +1693,7 @@ class TestSubmitApiPushFallback:
         container = _make_container_mock([
             (0, b"", b""),
             (0, b"", b""),
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),
             (1, b"", b"remote rejected: permission denied"),
             (0, b"abc1234def5678", b""),
@@ -1734,6 +1745,7 @@ class TestSubmitApiPushFallback:
         container = _make_container_mock([
             (0, b"", b""),
             (0, b"", b""),
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),
             (1, b"", b"remote rejected"),
             (0, b"abc1234def5678", b""),
@@ -1768,13 +1780,14 @@ class TestSubmitApiPushFallback:
         mock_verify_fn: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Dry run should work with squash_checkpoints and allow_force_push."""
+        """Dry run should show checkpoint info when unpushed commits exist."""
         mock_run_id.return_value = "run123"
         mock_verify_fn.return_value = {"gate_passed": True}
         mock_consume.return_value = {"token": "tok_good"}
 
         container = _make_container_mock([
             (0, b"M file.py\n---DIFF---\n 1 file changed", b""),
+            (0, b"abc1234 First checkpoint\ndef5678 Second checkpoint\n", b""),
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -1785,11 +1798,44 @@ class TestSubmitApiPushFallback:
             branch="fix/x",
             message="Fix",
             dry_run=True,
-            squash_checkpoints=True,
             allow_force_push=True,
         ))
 
         assert result["status"] == "dry_run"
+        assert "Checkpoints to squash" in result["diff_summary"]
+        assert "2 commit(s)" in result["diff_summary"]
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.run_verify")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    def test_dry_run_only_checkpoints(
+        self,
+        mock_consume: MagicMock,
+        mock_verify_fn: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Dry run should work with no working tree changes but unpushed commits."""
+        mock_verify_fn.return_value = {"gate_passed": True}
+        mock_consume.return_value = {"token": "tok_good"}
+
+        container = _make_container_mock([
+            (0, b"---DIFF---", b""),
+            (0, b"abc1234 Only checkpoint\n", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(submit(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=True,
+        ))
+
+        assert result["status"] == "dry_run"
+        assert "unpushed checkpoints" in result["diff_summary"]
+        assert "Checkpoints to squash: 1 commit(s)" in result["diff_summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -1816,6 +1862,7 @@ class TestSubmitAsyncProgress:
         container = _make_container_mock([
             (0, b"", b""),       # git checkout -b
             (0, b"", b""),       # git add -A
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"", b""),       # git commit
             (0, b"", b""),       # git push
             (0, b"abc1234", b""),  # git rev-parse HEAD
@@ -1893,6 +1940,7 @@ class TestSubmitAsyncProgress:
         container = _make_container_mock([
             (0, b"", b""),       # git checkout -b
             (0, b"", b""),       # git add -A
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"", b""),       # git commit
             (0, b"", b""),       # git push
             (0, b"abc1234", b""),  # git rev-parse HEAD

@@ -235,7 +235,10 @@ def checkpoint_list(
     working_dir: str = "/home/sandbox",
     limit: int = 20,
 ) -> str:
-    """List local Git checkpoints (no push, no verify, no token).
+    """List unpushed local Git checkpoints (no push, no verify, no token).
+
+    Shows only commits that have not been pushed to any remote.  After
+    :func:`submit` succeeds the list naturally becomes empty.
 
     Args:
         container_id: 12-character container ID prefix.
@@ -258,7 +261,7 @@ def checkpoint_list(
     safe_wd = shlex.quote(working_dir)
     cmd = (
         f"cd {safe_wd} &&"
-        f" git log --oneline --format='%h %aI %s' -{int(limit)}"
+        f" git log --oneline --format='%h %aI %s' HEAD --not --remotes -{int(limit)}"
     )
     ec, out = container.exec_run(
         ["/bin/sh", "-c", cmd],
@@ -595,7 +598,6 @@ async def submit(
     token: str = "",
     verify_path: str = ".",
     on_gate_fail: str = "reject",
-    squash_checkpoints: bool = False,
     allow_force_push: bool = False,
     author_name: str | None = None,
     author_email: str | None = None,
@@ -642,9 +644,6 @@ Args:
         ``"draft"`` creates a draft PR with ``[verify-failing]``
         markers when the verify gate fails (section 11.1 Rescue PR).
         ``"reject"`` aborts the operation on gate failure.
-    squash_checkpoints: When ``True``, squashes unpushed
-        checkpoints into a single commit before push
-        (fast-forward only, no force-push).
     allow_force_push: When ``True`` and needed, permits
         ``git push --force`` (opt-in; default ``False``).
     author_name: Git commit author name.  When set, takes precedence
@@ -700,13 +699,19 @@ Returns:
     # DRY RUN — show plan and generate token
     # ------------------------------------------------------------------
     if dry_run:
-        # Gather diff summary
+        # Gather diff summary (uncommitted changes)
         status_ec, status_out, status_err = _run(
             "git status --porcelain && echo '---DIFF---' && git diff HEAD --stat"
         )
         diff_summary = (status_out + "\n" + status_err).strip()
 
-        if not diff_summary or diff_summary == "---DIFF---":
+        # Check for unpushed checkpoints
+        unpushed_ec, unpushed_out, _ = _run(
+            "git log --oneline HEAD --not --remotes 2>/dev/null"
+        )
+        has_unpushed = unpushed_ec == 0 and unpushed_out.strip() != ""
+
+        if (not diff_summary or diff_summary == "---DIFF---") and not has_unpushed:
             return json.dumps({
                 "status": "dry_run",
                 "diff_summary": "(no changes detected)",
@@ -714,6 +719,15 @@ Returns:
                 "message": message,
                 "warning": "No changes to commit.  Submit will succeed as a no-op.",
             })
+
+        # Build diff_summary with checkpoint info if present
+        if has_unpushed:
+            checkpoint_lines = unpushed_out.strip().splitlines()
+            checkpoint_info = f"\n---\nCheckpoints to squash: {len(checkpoint_lines)} commit(s)"
+            if not diff_summary or diff_summary == "---DIFF---":
+                diff_summary = f"(unpushed checkpoints){checkpoint_info}"
+            else:
+                diff_summary += checkpoint_info
 
         details = (
             f"repo={repo} branch={branch} message={message[:80]}"
@@ -824,14 +838,25 @@ Returns:
             "error": add_err or add_out,
         })
 
-    # --- Squash unpushed checkpoints into a single commit ---
-    if squash_checkpoints:
-        track_ec, track_out, _ = _run("git rev-parse --abbrev-ref @{u} 2>/dev/null")
-        if track_ec == 0 and track_out.strip():
-            unpushed_ec, unpushed_out, _ = _run("git log --oneline @{u}..HEAD")
-            if unpushed_ec == 0 and unpushed_out.strip():
-                _run("git reset --soft @{u}")
-                _run("git add -A")
+    # --- Always squash unpushed checkpoints into a single commit ---
+    track_ec, track_out, _ = _run("git rev-parse --abbrev-ref @{u} 2>/dev/null")
+    if track_ec == 0 and track_out.strip():
+        unpushed_ec, unpushed_out, _ = _run("git log --oneline @{u}..HEAD")
+        if unpushed_ec == 0 and unpushed_out.strip():
+            reset_ec, reset_out, reset_err = _run("git reset --soft @{u}")
+            if reset_ec != 0:
+                return json.dumps({
+                    "status": "error",
+                    "step": "squash_reset",
+                    "error": reset_err or reset_out,
+                })
+            readd_ec, readd_out, readd_err = _run("git add -A")
+            if readd_ec != 0:
+                return json.dumps({
+                    "status": "error",
+                    "step": "squash_readd",
+                    "error": readd_err or readd_out,
+                })
 
     # --- Git identity: set before commit ---
     name_to_use = author_name if author_name is not None else "code-sandbox-mcp[bot]"

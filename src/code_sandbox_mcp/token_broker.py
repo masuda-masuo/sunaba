@@ -26,12 +26,29 @@ Configuration (host env)
     Override path to an already-present broker binary (skips download).
 ``GITHUB_TOKEN_COMMAND_TIMEOUT``
     Command timeout in seconds (default 30).
-``CSB_TOKEN_BROKER_CACHE_DIR`` / ``CSB_TOKEN_BROKER_NO_DOWNLOAD``
-    Cache directory override / disable network fetch (verify-only).
+``CSB_TOKEN_BROKER_CACHE_DIR``
+    Override the directory used to cache the downloaded broker binary.
+``CSB_TOKEN_BROKER_NO_DOWNLOAD``
+    Disable the network fetch entirely (verify-only): an already-cached,
+    checksum-matching binary is reused, otherwise resolution fails and the
+    caller falls back to the static token.  Use this to pin operators to a
+    pre-provisioned binary and forbid implicit downloads.
 
 The binary itself is never committed; the repository pins only the release tag
 and per-platform SHA-256 (``_BROKER_ASSETS``).  The asset is fetched once,
 checksum-verified, and cached locally (pin + fetch + verify).
+
+Bootstrapping caveat
+--------------------
+The broker binary lives in a *private* repo, so ``_download_and_verify`` needs a
+``GITHUB_TOKEN`` / ``GH_TOKEN`` to fetch it -- the very token the broker exists
+to provide.  This is only a one-time bootstrap: because the version is pinned
+and checksum-verified, fetch it once while a token is available (e.g. during
+setup, or a session still launched via mcp-launcher) and every later run reuses
+the cache.  For a fully tokenless daemon, pre-provision the binary out of band
+and point ``GITHUB_TOKEN_BROKER_BIN`` at it (or pre-warm
+``CSB_TOKEN_BROKER_CACHE_DIR``); unauthenticated fetch of a private asset does
+not work.
 """
 from __future__ import annotations
 
@@ -47,6 +64,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import httpx
+import platformdirs
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +106,6 @@ def _cache_dir() -> Path:
     override = os.environ.get("CSB_TOKEN_BROKER_CACHE_DIR")
     if override:
         return Path(override)
-    import platformdirs
-
     return Path(platformdirs.user_cache_dir("code-sandbox-mcp")) / "bin"
 
 

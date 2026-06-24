@@ -571,3 +571,98 @@ class TestContainerEnvBroker:
                 return_value=None,
             ):
                 assert _container_env(inject_vcs_token=True) == {}
+
+
+class TestSandboxExecArgv:
+    """argv mode: shell-free execve path (issue #234, #228 footgun)."""
+
+    def _decode(self, result: str) -> dict:
+        return json.loads(result)
+
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_argv_runs_without_shell(self, mock_docker: MagicMock) -> None:
+        """argv must reach exec_run verbatim, not wrapped in /bin/sh -c."""
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"https://x/issues/1\n", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        body = "multi\nline $'quoted'"
+        result = self._decode(sandbox_exec(
+            container_id="abc123def456",
+            argv=["gh", "issue", "create", "--title", "x", "--body", body],
+        ))
+        assert result["status"] == "ok"
+        called = mock_container.exec_run.call_args
+        # First positional arg is the argv list itself — no shell wrapper,
+        # so newlines and shell metacharacters survive literally.
+        assert called.args[0] == ["gh", "issue", "create", "--title", "x", "--body", body]
+        assert called.args[0][0] != "/bin/sh"
+        assert "shell" not in called.kwargs or not called.kwargs.get("shell")
+
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_argv_working_dir_uses_exec_workdir(self, mock_docker: MagicMock) -> None:
+        """working_dir maps to the exec workdir kwarg, not a `cd &&` prefix."""
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"ok-wd\n", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        sandbox_exec(
+            container_id="abc123def456",
+            argv=["git", "status", "wd-marker"],
+            working_dir="/tmp/repo",
+        )
+        called = mock_container.exec_run.call_args
+        assert called.args[0] == ["git", "status", "wd-marker"]
+        assert called.kwargs["workdir"] == "/tmp/repo"
+
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_argv_timeout_prepends_timeout_binary(self, mock_docker: MagicMock) -> None:
+        """timeout>0 prepends `timeout N` as argv rather than a shell wrapper."""
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"tmo\n", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        sandbox_exec(
+            container_id="abc123def456",
+            argv=["gh", "run", "list", "timeout-marker"],
+            timeout=5,
+        )
+        called = mock_container.exec_run.call_args
+        assert called.args[0] == ["timeout", "5", "gh", "run", "list", "timeout-marker"]
+
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_commands_and_argv_mutually_exclusive(self, mock_docker: MagicMock) -> None:
+        """Passing both commands and argv is rejected before touching docker."""
+        result = self._decode(sandbox_exec(
+            container_id="abc123def456",
+            commands=["echo hi"],
+            argv=["echo", "hi"],
+        ))
+        assert result["status"] == "error"
+        assert "mutually exclusive" in result["error"]
+        mock_docker.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_neither_commands_nor_argv_is_error(self, mock_docker: MagicMock) -> None:
+        """Passing neither commands nor argv is rejected before touching docker."""
+        result = self._decode(sandbox_exec(container_id="abc123def456"))
+        assert result["status"] == "error"
+        assert "required" in result["error"]
+        mock_docker.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_empty_argv_is_rejected(self, mock_docker: MagicMock) -> None:
+        """An empty argv list is rejected before touching docker (review #252)."""
+        result = self._decode(sandbox_exec(
+            container_id="abc123def456",
+            argv=[],
+        ))
+        assert result["status"] == "error"
+        assert "non-empty" in result["error"]
+        mock_docker.assert_not_called()

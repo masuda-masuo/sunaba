@@ -31,7 +31,7 @@ from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _docker
 
 def sandbox_exec(
     container_id: str,
-    commands: list[str],
+    commands: list[str] | None = None,
     working_dir: str = "",
     verbose: str = "summary",
     max_lines: int = 100,
@@ -40,6 +40,7 @@ def sandbox_exec(
     timeout: int = 0,
     max_output_tokens: int = 0,
     input_hash: str = "",
+    argv: list[str] | None = None,
 ) -> str:
     """Execute commands inside a running sandbox container.
 
@@ -82,6 +83,13 @@ def sandbox_exec(
             When set, the output is summarised to fit within this many
             estimated tokens and a ``resource://run/{run_id}/output``
             handle is included for full retrieval.
+        argv: When given, run this argument vector **directly** (no
+            ``/bin/sh -c``), so quoting, ``$'...'`` and embedded newlines
+            are passed through literally.  Mutually exclusive with
+            *commands*.  Intended for VCS/``gh`` calls where shell
+            quoting is a footgun (issue #234 / #228).  *working_dir* is
+            honoured via the exec ``workdir`` and *timeout* is prepended
+            as ``timeout(1)`` argv.
 
     Returns:
         JSON string with ``status``, ``output``, and metadata
@@ -94,7 +102,27 @@ def sandbox_exec(
         return json.dumps({"status": "error", "error": "timeout must be >= 0"})
     if max_output_tokens < 0:
         return json.dumps({"status": "error", "error": "max_output_tokens must be >= 0"})
-    if working_dir:
+
+    # --- Mode selection: commands (shell) vs argv (shell-free execve) ---
+    # ``argv`` runs the program directly via ``exec_run`` without an
+    # intervening ``/bin/sh -c``, so quoting / ``$'...'`` / embedded
+    # newlines pass through literally (issue #234, #228 footgun).
+    if argv is not None and commands:
+        return json.dumps(
+            {"status": "error", "error": "commands and argv are mutually exclusive"}
+        )
+    if argv is not None and not argv:
+        return json.dumps(
+            {"status": "error", "error": "argv must be a non-empty list"}
+        )
+    if argv is None and not commands:
+        return json.dumps(
+            {"status": "error", "error": "either commands or argv is required"}
+        )
+
+    use_argv = argv is not None
+    if not use_argv and working_dir:
+        assert commands is not None  # guaranteed by validation above
         commands = [f"cd {shlex.quote(working_dir)}"] + commands
 
     client = _docker()
@@ -111,13 +139,20 @@ def sandbox_exec(
         image_ref = str(raw) if not isinstance(raw, str) else raw
     except Exception:
         image_ref = container_id[:12]
-    cache_key = compute_cache_key(image_ref, commands, input_hash=input_hash)
+    # Namespace argv-mode separately so it never collides with a
+    # shell-mode call that happens to share an identical token list.
+    if argv is not None:
+        cache_subject = ["\x00argv\x00", *argv]
+    else:
+        assert commands is not None  # guaranteed by validation above
+        cache_subject = commands
+    cache_key = compute_cache_key(image_ref, cache_subject, input_hash=input_hash)
     cached = get_cached_result(cache_key)
     if cached is not None:
         # Journal the cache hit
         journal_record_exec(
             container_id[:12],
-            commands,
+            cache_subject,
             cached.get("exit_code", 0),
             verbose=verbose,
             cached=True,
@@ -126,24 +161,36 @@ def sandbox_exec(
         cached["cached"] = True
         return json.dumps(cached)
 
-    # --- Execute commands ---
-    joined = " && ".join(commands)
-    encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
-    tmpf = f"/tmp/.sx_{os.urandom(4).hex()}.sh"
-    runner = f"timeout {timeout} {tmpf}" if timeout > 0 else tmpf
-    cmd = (
-        f"echo {shlex.quote(encoded)} | base64 -d > {tmpf}"
-        f" && chmod +x {tmpf}"
-        f" && {runner}; rc=$?"
-        f"; rm -f {tmpf}"
-        f"; exit $rc"
-    )
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", cmd],
-        stdout=True,
-        stderr=True,
-        demux=True,
-    )
+    # --- Execute ---
+    if use_argv:
+        assert argv is not None  # guaranteed by validation above
+        # Direct execve: no /bin/sh, so the program receives argv
+        # verbatim.  ``timeout(1)`` is prepended as argv (rather than a
+        # shell wrapper) to preserve the timeout semantics.
+        run_argv = ["timeout", str(timeout), *argv] if timeout > 0 else list(argv)
+        exec_kwargs: dict[str, Any] = {"stdout": True, "stderr": True, "demux": True}
+        if working_dir:
+            exec_kwargs["workdir"] = working_dir
+        exit_code, output = container.exec_run(run_argv, **exec_kwargs)
+    else:
+        assert commands is not None  # guaranteed by validation above
+        joined = " && ".join(commands)
+        encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
+        tmpf = f"/tmp/.sx_{os.urandom(4).hex()}.sh"
+        runner = f"timeout {timeout} {tmpf}" if timeout > 0 else tmpf
+        cmd = (
+            f"echo {shlex.quote(encoded)} | base64 -d > {tmpf}"
+            f" && chmod +x {tmpf}"
+            f" && {runner}; rc=$?"
+            f"; rm -f {tmpf}"
+            f"; exit $rc"
+        )
+        exit_code, output = container.exec_run(
+            ["/bin/sh", "-c", cmd],
+            stdout=True,
+            stderr=True,
+            demux=True,
+        )
     stdout_part, stderr_part = output
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -215,7 +262,7 @@ def sandbox_exec(
 
     journal_record_exec(
         container_id[:12],
-        commands,
+        cache_subject,
         exit_code,
         verbose=verbose,
         cached=False,

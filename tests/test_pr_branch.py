@@ -437,6 +437,7 @@ class TestCloneRepoPrInteraction:
     ):
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
+        mock_container.exec_run.return_value = (0, (b"", b""))
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client

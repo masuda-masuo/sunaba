@@ -622,6 +622,28 @@ Two-step flow for boundary-crossing writes:
 Requires a container started with ``allow_network=True`` and
 ``inject_vcs_token=True``.
 
+.. rubric:: Use when
+
+- **Pushing changes** to a remote branch as the final step of the edit → verify → publish workflow
+- **Creating a PR** from the pushed branch (use ``create_pr=True``)
+- Squashing multiple local checkpoints into a single commit on push
+
+.. rubric:: Don't use when
+
+- **Running verification** — use :func:`verify_in_container` first; ``publish`` does not verify
+- **Local-only save points** — use :func:`checkpoint` instead (no network, no token)
+- **Pushing via GitHub Objects API only** — use :func:`sandbox_create_pr` (deprecated fallback)
+
+.. rubric:: Prefer over
+
+- Prefer over :func:`sandbox_create_pr` for the standard push+PR flow (two transports, no force-push by default)
+- Prefer over manual ``git push`` in ``sandbox_exec`` (the token credential helper is pre-configured)
+
+.. rubric:: Fallback
+
+- If ``git push`` fails (token permissions), the GitHub Objects API transport is tried automatically
+- If the API transport also fails, check that the container has ``inject_vcs_token=True``
+
 Args:
     container_id: 12-character container ID prefix.
     repo: Repository in ``"owner/repo"`` format.
@@ -1255,6 +1277,26 @@ def clone_repo(
        To avoid the two-step "init → clone" workflow, use
        :func:`sandbox_initialize` with ``clone_repo`` — it starts
        the container and copies a pre-cloned Shiori repo in one call.
+
+    .. rubric:: Use when
+
+    - You already have a running container and need to clone an additional repository
+    - You need to clone a specific branch (``branch`` parameter)
+
+    .. rubric:: Don't use when
+
+    - **Starting a new container** — use :func:`sandbox_initialize` with ``clone_repo`` instead (one-step init + clone)
+    - **Cloning a PR branch** — use :func:`sandbox_initialize` with ``pr=N`` instead (auto network + token)
+    - **One-shot workflows** — use :func:`run_container_and_exec` with ``clone_repo`` instead
+
+    .. rubric:: Prefer over
+
+    - Prefer over ``sandbox_exec`` + ``gh repo clone`` for VCS-authenticated clones (token injection handled automatically)
+    - Prefer over ``clone_repo`` when starting a new container — use ``sandbox_initialize(clone_repo=...)`` instead
+
+    .. rubric:: Fallback
+
+    - If ``clone_repo`` fails with a private repo, ensure the container was started with ``inject_vcs_token=True``
 
     Args:
         container_id: 12-character container ID prefix.

@@ -247,6 +247,30 @@ def write_file_sandbox(
        For removing multiple separate lines, use :func:`transform_file`
        or repeated single-line ``old_str`` calls.
 
+    .. rubric:: Use when
+
+    - **Editing files** inside the container — the default tool for AI-authored edits
+    - **Simple one-off string replacement** — use ``old_str`` mode for safe, unique-match edits
+    - **Creating new files** — use full overwrite mode
+    - **Appending to existing files** — use ``append=True``
+    - **Replacing a known line range** — use ``start_line``/``end_line``
+
+    .. rubric:: Don't use when
+
+    - **Bulk / repetitive / structural edits** — use :func:`transform_file` (imperative) instead
+    - **Edits where the new content is computed from existing text** — use :func:`transform_file` instead
+    - **Running shell commands** — use :func:`sandbox_exec` instead
+
+    .. rubric:: Prefer over
+
+    - Prefer over :func:`apply_patch` for AI-authored edits (no ``@@`` header errors)
+    - Prefer over ``sandbox_exec`` + ``sed`` for file editing (no quoting issues, safe uniqueness check)
+
+    .. rubric:: Fallback
+
+    - For complex transforms use :func:`transform_file`
+    - For inspecting content before editing use :func:`read_file_range`
+
     Args:
         container_id: 12-character container ID prefix.
         file_name: Name of the file to write.
@@ -505,6 +529,27 @@ def read_file_range(
        Use ``limit=-1`` to read all remaining lines from *offset*
        to end of file in one call.
 
+    .. rubric:: Use when
+
+    - Reading file content inside the container for inspection
+    - Paginating through large files with *offset*/*limit*
+    - Reading the full file with ``limit=-1``
+
+    .. rubric:: Don't use when
+
+    - **Running shell commands** — use :func:`sandbox_exec` instead
+    - **Searching for a pattern across files** — use :func:`search_in_container` instead
+    - **Editing files** — use :func:`write_file_sandbox` or :func:`transform_file` instead
+
+    .. rubric:: Prefer over
+
+    - Prefer over ``sandbox_exec cat`` for reading files (structured JSON response, pagination support)
+
+    .. rubric:: Fallback
+
+    - For searching content use :func:`search_in_container`
+    - For listing directory contents use :func:`list_files`
+
     Args:
         container_id: 12-character container ID prefix.
         file_path: Path to the file inside the container.
@@ -551,6 +596,27 @@ def list_files(
     Returns a JSON array of file paths sorted alphabetically.
     Hidden files (dotfiles) and directories under ``.git`` are
     excluded.
+
+    .. rubric:: Use when
+
+    - Exploring the container's filesystem structure
+    - Finding files matching a glob pattern (*pattern*)
+    - Getting a quick file count in a directory
+
+    .. rubric:: Don't use when
+
+    - **Reading file content** — use :func:`read_file_range` instead
+    - **Searching for text within files** — use :func:`search_in_container` instead
+    - **Running arbitrary shell commands** — use :func:`sandbox_exec` instead
+
+    .. rubric:: Prefer over
+
+    - Prefer over ``sandbox_exec find`` for listing files (structured JSON response, dotfiles excluded by default)
+
+    .. rubric:: Fallback
+
+    - For file content use :func:`read_file_range`
+    - For text search across files use :func:`search_in_container`
 
     Args:
         container_id: 12-character container ID prefix.

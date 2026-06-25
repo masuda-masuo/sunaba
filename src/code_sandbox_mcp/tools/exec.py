@@ -59,6 +59,32 @@ def sandbox_exec(
        (e.g. Japanese) are safe as long as no literal newline appears
        inside the JSON string value.
 
+    .. rubric:: Use when
+
+    - Running **git commands** (add, commit, push, log, diff) inside the container
+    - Running build scripts, test commands, or any shell command
+    - Running VCS/``gh`` calls via the *argv* parameter to avoid shell quoting issues
+    - Inspecting runtime state (package versions, environment variables, file existence)
+
+    .. rubric:: Don't use when
+
+    - **Reading file content** — use :func:`read_file_range` instead
+    - **Editing files** — use :func:`write_file_sandbox` (declarative) or :func:`transform_file` (imperative) instead
+    - **Searching file content** — use :func:`search_in_container` instead
+    - **Listing files** — use :func:`list_files` instead
+    - **Writing multi-line Python scripts** — use :func:`transform_file` (base64-encoded, no escaping issues)
+
+    .. rubric:: Prefer over
+
+    - Prefer over ``sandbox_exec`` for any file/document operation that has a dedicated tool
+    - Prefer *argv* mode over *commands* mode for ``gh`` calls to avoid shell quoting footguns
+
+    .. rubric:: Fallback
+
+    - If the container has no shell, *argv* mode can run binaries directly via ``execve``
+    - For long-running or fire-and-forget tasks use :func:`sandbox_exec_background`
+    - For a one-shot container lifecycle use :func:`run_container_and_exec`
+
     Args:
         container_id: 12-character container ID prefix.
         commands: List of shell commands to execute sequentially.

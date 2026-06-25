@@ -106,6 +106,30 @@ def transform_file(
        or a value computed from the file.  Always check the returned ``diff``;
        an over-broad pattern can change more than intended.
 
+    .. rubric:: Use when
+
+    - Making **bulk / repetitive** edits (e.g. renaming a symbol across many files)
+    - Applying **structural / computed** transformations (e.g. regex-based rewrites, re-indentation)
+    - Writing **multi-line Python scripts** that need file I/O, ``subprocess``, or complex logic
+    - Edits where the new content is a **computed value** from the existing text
+
+    .. rubric:: Don't use when
+
+    - **Simple one-off string replacement** — use :func:`write_file_sandbox` with ``old_str`` instead
+    - **Line-range replacement** — use :func:`write_file_sandbox` with ``start_line``/``end_line`` instead
+    - **Appending to a file** — use :func:`write_file_sandbox` with ``append=True`` instead
+    - **Creating a new file** — use :func:`write_file_sandbox` full-overwrite mode instead
+
+    .. rubric:: Prefer over
+
+    - Prefer over :func:`apply_patch` for AI-authored edits (no ``@@`` header errors)
+    - Prefer over ``sandbox_exec`` + ``sed`` for file editing (no quoting issues)
+
+    .. rubric:: Fallback
+
+    - For simple declarative edits use :func:`write_file_sandbox`
+    - For inspecting content before editing use :func:`read_file_range`
+
     Args:
         container_id: 12-character container ID prefix.
         file_path: Absolute path to the file inside the container.
@@ -183,6 +207,28 @@ def search_in_container(
     **Structural** mode uses ``ast-grep`` (``sg``) for AST-aware search
     that ignores whitespace/formatting differences.
 
+    .. rubric:: Use when
+
+    - Searching for text patterns across files inside the container
+    - Finding function definitions, imports, or specific code patterns
+    - AST-aware search via *structural* mode (ignores whitespace/formatting)
+
+    .. rubric:: Don't use when
+
+    - **Reading file content** — use :func:`read_file_range` instead
+    - **Listing files** — use :func:`list_files` instead
+    - **Running shell commands** — use :func:`sandbox_exec` instead
+
+    .. rubric:: Prefer over
+
+    - Prefer over ``sandbox_exec grep`` for text search (structured JSON response, language-aware fallback)
+
+    .. rubric:: Fallback
+
+    - If ripgrep/ast-grep is not installed, falls back to POSIX ``grep`` automatically
+    - For file content reading use :func:`read_file_range`
+    - For directory listing use :func:`list_files`
+
     Args:
         container_id: 12-character container ID prefix.
         pattern: Search pattern (regex for lexical, AST pattern for structural).
@@ -223,6 +269,25 @@ def lint_in_container(container_id: str, file_path: str) -> str:
     - ``.py`` → ``ruff check`` (falls back to ``pylint``)
     - ``.js``, ``.ts``, ``.jsx``, ``.tsx`` → ``eslint``
 
+    .. rubric:: Use when
+
+    - Checking code quality during the edit loop
+    - Detecting unused imports, syntax errors, and style violations
+
+    .. rubric:: Don't use when
+
+    - **Type checking** — use :func:`type_check_in_container` instead
+    - **Running tests** — use :func:`verify_in_container` instead
+
+    .. rubric:: Prefer over
+
+    - Prefer over ``sandbox_exec ruff check`` (structured JSON response)
+
+    .. rubric:: Fallback
+
+    - For type checking use :func:`type_check_in_container`
+    - For full pre-publish gate use :func:`verify_in_container`
+
     Args:
         container_id: 12-character container ID prefix.
         file_path: Path to the file inside the container.
@@ -261,6 +326,25 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
     Supported:
     - ``.py`` → ``pyright``
     - ``.ts``, ``.tsx`` → ``tsc --noEmit``
+
+    .. rubric:: Use when
+
+    - Checking type correctness during the edit loop
+    - Catching type errors before running tests
+
+    .. rubric:: Don't use when
+
+    - **Lint checking** — use :func:`lint_in_container` instead
+    - **Running tests** — use :func:`verify_in_container` instead
+
+    .. rubric:: Prefer over
+
+    - Prefer over ``sandbox_exec pyright`` (structured JSON response)
+
+    .. rubric:: Fallback
+
+    - For lint checking use :func:`lint_in_container`
+    - For full pre-publish gate use :func:`verify_in_container`
 
     Args:
         container_id: 12-character container ID prefix.
@@ -321,6 +405,29 @@ def verify_in_container(
        diff summary but as a **push plan** (branch, message, PR info)
        without test results — they are complementary views of the
        same pending change.
+
+    .. rubric:: Use when
+
+    - **Pre-publish test gate** — run as the final step before calling :func:`publish`
+    - Running the **full test suite** after making changes
+    - Running **filtered tests first** (via *test_filter*), then auto-fallback to the full suite
+
+    .. rubric:: Don't use when
+
+    - **Lint checking** — use :func:`lint_in_container` during the edit loop instead
+    - **Type checking** — use :func:`type_check_in_container` during the edit loop instead
+    - **Single specific test file only** — use ``sandbox_exec`` + ``python -m pytest`` instead (see refactoring rules)
+    - **Running non-Python tests** — use ``sandbox_exec`` with the appropriate test runner
+
+    .. rubric:: Prefer over
+
+    - Prefer over individual ``python -m pytest`` calls for the final pre-publish gate
+    - Prefer over manual ``git diff --stat`` — the diff summary is included automatically
+
+    .. rubric:: Fallback
+
+    - If pytest is not available in the container, use ``sandbox_exec`` with the appropriate test runner
+    - For lint/type-check during editing, use :func:`lint_in_container` / :func:`type_check_in_container`
 
     Args:
         container_id: 12-character container ID prefix.

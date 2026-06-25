@@ -1,6 +1,6 @@
-"""Tests for verify MCP tool wrappers (tools/verify.py).
+"""Tests for verify MCP tool wrappers.
 
-Tests cover the 6 wrapper functions (transform_file in file.py) that do container-existence
+Tests cover wrapper functions in tools/verify.py and tools/file.py that do container-existence
 checking then delegate to edit_verify module functions:
   - apply_patch
   - transform_file

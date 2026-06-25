@@ -76,7 +76,7 @@ def sandbox_exec(
 
     .. rubric:: Prefer over
 
-    - Prefer over ``sandbox_exec`` for any file/document operation that has a dedicated tool
+    - Prefer dedicated tools (``write_file_sandbox``, ``transform_file``, ``search_in_container``, etc.) over ``sandbox_exec`` for their specific operations
     - Prefer *argv* mode over *commands* mode for ``gh`` calls to avoid shell quoting footguns
 
     .. rubric:: Fallback

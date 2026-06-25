@@ -342,8 +342,8 @@ def verify_in_container(
     import shlex
 
     from code_sandbox_mcp.edit_verify import (
-        _quote_path,
         _SANDBOX_ENV,
+        _quote_path,
         detect_languages,
     )
 

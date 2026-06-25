@@ -376,6 +376,7 @@ class TestTypeCheckInContainer:
 # verify_in_container
 # ===================================================================
 
+
 class TestVerifyInContainer:
     """Tests for the rewritten verify_in_container (test-only with filter fallback)."""
 

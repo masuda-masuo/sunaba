@@ -69,6 +69,8 @@ class TestVerifyGateLogic:
                 )
 
 
+
+
         return (len(reasons) == 0, reasons)
 
     def test_all_clean_passes_gate(self) -> None:
@@ -125,7 +127,7 @@ class TestVerifyGateLogic:
              "severity": "error", "message": "unknown type"},
         ]
         passed, reasons = self._simulate_gate(
-            [], types_, {"status": "ok", "passed": 5}, [],
+            [], types_, {"status": "ok", "passed": 5},
             gate_on_type_error=True,
         )
         assert passed is False
@@ -198,3 +200,134 @@ class TestVerifyGateLogic:
         assert any("incomplete" in r for r in reasons)
 
 
+    def test_incomplete_test_layer_passes_gate_when_flag_false(self) -> None:
+        passed, reasons = self._simulate_gate(
+            [], [], {"status": "ok", "passed": 5},
+            gate_on_test_fail=False,
+            incomplete_layers={"test"},
+        )
+        assert passed is True
+
+
+# ===================================================================
+# _run_pyright_verify tests
+# ===================================================================
+
+
+
+
+class TestRunVerifyDetectionResult:
+    """Regression tests for #177: run_verify must iterate detected.languages,
+    not the DetectionResult object itself.
+
+    The bug was sorted(detected) instead of sorted(detected.languages), which
+    raised 'DetectionResult' object is not iterable.
+    """
+
+    def _make_client(self, container_id="abc123abc123"):
+        """Return a minimal mock Docker client."""
+        from unittest.mock import MagicMock
+        container = MagicMock()
+        client = MagicMock()
+        client.containers.get.return_value = container
+        return client, container
+
+    def test_python_file_does_not_raise(self, monkeypatch):
+        """run_verify with a .py path must not raise TypeError (regression #177)."""
+        from src.code_sandbox_mcp.edit_verify import DetectionResult, VerifyResult, run_verify
+
+        client, _container = self._make_client()
+
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify.detect_languages",
+            lambda *a, **k: DetectionResult(
+                languages={"python"}, scope={"python": "/app"}, reason=None
+            ),
+        )
+        ok_result = VerifyResult(tool="ruff", status="ok", findings=[], exit_code=0)
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._dispatch_layer",
+            lambda *a, **k: ok_result,
+        )
+
+        result = run_verify(client, "abc123abc123", "/app/main.py")
+        assert result["gate_passed"] is True
+        assert "python" in result["detected_languages"]
+
+    def test_no_languages_detected_passes_gate(self, monkeypatch):
+        """When no language is detected, run_verify must not iterate DetectionResult
+        itself and should pass the gate (no findings)."""
+        from src.code_sandbox_mcp.edit_verify import DetectionResult, run_verify
+
+        client, _container = self._make_client()
+
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify.detect_languages",
+            lambda *a, **k: DetectionResult(
+                languages=set(), scope={}, reason="no markers found"
+            ),
+        )
+
+        result = run_verify(client, "abc123abc123", "/app/unknown")
+        assert result["gate_passed"] is True
+        assert result["detected_languages"] == []
+
+    def test_polyglot_project_iterates_all_languages(self, monkeypatch):
+        """run_verify must dispatch layers for every language in detected.languages."""
+        from src.code_sandbox_mcp.edit_verify import DetectionResult, VerifyResult, run_verify
+
+        client, _container = self._make_client()
+        dispatched: list[tuple[str, str]] = []
+
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify.detect_languages",
+            lambda *a, **k: DetectionResult(
+                languages={"python", "ts"},
+                scope={"python": "/app/backend", "ts": "/app/frontend"},
+                reason=None,
+            ),
+        )
+
+        def fake_dispatch(container, path, lang, layer):
+            dispatched.append((lang, layer))
+            return VerifyResult(tool=layer, status="ok", findings=[], exit_code=0)
+
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._dispatch_layer",
+            fake_dispatch,
+        )
+
+        result = run_verify(client, "abc123abc123", "/app")
+        assert result["gate_passed"] is True
+        dispatched_langs = {lang for lang, _ in dispatched}
+        assert dispatched_langs == {"python", "ts"}
+        assert result["detected_languages"] == ["python", "ts"]
+
+    def test_explicit_language_override_is_respected(self, monkeypatch):
+        """When language= is passed explicitly, detect_languages must receive it
+        and run_verify must iterate only that language."""
+        from src.code_sandbox_mcp.edit_verify import DetectionResult, VerifyResult, run_verify
+
+        client, _container = self._make_client()
+        detected_calls: list = []
+
+        def fake_detect(container, path, language=None):
+            detected_calls.append(language)
+            return DetectionResult(
+                languages={language} if language else set(),
+                scope={language: path} if language else {},
+                reason=None,
+            )
+
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify.detect_languages",
+            fake_detect,
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._dispatch_layer",
+            lambda *a, **k: VerifyResult(tool="x", status="ok", findings=[], exit_code=0),
+        )
+
+        result = run_verify(client, "abc123abc123", "/app", language="python")
+        assert detected_calls == ["python"]
+        assert "python" in result["detected_languages"]

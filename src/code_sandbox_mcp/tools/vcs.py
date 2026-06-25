@@ -8,7 +8,6 @@ import logging
 import posixpath
 import re
 import shlex
-import time as _time
 from typing import Any
 
 from docker.errors import NotFound

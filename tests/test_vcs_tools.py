@@ -358,17 +358,16 @@ class TestPublish:
         assert "token" in result["error"].lower()
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_invalid_token(
         self,
         mock_run_id: MagicMock,
-        mock_gate: MagicMock,
         mock_verify: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """dry_run=False with invalid token should return error."""
         mock_run_id.return_value = "run123"
-        mock_gate.return_value = {"gate_passed": True}
         mock_verify.return_value = None  # token invalid
         mock_docker.return_value = _make_client_mock(MagicMock())
 
@@ -384,53 +383,15 @@ class TestPublish:
         assert result["status"] == "error"
         assert "invalid" in result["error"].lower()
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_verify_gate_fails(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
-        mock_token: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Execute with verify gate failure should reject."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "failed",
-            "gate_passed": False,
-            "gate_fail_reasons": ["lint: 3 error(s)"],
-        }
-        mock_docker.return_value = _make_client_mock(MagicMock())
 
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix",
-            dry_run=False,
-            token="tok_good",
-            working_dir="/root/repo",
-        ))
-
-        assert result["status"] == "rejected"
-        assert result["reason"] == "verify_gate_failed"
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_successful_push(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -442,10 +403,6 @@ class TestPublish:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         # Mock: git add (0), git commit (0), git push (0), git rev-parse (0)
@@ -473,14 +430,16 @@ class TestPublish:
         assert result["status"] == "pushed"
         assert result["branch"] == "fix/x"
         assert result["sha"] == "abc1234"
+
+
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_successful_push_with_pr(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -492,10 +451,6 @@ class TestPublish:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         container = _make_container_mock([
@@ -527,13 +482,13 @@ class TestPublish:
         assert result["pr_url"] == "https://github.com/owner/repo/pull/99"
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_commit_nothing_to_commit_is_ok(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -545,10 +500,6 @@ class TestPublish:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         container = _make_container_mock([
@@ -575,13 +526,13 @@ class TestPublish:
         assert result["status"] == "pushed"
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_push_failure(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -593,10 +544,6 @@ class TestPublish:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         container = _make_container_mock([
@@ -665,13 +612,13 @@ class TestPublish:
     # -- Git identity tests --
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_uses_default_identity(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -683,10 +630,6 @@ class TestPublish:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         container = _make_container_mock([
@@ -720,13 +663,13 @@ class TestPublish:
         assert "'code-sandbox-mcp[bot]'" in commit_cmd
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_with_custom_identity(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -738,10 +681,6 @@ class TestPublish:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         container = _make_container_mock([
@@ -1363,117 +1302,18 @@ class TestCheckpointRestore:
 # Additional publish tests for issue #241 features
 # ---------------------------------------------------------------------------
 
-class TestSubmitOnGateFail:
-    """Tests for publish with on_gate_fail='draft' (Rescue PR path)."""
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_rescue_draft(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_consume: MagicMock,
-        mock_gate: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """on_gate_fail='draft' should call _rescue_pr and return rescue_draft status."""
-        mock_run_id.return_value = "run123"
-        mock_consume.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-        }
-        mock_gate.return_value = {
-            "status": "failed",
-            "gate_passed": False,
-            "gate_fail_reasons": ["lint: 3 error(s)"],
-            "lint": {"passed": False},
-            "type_check": {"passed": True},
-            "test": {"passed": True},
-            "scan": {"passed": True},
-        }
-
-        push_json = json.dumps({"sha": "a" * 40}).encode()
-        container = _make_container_mock([
-            (0, b"", b""),
-            (0, b"[verify-failing] msg", b""),
-            (0, b"", b""),
-            (0, push_json, b""),
-            (0, b"https://github.com/owner/repo/pull/99\n", b""),
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix issue",
-            dry_run=False,
-            token="tok_good",
-))
-
-        assert result["status"] == "rescue_draft"
-        assert result["gate_passed"] is False
-        assert result["sha"] == "aaaaaaa"
-        assert "pr_url" in result
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_rescue_draft_empty_verify(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_consume: MagicMock,
-        mock_gate: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """_rescue_pr with empty verify_result should use fallback message."""
-        mock_run_id.return_value = "run123"
-        mock_consume.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-        }
-        mock_gate.return_value = {
-            "status": "failed",
-            "gate_passed": False,
-        }
-
-        push_json = json.dumps({"sha": "a" * 40}).encode()
-        container = _make_container_mock([
-            (0, b"", b""),
-            (0, b"[verify-failing] msg", b""),
-            (0, b"", b""),
-            (0, push_json, b""),
-            (0, b"https://github.com/owner/repo/pull/100\n", b""),
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix issue",
-            dry_run=False,
-            token="tok_good",
-))
-
-        assert result["status"] == "rescue_draft"
-
 
 class TestPublishSquashCheckpoints:
     """Tests for publish with automatic checkpoint squash."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_squash_checkpoints(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -1485,10 +1325,6 @@ class TestPublishSquashCheckpoints:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         container = _make_container_mock([
@@ -1522,13 +1358,13 @@ class TestPublishSquashCheckpoints:
         assert len(reset_calls) == 1
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_squash_checkpoints_no_tracking(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -1540,10 +1376,6 @@ class TestPublishSquashCheckpoints:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         container = _make_container_mock([
@@ -1573,13 +1405,13 @@ class TestPublishAllowForcePush:
     """Tests for publish with allow_force_push=True."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_allow_force_push(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -1591,10 +1423,6 @@ class TestPublishAllowForcePush:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         container = _make_container_mock([
@@ -1631,13 +1459,13 @@ class TestPublishApiPushFallback:
     """Tests for publish when git push fails and falls back to _try_api_push."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_api_push_fallback_succeeds(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -1649,10 +1477,6 @@ class TestPublishApiPushFallback:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         push_json = json.dumps({"sha": "b" * 40}).encode()
@@ -1682,13 +1506,13 @@ class TestPublishApiPushFallback:
         assert result["sha"] == "bbbbbbb"
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_api_push_fallback_fails(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -1700,10 +1524,6 @@ class TestPublishApiPushFallback:
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
-        }
-        mock_verify_fn.return_value = {
-            "status": "ok",
-            "gate_passed": True,
         }
 
         container = _make_container_mock([
@@ -1731,7 +1551,8 @@ class TestPublishApiPushFallback:
         assert result["status"] == "error"
         assert result["step"] == "git_push"
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_dry_run_with_squash_and_force(
@@ -1739,12 +1560,10 @@ class TestPublishApiPushFallback:
         mock_run_id: MagicMock,
         mock_record: MagicMock,
         mock_consume: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Dry run should show checkpoint info when unpushed commits exist."""
         mock_run_id.return_value = "run123"
-        mock_verify_fn.return_value = {"gate_passed": True}
         mock_consume.return_value = {"token": "tok_good"}
 
         container = _make_container_mock([
@@ -1767,15 +1586,14 @@ class TestPublishApiPushFallback:
         assert "Checkpoints to squash" in result["diff_summary"]
         assert "2 commit(s)" in result["diff_summary"]
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     def test_dry_run_only_checkpoints(
         self,
         mock_consume: MagicMock,
-        mock_verify_fn: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Dry run should work with no working tree changes but unpushed commits."""
-        mock_verify_fn.return_value = {"gate_passed": True}
         mock_consume.return_value = {"token": "tok_good"}
 
         container = _make_container_mock([
@@ -1799,3 +1617,7 @@ class TestPublishApiPushFallback:
 
 
 # ---------------------------------------------------------------------------
+# publish async + progress notification tests (Issue #253)
+# ---------------------------------------------------------------------------
+
+

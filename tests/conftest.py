@@ -28,6 +28,39 @@ def _mock_result_cache() -> None:
         yield
 
 # -------------------------------------------------------------------
+# Shared helpers for VCS tool tests
+# -------------------------------------------------------------------
+
+
+import asyncio
+import inspect
+import json
+from unittest.mock import MagicMock
+
+
+def _make_container_mock(exec_returns: list[tuple[int, bytes, bytes]]):
+    """Build a mock Docker container with a sequence of exec_run results."""
+    container = MagicMock()
+    container.exec_run.side_effect = [
+        (ec, (stdout, stderr)) for ec, stdout, stderr in exec_returns
+    ]
+    return container
+
+
+def _make_client_mock(container: MagicMock):
+    """Build a mock Docker client that returns the given container."""
+    client = MagicMock()
+    client.containers.get.return_value = container
+    return client
+
+
+def _decode(result):
+    if inspect.iscoroutine(result):
+        result = asyncio.run(result)
+    return json.loads(result)
+
+
+# -------------------------------------------------------------------
 # Shared test helpers for edit-verify tests
 # -------------------------------------------------------------------
 

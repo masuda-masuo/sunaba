@@ -9,7 +9,6 @@ from docker.errors import NotFound
 from code_sandbox_mcp.edit_verify import (
     apply_patch_to_file,
     lint_file,
-    run_verify,
     search_files,
     transform_file_in_container,
     type_check_file,
@@ -296,79 +295,69 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
 def verify_in_container(
     container_id: str,
     path: str,
-    gate_on_lint_error: bool = True,
-    gate_on_type_error: bool = False,
-    gate_on_test_fail: bool = True,
-    gate_on_scan_error: bool = True,
-    gate_on_scan_warning: bool = False,
+    test_filter: str | None = None,
+    verbose: bool = False,
+    pytest_args: str | None = None,
     language: str | None = None,
 ) -> str:
-    """Run lint + type_check + test + scan as a bundled verification.
+    """Run pytest with optional filter → full-suite fallback and diff summary.
 
-    **Use this instead of calling** :func:`lint_in_container` **,**
-    :func:`type_check_in_container` **, and pytest separately.**
-    A single call runs all four analysis layers, normalises output,
-    and returns a gate decision.
+    **Use this as the pre-publish test gate.**  When *test_filter* or
+    *pytest_args* is provided, the filtered tests run first; if they
+    pass, the full test suite runs automatically.  The gate decision is
+    always based on the full suite result.
 
-    Supports multi-language verification (Python / JS / TS / Go) with
-    language-aware dispatch.  Auto-detects project language from *path*
-    unless overridden with *language*.
+    Lint and type-checking should be done separately with
+    :func:`lint_in_container` and :func:`type_check_in_container`
+    during the edit loop.
 
-    **Layers:**
+    Returns a diff summary (``git diff --stat``) so the LLM can
+    present changes to the user before calling :func:`publish`.
 
-    =========== ======== ============================
-    Layer       Tool    Notes
-    =========== ======== ============================
-    lint        ruff    Python lint (``ruff check``)
-    type_check  pyright Python type checking
-    test        pytest  pytest with json-report
-    scan        semgrep Security scanning
-    =========== ======== ============================
+    .. note::
 
-    **Gate logic:**
-
-    By default the gate fails when any of the following are detected:
-
-    * lint errors (E/F/B/RUF rule codes)
-    * test failures
-    * semgrep ``ERROR`` findings
-    * verification incomplete (tool not available or errored)
-
-    Type-check errors and semgrep ``WARNING`` findings are
-    configurable via the ``gate_on_*`` parameters.
+       This diff summary includes **test outcomes** (gate_passed,
+       test counts).  :func:`publish`'s ``dry_run`` also returns a
+       diff summary but as a **push plan** (branch, message, PR info)
+       without test results — they are complementary views of the
+       same pending change.
 
     Args:
         container_id: 12-character container ID prefix.
-        path: File or directory path inside the container.
-        gate_on_lint_error: Whether lint errors fail the gate
-            (default ``True``).
-        gate_on_type_error: Whether type-check errors fail the gate
-            (default ``False``).
-        gate_on_test_fail: Whether test failures fail the gate
-            (default ``True``).
-        gate_on_scan_error: Whether semgrep ERROR findings fail the gate
-            (default ``True``).
-        gate_on_scan_warning: Whether semgrep WARNING findings fail the gate
-            (default ``False``).
+        path: File or directory path inside the container (e.g.
+            ``"tests/"``).
+        test_filter: pytest ``-k`` expression for selective test
+            execution.  When set, filtered tests run first; if
+            they pass, the full suite runs automatically.
+        verbose: Pass ``-v`` to pytest (default ``False``).
+        pytest_args: Additional raw pytest arguments (e.g.
+            ``"-x --tb=short"``).  Applied to both filtered and
+            full runs.
         language: Explicit language override (``"python"``, ``"js"``,
             ``"ts"``, ``"go"``).  Skips auto-detection.
 
     Returns:
         JSON string with:
 
-        * ``status``: ``"ok"`` or ``"failed"``
-        * ``gate_passed``: ``True`` if all gate conditions are satisfied
-        * ``incomplete``: ``True`` if any layer was not available / errored
+        * ``gate_passed``: ``True`` if full test suite passed
+        * ``partial_test_run``: ``True`` when only filtered tests ran
+          (filtered failed, full was never executed)
         * ``detected_languages``: list of detected language keys
-        * ``lint``: list of ``{file, line, rule, severity, message}``
-        * ``types``: list of ``{file, line, rule, severity, message}``
-        * ``tests``: ``{status, passed, failed, duration, failures?}``
-        * ``scan``: list of ``{file, line, rule, severity, message}``
+        * ``tests``: result dict with ``filtered`` and/or ``full`` keys
+        * ``diff_summary``: ``git diff --stat`` output
         * ``gate_fail_reasons`` (optional): list of human-readable reasons
     """
+    import shlex
+
+    from code_sandbox_mcp.edit_verify import (
+        _SANDBOX_ENV,
+        _quote_path,
+        detect_languages,
+    )
+
     client = _docker()
     try:
-        _ = client.containers.get(container_id)
+        container = client.containers.get(container_id)
     except NotFound:
         return json.dumps({
             "status": "error",
@@ -382,15 +371,111 @@ def verify_in_container(
             "error": str(e),
         })
 
-    result = run_verify(
-        client,
-        container_id,
-        path,
-        gate_on_lint_error=gate_on_lint_error,
-        gate_on_type_error=gate_on_type_error,
-        gate_on_test_fail=gate_on_test_fail,
-        gate_on_scan_error=gate_on_scan_error,
-        gate_on_scan_warning=gate_on_scan_warning,
-        language=language,
+    # --- Language detection ---
+    detected = detect_languages(container, path, language)
+
+    def _run(cmd: str) -> tuple[int, str, str]:
+        ec, out = container.exec_run(
+            ["/bin/sh", "-c", cmd], stdout=True, stderr=True,
+        )
+        out_stdout, out_stderr = (
+            out if isinstance(out, tuple) else (out, b"")
+        )
+        stdout_text = (
+            out_stdout.decode("utf-8", errors="replace") if out_stdout else ""
+        )
+        stderr_text = (
+            out_stderr.decode("utf-8", errors="replace") if out_stderr else ""
+        )
+        return ec, stdout_text, stderr_text
+
+    # --- Get diff summary ---
+    diff_ec, diff_out, diff_err = _run(
+        "git diff HEAD --stat 2>/dev/null && echo '---UNSTAGED---' && "
+        "git diff --cached --stat 2>/dev/null"
     )
+    diff_summary = (diff_out + "\n" + diff_err).strip()
+    if not diff_summary:
+        diff_summary = "(no changes detected)"
+
+    # --- Determine if partial test run (filter provided) ---
+    has_filter = bool(test_filter or pytest_args)
+    extra_args = ""
+    if test_filter:
+        extra_args += f" -k {shlex.quote(test_filter)}"
+    if verbose:
+        extra_args += " -v"
+    if pytest_args:
+        extra_args += f" {pytest_args}"
+
+    result: dict = {
+        "gate_passed": False,
+        "partial_test_run": False,
+        "detected_languages": sorted(detected.languages),
+        "tests": {},
+        "diff_summary": diff_summary,
+    }
+    if detected.reason:
+        result["detection_warning"] = detected.reason
+
+    # --- Run pytest ---
+    def _run_pytest(filter_args: str) -> dict:
+        _json_file = "/tmp/_pytest_report.json"
+        full_cmd = (
+            f"{_SANDBOX_ENV}python3 -m pytest --json-report "
+            f"--json-report-file={_json_file} -q{filter_args} "
+            f"{_quote_path(path)} >/dev/null 2>&1; "
+            f"_ec=$?; cat {_json_file} 2>/dev/null; "
+            f"rm -f {_json_file}; exit $_ec"
+        )
+        ec, stdout_text, stderr_text = _run(full_cmd)
+
+        if ec == 127:
+            return {"status": "not_available", "error": "python3 not found in container"}
+        if ec == 5:
+            return {"status": "no_tests", "error": "no tests found"}
+
+        stdout_text_s = stdout_text if isinstance(stdout_text, str) else ""
+
+        if not stdout_text_s.strip():
+            return {"status": "no_tests", "error": "no test output produced"}
+
+        try:
+            from code_sandbox_mcp.test_report import PytestAdapter
+            report = PytestAdapter.parse_json(stdout_text_s)
+            d = report.to_dict()
+            return d
+        except Exception:
+            return {"status": "error", "error": f"failed to parse pytest output (exit {ec})"}
+
+    if has_filter:
+        # Phase 1: filtered test run
+        filtered_result = _run_pytest(extra_args)
+        result["tests"]["filtered"] = filtered_result
+        if filtered_result.get("status") != "ok":
+            result["partial_test_run"] = True
+            result["gate_fail_reasons"] = [
+                f"filtered tests ({filtered_result.get('status', 'unknown')}): "
+                f"{filtered_result.get('failed', 0)} failed"
+            ]
+            return json.dumps(result)
+        # Phase 2: full test suite
+        full_result = _run_pytest("")
+        result["tests"]["full"] = full_result
+    else:
+        full_result = _run_pytest(extra_args)
+        result["tests"]["full"] = full_result
+
+    if full_result.get("status") == "ok":
+        result["gate_passed"] = True
+    elif full_result.get("status") == "not_available":
+        result["gate_fail_reasons"] = ["pytest not available in container"]
+    elif full_result.get("status") == "no_tests":
+        result["gate_pass_reason"] = "no tests found — gate passes"
+        result["gate_passed"] = True
+    else:
+        result["gate_fail_reasons"] = [
+            f"tests: {full_result.get('failed', 0)} failure(s)"
+        ]
+
     return json.dumps(result)

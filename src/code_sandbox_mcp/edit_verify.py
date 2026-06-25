@@ -1394,31 +1394,26 @@ _DISPATCH: dict[str, dict[str, Any]] = {
         "lint": _run_ruff_verify,
         "type": _run_pyright_verify,  # primary
         "test": _run_pytest_verify,
-        "scan": lambda c, p: _run_semgrep_verify(c, p, "p/python"),
     },
     "js": {
         "lint": _run_eslint_verify,
         "type": None,  # skipped
         "test": _run_jest_verify,
-        "scan": lambda c, p: _run_semgrep_verify(c, p, "p/javascript"),
     },
     "ts": {
         "lint": _run_eslint_verify,
         "type": _run_tsc_verify,
         "test": _run_jest_verify,
-        "scan": lambda c, p: _run_semgrep_verify(c, p, "p/typescript"),
     },
     "go": {
         "lint": _run_golangci_lint_verify,
         "type": None,  # skipped: build/vet covers typing
         "test": _run_go_test_verify,
-        "scan": lambda c, p: _run_semgrep_verify(c, p, "p/go"),
     },
     "unknown": {
         "lint": None,
         "type": None,
         "test": None,
-        "scan": None,
     },
 }
 
@@ -1913,7 +1908,7 @@ def run_verify(
     - ``"skipped"`` — intentionally not run (no layer for this language)
 
     Gate logic:
-    - **strict** (submit): any ``"not_available"`` or ``"error"``
+    - **strict** (publish): any ``"not_available"`` or ``"error"``
       status causes ``gate_passed=false`` with reason
       ``"verification incomplete: <tool> <status>"``.
     - **lenient** (interactive verify): passes but returns
@@ -1924,7 +1919,7 @@ def run_verify(
         container_id: 12-character container ID prefix.
         path: File or directory path inside the container.
         strict: When ``True``, missing/unavailable tools cause gate
-            failure (submit mode).  When ``False`` (lenient, interactive
+            failure (publish mode).  When ``False`` (lenient, interactive
             verify), passes but sets ``incomplete: true``.
         gate_on_lint_error: Whether lint errors fail the gate
             (default ``True``).
@@ -1965,12 +1960,11 @@ def run_verify(
         "lint": [],
         "type": [],
         "test": [],
-        "scan": [],
     }
 
     for lang in sorted(detected.languages):
         scope_path = detected.scope.get(lang, path)
-        for layer_name in ("lint", "type", "test", "scan"):
+        for layer_name in ("lint", "type", "test"):
             vr = _dispatch_layer(container, scope_path, lang, layer_name)
             layers[layer_name].append(vr)
 
@@ -1982,7 +1976,6 @@ def run_verify(
         "lint": gate_on_lint_error,
         "type": gate_on_type_error,
         "test": gate_on_test_fail,
-        "scan": gate_on_scan_error,
     }
 
     for layer_name, results in layers.items():
@@ -2037,32 +2030,7 @@ def run_verify(
                 except (json.JSONDecodeError, ValueError):
                     pass
 
-    # Scan error gate
-    if gate_on_scan_error:
-        for vr in layers["scan"]:
-            if vr.status == "findings":
-                scan_errors = [
-                    r for r in vr.findings
-                    if r.get("severity") == "ERROR"
-                    and r.get("rule") not in ("no-scanner",)
-                ]
-                if scan_errors:
-                    gate_fail_reasons.append(
-                        f"scan ({vr.tool}): {len(scan_errors)} ERROR(s)"
-                    )
 
-    # Scan warning gate
-    if gate_on_scan_warning:
-        for vr in layers["scan"]:
-            if vr.status == "findings":
-                scan_warnings = [
-                    r for r in vr.findings
-                    if r.get("severity") == "WARNING"
-                ]
-                if scan_warnings:
-                    gate_fail_reasons.append(
-                        f"scan ({vr.tool}): {len(scan_warnings)} WARNING(s)"
-                    )
 
     gate_passed = len(gate_fail_reasons) == 0
     overall_status = "failed" if not gate_passed else "ok"
@@ -2079,7 +2047,6 @@ def run_verify(
         "lint": _flatten_layer(layers["lint"]),
         "types": _flatten_layer(layers["type"]),
         "tests": _flatten_test_layer(layers["test"]),
-        "scan": _flatten_layer(layers["scan"]),
     }
 
     if detection_warning:

@@ -201,7 +201,7 @@ def record_file_write(
 
     *is_test* indicates whether the written file is a test file
     (based on path conventions such as ``test_`` prefix or
-    ``tests/`` directory).  This enables the submit flow to
+    ``tests/`` directory).  This enables the publish flow to
     flag "test changes" as a first-class signal (Issue #96).
     """
     run_id = get_or_create_run_id(container_id)
@@ -378,7 +378,7 @@ def get_runs() -> list[dict[str, Any]]:
         if entry.get("boundary_crossing") or entry.get("operation") == "boundary_crossing":
             run["boundary_crossings"] += 1
             sub_op = entry.get("sub_operation", "")
-            if sub_op in ("issue_view", "submit"):
+            if sub_op in ("issue_view", "publish"):
                 run["vcs_operations"] += 1
 
     return sorted(runs.values(), key=lambda r: r.get("started", ""), reverse=True)

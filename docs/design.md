@@ -23,7 +23,7 @@
 - **クリーン環境優先**: 状態共有による高速化より、再現性・安全性・デバッグ容易性を優先。原則は使い捨て環境。
 - **リスク階層**: AI にホストを直接操作させるリスクは最大（`rm -rf ~` / `git push --force` / SSH鍵流出の経路が無制限）。コンテナに隔離すれば、何をされても使い捨てで消える。この MCP の価値の半分は **「できないことの保証」** にある — ネットワーク off 既定 / 非 root 強制 / VCSトークン opt-in の三重ロックで、AI の暴走が境界を越える経路を構造的に塞いでいる。
 - **ホスト権限の最小化（承認疲れ防止）**: サンドボックスなしで AI がホスト上で作業すると、Bash/PowerShell の承認プロンプトが頻発する。ユーザーは承認疲れで全許可にしてしまい、結果として AI がホスト上で何でもできる状態になる。この MCP を使うことで実作業をコンテナ内に集約し、ホスト側のシェル権限をオフのまま維持できる。**MCP があることでホスト権限を絞れる**、というのが本来の設計意図であり、ローカル直接作業はその恩恵を自ら壊す。
-- **スコープの線引き**: このMCPは「テスト・検証・提出（submit）まで回すサンドボックス」。**コード理解レイヤーの自前実装は引き続き §1 で除外**。外部VCSへの提出（push/PR/issue取得）は、コンテナ内クローンに対する**境界越え操作**として §2.2 の条件下でのみ許可。ユーザのローカル作業ツリーは §5 の通り対象外のまま。
+- **スコープの線引き**: このMCPは「テスト・検証・提出（publish）まで回すサンドボックス」。**コード理解レイヤーの自前実装は引き続き §1 で除外**。外部VCSへの提出（push/PR/issue取得）は、コンテナ内クローンに対する**境界越え操作**として §2.2 の条件下でのみ許可。ユーザのローカル作業ツリーは §5 の通り対象外のまま。
 - **組織化プリミティブ = セッション**: すべてのツールは「Docker操作」ではなく **ライブなセッション（コンテナ＋FS＋run履歴を持つ作業空間）に対する操作** として設計する。機能の所属は常に **「それはセッション状態に対する操作か?」** で判定する（Yes＝入れる / 横断的なコード理解はNo＝§1で切る）。
 - **affordance**: インストール済み ≠ 使われる。LLM はツールリストに**動詞として載っている能力**しか常用しない（Claude Code が bash を持ちつつ Grep/Edit/Glob を別ツールとして出しているのが傍証）。「使わせたい操作」は first-class ツールにする。**ただし §1/§5 の非増殖と両立**させ、first-class 化は「常用させたい動詞」に限る（残りはイメージ同梱＋exec）。
 
@@ -41,7 +41,7 @@
 - **`create_network` / `expose_port_temporarily` / `estimate_cost`** → 後回し。Composeで足りる領域はComposeに寄せる。
 - **コンテナ内任意コマンドの「危険度判定」ゲート** → **入れない。** 自己申告に依存して構造的に強制できない。守るのは境界越え操作のみ（§2）。
 - **Tool Auto Discovery / Intelligent Test Runner** → 北極星（ビジョン）として保持。
-- **外部VCS の広域運用** → **入れない。** issue 一覧管理・レビュー運用・projects 連携等は GitHub MCP の領分。このMCPは入口（`issue_view`）と出口（`submit`）に限定。
+- **外部VCS の広域運用** → **入れない。** issue 一覧管理・レビュー運用・projects 連携等は GitHub MCP の領分。このMCPは入口（`issue_view`）と出口（`publish`）に限定。
 
 ---
 
@@ -62,7 +62,7 @@
 
 **対象（write 系・トークン必須）**
 - 永続ボリュームの削除 / 永続リソースの削除 / ホストマウント変更 / ネットワーク変更。
-- **外部VCS への書き込み**: `git push` / PR作成 / PRコメント / リモートブランチ削除。verify ゲート（§5）未通過の push はトークン発行段階で拒否。
+- **外部VCS への書き込み**: `git push` / PR作成 / PRコメント / リモートブランチ削除。
 - 方式: 該当ツールは `dry_run` で実行予定＋確認トークンを返し、本実行はトークン無しでは無条件拒否（二段階トークン）。elicitation は対応クライアント向けの確認UI糖衣として任意で返す。
 
 **対象（read 系・ネットワーク許可＋記録のみ）**
@@ -88,7 +88,7 @@
 - [x] **失敗のフィンガープリント＋重複圧縮**: 同型失敗は `×N` に畳む（`compress_failures`）。
 - [x] **`rerun_failed(run_id)` / 影響範囲の絞り込み再実行**: 失敗分・変更ファイルが影響するテストだけ実行。
 - [x] **コンテンツアドレスな結果キャッシュ**: image＋コマンド＋入力ハッシュが不変なら `cached: true`（`result_cache.py`）。
-- **`submit` の差分も非通過**: diff はコンテナ内で完結し、LLM には差分サマリ＋ハンドルのみ返す。
+- **`publish` の差分も非通過**: diff はコンテナ内で完結し、LLM には差分サマリ＋ハンドルのみ返す。
 
 ### 3.3 返す前にデノイズ
 - ANSIカラー・タイムスタンプ・`\r` 進捗バーを除去。`CI=true` / `--no-color` 等を強制。
@@ -137,7 +137,8 @@
 - **`search_in_container`**: `mode: lexical|structural` で ripgrep / ast-grep を切り替え。`{file, line, text}` 配列を返す。`max_results` 上限付き。理想ループの起点。
 - **`read_file_range`**: `offset` / `limit` で該当箇所だけ読む。
 - **`write_file_sandbox`（編集の主役）**: 既知の新テキストを渡す宣言的編集。`overwrite` / 行範囲 / `append` / `old_str`（文字列置換）の各モードを束ねる。LLM 著作編集の既定経路。
-- **`verify`**: lint（ruff）＋ type_check（pyright/mypy）＋ test（pytest/jest/go test）＋ scan（semgrep）を **1コールで強制実行**。各ツールの出力を `{file, line, rule, severity, message}` に統一。`submit` の内部ゲートでも必ず再実行（構造的強制）。ゲート閾値: lint error / pytest fail / semgrep ERROR で push 拒否。型エラーと semgrep WARNING は設定で変更可能。
+- **`lint_in_container` / `type_check_in_container`**: 編集ループ中の単体確認用。ruff / pyright。
+- **`verify_in_container`**: test 専用。`test_filter`（pytest `-k`）で特定テストだけ実行可能。フィルタ合格時は自動で全件テストを実行し、gate は常に全件ベースで判定。結果に `diff_summary`（`git diff --stat`）を含める。
 
 **編集の2モダリティ（宣言的 / 命令的の直交2本）**
 
@@ -155,7 +156,7 @@
 
 **理想ループ（最小コンテキスト）**
 ```
-search_in_container → read_file_range → write_file_sandbox(old_str) | transform_file → verify → submit
+search_in_container → read_file_range → write_file_sandbox(old_str) | transform_file → lint_in_container → type_check_in_container → verify_in_container → publish
 ```
 
 ---
@@ -229,7 +230,7 @@ else:
 - **ローカルWebダッシュボード（localhost限定 / read-mostly / 自動更新）**: 稼働コンテナ・run履歴・pass/fail・リソース使用量・承認待ちを一目で。
 - **承認キュー＋ワンクリック Approve/Reject（縮小）**: §2.2 の境界越え操作トークンと連動。ダッシュボードの一機能。
 - **プッシュ通知（OS通知 / Webhook）**: 境界越え操作・失敗閾値超え・長時間実行のときだけ。
-- **実行前の人間向けプラン表示**: `submit` で対象ブランチ・差分サマリ・上書き有無を提示。
+- **実行前の人間向けプラン表示**: `publish` で対象ブランチ・差分サマリ・上書き有無を提示。
 
 > 注意: ダッシュボードは localhost 限定＋必要なら認証。
 
@@ -242,14 +243,14 @@ else:
 
 ---
 
-## 11. 外部VCS連携（issue→fix→verify→submit の自己完結）
+## 11. 外部VCS連携（issue→fix→verify→publish の自己完結）
 
 > 位置づけ: edit/verify ループの**入口（課題取得）と出口（提出）**だけを足す。GitHub MCP を介さず payload をコンテキストに通さないことが唯一の狙い。
 
 **ツール**
 
 - **`issue_view`**（read）: issue 本文をコンテナ内ファイルへ落とし、LLM には**要約＋ハンドル**だけ返す（§3.1）。§2.2 read 扱い（ジャーナル記録・ネットワーク明示許可）。
-- **`submit`**（write / 境界越え）: コミット済みの状態を push し、任意で PR を作成する唯一の出口。内部で `verify` を必ず再実行し、ゲート不合格なら push を拒否する。§2.2 の二段階トークン必須、§8 ジャーナルにプランと結果を記録。
+- **`publish`**（write / 境界越え）: コミット済みの状態を push し、任意で PR を作成する唯一の出口。verify は内蔵せず、LLM が `verify_in_container` で事前に行う。§2.2 の二段階トークン必須、§8 ジャーナルにプランと結果を記録。
 
 **認証（opt-in トークン注入）**
 
@@ -262,7 +263,7 @@ VCS トークンは `inject_vcs_token=True` を指定したコンテナにのみ
 **payload 非通過フロー**
 
 ```
-issue_view →(要約)→ search_in_container → read_file_range → write_file_sandbox(old_str) | transform_file → verify → submit
+issue_view →(要約)→ search_in_container → read_file_range → write_file_sandbox(old_str) | transform_file → lint_in_container → type_check_in_container → verify_in_container → publish
 ```
 
 issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンドル / 構造化サマリだけ運ぶ。
@@ -277,38 +278,26 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 |---|---|---|---|---|
 | 保存 | `checkpoint` / `checkpoint_list` | 不要 | 無し | コンテナ内 |
 | 巻き戻し | `checkpoint_restore` | 不要 | 無し | コンテナ内 |
-| 出口 | `submit` | 必須 | 有り | GitHub への push |
+| 出口 | `publish` | 必須 | 無し（LLM が事前に verify_in_container で担保） | GitHub への push |
 
 コンテナ内は使い捨て（§0）。保存・巻き戻し層は token もゲートも要らず、edit/verify ループ中のセーブポイントと巻き戻しに使う。ゲートの対象は境界を越える push だけ（§2.2）。
 
-**出口（`submit`）と transport**
+**出口（`publish`）と transport**
 
-提出ツールは `submit` のみ。`submit` は2つの push transport を内部に持ち、外からは透過:
+提出ツールは `publish` のみ。`publish` は2つの push transport を内部に持ち、外からは透過:
 
 - 既定: `git push`（credential helper 経由）。
 - フォールバック: GitHub Objects API（blob→tree→commit→ref）に `Authorization` ヘッダを直接載せて push。helper を介さないため、helper にトークンを渡せない環境でも成功する。
 
-`git push` が認証配管の都合で失敗したとき、`submit` は自動で API push に切り替える。transport の選択は LLM に露出しない。
+`git push` が認証配管の都合で失敗したとき、`publish` は自動で API push に切り替える。transport の選択は LLM に露出しない。
 
 **transport 非依存の不変条件**
 
-- verify ゲートは transport によらず必ず通る。どちらの経路でもゲートは迂回できない。
 - force-push はオプトイン。フォールバック時も暗黙には force-push しない。
 
 **checkpoint の squash**
 
-`submit` は常に未 push の checkpoint コミットを1コミットに畳んでから push する（`squash_checkpoints` パラメータは削除済み）。squash ベースは clone/branch 時に記録した分岐点 ref を使い、デフォルトブランチ名に依存せず push を常に fast-forward に保つ。API push 経路は HEAD ツリーを単一コミット化するため、checkpoint は元から残らない。
-
-**Rescue PR（gate 失敗時の保全）**
-
-原則: gate は landing を止めるが、preservation は止めない。verify が赤でも作業を GitHub へ退避する経路を、明示オプトインとして持つ。
-
-- `on_gate_fail="draft"` のときだけ有効。draft PR を強制し、保護ブランチを base にできない。
-- PR 本文と commit trailer に `[verify-failing]` と、どの層が赤かの構造化サマリ（file:line）を記録する。
-- ジャーナルに記録し、確認トークンの二段階フローを維持する（§2.2 / §8）。
-- verify を通過していない push を緑として扱うことはない。赤は赤と明示した提出だけを許可する。
-
-`gate_on_*` で「赤を緑として通す」設定は持たない。verify が赤のまま提出する正規の経路は Rescue PR だけとする。
+`publish` は常に未 push の checkpoint コミットを1コミットに畳んでから push する（`squash_checkpoints` パラメータは削除済み）。squash ベースは clone/branch 時に記録した分岐点 ref を使い、デフォルトブランチ名に依存せず push を常に fast-forward に保つ。API push 経路は HEAD ツリーを単一コミット化するため、checkpoint は元から残らない。
 
 ---
 
@@ -325,10 +314,9 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 | シンボル | `ctags` | 任意（需要次第） |
 | lint | `ruff` | Python lint + autofix |
 | 型検査 | `pyright` | Python 型検査（mypy も可） |
-| セキュリティ | `semgrep` | `verify` の scan 層 |
 | VCS | `git` / `gh` | clone / push / issue_view |
 | 高速インストール | `uv` | pip 代替（タイムアウト対策） |
-| JSON処理 | `jq` | semgrep --json 等のパース補助 |
+| JSON処理 | `jq` | テスト結果JSON等のパース補助 |
 
 ---
 
@@ -354,7 +342,7 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 | **2** | 構造化テスト結果 pytest/jest/go（§4） | AI-firstの本丸 |
 | **2+** | Edit/Verify コア（§5）: `search_in_container`（lexical/structural）＋ `verify`（束ね・強制ゲート）＋ stdout バグ修正（#52） | 失敗→修正→再検証ループを閉じる |
 | **4** | `run_test_environment`＋`wait_for_condition`（§10） | `sleep 30`撲滅 |
-| **5** | 外部VCS連携（§11）: `issue_view` + `submit`（verify ゲート内蔵） | issue→push をコンテキスト非通過で自己完結 |
+| **5** | 外部VCS連携（§11）: `issue_view` + `publish` | issue→push をコンテキスト非通過で自己完結 |
 | 横断 | トークン削減（§3） | 各Phaseに織り込む |
 | 並行 | 可観測性 §9 | ジャーナル→リプレイ→ダッシュボード→通知 |
 | 基盤 | `docker/Dockerfile.sandbox`（§12・§13） | Phase 1 と並行して整備 |

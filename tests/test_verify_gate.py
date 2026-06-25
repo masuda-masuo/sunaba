@@ -22,12 +22,9 @@ class TestVerifyGateLogic:
         lint_results: list[dict],
         type_results: list[dict],
         test_results: dict,
-        scan_results: list[dict],
         gate_on_lint_error: bool = True,
         gate_on_type_error: bool = False,
         gate_on_test_fail: bool = True,
-        gate_on_scan_error: bool = True,
-        gate_on_scan_warning: bool = False,
         incomplete_layers: set[str] | None = None,
     ) -> tuple[bool, list[str]]:
         """Simulate the gate logic from run_verify."""
@@ -39,7 +36,6 @@ class TestVerifyGateLogic:
                 "lint": gate_on_lint_error,
                 "type": gate_on_type_error,
                 "test": gate_on_test_fail,
-                "scan": gate_on_scan_error,
             }
             for layer_name in sorted(incomplete_layers):
                 if layer_gate_map.get(layer_name, True):
@@ -72,28 +68,13 @@ class TestVerifyGateLogic:
                     f"tests: {test_results.get('failed', 0)} failure(s)"
                 )
 
-        if gate_on_scan_error:
-            scan_errors = [
-                r for r in scan_results
-                if r.get("severity") == "ERROR"
-                and r.get("rule") not in ("no-scanner",)
-            ]
-            if scan_errors:
-                reasons.append(f"scan: {len(scan_errors)} ERROR(s)")
 
-        if gate_on_scan_warning:
-            scan_warnings = [
-                r for r in scan_results
-                if r.get("severity") == "WARNING"
-            ]
-            if scan_warnings:
-                reasons.append(f"scan: {len(scan_warnings)} WARNING(s)")
+
 
         return (len(reasons) == 0, reasons)
 
     def test_all_clean_passes_gate(self) -> None:
-        passed, reasons = self._simulate_gate([], [], {"status": "ok", "passed": 10},
-                                               [])
+        passed, reasons = self._simulate_gate([], [], {"status": "ok", "passed": 10})
         assert passed is True
         assert reasons == []
 
@@ -103,8 +84,7 @@ class TestVerifyGateLogic:
              "severity": "error", "message": "unused import"},
         ]
         passed, reasons = self._simulate_gate(
-            lint, [], {"status": "ok", "passed": 5}, []
-        )
+            lint, [], {"status": "ok", "passed": 5})
         assert passed is False
         assert any("lint" in r for r in reasons)
 
@@ -113,7 +93,7 @@ class TestVerifyGateLogic:
             {"file": "a.py", "line": 5, "rule": "W291",
              "severity": "warning", "message": "trailing whitespace"},
         ]
-        passed, _ = self._simulate_gate(lint, [], {"status": "ok", "passed": 5}, [])
+        passed, _ = self._simulate_gate(lint, [], {"status": "ok", "passed": 5})
         assert passed is True
 
     def test_lint_info_does_not_fail_gate(self) -> None:
@@ -121,7 +101,7 @@ class TestVerifyGateLogic:
             {"file": "a.py", "line": 5, "rule": "I001",
              "severity": "info", "message": "unsorted imports"},
         ]
-        passed, _ = self._simulate_gate(lint, [], {"status": "ok", "passed": 5}, [])
+        passed, _ = self._simulate_gate(lint, [], {"status": "ok", "passed": 5})
         assert passed is True
 
     def test_no_linter_tool_does_not_fail_gate(self) -> None:
@@ -129,7 +109,7 @@ class TestVerifyGateLogic:
             {"file": "a.py", "line": 0, "rule": "no-linter",
              "severity": "info", "message": "ruff not installed"},
         ]
-        passed, _ = self._simulate_gate(lint, [], {"status": "ok", "passed": 5}, [])
+        passed, _ = self._simulate_gate(lint, [], {"status": "ok", "passed": 5})
         assert passed is True
 
     def test_type_error_passes_gate_by_default(self) -> None:
@@ -138,8 +118,7 @@ class TestVerifyGateLogic:
              "severity": "error", "message": "unknown type"},
         ]
         passed, _ = self._simulate_gate(
-            [], types_, {"status": "ok", "passed": 5}, []
-        )
+            [], types_, {"status": "ok", "passed": 5})
         assert passed is True
 
     def test_type_error_fails_gate_when_enabled(self) -> None:
@@ -148,7 +127,7 @@ class TestVerifyGateLogic:
              "severity": "error", "message": "unknown type"},
         ]
         passed, reasons = self._simulate_gate(
-            [], types_, {"status": "ok", "passed": 5}, [],
+            [], types_, {"status": "ok", "passed": 5},
             gate_on_type_error=True,
         )
         assert passed is False
@@ -156,7 +135,7 @@ class TestVerifyGateLogic:
 
     def test_test_failure_fails_gate(self) -> None:
         test = {"status": "failed", "passed": 8, "failed": 2, "duration": 1.5}
-        passed, reasons = self._simulate_gate([], [], test, [])
+        passed, reasons = self._simulate_gate([], [], test)
         assert passed is False
         assert any("tests" in r for r in reasons)
 
@@ -167,66 +146,28 @@ class TestVerifyGateLogic:
         )
         assert passed is True
 
-    def test_scan_error_fails_gate(self) -> None:
-        scan = [
-            {"file": "a.py", "line": 10, "rule": "python.sql-injection",
-             "severity": "ERROR", "message": "SQL injection"},
-        ]
-        passed, reasons = self._simulate_gate([], [], {"status": "ok", "passed": 3},
-                                               scan)
-        assert passed is False
-        assert any("scan" in r for r in reasons)
 
-    def test_scan_warning_passes_gate_by_default(self) -> None:
-        scan = [
-            {"file": "a.py", "line": 10, "rule": "python.warning",
-             "severity": "WARNING", "message": "something"},
-        ]
-        passed, _ = self._simulate_gate([], [], {"status": "ok", "passed": 3}, scan)
-        assert passed is True
 
-    def test_scan_warning_fails_gate_when_enabled(self) -> None:
-        scan = [
-            {"file": "a.py", "line": 10, "rule": "python.warning",
-             "severity": "WARNING", "message": "something"},
-        ]
-        passed, reasons = self._simulate_gate(
-            [], [], {"status": "ok", "passed": 3}, scan,
-            gate_on_scan_warning=True,
-        )
-        assert passed is False
-        assert any("WARNING" in r for r in reasons)
 
-    def test_no_scanner_tool_does_not_fail_gate(self) -> None:
-        scan = [
-            {"file": "a.py", "line": 0, "rule": "no-scanner",
-             "severity": "info", "message": "semgrep not installed"},
-        ]
-        passed, _ = self._simulate_gate([], [], {"status": "ok", "passed": 3}, scan)
-        assert passed is True
 
     def test_multiple_fail_reasons_accumulate(self) -> None:
         lint = [
             {"file": "a.py", "line": 5, "rule": "F401",
              "severity": "error", "message": "unused import"},
         ]
-        scan = [
-            {"file": "a.py", "line": 10, "rule": "python.sql-injection",
-             "severity": "ERROR", "message": "SQL injection"},
-        ]
         test = {"status": "failed", "passed": 5, "failed": 1, "duration": 0.5}
-        passed, reasons = self._simulate_gate(lint, [], test, scan)
+        passed, reasons = self._simulate_gate(lint, [], test)
         assert passed is False
-        assert len(reasons) == 3
+        assert len(reasons) == 2
 
     def test_skipped_test_does_not_fail_gate(self) -> None:
         test = {"status": "skipped", "message": "no test output"}
-        passed, _ = self._simulate_gate([], [], test, [])
+        passed, _ = self._simulate_gate([], [], test)
         assert passed is True
 
     def test_incomplete_type_layer_passes_gate_when_flag_false(self) -> None:
         passed, reasons = self._simulate_gate(
-            [], [], {"status": "ok", "passed": 5}, [],
+            [], [], {"status": "ok", "passed": 5},
             gate_on_type_error=False,
             incomplete_layers={"type"},
         )
@@ -234,7 +175,7 @@ class TestVerifyGateLogic:
 
     def test_incomplete_type_layer_fails_gate_when_flag_true(self) -> None:
         passed, reasons = self._simulate_gate(
-            [], [], {"status": "ok", "passed": 5}, [],
+            [], [], {"status": "ok", "passed": 5},
             gate_on_type_error=True,
             incomplete_layers={"type"},
         )
@@ -243,7 +184,7 @@ class TestVerifyGateLogic:
 
     def test_incomplete_lint_layer_passes_gate_when_flag_false(self) -> None:
         passed, reasons = self._simulate_gate(
-            [], [], {"status": "ok", "passed": 5}, [],
+            [], [], {"status": "ok", "passed": 5},
             gate_on_lint_error=False,
             incomplete_layers={"lint"},
         )
@@ -251,24 +192,17 @@ class TestVerifyGateLogic:
 
     def test_incomplete_lint_layer_fails_gate_when_flag_true(self) -> None:
         passed, reasons = self._simulate_gate(
-            [], [], {"status": "ok", "passed": 5}, [],
+            [], [], {"status": "ok", "passed": 5},
             gate_on_lint_error=True,
             incomplete_layers={"lint"},
         )
         assert passed is False
         assert any("incomplete" in r for r in reasons)
 
-    def test_incomplete_scan_layer_passes_gate_when_flag_false(self) -> None:
-        passed, reasons = self._simulate_gate(
-            [], [], {"status": "ok", "passed": 5}, [],
-            gate_on_scan_error=False,
-            incomplete_layers={"scan"},
-        )
-        assert passed is True
 
     def test_incomplete_test_layer_passes_gate_when_flag_false(self) -> None:
         passed, reasons = self._simulate_gate(
-            [], [], {"status": "ok", "passed": 5}, [],
+            [], [], {"status": "ok", "passed": 5},
             gate_on_test_fail=False,
             incomplete_layers={"test"},
         )

@@ -1,21 +1,17 @@
-"""VCS tools: issue_view, submit, sandbox_create_pr, clone_repo."""
+"""VCS tools: issue_view, publish, sandbox_create_pr, clone_repo."""
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
 import posixpath
 import re
 import shlex
-import time as _time
 from typing import Any
 
 from docker.errors import NotFound
-from fastmcp import Context
 
-from code_sandbox_mcp.edit_verify import run_verify
 from code_sandbox_mcp.journal import get_or_create_run_id, record_boundary_crossing
 from code_sandbox_mcp.token import generate_token, verify_and_consume
 from code_sandbox_mcp.tools.common import _docker
@@ -238,7 +234,7 @@ def checkpoint_list(
     """List unpushed local Git checkpoints (no push, no verify, no token).
 
     Shows only commits that have not been pushed to any remote.  After
-    :func:`submit` succeeds the list naturally becomes empty.
+    :func:`publish` succeeds the list naturally becomes empty.
 
     Args:
         container_id: 12-character container ID prefix.
@@ -504,7 +500,7 @@ def issue_view(
 
 # ---------------------------------------------------------------------------
 # Shared dry_run / confirmation-token flow for boundary-crossing writes
-# (Issue #169).  Both ``submit`` and ``sandbox_create_pr`` route their
+# (Issue #169).  Both ``publish`` and ``sandbox_create_pr`` route their
 # dry_run -> token -> execute flow through these helpers so the logic has a
 # single implementation and cannot drift between the two tools.
 # ---------------------------------------------------------------------------
@@ -525,7 +521,7 @@ def _dry_run_response(
 
     Args:
         operation: Operation type recorded on the token and journal
-            (e.g. ``"submit"``, ``"sandbox_create_pr"``).
+            (e.g. ``"publish"``, ``"sandbox_create_pr"``).
         cid: 12-character container ID prefix.
         run_id: Run identifier from the journal.
         details: Human-readable summary of what execution will do.
@@ -580,11 +576,11 @@ def _consume_confirmation_token(
 
 
 # ---------------------------------------------------------------------------
-# submit
+# publish
 # ---------------------------------------------------------------------------
 
 
-async def submit(
+def publish(
     container_id: str,
     repo: str,
     branch: str,
@@ -596,13 +592,9 @@ async def submit(
     base_branch: str = "",
     dry_run: bool = False,
     token: str = "",
-    verify_path: str = ".",
-    on_gate_fail: str = "reject",
     allow_force_push: bool = False,
     author_name: str | None = None,
     author_email: str | None = None,
-    language: str | None = None,
-    ctx: "Context | None" = None,
 ) -> str:
     """Stage, commit, push, and optionally create a PR.
 
@@ -610,14 +602,21 @@ The **single exit tool** (design doc `docs/design.md` section 11.1).
 Internally holds two push transports: ``git push`` with credential
 helper, and GitHub Objects API (blob->tree->commit->ref) as
 automatic fallback.  The transport choice is transparent to the
-caller -- verify gate always runs regardless of path.
+caller.
+
+.. important::
+
+   ``publish`` does **not** run verification — the design assumes the
+   LLM calls :func:`verify_in_container` before ``publish`` as part of
+   the **edit → verify → publish** workflow (see ``AGENTS.md``).
 
 Two-step flow for boundary-crossing writes:
 
 1. ``dry_run=True`` -- returns a diff summary and a confirmation
-   token that must be approved before execution.
-2. ``dry_run=False`` + *token* -- verifies the token, runs
-   ``verify_in_container`` as a gate, stages/commits/pushes
+   token that must be approved before execution.  (The dry-run diff
+   summary shows the push plan; :func:`verify_in_container`'s diff
+   summary includes test results.)
+2. ``dry_run=False`` + *token* -- verifies the token, stages/commits/pushes
    (and creates a PR if *create_pr* is ``True``).
 
 Requires a container started with ``allow_network=True`` and
@@ -638,12 +637,6 @@ Args:
     dry_run: When ``True``, returns a diff summary and
         confirmation token instead of executing.
     token: Confirmation token from a previous ``dry_run`` call.
-    verify_path: Path inside *working_dir* to run verification on
-        (default ``"."``).
-    on_gate_fail: ``"reject"`` (default) or ``"draft"``.
-        ``"draft"`` creates a draft PR with ``[verify-failing]``
-        markers when the verify gate fails (section 11.1 Rescue PR).
-        ``"reject"`` aborts the operation on gate failure.
     allow_force_push: When ``True`` and needed, permits
         ``git push --force`` (opt-in; default ``False``).
     author_name: Git commit author name.  When set, takes precedence
@@ -655,12 +648,6 @@ Args:
         ``docker/Dockerfile.sandbox``
         (``code-sandbox-mcp[bot]@users.noreply.github.com``).
         When ``None``, the image-level default is used.
-    language: Explicit language override (``"python"``, ``"js"``,
-        ``"ts"``, ``"go"``).  Passed through to verify gate.
-    ctx: MCP context injected by FastMCP.  When present, the
-        verify gate runs in a background thread with periodic
-        progress notifications to prevent HTTP timeouts during
-        long verification runs (Issue #253).
 
 Returns:
     JSON string with operation result.
@@ -717,7 +704,7 @@ Returns:
                 "diff_summary": "(no changes detected)",
                 "branch": branch,
                 "message": message,
-                "warning": "No changes to commit.  Submit will succeed as a no-op.",
+                "warning": "No changes to commit.  Publish will succeed as a no-op.",
             })
 
         # Build diff_summary with checkpoint info if present
@@ -736,7 +723,7 @@ Returns:
             details += f" pr_title={pr_title[:60]}"
 
         return _dry_run_response(
-            "submit",
+            "publish",
             cid,
             run_id,
             details,
@@ -750,7 +737,7 @@ Returns:
         )
 
     # ------------------------------------------------------------------
-    # EXECUTE — require token + verify gate
+    # EXECUTE — require token
     # ------------------------------------------------------------------
     if not token:
         return json.dumps({
@@ -758,74 +745,11 @@ Returns:
             "error": "Token required for execution.  Run with dry_run=True first.",
         })
 
-    # --- Verify gate (always runs, regardless of transport) ---
-    if posixpath.isabs(verify_path):
-        verify_path_full = verify_path
-    else:
-        verify_path_full = f"{working_dir}/{verify_path}".rstrip("/")
-
-    if ctx is not None:
-        loop = asyncio.get_running_loop()
-
-        def _run_verify():
-            return run_verify(
-                client, cid, verify_path_full, strict=True, language=language,
-            )
-
-        verify_future = loop.run_in_executor(None, _run_verify)
-        start = _time.monotonic()
-        while not verify_future.done():
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(verify_future), timeout=15.0,
-                )
-            except asyncio.TimeoutError:
-                elapsed = _time.monotonic() - start
-                try:
-                    await ctx.report_progress(
-                        0, None, f"Verify gate running... ({elapsed:.0f}s)",
-                    )
-                except Exception:
-                    logger.debug(
-                        "report_progress failed for container %s (elapsed %.0fs)",
-                        cid, elapsed, exc_info=True,
-                    )
-        verify_result = await verify_future
-    else:
-        verify_result = run_verify(
-            client,
-            cid,
-            verify_path_full,
-            strict=True,
-            language=language,
-        )
-
-    gate_passed = verify_result.get("gate_passed", False)
-    if not gate_passed and on_gate_fail != "draft":
-        record_boundary_crossing(
-            cid,
-            "submit",
-            f"repo={repo} branch={branch} verify_failed",
-            approved=False,
-            token=token,
-        )
-        return json.dumps({
-            "status": "rejected",
-            "reason": "verify_gate_failed",
-            "verify_result": verify_result,
-        })
     # --- Consume token ---
     token_result, token_error = _consume_confirmation_token(token)
     if token_error is not None:
         return token_error
 
-    # --- Rescue PR: push as draft when gate failed ---
-    if not gate_passed and on_gate_fail == "draft":
-        return _rescue_pr(
-            container, cid, repo, branch, message,
-            working_dir, pr_title, pr_body, base_branch,
-            verify_result, author_name, author_email, token,
-        )
     # --- Git branch check/create ---
     _run(f"git checkout -b {shlex.quote(branch)} 2>/dev/null || git checkout {shlex.quote(branch)}")
 
@@ -905,7 +829,7 @@ Returns:
         else:
             record_boundary_crossing(
                 cid,
-                "submit",
+                "publish",
                 f"repo={repo} branch={branch} push_failed transport=both",
                 approved=False,
                 token=token,
@@ -915,7 +839,6 @@ Returns:
                 "step": "git_push",
                 "error": push_err or push_out,
                 "sha": sha,
-                "verify_result": verify_result,
             })
     # --- Optionally create PR ---
     pr_url: str | None = None
@@ -948,7 +871,7 @@ Returns:
             # Push succeeded but PR creation failed — still record push
             record_boundary_crossing(
                 cid,
-                "submit",
+                "publish",
                 f"repo={repo} branch={branch} sha={sha} pr_create_failed",
                 approved=True,
                 token=token,
@@ -958,7 +881,6 @@ Returns:
                 "branch": branch,
                 "sha": sha,
                 "pr_create_error": pr_err or pr_out,
-                "verify_result": verify_result,
             })
 
         # Extract PR URL from gh output
@@ -975,7 +897,7 @@ Returns:
 
     record_boundary_crossing(
         cid,
-        "submit",
+        "publish",
         details,
         approved=True,
         token=token,
@@ -985,7 +907,6 @@ Returns:
         "status": "pushed",
         "branch": branch,
         "sha": sha,
-        "verify_result": verify_result,
     }
     if pr_url:
         result["pr_url"] = pr_url
@@ -994,7 +915,7 @@ Returns:
 
 
 # ---------------------------------------------------------------------------
-# Internal transport: GitHub Objects API push (used by submit as fallback)
+# Internal transport: GitHub Objects API push (used by publish as fallback)
 # ---------------------------------------------------------------------------
 
 
@@ -1047,154 +968,6 @@ def _try_api_push(
     return {"status": "ok", "sha": push_result.get("sha", "unknown")[:7]}
 
 
-def _rescue_pr(
-    container: Any,
-    cid: str,
-    repo: str,
-    branch: str,
-    message: str,
-    working_dir: str,
-    pr_title: str,
-    pr_body: str,
-    base_branch: str,
-    verify_result: dict[str, Any],
-    author_name: str | None,
-    author_email: str | None,
-    token: str,
-) -> str:
-    """Push as a draft PR with ``[verify-failing]`` markers (Rescue PR)."""
-    def _run(cmd: str) -> tuple[int, str, str]:
-        full_cmd = f"cd {shlex.quote(working_dir)} && {cmd}"
-        ec, out = container.exec_run(
-            ["/bin/sh", "-c", full_cmd],
-            stdout=True,
-            stderr=True,
-        )
-        out_stdout, out_stderr = (
-            out if isinstance(out, tuple) else (out, b"")
-        )
-        stdout_text = (
-            out_stdout.decode("utf-8", errors="replace") if out_stdout else ""
-        )
-        stderr_text = (
-            out_stderr.decode("utf-8", errors="replace") if out_stderr else ""
-        )
-        return ec, stdout_text, stderr_text
-
-    # Build rescue body with verify failure summary
-    rescue_body = "[verify-failing]\n\n"
-    rescue_body += "## Verify Gate Failure Summary\n\n"
-    rescue_body += "| Layer | Status |\n|-------|--------|\n"
-
-    for layer in ("lint", "type_check", "test", "scan"):
-        layer_result = verify_result.get(layer, {})
-        if isinstance(layer_result, dict):
-            layer_passed = layer_result.get("passed")
-            icon = ":white_check_mark:" if layer_passed else ":x:"
-            rescue_body += f"| {layer} | {icon} |\n"
-        else:
-            rescue_body += f"| {layer} | :grey_question: |\n"
-
-    # Fallback when verify_result lacks expected keys (boundary case)
-    if not any(
-        isinstance(verify_result.get(layer), dict)
-        for layer in ("lint", "type_check", "test", "scan")
-    ):
-        rescue_body += (
-            "\n> **Note:** verify_result structure unexpected -- "
-            "gate details unavailable.\n"
-        )
-
-    if pr_body:
-        rescue_body += f"\n{pr_body}"
-
-    # Stage, commit with [verify-failing] prefix
-    _run("git add -A")
-
-    name_to_use = author_name if author_name is not None else "code-sandbox-mcp[bot]"
-    email_to_use = author_email if author_email is not None else "code-sandbox-mcp[bot]@users.noreply.github.com"
-    safe_name = shlex.quote(name_to_use)
-    safe_email = shlex.quote(email_to_use)
-    rescue_message = f"[verify-failing] {message}"
-    git_commit_cmd = (
-        f"git -c user.name={safe_name} -c user.email={safe_email}"
-        f" commit --allow-empty -m {shlex.quote(rescue_message)}"
-    )
-    commit_ec, commit_out, commit_err = _run(git_commit_cmd)
-    if commit_ec != 0:
-        if "nothing to commit" not in (commit_out + commit_err).lower():
-            return json.dumps({
-                "status": "error",
-                "step": "git_commit",
-                "error": commit_err or commit_out,
-            })
-
-    # Push via API transport
-    push_result = _try_api_push(container, cid, repo, branch, working_dir)
-    if push_result.get("status") != "ok":
-        record_boundary_crossing(
-            cid, "submit",
-            f"repo={repo} branch={branch} rescue_push_failed",
-            approved=False, token=token,
-        )
-        return json.dumps({
-            "status": "error",
-            "step": "rescue_push",
-            "error": push_result.get("error", "API push failed"),
-        })
-
-    sha = push_result.get("sha", "")
-
-    # Create draft PR
-    pr_url: str | None = None
-    # Rescue PR always creates a draft PR (documented behaviour)
-    if True:
-        safe_title = shlex.quote(f"[verify-failing] {pr_title or message}")
-        pr_cmd = (
-            f"gh pr create --repo {shlex.quote(repo)}"
-            f" --head {shlex.quote(branch)}"
-            f" --title {safe_title}"
-            f" --draft"
-        )
-        rescue_body_b64 = base64.b64encode(
-            rescue_body.encode("utf-8")
-        ).decode("ascii")
-        base_cmd = pr_cmd
-        pr_cmd = (
-            "BODY_FILE=$(mktemp) &&"
-            f" echo {shlex.quote(rescue_body_b64)} | base64 -d > " "$BODY_FILE" " &&"
-            f" {base_cmd} --body-file " "$BODY_FILE" ";"
-            " rm -f " "$BODY_FILE"
-        )
-        if base_branch:
-            pr_cmd += f" --base {shlex.quote(base_branch)}"
-
-        pr_ec, pr_out, pr_err = _run(pr_cmd)
-        for line in (pr_out + pr_err).splitlines():
-            line = line.strip()
-            if line.startswith("https://github.com/"):
-                pr_url = line
-                break
-
-    details = f"repo={repo} branch={branch} sha={sha} rescue_draft=True"
-    if pr_url:
-        details += f" pr_url={pr_url}"
-
-    record_boundary_crossing(
-        cid, "submit", details,
-        approved=True, token=token,
-    )
-
-    result: dict[str, Any] = {
-        "status": "rescue_draft",
-        "branch": branch,
-        "sha": sha,
-        "gate_passed": False,
-        "verify_result": verify_result,
-    }
-    if pr_url:
-        result["pr_url"] = pr_url
-    return json.dumps(result)
 
 
 # ---------------------------------------------------------------------------
@@ -1218,10 +991,10 @@ def sandbox_create_pr(
     .. deprecated::
        This function is **no longer registered as an MCP tool** (see
        issue #256).  It remains as an internal fallback for the
-       GitHub Objects API push path within :func:`submit`.  Use
-       :func:`submit` instead.
+       GitHub Objects API push path within :func:`publish`.  Use
+       :func:`publish` instead.
 
-    Unlike :func:`submit`, this tool uses the GitHub Objects API
+    Unlike :func:`publish`, this tool uses the GitHub Objects API
     (blob → tree → commit → ref) to push the branch, which works when
     the injected token cannot push via HTTPS git (e.g. GitHub App
     installation tokens).
@@ -1234,7 +1007,7 @@ def sandbox_create_pr(
     4. ``sandbox_create_pr(dry_run=True)`` — preview + confirmation token
     5. ``sandbox_create_pr(token=...)`` — pushes via API + opens PR
 
-    Like :func:`submit`, execution is a two-step flow: call once with
+    Like :func:`publish`, execution is a two-step flow: call once with
     ``dry_run=True`` to get a preview of the HEAD commit and a
     confirmation token, then call again with that ``token`` to push and
     open the PR.
@@ -1251,7 +1024,7 @@ def sandbox_create_pr(
 
     .. warning::
 
-       Unlike :func:`submit`, this tool has **no verify gate** (no
+       Unlike :func:`publish`, this tool has **no verify gate** (no
        lint/type-check/test run before push).  Ensure the sandbox passes
        all checks before calling this tool.
 

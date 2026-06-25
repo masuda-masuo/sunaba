@@ -488,7 +488,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 detail_text = e.get("details", "")
                 if sub_op == "issue_view":
                     details = f'<span style="color:#a5d6ff">issue_view</span> {_escape(detail_text)}'
-                elif sub_op == "submit":
+                elif sub_op == "publish":
                     formatted = _escape(detail_text)
                     for word in detail_text.split():
                         idx = word.find("https://github.com/")

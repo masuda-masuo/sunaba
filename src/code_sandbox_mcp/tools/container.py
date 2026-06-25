@@ -112,6 +112,39 @@ def _container_env(inject_vcs_token: bool = False) -> dict[str, str]:
     return env
 
 
+def _resolve_image_ref(image: str) -> str:
+    """Resolve a tag-based image reference to a digest-based one.
+
+    If *image* already contains a ``@sha256:...`` digest, return it
+    as-is.  Otherwise pull the image by tag and extract its digest
+    from the local Docker metadata, returning ``image@sha256:...``.
+
+    This allows callers to pass variant tags (e.g. ``sandbox:go``)
+    instead of requiring a fully-qualified digest every time.
+    """
+    # Already a digest reference — nothing to resolve
+    if re.search(r"@sha256:[a-f0-9]{64}$", image):
+        return image
+
+    _ensure_image(image)
+    try:
+        img = _docker().images.get(image)
+    except Exception as e:
+        raise ValueError(
+            f"Could not resolve digest for image: {image!r}: {e}"
+        )
+
+    for repo_digest in img.attrs.get("RepoDigests") or []:
+        if "@sha256:" in repo_digest:
+            logger.info("Resolved image %s → %s", image, repo_digest)
+            return repo_digest
+
+    raise ValueError(
+        f"Could not resolve digest for image: {image!r}. "
+        "The image may not have been pushed to a registry."
+    )
+
+
 def _ensure_image(image: str) -> None:
     """Ensure the specified Docker image is available locally.
 
@@ -660,6 +693,7 @@ def sandbox_initialize(
     env = _container_env(inject_vcs_token=inject_vcs_token)
 
     try:
+        resolved = _resolve_image_ref(resolved)
         validate_image_ref(resolved)
     except ValueError as e:
         return f"Error: {e}"
@@ -952,6 +986,7 @@ def run_container_and_exec(
 
     # --- Start container ---
     try:
+        resolved = _resolve_image_ref(resolved)
         validate_image_ref(resolved)
         profile = replace(DEFAULT_SECURITY_PROFILE, allow_network=allow_network)
         run_kwargs = build_secure_run_kwargs(

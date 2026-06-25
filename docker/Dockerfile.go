@@ -15,7 +15,7 @@ FROM ${BASE_IMAGE}
 # ── Go ツールチェーン ─────────────────────────────────────────────
 USER root
 ARG TARGETARCH
-ARG GO_VERSION=1.23.4
+ARG GO_VERSION=1.26.4
 
 RUN set -ex; \
     case "${TARGETARCH}" in \
@@ -30,9 +30,13 @@ RUN set -ex; \
 
 # GOPATH はユーザ home、GOCACHE は書込可能な /tmp 配下（read-only ルート対策）。
 # buildvcs=false: クローン外のディレクトリでも go build が VCS スタンプで失敗しないように。
+# GOMAXPROCS=1: pids 上限（100）超過による fork 枯渇を防ぐ（Issue #233）。
+#   Go の並列コンパイルは多数の compile/vet/link を fork するため、
+#   デフォルトの pids_limit=100 を容易に超過する。直列化で回避。
 ENV GOPATH=/home/sandbox/go \
     GOCACHE=/tmp/.gocache \
-    GOFLAGS=-buildvcs=false
+    GOMAXPROCS=1 \
+    GOFLAGS="-buildvcs=false -p=1"
 
 USER sandbox
 WORKDIR /home/sandbox

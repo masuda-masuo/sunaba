@@ -52,7 +52,7 @@ class TestSecurityProfile:
         assert DEFAULT_SECURITY_PROFILE.cpu_quota == 50000
 
     def test_default_profile_has_pids_limit(self) -> None:
-        assert DEFAULT_SECURITY_PROFILE.pids_limit == 100
+        assert DEFAULT_SECURITY_PROFILE.pids_limit == 500
 
     def test_default_profile_network_mode_none(self) -> None:
         assert DEFAULT_SECURITY_PROFILE.network_mode == "none"
@@ -218,7 +218,7 @@ class TestBuildSecureRunKwargs:
 
     def test_pids_limit_applied(self) -> None:
         result = build_secure_run_kwargs(DEFAULT_SECURITY_PROFILE)
-        assert result["pids_limit"] == 100
+        assert result["pids_limit"] == 500
 
     def test_network_mode_none_by_default(self) -> None:
         result = build_secure_run_kwargs(DEFAULT_SECURITY_PROFILE)

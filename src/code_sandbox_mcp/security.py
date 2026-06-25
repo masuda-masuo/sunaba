@@ -69,9 +69,10 @@ _DEFAULT_CPU_PERIOD: int = 100000
 _DEFAULT_CPU_QUOTA: int = 50000
 
 #: PIDs limit (prevents fork bombs).
-#: 100 processes is enough for typical test suites (pytest workers,
-#: subprocess calls) but low enough to stop fork-based DoS attacks.
-_DEFAULT_PIDS_LIMIT: int = 100
+#: 500 allows Go's parallel compiler (compile/vet/link per package,
+#: easily exceeding 100) while still preventing fork-based DoS attacks.
+#: Bumped from 100 (Issue #233).
+_DEFAULT_PIDS_LIMIT: int = 500
 
 #: Compiled pattern for SHA-256 digest references.
 #:

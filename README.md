@@ -120,6 +120,9 @@ Sends OS desktop notifications (Linux) or webhook notifications on boundary-cros
 | `sandbox_initialize` | Start a container. Returns 12-char `container_id`. Supports `image`, `allow_network`, `inject_vcs_token`. |
 | `sandbox_stop` | Stop and remove a container. |
 | `run_container_and_exec` | One-shot: `initialize` → `exec` → `stop`. |
+| `run_test_environment` | Start a Compose-like multi-service test environment with health checks. |
+| `wait_for_condition` | Wait for TCP port open, HTTP 2xx, or log pattern match (replaces `sleep 30`). |
+| `stop_test_environment` | Stop and remove a test environment started by `run_test_environment`. |
 
 ### Execution
 
@@ -128,12 +131,17 @@ Sends OS desktop notifications (Linux) or webhook notifications on boundary-cros
 | `sandbox_exec` | Run commands synchronously. Supports `verbose` (`error_only`/`summary`/`full`), truncation, pagination (`offset`/`limit`). |
 | `sandbox_exec_background` | Run commands with `nohup` in background. Returns `job_id`. |
 | `sandbox_exec_check` | Poll background job status. Returns `"running"`, stdout on success, or error on failure. |
+| `sandbox_exec_diff` | Execute commands and return only the diff from the cached result. |
+| `rerun_failed` | Re-run failed commands from a previous `run_id`, returning only the diff. |
 
 ### File operations
 
 | Tool | Description |
 |------|-------------|
 | `write_file_sandbox` | **Primary edit path for AI.** Write/update files. Supports full overwrite, line-range replacement, append, and `old_str` replacement (uniqueness check + whitespace-flexible fallback). |
+| `transform_file` | **Imperative edit path.** Edit a file by supplying Python `transform(text) -> str` that computes the new content (runs inside the container; returns a unified diff). Best for bulk / repetitive / structural / computed edits. |
+| `read_file_range` | Read `limit` lines starting at `offset`. Returns JSON with pagination metadata. |
+| `list_files` | List files inside the container using `find`. Returns JSON array of file paths. |
 | `copy_project` | Copy a local directory into the container (tar archive streaming). |
 | `copy_file` | Copy a single local file into the container. |
 
@@ -141,10 +149,10 @@ Sends OS desktop notifications (Linux) or webhook notifications on boundary-cros
 
 | Tool | Description |
 |------|-------------|
-| `transform_file` | **Imperative edit path.** Edit a file by supplying Python `transform(text) -> str` that computes the new content (runs inside the container; returns a unified diff). Best for bulk / repetitive / structural / computed edits where `old_str` would need many calls and a diff would be huge. Single `code` string — no shell escaping. |
-| `read_file_range` | Read `limit` lines starting at `offset`. Returns JSON with pagination metadata. |
+| `search_in_container` | Search for text patterns across files. Lexical (ripgrep) or structural (ast-grep) mode. |
 | `lint_in_container` | Run linter on a file (`.py` → ruff/pylint, `.js/.ts/.jsx/.tsx` → eslint). |
-| `type_check_in_container` | Run type checker on a file (`.py` → pyright (mypy fallback), `.ts/.tsx` → tsc). |
+| `type_check_in_container` | Run type checker on a file (`.py` → pyright, `.ts/.tsx` → tsc). |
+| `verify_in_container` | **Pre-publish test gate.** Run pytest with optional filter, then auto-full-suite. Returns diff summary. |
 
 ### Observability
 
@@ -155,6 +163,27 @@ Sends OS desktop notifications (Linux) or webhook notifications on boundary-cros
 | `sandbox_list_runs` | List all runs recorded in the journal. |
 | `sandbox_journal_path` | Return path to `~/.code-sandbox-mcp/journal.log`. |
 | `sandbox_trace_dir` | Return path to `~/.code-sandbox-mcp/traces/`. |
+
+### VCS / Versioning
+
+| Tool | Description |
+|------|-------------|
+| `clone_repo` | Clone a Git repository inside the container using `gh repo clone`. |
+| `issue_view` | Read a GitHub issue and save its body to a file inside the container. |
+| `checkpoint` | Local Git checkpoint (commit only, no push). Use frequently during edit loops. |
+| `checkpoint_list` | List unpushed local checkpoints. |
+| `checkpoint_restore` | Restore working tree to a previous checkpoint (`git reset --hard`). |
+| `publish` | Stage, commit, push, and optionally create a PR. Two-step flow: dry_run → token. |
+
+### Sandbox management
+
+| Tool | Description |
+|------|-------------|
+| `sandbox_approval_status` | List all pending approval tokens for boundary-crossing operations. |
+| `sandbox_approve` | Approve a pending boundary-crossing operation. |
+| `sandbox_reject` | Reject a pending boundary-crossing operation. |
+| `sandbox_cache_invalidate` | Invalidate result cache entries. |
+| `sandbox_cache_stats` | Return result cache statistics. |
 
 ## Sandbox image
 

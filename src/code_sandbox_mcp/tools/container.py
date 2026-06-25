@@ -52,6 +52,7 @@ from code_sandbox_mcp.security import (
     validate_image_ref,
 )
 from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _docker
+from code_sandbox_mcp.tools.vcs import checkpoint_list
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -764,24 +765,12 @@ def sandbox_stop(
     except Exception as e:
         return f"Error: {e}"
 
-    # Check for unpushed checkpoints (Issue #264)
+    # Check for unpushed checkpoints (Issue #264) — reuse checkpoint_list
     if not force:
-        safe_wd = shlex.quote(working_dir)
-        cmd = f"cd {safe_wd} && git log --oneline --not --remotes -1 2>/dev/null"
-        ec, out = container.exec_run(["/bin/sh", "-c", cmd], stdout=True, stderr=True)
-        stdout, _ = (out if isinstance(out, tuple) else (out, b""))
-        stdout_text = stdout.decode("utf-8", errors="replace") if stdout else ""
-        if ec == 0 and stdout_text.strip():
-            count_cmd = f"cd {safe_wd} && git log --oneline --not --remotes 2>/dev/null | wc -l"
-            _, count_out = container.exec_run(
-                ["/bin/sh", "-c", count_cmd], stdout=True, stderr=True
-            )
-            count_stdout, _ = (
-                count_out if isinstance(count_out, tuple) else (count_out, b"")
-            )
-            count_text = count_stdout.decode("utf-8", errors="replace") if count_stdout else ""
-            count = count_text.strip() or "?"
-            return f"Error: Container has {count} unpushed checkpoint(s). Use force=True to override."
+        result = json.loads(checkpoint_list(container_id, working_dir))
+        checkpoints = result.get("checkpoints", [])
+        if checkpoints:
+            return f"Error: Container has {len(checkpoints)} unpushed checkpoint(s). Use force=True to override."
 
     # Kill first (ignore if already stopped), then force-remove so a
     # still-running or unresponsive container is torn down regardless.

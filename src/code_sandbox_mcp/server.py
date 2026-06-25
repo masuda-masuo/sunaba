@@ -67,7 +67,7 @@ from .tools.vcs import (
     checkpoint_restore,
     clone_repo,
     issue_view,
-    submit,
+    publish,
 )
 from .tools.verify import (
     lint_in_container,
@@ -87,7 +87,7 @@ sandbox_exec_background = mcp.tool()(sandbox_exec_background)
 sandbox_exec_check = mcp.tool()(sandbox_exec_check)
 
 issue_view = mcp.tool()(issue_view)
-submit = mcp.tool()(submit)
+publish = mcp.tool()(publish)
 checkpoint = mcp.tool()(checkpoint)
 checkpoint_list = mcp.tool()(checkpoint_list)
 checkpoint_restore = mcp.tool()(checkpoint_restore)

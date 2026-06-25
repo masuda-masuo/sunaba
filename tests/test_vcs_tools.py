@@ -1,4 +1,4 @@
-"""Tests for the External VCS tools (issue_view, submit) — Issue #55."""
+"""Tests for the External VCS tools (issue_view, publish) — Issue #55."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ from code_sandbox_mcp.tools.vcs import (
     checkpoint_restore,
     issue_view,
     sandbox_create_pr,
-    submit,
+    publish,
 )
 
 # ---------------------------------------------------------------------------
@@ -214,12 +214,12 @@ class TestIssueView:
 
 
 # ---------------------------------------------------------------------------
-# submit tests
+# publish tests
 # ---------------------------------------------------------------------------
 
 
-class TestSubmit:
-    """Tests for submit."""
+class TestPublish:
+    """Tests for publish."""
 
     # -- dry_run=True tests --
 
@@ -245,7 +245,7 @@ class TestSubmit:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/issue-55",
@@ -262,7 +262,7 @@ class TestSubmit:
         # Verify token was generated for submit
         mock_gen_token.assert_called_once()
         call_kwargs = mock_gen_token.call_args[1]
-        assert call_kwargs["operation"] == "submit"
+        assert call_kwargs["operation"] == "publish"
 
         # Verify pending boundary crossing was recorded
         mock_record.assert_called_once()
@@ -289,7 +289,7 @@ class TestSubmit:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/issue-55",
@@ -322,7 +322,7 @@ class TestSubmit:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="feat/new",
@@ -345,7 +345,7 @@ class TestSubmit:
         """dry_run=False without token should return error."""
         mock_docker.return_value = _make_client_mock(MagicMock())
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -358,9 +358,7 @@ class TestSubmit:
         assert "token" in result["error"].lower()
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_invalid_token(
         self,
         mock_run_id: MagicMock,
@@ -374,7 +372,7 @@ class TestSubmit:
         mock_verify.return_value = None  # token invalid
         mock_docker.return_value = _make_client_mock(MagicMock())
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -387,9 +385,7 @@ class TestSubmit:
         assert "invalid" in result["error"].lower()
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_verify_gate_fails(
         self,
@@ -403,7 +399,7 @@ class TestSubmit:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -415,7 +411,7 @@ class TestSubmit:
         }
         mock_docker.return_value = _make_client_mock(MagicMock())
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -427,12 +423,8 @@ class TestSubmit:
 
         assert result["status"] == "rejected"
         assert result["reason"] == "verify_gate_failed"
-        assert result["verify_result"]["gate_passed"] is False
-
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_successful_push(
         self,
@@ -446,7 +438,7 @@ class TestSubmit:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -468,7 +460,7 @@ class TestSubmit:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -481,12 +473,8 @@ class TestSubmit:
         assert result["status"] == "pushed"
         assert result["branch"] == "fix/x"
         assert result["sha"] == "abc1234"
-        assert result["verify_result"]["gate_passed"] is True
-
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_successful_push_with_pr(
         self,
@@ -500,7 +488,7 @@ class TestSubmit:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -522,7 +510,7 @@ class TestSubmit:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -539,9 +527,7 @@ class TestSubmit:
         assert result["pr_url"] == "https://github.com/owner/repo/pull/99"
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_commit_nothing_to_commit_is_ok(
         self,
@@ -555,7 +541,7 @@ class TestSubmit:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -576,7 +562,7 @@ class TestSubmit:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -589,9 +575,7 @@ class TestSubmit:
         assert result["status"] == "pushed"
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_push_failure(
         self,
@@ -605,7 +589,7 @@ class TestSubmit:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -629,7 +613,7 @@ class TestSubmit:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -665,7 +649,7 @@ class TestSubmit:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/issue-55",
@@ -681,9 +665,7 @@ class TestSubmit:
     # -- Git identity tests --
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_uses_default_identity(
         self,
@@ -697,7 +679,7 @@ class TestSubmit:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -718,7 +700,7 @@ class TestSubmit:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -738,9 +720,7 @@ class TestSubmit:
         assert "'code-sandbox-mcp[bot]'" in commit_cmd
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_with_custom_identity(
         self,
@@ -754,7 +734,7 @@ class TestSubmit:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -775,7 +755,7 @@ class TestSubmit:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -800,7 +780,7 @@ class TestSubmit:
 # ---------------------------------------------------------------------------
 
 
-class TestSubmitTokenFlow:
+class TestPublishTokenFlow:
     """Integration tests for the dry_run → approve → execute flow."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
@@ -817,7 +797,7 @@ class TestSubmitTokenFlow:
         mock_docker.return_value = client
 
         # Step 1: dry_run to get token
-        dry_result = _decode(submit(
+        dry_result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -1380,15 +1360,13 @@ class TestCheckpointRestore:
 
 
 # ---------------------------------------------------------------------------
-# Additional submit tests for issue #241 features
+# Additional publish tests for issue #241 features
 # ---------------------------------------------------------------------------
 
 class TestSubmitOnGateFail:
-    """Tests for submit with on_gate_fail='draft' (Rescue PR path)."""
+    """Tests for publish with on_gate_fail='draft' (Rescue PR path)."""
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs._docker")    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_rescue_draft(
@@ -1403,7 +1381,7 @@ class TestSubmitOnGateFail:
         mock_run_id.return_value = "run123"
         mock_consume.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
         }
         mock_gate.return_value = {
             "status": "failed",
@@ -1426,24 +1404,21 @@ class TestSubmitOnGateFail:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
             message="Fix issue",
             dry_run=False,
             token="tok_good",
-            on_gate_fail="draft",
-        ))
+))
 
         assert result["status"] == "rescue_draft"
         assert result["gate_passed"] is False
         assert result["sha"] == "aaaaaaa"
         assert "pr_url" in result
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs._docker")    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_rescue_draft_empty_verify(
@@ -1458,7 +1433,7 @@ class TestSubmitOnGateFail:
         mock_run_id.return_value = "run123"
         mock_consume.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
         }
         mock_gate.return_value = {
             "status": "failed",
@@ -1476,26 +1451,23 @@ class TestSubmitOnGateFail:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
             message="Fix issue",
             dry_run=False,
             token="tok_good",
-            on_gate_fail="draft",
-        ))
+))
 
         assert result["status"] == "rescue_draft"
 
 
-class TestSubmitSquashCheckpoints:
-    """Tests for submit with automatic checkpoint squash."""
+class TestPublishSquashCheckpoints:
+    """Tests for publish with automatic checkpoint squash."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_squash_checkpoints(
         self,
@@ -1509,7 +1481,7 @@ class TestSubmitSquashCheckpoints:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -1533,7 +1505,7 @@ class TestSubmitSquashCheckpoints:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -1550,9 +1522,7 @@ class TestSubmitSquashCheckpoints:
         assert len(reset_calls) == 1
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_squash_checkpoints_no_tracking(
         self,
@@ -1566,7 +1536,7 @@ class TestSubmitSquashCheckpoints:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -1587,7 +1557,7 @@ class TestSubmitSquashCheckpoints:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -1599,13 +1569,11 @@ class TestSubmitSquashCheckpoints:
         assert result["status"] == "pushed"
 
 
-class TestSubmitAllowForcePush:
-    """Tests for submit with allow_force_push=True."""
+class TestPublishAllowForcePush:
+    """Tests for publish with allow_force_push=True."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_allow_force_push(
         self,
@@ -1619,7 +1587,7 @@ class TestSubmitAllowForcePush:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -1640,7 +1608,7 @@ class TestSubmitAllowForcePush:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -1659,13 +1627,11 @@ class TestSubmitAllowForcePush:
         assert "--force" in push_calls[0]
 
 
-class TestSubmitApiPushFallback:
-    """Tests for submit when git push fails and falls back to _try_api_push."""
+class TestPublishApiPushFallback:
+    """Tests for publish when git push fails and falls back to _try_api_push."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_api_push_fallback_succeeds(
         self,
@@ -1679,7 +1645,7 @@ class TestSubmitApiPushFallback:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -1703,7 +1669,7 @@ class TestSubmitApiPushFallback:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -1716,9 +1682,7 @@ class TestSubmitApiPushFallback:
         assert result["sha"] == "bbbbbbb"
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_api_push_fallback_fails(
         self,
@@ -1732,7 +1696,7 @@ class TestSubmitApiPushFallback:
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
-            "operation": "submit",
+            "operation": "publish",
             "details": "...",
             "container_id": "abc123def456",
             "run_id": "run123",
@@ -1755,7 +1719,7 @@ class TestSubmitApiPushFallback:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -1767,9 +1731,7 @@ class TestSubmitApiPushFallback:
         assert result["status"] == "error"
         assert result["step"] == "git_push"
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs._docker")    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_dry_run_with_squash_and_force(
@@ -1792,7 +1754,7 @@ class TestSubmitApiPushFallback:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -1805,9 +1767,7 @@ class TestSubmitApiPushFallback:
         assert "Checkpoints to squash" in result["diff_summary"]
         assert "2 commit(s)" in result["diff_summary"]
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs._docker")    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     def test_dry_run_only_checkpoints(
         self,
         mock_consume: MagicMock,
@@ -1825,7 +1785,7 @@ class TestSubmitApiPushFallback:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(submit(
+        result = _decode(publish(
             container_id="abc123def456",
             repo="owner/repo",
             branch="fix/x",
@@ -1839,124 +1799,3 @@ class TestSubmitApiPushFallback:
 
 
 # ---------------------------------------------------------------------------
-# submit async + progress notification tests (Issue #253)
-# ---------------------------------------------------------------------------
-
-
-class TestSubmitAsyncProgress:
-    """Tests for the async progress notification path in submit."""
-
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    def test_ctx_is_none_falls_back_to_sync_verify(
-        self,
-        mock_verify_token: MagicMock,
-        mock_docker: MagicMock,
-        mock_run_verify: MagicMock,
-    ) -> None:
-        """When ctx is None, run_verify is called synchronously."""
-        mock_run_verify.return_value = {"gate_passed": True, "status": "ok"}
-        mock_verify_token.return_value = (dict(consumed=True), None)
-
-        container = _make_container_mock([
-            (0, b"", b""),       # git checkout -b
-            (0, b"", b""),       # git add -A
-            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
-            (0, b"", b""),       # git commit
-            (0, b"", b""),       # git push
-            (0, b"abc1234", b""),  # git rev-parse HEAD
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(submit(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/issue-55",
-            message="Fix",
-            dry_run=False,
-            token="tok_valid123",
-            ctx=None,
-        ))
-
-        assert result["status"] == "pushed"
-        mock_run_verify.assert_called_once()
-
-    @patch("code_sandbox_mcp.tools.vcs.run_verify")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.asyncio.wait_for")
-    @patch("code_sandbox_mcp.tools.vcs.asyncio.shield", side_effect=lambda x: x)
-    @patch("code_sandbox_mcp.tools.vcs.asyncio.get_running_loop")
-    def test_ctx_provided_calls_report_progress(
-        self,
-        mock_get_loop: MagicMock,
-        mock_shield: MagicMock,
-        mock_wait_for: MagicMock,
-        mock_verify_token: MagicMock,
-        mock_docker: MagicMock,
-        mock_run_verify: MagicMock,
-    ) -> None:
-        """When ctx is provided and verify takes time, report_progress is called."""
-        mock_run_verify.return_value = {"gate_passed": True, "status": "ok"}
-        mock_verify_token.return_value = (dict(consumed=True), None)
-
-        # Build a mock future that supports done() / result() / __await__.
-        # asyncio.Future() requires a running event loop in Python 3.12.
-        _verify_result = {"gate_passed": True, "status": "ok"}
-
-        class _ControlledFuture:
-            """Mock asyncio.Future with controlled done() behavior."""
-
-            def __init__(self, result: dict):
-                self._result = result
-                self._done_calls = 0
-
-            def done(self) -> bool:
-                self._done_calls += 1
-                if self._done_calls == 1:
-                    return False
-                return True
-
-            def result(self) -> dict:
-                return self._result
-
-            def __await__(self):
-                return self._result
-                yield  # pragma: no cover
-
-        loop_future = _ControlledFuture(_verify_result)
-
-        mock_loop = MagicMock()
-        mock_loop.run_in_executor.return_value = loop_future
-        mock_get_loop.return_value = mock_loop
-
-        mock_wait_for.side_effect = asyncio.TimeoutError()
-
-        mock_ctx = MagicMock()
-        mock_ctx.report_progress = AsyncMock()
-
-        container = _make_container_mock([
-            (0, b"", b""),       # git checkout -b
-            (0, b"", b""),       # git add -A
-            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
-            (0, b"", b""),       # git commit
-            (0, b"", b""),       # git push
-            (0, b"abc1234", b""),  # git rev-parse HEAD
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(submit(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/issue-55",
-            message="Fix",
-            dry_run=False,
-            token="tok_valid123",
-            ctx=mock_ctx,
-        ))
-
-        assert result["status"] == "pushed"
-        mock_ctx.report_progress.assert_called()

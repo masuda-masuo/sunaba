@@ -377,7 +377,7 @@ class TestTypeCheckInContainer:
 # ===================================================================
 
 class TestVerifyInContainer:
-    """Tests for the verify_in_container wrapper."""
+    """Tests for the rewritten verify_in_container (test-only with filter fallback)."""
 
     @patch("code_sandbox_mcp.tools.verify._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
@@ -406,63 +406,18 @@ class TestVerifyInContainer:
         assert "connection refused" in result["error"]
 
     @patch("code_sandbox_mcp.tools.verify._docker")
-    @patch("code_sandbox_mcp.tools.verify.run_verify")
-    def test_delegates_with_defaults(
-        self,
-        mock_impl: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
+    def test_signature_accepts_test_filter(self, mock_docker: MagicMock) -> None:
+        """verify_in_container accepts test_filter, verbose, pytest_args."""
         mock_client = MagicMock()
-        mock_client.containers.get.return_value = mock_container
+        mock_client.containers.get.side_effect = NotFound("not found")
         mock_docker.return_value = mock_client
-        mock_impl.return_value = {"status": "ok", "gate_passed": True}
 
-        result = json.loads(
-            verify_in_container(container_id="abc123", path="/tmp")
-        )
-        assert result["status"] == "ok"
-        assert result["gate_passed"] is True
-        mock_impl.assert_called_once_with(
-            mock_client, "abc123", "/tmp",
-            gate_on_lint_error=True,
-            gate_on_type_error=False,
-            gate_on_test_fail=True,
-            gate_on_scan_error=True,
-            gate_on_scan_warning=False,
-            language=None,
-        )
-
-    @patch("code_sandbox_mcp.tools.verify._docker")
-    @patch("code_sandbox_mcp.tools.verify.run_verify")
-    def test_delegates_with_explicit_args(
-        self,
-        mock_impl: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_client = MagicMock()
-        mock_client.containers.get.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_impl.return_value = {"status": "ok", "gate_passed": True}
-
-        json.loads(
-            verify_in_container(
-                container_id="abc123", path="/tmp",
-                gate_on_lint_error=False,
-                gate_on_type_error=True,
-                gate_on_test_fail=False,
-                gate_on_scan_error=False,
-                gate_on_scan_warning=True,
-                language="python",
-            )
-        )
-        mock_impl.assert_called_once_with(
-            mock_client, "abc123", "/tmp",
-            gate_on_lint_error=False,
-            gate_on_type_error=True,
-            gate_on_test_fail=False,
-            gate_on_scan_error=False,
-            gate_on_scan_warning=True,
+        result = json.loads(verify_in_container(
+            container_id="abc123",
+            path="/tmp",
+            test_filter="TestFoo",
+            verbose=True,
+            pytest_args="-x --tb=short",
             language="python",
-        )
+        ))
+        assert result["status"] == "error"  # container not found

@@ -1578,6 +1578,7 @@ def run_test_environment(
                 port_bindings[str(container_p)] = ("0.0.0.0", int(host_p))
 
             try:
+                image = _resolve_image_ref(image)
                 validate_image_ref(image)
                 profile = replace(
                     DEFAULT_SECURITY_PROFILE,

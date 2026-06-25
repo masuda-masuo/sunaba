@@ -1,4 +1,4 @@
-"""Tests for Shiori clone_repo functionality (Issue #84)."""
+"""Tests for clone_repo: validation, Shiori pre-clone, network fallback, and tool endpoint."""
 from __future__ import annotations
 
 import json
@@ -11,8 +11,6 @@ from code_sandbox_mcp.tools.container import (
     _clone_repo_via_network,
     _clone_shiori_repo_to_container,
     _validate_clone_repo,
-    run_container_and_exec,
-    sandbox_initialize,
 )
 
 
@@ -228,7 +226,6 @@ class TestCloneShioriRepoToContainer:
                     mock_container, "abc123", "owner/repo", "/tmp/repo"
                 )
 
-
     def test_repo_name_in_path(self, tmp_path: Path) -> None:
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
@@ -256,779 +253,138 @@ class TestCloneShioriRepoToContainer:
         mock_container.put_archive.assert_called_once()
 
 
-
-class TestSandboxInitializeCloneRepo:
-    """Tests for sandbox_initialize with clone_repo."""
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_clone_repo_calls_helper(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.return_value = "Copied Shiori clone of owner/repo → /tmp/repo/repo in container abc123def456"
-
-        result = sandbox_initialize(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            clone_repo="owner/repo",
-        )
-
-        assert "abc123def456" in result
-        assert "Copied Shiori clone" in result
-        assert "pip install" not in result
-        mock_clone.assert_called_once_with(
-            mock_container, "abc123def456", "owner/repo", "/tmp/repo",
-        )
-
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_clone_repo_failure_non_fatal(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.side_effect = ValueError("clone not found")
-
-        result = sandbox_initialize(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            clone_repo="owner/repo",
-        )
-
-        assert result.startswith("abc123def456")
-        assert "clone_repo failed" in result
-
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_without_clone_repo_works_normally(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        result = sandbox_initialize(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        )
-
-        assert result == "abc123def456"
-        mock_clone.assert_not_called()
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_clone_dest_custom(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.return_value = "Copied Shiori clone..."
-
-        sandbox_initialize(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            clone_repo="owner/repo",
-            clone_dest="/tmp/proj",
-        )
-
-        mock_clone.assert_called_once_with(
-            mock_container, "abc123def456", "owner/repo", "/tmp/proj",
-        )
-
-    @patch("code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", None)
-    @patch("code_sandbox_mcp.tools.container._clone_repo_via_network")
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_network_fallback_when_shiori_not_configured(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-        mock_shiori_clone: MagicMock,
-        mock_net_clone: MagicMock,
-    ) -> None:
-        # When Shiori is NOT configured and the Shiori copy raises
-        # ValueError, sandbox_initialize should use the network fallback
-        # too (mirrors the run_container_and_exec path, Issue #146).
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_shiori_clone.side_effect = ValueError(
-            "Shiori repos path is not configured"
-        )
-        mock_net_clone.return_value = (
-            "Cloned owner/repo via network into /tmp/repo/repo"
-            " in container abc123def456"
-        )
-
-        result = sandbox_initialize(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            clone_repo="owner/repo",
-        )
-
-        assert result.startswith("abc123def456")
-        assert "clone_repo failed" not in result
-        assert "via network" in result
-        mock_net_clone.assert_called_once()
+def _make_container(exec_returns):
+    container = MagicMock()
+    container.exec_run.side_effect = [
+        (ec, (stdout, stderr)) for ec, stdout, stderr in exec_returns
+    ]
+    return container
 
 
+def _make_client(container):
+    client = MagicMock()
+    client.containers.get.return_value = container
+    return client
 
 
-class TestSandboxInitializeCloneRepoPipExtras:
-    """Tests for pip_extras with clone_repo (Issue #245)."""
+class TestCloneRepo:
+    """Tests for clone_repo tool endpoint."""
 
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_pip_extras_none_skips_install(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.return_value = "Clone OK"
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    def test_successful_clone(self, mock_record, mock_docker):
+        """Successful clone returns ok with clone_path."""
+        container = _make_container([
+            (0, b"", b""),  # gh auth setup-git
+            (0, b"Cloning into 'mytool'...\n", b""),
+        ])
+        mock_docker.return_value = _make_client(container)
 
-        result = sandbox_initialize(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            clone_repo="owner/repo",
-            pip_extras=None,
-        )
-
-        assert "abc123def456" in result
-        # exec_run should NOT be called (no pip install)
-        assert mock_container.exec_run.call_count == 0
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_pip_extras_default_installs_dev(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"Installed", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.return_value = "Clone OK"
-
-        result = sandbox_initialize(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            clone_repo="owner/repo",
-        )
-
-        assert "abc123def456" in result
-        # exec_run should be called for pip install
-        assert mock_container.exec_run.call_count == 1
-        call_cmd = mock_container.exec_run.call_args[0][0][-1]
-        assert "pip install -e '.[dev]' -q" in call_cmd
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_pip_extras_custom_value(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.return_value = "Clone OK"
-
-        sandbox_initialize(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            clone_repo="owner/repo",
-            pip_extras="[test]",
-        )
-
-        call_cmd = mock_container.exec_run.call_args[0][0][-1]
-        assert "pip install -e '.[test]' -q" in call_cmd
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_pip_install_failure_non_fatal(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (1, (b"", b"ERROR"))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.return_value = "Clone OK"
-
-        result = sandbox_initialize(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            clone_repo="owner/repo",
-        )
-
-        assert "abc123def456" in result
-        assert "clone_repo failed" not in result
-        assert "pip install" not in result
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_clone_failure_skips_pip_install(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.side_effect = ValueError("clone not found")
-
-        result = sandbox_initialize(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            clone_repo="owner/repo",
-        )
-
-        assert "clone_repo failed" in result
-        # exec_run should NOT be called when clone fails
-        assert mock_container.exec_run.call_count == 0
-
-
-class TestRunContainerAndExecCloneRepo:
-    """Tests for run_container_and_exec with clone_repo."""
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_clone_repo_called_before_exec(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"test output", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        parent_mock = MagicMock()
-        parent_mock.attach_mock(mock_clone, "clone")
-        parent_mock.attach_mock(mock_container.exec_run, "exec_run")
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-            clone_repo="owner/repo",
-        ))
-
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
-        mock_clone.assert_called_once()
+        assert result["repo"] == "owner/mytool"
+        assert result["clone_path"] == "/home/sandbox/mytool"
+        assert result["branch"] == "default"
+        mock_record.assert_called_once()
 
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    @patch("code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", "/some/repos")
-    def test_clone_error_reported_in_result(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        # When Shiori IS configured, pre-clone exists, but the copy step
-        # fails with ValueError, the error is reported as clone_warning
-        # (Issue #84).  _shiori_preclone_exists is stubbed True so that
-        # _try_clone_into_container does not attempt the network fallback.
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"test output", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.side_effect = ValueError("path not found")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    def test_clone_with_branch(self, mock_record, mock_docker):
+        """Clone with branch specified."""
+        container = _make_container([
+            (0, b"", b""),
+            (0, b"Cloning into 'mytool'...\n", b""),
+        ])
+        mock_docker.return_value = _make_client(container)
 
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-            clone_repo="owner/repo",
-        ))
-
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(
+            clone_repo("abc123def456", "owner/mytool", branch="develop")
+        )
         assert result["status"] == "ok"
-        assert result["clone_warning"] == "path not found"
+        assert result["branch"] == "develop"
+        mock_record.assert_called_once()
 
-    @patch("code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", None)
-    @patch("code_sandbox_mcp.tools.container._clone_repo_via_network")
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_network_fallback_when_shiori_not_configured(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-        mock_shiori_clone: MagicMock,
-        mock_net_clone: MagicMock,
-    ) -> None:
-        # When Shiori is NOT configured and _clone_shiori_repo_to_container
-        # raises ValueError, the network fallback should be used (Issue #146).
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"test output", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_shiori_clone.side_effect = ValueError("Shiori repos path is not configured")
-        mock_net_clone.return_value = "Cloned owner/repo via network"
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_clone_failure(self, mock_docker):
+        """Clone failure returns error status."""
+        container = _make_container([
+            (0, b"", b""),
+            (1, b"", b"fatal: repository not found\n"),
+        ])
+        mock_docker.return_value = _make_client(container)
 
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-            clone_repo="owner/repo",
-        ))
-
-        assert result["status"] == "ok"
-        assert "clone_warning" not in result
-        mock_net_clone.assert_called_once()
-
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_without_clone_repo_normally(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"test output", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-        ))
-
-        assert result["status"] == "ok"
-        mock_clone.assert_not_called()
-        assert "clone_warning" not in result
-
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=False)
-    @patch("code_sandbox_mcp.tools.container._clone_repo_via_network")
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_preclone_absent_falls_back_to_network(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-        mock_shiori_clone: MagicMock,
-        mock_net_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        # When _shiori_preclone_exists returns False (pre-clone absent),
-        # _try_clone_into_container should fall back to network clone
-        # (Issue #178).  The helper is mocked directly for robustness.
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"test output", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_shiori_clone.side_effect = ValueError("Repository clone not found: /some/repos/owner/repo")
-        mock_net_clone.return_value = "Cloned owner/repo via network into /tmp/repo/repo in container abc123def456"
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-            clone_repo="owner/repo",
-        ))
-
-        assert result["status"] == "ok"
-        assert "clone_warning" not in result
-        mock_net_clone.assert_called_once()
-
-
-
-class TestRunContainerAndExecPipExtras:
-    """Tests for pip_extras with clone_repo in run_container_and_exec (Issue #245)."""
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_pip_extras_none_skips_install(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"output", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.return_value = "Clone OK"
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-            clone_repo="owner/repo",
-            pip_extras=None,
-        ))
-
-        assert result["status"] == "ok"
-        # exec_run called once for the "echo hello" command only (no pip install)
-        assert mock_container.exec_run.call_count == 1
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_default_pip_extras_installs_dev(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        # pip install exec_run + commands exec_run
-        mock_container.exec_run.side_effect = [
-            (0, (b"", b"")),       # pip install
-            (0, (b"output", b"")),  # user command
-        ]
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.return_value = "Clone OK"
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-            clone_repo="owner/repo",
-        ))
-
-        assert result["status"] == "ok"
-        assert mock_container.exec_run.call_count == 2
-        first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
-        assert "pip install -e '.[dev]' -q" in first_cmd
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_custom_pip_extras(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.side_effect = [
-            (0, (b"", b"")),       # pip install
-            (0, (b"output", b"")),  # user command
-        ]
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.return_value = "Clone OK"
-
-        json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-            clone_repo="owner/repo",
-            pip_extras="[test]",
-        ))
-
-        first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
-        assert "pip install -e '.[test]' -q" in first_cmd
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_pip_install_failure_non_fatal(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.side_effect = [
-            (1, (b"", b"ERROR")),   # pip install fails
-            (0, (b"output", b"")),   # user command still runs
-        ]
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.return_value = "Clone OK"
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-            clone_repo="owner/repo",
-        ))
-
-        assert result["status"] == "ok"
-        assert "clone_warning" not in result
-
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("code_sandbox_mcp.tools.container._clone_shiori_repo_to_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_clone_failure_skips_pip_install(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-        mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
-    ) -> None:
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"output", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-        mock_clone.side_effect = ValueError("clone not found")
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-            clone_repo="owner/repo",
-        ))
-
-        assert result["status"] == "ok"
-        assert result["clone_warning"] == "clone not found"
-        # exec_run called once for user command only (no pip install)
-        assert mock_container.exec_run.call_count == 1
-
-
-class TestRunContainerAndExecTimeout:
-    """Tests for run_container_and_exec with timeout (Issue #138)."""
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_timeout_applied_in_cmd(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """timeout=N should wrap the script with timeout(1)."""
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"ok", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo ok"],
-            timeout=5,
-        ))
-
-        assert result["status"] == "ok"
-        cmd = mock_container.exec_run.call_args[0][0][-1]
-        assert "timeout 5" in cmd
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_timeout_zero_not_applied(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """timeout=0 (default) does not wrap command with timeout(1)."""
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"ok", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo ok"],
-        ))
-
-        assert result["status"] == "ok"
-        cmd = mock_container.exec_run.call_args[0][0][-1]
-        assert "timeout" not in cmd
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_timeout_status_on_exit_124(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Issue #138: timeout=N returns status 'timeout' when exit_code is 124."""
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (124, (b"", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["sleep 60"],
-            timeout=5,
-        ))
-
-        assert result["status"] == "timeout"
-        assert result["exit_code"] == 124
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_exit_124_without_timeout_is_error(
-        self,
-        mock_validate: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """exit_code=124 without timeout set is status 'error', not 'timeout'."""
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (124, (b"", b""))
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["exit 124"],
-        ))
-
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(clone_repo("abc123def456", "owner/nonexistent"))
         assert result["status"] == "error"
+        assert "repository not found" in result["error"]
 
-    def test_negative_timeout_returns_error(self) -> None:
-        """timeout < 0 is rejected immediately with a clear error."""
-        result = json.loads(run_container_and_exec(
-            commands=["echo ok"],
-            timeout=-1,
-        ))
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_clone_with_custom_dest(self, mock_docker):
+        """Clone with custom dest_dir computes correct clone_path."""
+        container = _make_container([
+            (0, b"", b""),
+            (0, b"", b""),
+        ])
+        mock_docker.return_value = _make_client(container)
 
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(
+            clone_repo("abc123def456", "owner/mytool", dest_dir="/tmp/work")
+        )
+        assert result["clone_path"] == "/tmp/work/mytool"
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_clone_targets_repo_subdir(self, mock_docker):
+        """Issue #131: gh clones into {dest_dir}/{repo_name}, not dest_dir."""
+        container = _make_container([
+            (0, b"", b""),
+            (0, b"Cloning into 'mytool'...\n", b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        from code_sandbox_mcp.server import clone_repo
+        clone_repo("abc123def456", "owner/mytool")
+
+        cmd = container.exec_run.call_args[0][0][-1]
+        assert "/home/sandbox/mytool" in cmd
+        assert "gh repo clone 'owner/mytool' '/home/sandbox'" not in cmd
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_clone_existing_dir_adds_hint(self, mock_docker):
+        """Issue #131: 'already exists' failures get an actionable hint."""
+        container = _make_container([
+            (0, b"", b""),
+            (
+                1,
+                b"",
+                b"fatal: destination path '/home/sandbox/mytool' already "
+                b"exists and is not an empty directory.\n",
+            ),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "error"
-        assert "timeout" in result["error"]
+        assert "Hint:" in result["error"]
+        assert "dest_dir" in result["error"]
 
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    def test_clone_succeeds_when_auth_setup_fails(self, mock_record, mock_docker):
+        """gh auth setup-git failure is ignored; clone still proceeds."""
+        container = _make_container([
+            (1, b"", b"gh: not logged in\n"),
+            (0, b"Cloning into 'mytool'...\n", b""),
+        ])
+        mock_docker.return_value = _make_client(container)
 
-class TestShioriReposPathArg:
-    """Tests for --shiori-repos-path CLI argument."""
-
-    def test_default_is_none(self) -> None:
-        from code_sandbox_mcp.server import _build_arg_parser
-        parser = _build_arg_parser()
-        args = parser.parse_args([])
-        assert args.shiori_repos_path is None
-
-    def test_explicit_arg(self) -> None:
-        from code_sandbox_mcp.server import _build_arg_parser
-        parser = _build_arg_parser()
-        args = parser.parse_args(["--shiori-repos-path", "/data/repos"])
-        assert args.shiori_repos_path == "/data/repos"
-
-    def test_env_var_default(self) -> None:
-        import os
-
-        from code_sandbox_mcp.server import _build_arg_parser
-        with patch.dict(os.environ, {"SHIORI_REPOS_PATH": "/custom/repos"}):
-            parser = _build_arg_parser()
-            args = parser.parse_args([])
-            assert args.shiori_repos_path == "/custom/repos"
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(clone_repo("abc123def456", "owner/mytool"))
+        assert result["status"] == "ok"
+        assert result["clone_path"] == "/home/sandbox/mytool"
 
 
 class TestCloneRepoViaNetwork:
@@ -1047,16 +403,12 @@ class TestCloneRepoViaNetwork:
         assert "/tmp/repo/repo" in msg
 
     def test_failure_without_token_hints_inject_vcs_token(self) -> None:
-        # Private repos fail without a token; the error must guide the user
-        # to opt in with inject_vcs_token=True (token is not auto-injected).
         c = self._container(1, b"gh: Could not resolve to a Repository")
         with pytest.raises(RuntimeError) as exc:
             _clone_repo_via_network(c, "abc123def456", "owner/private", "/tmp/repo")
         assert "inject_vcs_token=True" in str(exc.value)
 
     def test_failure_with_token_omits_hint(self) -> None:
-        # When the token was already injected the hint would be misleading,
-        # so it must be suppressed.
         c = self._container(1, b"some other gh error")
         with pytest.raises(RuntimeError) as exc:
             _clone_repo_via_network(

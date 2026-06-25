@@ -52,6 +52,7 @@ from code_sandbox_mcp.security import (
     validate_image_ref,
 )
 from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _docker
+from code_sandbox_mcp.tools.vcs import checkpoint_list
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -730,11 +731,19 @@ def sandbox_initialize(
     return cid + clone_msg + pr_msg
 
 
-def sandbox_stop(container_id: str) -> str:
+def sandbox_stop(
+    container_id: str,
+    force: bool = False,
+    working_dir: str = "/home/sandbox",
+) -> str:
     """Stop and remove a running sandbox container.
 
     Args:
         container_id: 12-character container ID prefix.
+        force: If False (default), warns about unpushed checkpoints
+            in the container's git repo.  Use True to override.
+        working_dir: Directory in the container containing the git
+            repository (default ``"/home/sandbox"``).
 
     Removal is forceful: the container is killed (SIGKILL) and removed
     with ``force=True`` rather than gracefully stopped.  A graceful
@@ -755,6 +764,13 @@ def sandbox_stop(container_id: str) -> str:
         return f"Error: container {cid} not found"
     except Exception as e:
         return f"Error: {e}"
+
+    # Check for unpushed checkpoints (Issue #264) — reuse checkpoint_list
+    if not force:
+        result = json.loads(checkpoint_list(container_id, working_dir))
+        checkpoints = result.get("checkpoints", [])
+        if checkpoints:
+            return f"Error: Container has {len(checkpoints)} unpushed checkpoint(s). Use force=True to override."
 
     # Kill first (ignore if already stopped), then force-remove so a
     # still-running or unresponsive container is torn down regardless.

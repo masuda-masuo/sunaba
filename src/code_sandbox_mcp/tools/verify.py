@@ -268,6 +268,8 @@ def verify_in_container(
     pytest_args: str | None = None,
     language: str | None = None,
     working_dir: str | None = None,
+    skip_lint_gate: bool = False,
+    skip_type_gate: bool = False,
 ) -> str:
     """Run pytest with optional filter → full-suite fallback and diff summary.
 
@@ -341,6 +343,13 @@ def verify_in_container(
         working_dir: Working directory inside the container for test
             execution.  When ``None``, tests run from the container's
             default directory (``/home/sandbox``).
+        skip_lint_gate: Skip the lint precondition (default ``False``).
+            Use during the edit loop for faster focused-test feedback
+            when lint is known clean; leave ``False`` on the final
+            pre-publish call so the gate is enforced.
+        skip_type_gate: Skip the type-check precondition (default
+            ``False``).  Same edit-loop fast-path rationale as
+            *skip_lint_gate*.
 
     Returns:
         JSON string with:
@@ -434,23 +443,32 @@ def verify_in_container(
     # Lint/type run on the project source scope (mirroring CI's
     # ``ruff check src/``), independent of the test ``path``.  This makes
     # verify a single quality gate so a forgotten lint can no longer slip
-    # through to CI; both must pass before the test suite runs.
-    src_ec, _, _ = _run("test -d src")
-    gate_scope = "src" if src_ec == 0 else "."
-    lt_gate = run_lint_type_gate(
-        container, gate_scope, working_dir=working_dir, language=language
-    )
-    result["lint"] = lt_gate["lint"]
-    result["types"] = lt_gate["types"]
-    if lt_gate["incomplete"]:
-        result["lint_type_incomplete"] = True
-    if not lt_gate["gate_passed"]:
-        result["gate_fail_reasons"] = lt_gate["gate_fail_reasons"]
-        result["tests"] = {
-            "status": "skipped",
-            "message": "lint/type gate failed; tests not run",
-        }
-        return json.dumps(result)
+    # through to CI; both must pass before the test suite runs.  The
+    # skip_* flags let the edit loop get faster focused-test feedback when
+    # lint/type are known clean -- the gate is still enforced on the final
+    # pre-publish call where the flags are left at their default (False).
+    if not (skip_lint_gate and skip_type_gate):
+        src_ec, _, _ = _run("test -d src")
+        gate_scope = "src" if src_ec == 0 else "."
+        lt_gate = run_lint_type_gate(
+            container,
+            gate_scope,
+            working_dir=working_dir,
+            language=language,
+            gate_on_lint=not skip_lint_gate,
+            gate_on_type=not skip_type_gate,
+        )
+        result["lint"] = lt_gate["lint"]
+        result["types"] = lt_gate["types"]
+        if lt_gate["incomplete"]:
+            result["lint_type_incomplete"] = True
+        if not lt_gate["gate_passed"]:
+            result["gate_fail_reasons"] = lt_gate["gate_fail_reasons"]
+            result["tests"] = {
+                "status": "skipped",
+                "message": "lint/type gate failed; tests not run",
+            }
+            return json.dumps(result)
 
     # --- Run pytest ---
     def _run_pytest(filter_args: str) -> dict:

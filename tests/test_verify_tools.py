@@ -501,3 +501,68 @@ class TestVerifyInContainer:
             # Verify exec_run was called with workdir=working_dir
             _, kwargs = mock_container.exec_run.call_args
             assert kwargs.get("workdir") == "/tmp/repo/code-sandbox-mcp"
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_skip_both_gates_bypasses_lint_type_gate(self, mock_docker: MagicMock) -> None:
+        """skip_lint_gate + skip_type_gate skip the gate entirely (#294 review)."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.exec_run.return_value = (0, (b"", b""))
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate"
+        ) as mock_gate:
+            result = json.loads(verify_in_container(
+                container_id="abc123",
+                path="tests/",
+                skip_lint_gate=True,
+                skip_type_gate=True,
+            ))
+
+        mock_gate.assert_not_called()
+        assert "lint" not in result
+        assert "types" not in result
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_skip_lint_gate_maps_to_gate_on_lint_false(self, mock_docker: MagicMock) -> None:
+        """skip_lint_gate=True forwards gate_on_lint=False to run_lint_type_gate."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.exec_run.return_value = (0, (b"", b""))
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ) as mock_gate:
+            verify_in_container(
+                container_id="abc123",
+                path="tests/",
+                skip_lint_gate=True,
+            )
+
+        assert mock_gate.call_count == 1
+        _args, kwargs = mock_gate.call_args
+        assert kwargs["gate_on_lint"] is False
+        assert kwargs["gate_on_type"] is True

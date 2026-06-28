@@ -2215,7 +2215,13 @@ def run_verify(
 # Pre-test lint + type gate (Issue #293)
 # ---------------------------------------------------------------------------
 
-#: "rule" values that denote tool-state (absent / errored), not a real finding.
+#: "rule" values that denote tool-state, not a real code finding, and so
+#: must never fail the gate.  ``no-linter`` / ``no-typechecker`` are the
+#: tool-absence sentinels; ``error`` is the rule emitted by
+#: :func:`lint_file` / :func:`_run_python_linter` when the container call
+#: itself fails (e.g. container not found) -- defensive, since the gate
+#: runs the ``*_verify`` runners directly (which signal that via
+#: ``status="error"`` instead), but kept for alignment with that convention.
 _GATE_SENTINEL_RULES = ("no-linter", "no-typechecker", "error")
 
 

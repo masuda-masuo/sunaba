@@ -10,6 +10,7 @@ from src.code_sandbox_mcp.edit_verify import (
     _parse_pylint_output,
     _parse_ruff_output,
     _parse_semgrep_output,
+    _resolve_workdir,
 )
 
 # ===================================================================
@@ -384,3 +385,36 @@ class TestRuffSecurityRules:
         assert rules == {"F401", "S507"}
         assert _determine_lint_severity("F401") == "error"
         assert _determine_lint_severity("S507") == "warning"
+
+
+# ===================================================================
+# _resolve_workdir tests
+# ===================================================================
+
+
+class TestResolveWorkdir:
+    """Tests for project root derivation from file paths."""
+
+    def test_src_in_absolute_path(self) -> None:
+        """/src/ in path returns the parent of src/."""
+        assert _resolve_workdir("/app/src/foo.py") == "/app"
+
+    def test_src_in_deep_path(self) -> None:
+        """/src/ nested deeper returns the parent of src/."""
+        assert _resolve_workdir("/home/sandbox/project/src/lib/foo.py") == "/home/sandbox/project"
+
+    def test_src_prefix_relative(self) -> None:
+        """src/ prefix returns '.'."""
+        assert _resolve_workdir("src/foo.py") == "."
+
+    def test_no_src_absolute(self) -> None:
+        """No /src/ in absolute path returns dirname."""
+        assert _resolve_workdir("/home/sandbox/lib/foo.py") == "/home/sandbox/lib"
+
+    def test_no_src_root(self) -> None:
+        """File in root returns '.'."""
+        assert _resolve_workdir("foo.py") == "."
+
+    def test_no_src_relative_dir(self) -> None:
+        """Relative path with no /src/ returns the dirname."""
+        assert _resolve_workdir("lib/foo.py") == "lib"

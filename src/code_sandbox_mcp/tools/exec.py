@@ -37,7 +37,7 @@ def _coerce_list_arg(v: object) -> object:
             parsed = json.loads(v)
             if isinstance(parsed, list):
                 return parsed
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:
             pass
     return v
 

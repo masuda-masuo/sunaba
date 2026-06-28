@@ -676,78 +676,55 @@ class TestCoerceListArg:
     list so pydantic validation succeeds.
     """
 
+    from typing import Annotated
+
+    from pydantic import BeforeValidator, TypeAdapter
+
+    from code_sandbox_mcp.tools.exec import _coerce_list_arg
+
+    def _ta(self) -> "TypeAdapter[list[str]]":
+        from typing import Annotated
+        from pydantic import BeforeValidator, TypeAdapter
+        from code_sandbox_mcp.tools.exec import _coerce_list_arg
+        return TypeAdapter(Annotated[list[str], BeforeValidator(_coerce_list_arg)])
+
     def test_list_passthrough(self) -> None:
         """A real list is returned unchanged."""
         from code_sandbox_mcp.tools.exec import _coerce_list_arg
-
         v = ["echo", "hi"]
         assert _coerce_list_arg(v) is v
 
     def test_json_string_is_coerced_to_list(self) -> None:
         """A JSON-encoded list string is decoded to a list."""
         from code_sandbox_mcp.tools.exec import _coerce_list_arg
-
-        result = _coerce_list_arg('["echo", "hi"]')
-        assert result == ["echo", "hi"]
+        assert _coerce_list_arg('["echo", "hi"]') == ["echo", "hi"]
 
     def test_non_json_string_is_returned_as_is(self) -> None:
         """A non-JSON string is returned unchanged (pydantic will reject it later)."""
         from code_sandbox_mcp.tools.exec import _coerce_list_arg
-
-        result = _coerce_list_arg("not-a-list")
-        assert result == "not-a-list"
+        assert _coerce_list_arg("not-a-list") == "not-a-list"
 
     def test_json_object_string_not_coerced(self) -> None:
         """A JSON string whose payload is not a list is returned unchanged."""
         from code_sandbox_mcp.tools.exec import _coerce_list_arg
-
-        result = _coerce_list_arg('{"key": "value"}')
-        assert result == '{"key": "value"}'
+        assert _coerce_list_arg('{"key": "value"}') == '{"key": "value"}'
 
     def test_none_passthrough(self) -> None:
         """None is returned unchanged."""
         from code_sandbox_mcp.tools.exec import _coerce_list_arg
-
         assert _coerce_list_arg(None) is None
 
     def test_pydantic_accepts_json_string_for_commands(self) -> None:
         """pydantic TypeAdapter accepts a JSON-stringified list for the commands field."""
-        from typing import Annotated
-
-        from pydantic import BeforeValidator, TypeAdapter
-
-        from code_sandbox_mcp.tools.exec import _coerce_list_arg
-
-        ta: TypeAdapter[list[str]] = TypeAdapter(
-            Annotated[list[str], BeforeValidator(_coerce_list_arg)]
-        )
-        result = ta.validate_python('["git log --oneline -5", "ruff --version"]')
+        result = self._ta().validate_python('["git log --oneline -5", "ruff --version"]')
         assert result == ["git log --oneline -5", "ruff --version"]
 
     def test_pydantic_accepts_json_string_for_argv(self) -> None:
         """pydantic TypeAdapter accepts a JSON-stringified list for the argv field."""
-        from typing import Annotated
-
-        from pydantic import BeforeValidator, TypeAdapter
-
-        from code_sandbox_mcp.tools.exec import _coerce_list_arg
-
-        ta: TypeAdapter[list[str]] = TypeAdapter(
-            Annotated[list[str], BeforeValidator(_coerce_list_arg)]
-        )
-        result = ta.validate_python('["/bin/sh", "-c", "git log --oneline -5"]')
+        result = self._ta().validate_python('["/bin/sh", "-c", "git log --oneline -5"]')
         assert result == ["/bin/sh", "-c", "git log --oneline -5"]
 
     def test_pydantic_still_accepts_real_list(self) -> None:
         """pydantic TypeAdapter still accepts a real list (no regression)."""
-        from typing import Annotated
-
-        from pydantic import BeforeValidator, TypeAdapter
-
-        from code_sandbox_mcp.tools.exec import _coerce_list_arg
-
-        ta: TypeAdapter[list[str]] = TypeAdapter(
-            Annotated[list[str], BeforeValidator(_coerce_list_arg)]
-        )
-        result = ta.validate_python(["git", "log", "--oneline"])
+        result = self._ta().validate_python(["git", "log", "--oneline"])
         assert result == ["git", "log", "--oneline"]

@@ -13,8 +13,6 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-logger: logging.Logger = logging.getLogger(__name__)
-
 from docker.errors import APIError, NotFound
 
 from code_sandbox_mcp.edit_verify import (
@@ -26,6 +24,8 @@ from code_sandbox_mcp.edit_verify import (
 from code_sandbox_mcp.journal import record_copy
 from code_sandbox_mcp.output_control import paginate_output, truncate_output
 from code_sandbox_mcp.tools.common import _docker
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # write_file_sandbox  --  old_str helper functions

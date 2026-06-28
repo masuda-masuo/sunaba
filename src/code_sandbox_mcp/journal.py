@@ -95,10 +95,21 @@ def record_initialize(
     image: str,
     allow_network: bool = False,
     inject_vcs_token: bool = False,
+    mem_limit: str | None = None,
+    cpus: float | None = None,
 ) -> None:
-    """Record a container initialization event."""
+    """Record a container initialization event.
+
+    Args:
+        container_id: Container ID prefix.
+        image: Docker image used.
+        allow_network: Whether network access was granted.
+        inject_vcs_token: Whether VCS tokens were injected.
+        mem_limit: Override mem_limit if specified (Issue #201).
+        cpus: Override cpus if specified (Issue #201).
+    """
     run_id = get_or_create_run_id(container_id)
-    _append_json({
+    entry: dict[str, Any] = {
         "ts": _utcnow_iso(),
         "run_id": run_id,
         "container_id": container_id,
@@ -106,7 +117,12 @@ def record_initialize(
         "image": image,
         "allow_network": allow_network,
         "inject_vcs_token": inject_vcs_token,
-    })
+    }
+    if mem_limit is not None:
+        entry["mem_limit"] = mem_limit
+    if cpus is not None:
+        entry["cpus"] = cpus
+    _append_json(entry)
 
 
 def record_exec(

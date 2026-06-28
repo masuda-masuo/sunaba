@@ -412,3 +412,150 @@ class TestBuildSecureRunKwargsAllowAll:
         profile = SecurityProfile(user="")
         result = build_secure_run_kwargs(profile)
         assert "user" not in result
+
+
+class TestParseMemToMb:
+    """Tests for _parse_mem_to_mb."""
+
+    def test_parse_m(self) -> None:
+        from code_sandbox_mcp.security import _parse_mem_to_mb
+        assert _parse_mem_to_mb("512m") == 512
+        assert _parse_mem_to_mb("0m") == 0
+
+    def test_parse_g(self) -> None:
+        from code_sandbox_mcp.security import _parse_mem_to_mb
+        assert _parse_mem_to_mb("2g") == 2048
+        assert _parse_mem_to_mb("1g") == 1024
+
+    def test_parse_k(self) -> None:
+        from code_sandbox_mcp.security import _parse_mem_to_mb
+        assert _parse_mem_to_mb("1024k") == 1
+        assert _parse_mem_to_mb("2048k") == 2
+
+    def test_parse_plain_number(self) -> None:
+        from code_sandbox_mcp.security import _parse_mem_to_mb
+        assert _parse_mem_to_mb("2048") == 2048
+        assert _parse_mem_to_mb("512") == 512
+
+    def test_parse_case_insensitive(self) -> None:
+        from code_sandbox_mcp.security import _parse_mem_to_mb
+        assert _parse_mem_to_mb("2G") == 2048
+        assert _parse_mem_to_mb("512M") == 512
+
+    def test_parse_empty_raises(self) -> None:
+        from code_sandbox_mcp.security import _parse_mem_to_mb
+        with pytest.raises(ValueError, match="Empty memory string"):
+            _parse_mem_to_mb("")
+
+    def test_parse_invalid_raises(self) -> None:
+        from code_sandbox_mcp.security import _parse_mem_to_mb
+        with pytest.raises(ValueError):
+            _parse_mem_to_mb("not-a-number")
+
+
+class TestComputeDefaultLimits:
+    """Tests for compute_default_limits."""
+
+    def test_computes_from_host_resources(self, monkeypatch) -> None:
+        from code_sandbox_mcp.security import compute_default_limits
+        # Mock 16GB host / 8 CPUs
+        monkeypatch.setattr(
+            "code_sandbox_mcp.security._detect_host_resources",
+            lambda: (16384, 8),
+        )
+        mem_str, cpus = compute_default_limits(0.25, 0.25)
+        # 16384 * 0.25 = 4096
+        assert mem_str == "4096m"
+        # 8 * 0.25 = 2.0
+        assert cpus == 2.0
+
+    def test_floor_mem_512(self, monkeypatch) -> None:
+        from code_sandbox_mcp.security import compute_default_limits
+        # Very small host (e.g. 512MB)
+        monkeypatch.setattr(
+            "code_sandbox_mcp.security._detect_host_resources",
+            lambda: (512, 1),
+        )
+        mem_str, cpus = compute_default_limits(0.25, 0.25)
+        # 512 * 0.25 = 128, floor is 512
+        assert mem_str == "512m"
+
+    def test_floor_cpu_0_5(self, monkeypatch) -> None:
+        from code_sandbox_mcp.security import compute_default_limits
+        # Single-core host
+        monkeypatch.setattr(
+            "code_sandbox_mcp.security._detect_host_resources",
+            lambda: (8192, 1),
+        )
+        mem_str, cpus = compute_default_limits(0.25, 0.25)
+        # 1 * 0.25 = 0.25, floor is 0.5
+        assert cpus == 0.5
+
+    def test_fallback_on_detection_failure(self, monkeypatch) -> None:
+        from code_sandbox_mcp.security import compute_default_limits
+        monkeypatch.setattr(
+            "code_sandbox_mcp.security._detect_host_resources",
+            lambda: (0, 4),
+        )
+        mem_str, cpus = compute_default_limits(0.25, 0.25)
+        # Fallback to hard-coded 512m / 0.5
+        assert mem_str == "512m"
+        assert cpus == 0.5
+
+    def test_custom_ratios(self, monkeypatch) -> None:
+        from code_sandbox_mcp.security import compute_default_limits
+        monkeypatch.setattr(
+            "code_sandbox_mcp.security._detect_host_resources",
+            lambda: (32768, 16),
+        )
+        mem_str, cpus = compute_default_limits(0.5, 0.5)
+        # 32768 * 0.5 = 16384
+        assert mem_str == "16384m"
+        # 16 * 0.5 = 8.0
+        assert cpus == 8.0
+
+
+class TestGetSetDefaultProfile:
+    """Tests for get_default_profile / set_default_profile."""
+
+    def test_returns_static_default_by_default(self) -> None:
+        from code_sandbox_mcp.security import (
+            DEFAULT_SECURITY_PROFILE,
+            _effective_default_profile,
+            get_default_profile,
+        )
+        # Ensure no override is set
+        saved = _effective_default_profile
+        try:
+            from code_sandbox_mcp.security import set_default_profile
+            set_default_profile(None)  # noqa: type error ok for test
+        except TypeError:
+            pass
+        # After clearing, should return DEFAULT
+        result = get_default_profile()
+        assert result is DEFAULT_SECURITY_PROFILE
+
+    def test_set_profile_returned_by_get(self) -> None:
+        from code_sandbox_mcp.security import (
+            SecurityProfile,
+            get_default_profile,
+            set_default_profile,
+        )
+        custom = SecurityProfile(mem_limit="1g")
+        set_default_profile(custom)
+        result = get_default_profile()
+        assert result is custom
+        # Reset
+        from code_sandbox_mcp.security import DEFAULT_SECURITY_PROFILE
+        set_default_profile(DEFAULT_SECURITY_PROFILE)
+
+
+class TestDetectHostResources:
+    """Tests for _detect_host_resources."""
+
+    def test_returns_positive_values(self) -> None:
+        from code_sandbox_mcp.security import _detect_host_resources
+        mem_mb, cpus = _detect_host_resources()
+        assert cpus >= 1
+        # mem_mb may be 0 on platforms without sysconf support
+        assert mem_mb >= 0

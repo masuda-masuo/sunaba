@@ -110,6 +110,7 @@ class TestSandboxStopForceKill:
 class TestSandboxInitializeResources:
     """sandbox_initialize honours mem_limit / cpus overrides."""
 
+    @patch("code_sandbox_mcp.tools.container._detect_host_resources")
     @patch("code_sandbox_mcp.tools.container._docker")
     @patch("code_sandbox_mcp.tools.container._ensure_image")
     @patch("code_sandbox_mcp.tools.container.validate_image_ref")
@@ -118,12 +119,15 @@ class TestSandboxInitializeResources:
         mock_validate: MagicMock,
         mock_ensure: MagicMock,
         mock_docker: MagicMock,
+        mock_detect: MagicMock,
     ) -> None:
         container = MagicMock()
         container.id = "abc123def456"
         client = MagicMock()
         client.containers.run.return_value = container
         mock_docker.return_value = client
+        # Return large host resources so cap check passes
+        mock_detect.return_value = (65536, 32)
 
         result = sandbox_initialize(image=_IMG, mem_limit="2g", cpus=2.0)
 
@@ -134,6 +138,7 @@ class TestSandboxInitializeResources:
         # 2.0 cores * default cpu_period (100000us)
         assert kwargs["cpu_quota"] == 200000
 
+    @patch("code_sandbox_mcp.tools.container._detect_host_resources")
     @patch("code_sandbox_mcp.tools.container._docker")
     @patch("code_sandbox_mcp.tools.container._ensure_image")
     @patch("code_sandbox_mcp.tools.container.validate_image_ref")
@@ -142,12 +147,14 @@ class TestSandboxInitializeResources:
         mock_validate: MagicMock,
         mock_ensure: MagicMock,
         mock_docker: MagicMock,
+        mock_detect: MagicMock,
     ) -> None:
         container = MagicMock()
         container.id = "abc123def456"
         client = MagicMock()
         client.containers.run.return_value = container
         mock_docker.return_value = client
+        mock_detect.return_value = (65536, 32)
 
         sandbox_initialize(image=_IMG)
 
@@ -160,6 +167,7 @@ class TestSandboxInitializeResources:
         assert kwargs["memswap_limit"] == "512m"
         assert kwargs["cpu_quota"] == 50000
 
+    @patch("code_sandbox_mcp.tools.container._detect_host_resources")
     @patch("code_sandbox_mcp.tools.container._docker")
     @patch("code_sandbox_mcp.tools.container._ensure_image")
     @patch("code_sandbox_mcp.tools.container.validate_image_ref")
@@ -168,13 +176,109 @@ class TestSandboxInitializeResources:
         mock_validate: MagicMock,
         mock_ensure: MagicMock,
         mock_docker: MagicMock,
+        mock_detect: MagicMock,
     ) -> None:
         client = MagicMock()
         mock_docker.return_value = client
+        mock_detect.return_value = (65536, 32)
 
         result = sandbox_initialize(image=_IMG, cpus=0)
 
         assert result.startswith("Error: cpus must be > 0")
+        client.containers.run.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.container._detect_host_resources")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_mem_exceeds_host_cap_rejected(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+        mock_detect: MagicMock,
+    ) -> None:
+        """mem_limit over 90% of host memory is rejected."""
+        client = MagicMock()
+        mock_docker.return_value = client
+        # Host has 1024MB, so cap is 921MB. Requesting 1g (=1024m) exceeds it.
+        mock_detect.return_value = (1024, 4)
+
+        result = sandbox_initialize(image=_IMG, mem_limit="1g")
+
+        assert result.startswith("Error: mem_limit")
+        assert "exceeds host cap" in result
+        client.containers.run.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.container._detect_host_resources")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_mem_within_cap_passes(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+        mock_detect: MagicMock,
+    ) -> None:
+        """mem_limit within 90% cap passes through."""
+        container = MagicMock()
+        container.id = "abc123def456"
+        client = MagicMock()
+        client.containers.run.return_value = container
+        mock_docker.return_value = client
+        # Host has 10240MB, cap is 9216MB. 512m is well within.
+        mock_detect.return_value = (10240, 4)
+
+        result = sandbox_initialize(image=_IMG, mem_limit="512m")
+
+        assert result == "abc123def456"
+        kwargs = client.containers.run.call_args.kwargs
+        assert kwargs["mem_limit"] == "512m"
+
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_cap_skipped_when_host_detection_fails(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When host detection returns 0, cap check is skipped."""
+        container = MagicMock()
+        container.id = "abc123def456"
+        client = MagicMock()
+        client.containers.run.return_value = container
+        mock_docker.return_value = client
+        # Not mocking _detect_host_resources → returns (0, N) → cap skipped
+
+        result = sandbox_initialize(image=_IMG, mem_limit="2g")
+
+        assert result == "abc123def456"
+        kwargs = client.containers.run.call_args.kwargs
+        assert kwargs["mem_limit"] == "2g"
+
+    @patch("code_sandbox_mcp.tools.container._detect_host_resources")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_cpus_exceeds_host_rejected(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+        mock_detect: MagicMock,
+    ) -> None:
+        """cpus > host CPU count is rejected."""
+        client = MagicMock()
+        mock_docker.return_value = client
+        mock_detect.return_value = (65536, 2)  # 2 CPUs
+
+        result = sandbox_initialize(image=_IMG, cpus=4.0)
+
+        assert result.startswith("Error: cpus")
+        assert "exceeds host CPU count" in result
         client.containers.run.assert_not_called()
 
 

@@ -23,6 +23,8 @@ from code_sandbox_mcp.result_cache import (
     invalidate_cache,
 )
 from code_sandbox_mcp.security import (
+    compute_default_limits,
+    set_default_profile,
     validate_image_ref,
 )
 from code_sandbox_mcp.token import (
@@ -336,6 +338,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=300,
         help="Notify after this many seconds of execution (default: 300)",
     )
+    parser.add_argument(
+        "--mem-ratio",
+        type=float,
+        default=0.25,
+        help="Fraction of host memory for default mem_limit (default: 0.25)",
+    )
+    parser.add_argument(
+        "--cpu-ratio",
+        type=float,
+        default=0.25,
+        help="Fraction of host CPU for default cpu quota (default: 0.25)",
+    )
     return parser
 
 
@@ -388,11 +402,26 @@ def main() -> None:
     args = parser.parse_args()
 
     from code_sandbox_mcp.tools import container as _ct_mod
+    from dataclasses import replace
+    from code_sandbox_mcp.security import DEFAULT_SECURITY_PROFILE, _DEFAULT_CPU_PERIOD
     if args.default_image:
         validate_image_ref(args.default_image)
         _ct_mod._DEFAULT_IMAGE = args.default_image
     if args.shiori_repos_path:
         _ct_mod._SHIORI_REPOS_PATH = args.shiori_repos_path
+
+    # Compute host-adjusted default limits (Issue #201)
+    mem_limit_str, cpu_count = compute_default_limits(
+        mem_ratio=args.mem_ratio,
+        cpu_ratio=args.cpu_ratio,
+    )
+    adjusted_profile = replace(
+        DEFAULT_SECURITY_PROFILE,
+        mem_limit=mem_limit_str,
+        memswap_limit=mem_limit_str,
+        cpu_quota=int(cpu_count * _DEFAULT_CPU_PERIOD),
+    )
+    set_default_profile(adjusted_profile)
 
     # Configure notifications if webhook is set
     if args.webhook_url or args.failure_threshold != 5 or args.long_run_seconds != 300:

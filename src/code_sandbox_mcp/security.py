@@ -5,6 +5,7 @@ HITL (Human-In-The-Loop) runtime approval mechanisms.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -355,3 +356,90 @@ def build_secure_run_kwargs(
         result.setdefault("network_mode", profile.network_mode)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Host resource detection & default limit computation (Issue #201)
+# ---------------------------------------------------------------------------
+
+#: Mutable holder for the effective default profile.
+#: Set by :func:`set_default_profile` during server startup.
+_effective_default_profile: SecurityProfile | None = None
+
+
+def get_default_profile() -> SecurityProfile:
+    """Return the effective default security profile.
+
+    Returns the runtime-adjusted profile (set via :func:`set_default_profile`)
+    if available, otherwise falls back to the static ``DEFAULT_SECURITY_PROFILE``.
+    """
+    if _effective_default_profile is not None:
+        return _effective_default_profile
+    return DEFAULT_SECURITY_PROFILE
+
+
+def set_default_profile(profile: SecurityProfile) -> None:
+    """Override the effective default security profile.
+
+    Called during server startup after computing host-adjusted limits.
+    """
+    global _effective_default_profile
+    _effective_default_profile = profile
+
+
+def _detect_host_resources() -> tuple[int, int]:
+    """Return (host_memory_mb, host_cpu_count).
+
+    Returns (0, cpu_count) on platforms where sysconf is unavailable,
+    signalling that the caller should fall back to hard-coded defaults.
+    """
+    try:
+        mem_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        mem_mb = mem_bytes // (1024 * 1024)
+    except (ValueError, AttributeError, OSError):
+        mem_mb = 0
+    cpus = os.cpu_count() or 1
+    return mem_mb, cpus
+
+
+def compute_default_limits(
+    mem_ratio: float = 0.25,
+    cpu_ratio: float = 0.25,
+) -> tuple[str, float]:
+    """Compute default mem_limit and cpu count from host resources.
+
+    Args:
+        mem_ratio: Fraction of host memory to allocate (default 0.25).
+        cpu_ratio: Fraction of host CPU cores to allocate (default 0.25).
+
+    Returns:
+        (mem_limit_string, cpu_count) e.g. ("8192m", 4.0).
+        Falls back to ("512m", 0.5) when host detection fails.
+    """
+    mem_mb, cpus = _detect_host_resources()
+    if mem_mb <= 0:
+        return _DEFAULT_MEM_LIMIT, 0.5
+    mem_limit = max(512, int(mem_mb * mem_ratio))
+    cpu_limit = max(0.5, round(cpus * cpu_ratio, 2))
+    return f"{mem_limit}m", cpu_limit
+
+
+def _parse_mem_to_mb(mem_str: str) -> int:
+    """Parse a memory limit string to megabytes.
+
+    Supports ``"512m"``, ``"2g"``, ``"2048"`` (plain MB).
+
+    Raises:
+        ValueError: If the string cannot be parsed.
+    """
+    if not mem_str:
+        raise ValueError("Empty memory string")
+    mem_str = mem_str.strip().lower()
+    if mem_str.endswith("g"):
+        return int(float(mem_str[:-1]) * 1024)
+    elif mem_str.endswith("m"):
+        return int(float(mem_str[:-1]))
+    elif mem_str.endswith("k"):
+        return max(1, int(float(mem_str[:-1]) // 1024))
+    else:
+        return int(float(mem_str))

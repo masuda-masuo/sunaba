@@ -43,6 +43,6 @@ WORKDIR /home/sandbox
 
 # ── ヘルスチェック (go イメージが保有するツール) ──────────────────
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD go version && rg --version && sg --version && semgrep --version || exit 1
+  CMD go version && rg --version && sg --version && node --version && semgrep --version || exit 1
 
 CMD ["bash"]

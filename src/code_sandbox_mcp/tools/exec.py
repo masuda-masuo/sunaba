@@ -27,19 +27,8 @@ from code_sandbox_mcp.result_cache import (
     get_cached_result,
     set_cached_result,
 )
-from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _docker
+from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _coerce_list_arg, _docker
 
-
-def _coerce_list_arg(v: object) -> object:
-    """Coerce a JSON-stringified list to list (MCP client serialization workaround, issue #296)."""
-    if isinstance(v, str):
-        try:
-            parsed = json.loads(v)
-            if isinstance(parsed, list):
-                return parsed
-        except ValueError:
-            pass
-    return v
 
 def sandbox_exec(
     container_id: str,

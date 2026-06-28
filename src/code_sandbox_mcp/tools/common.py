@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import os
 from typing import Any
 
@@ -40,6 +42,19 @@ def _recovery_timeout_from_env() -> float:
 
 
 RECOVERY_DOCKER_TIMEOUT: float = _recovery_timeout_from_env()
+
+
+
+def _coerce_list_arg(v: object) -> object:
+    """Coerce a JSON-stringified list to list (MCP client serialization workaround, issue #296)."""
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+            if isinstance(parsed, list):
+                return parsed
+        except ValueError:
+            pass
+    return v
 
 
 def _docker(timeout: float | None = None) -> Any:

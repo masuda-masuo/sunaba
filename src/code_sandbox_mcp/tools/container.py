@@ -16,9 +16,10 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Annotated, Any, NamedTuple
 
 from docker.errors import APIError, NotFound
+from pydantic import BeforeValidator
 
 from code_sandbox_mcp import token_broker
 from code_sandbox_mcp.journal import (
@@ -54,7 +55,7 @@ from code_sandbox_mcp.security import (
     get_default_profile,
     validate_image_ref,
 )
-from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _docker
+from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _coerce_list_arg, _docker
 from code_sandbox_mcp.tools.vcs import checkpoint_list
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -875,7 +876,7 @@ def sandbox_stop(
 
 def run_container_and_exec(
     image: str | None = None,
-    commands: list[str] | None = None,
+    commands: Annotated[list[str], BeforeValidator(_coerce_list_arg)] | None = None,
     verbose: str = "summary",
     max_lines: int = 100,
     offset: int = 0,
@@ -1208,7 +1209,7 @@ def run_container_and_exec(
 def rerun_failed(
     container_id: str,
     run_id: str,
-    commands: list[str] | None = None,
+    commands: Annotated[list[str], BeforeValidator(_coerce_list_arg)] | None = None,
     verbose: str = "summary",
     max_lines: int = 100,
     offset: int = 0,
@@ -1341,7 +1342,7 @@ def rerun_failed(
 
 def sandbox_exec_diff(
     container_id: str,
-    commands: list[str],
+    commands: Annotated[list[str], BeforeValidator(_coerce_list_arg)],
     verbose: str = "summary",
     timeout: int = 0,
     max_output_tokens: int = 0,
@@ -1514,7 +1515,7 @@ def _cleanup_test_environment(network_name: str) -> None:
 
 
 def run_test_environment(
-    services: list[dict[str, Any]],
+    services: Annotated[list[dict[str, Any]], BeforeValidator(_coerce_list_arg)],
     network_name: str | None = None,
     cleanup_after: str | None = None,
 ) -> str:

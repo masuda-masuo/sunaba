@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from typing import Annotated
 
 from docker.errors import NotFound
+from pydantic import BeforeValidator
 
-from code_sandbox_mcp.tools.common import _docker
+from code_sandbox_mcp.tools.common import _coerce_list_arg, _docker
 
 
 def _run_in_container(container_id: str, cmd: list[str]) -> tuple[int, str, str]:
@@ -48,7 +50,7 @@ def _package_to_key(pkg: dict[str, str]) -> str:
 
 def package_install(
     container_id: str,
-    packages: str | list[str] | None = None,
+    packages: Annotated[str | list[str], BeforeValidator(_coerce_list_arg)] | None = None,
     editable: str | None = None,
     constraints: str | None = None,
     requirements: str | None = None,

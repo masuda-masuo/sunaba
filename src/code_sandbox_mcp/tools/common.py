@@ -55,5 +55,7 @@ def _docker(timeout: float | None = None) -> Any:
     import docker
 
     if timeout is not None:
-        return docker.from_env(timeout=timeout)
+        # docker-py types ``timeout`` as int, but seconds-as-float is
+        # intentional here (sub-second recovery budgets); accepted at runtime.
+        return docker.from_env(timeout=timeout)  # type: ignore[arg-type]
     return docker.from_env()

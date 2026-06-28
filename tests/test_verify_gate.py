@@ -331,3 +331,157 @@ class TestRunVerifyDetectionResult:
         result = run_verify(client, "abc123abc123", "/app", language="python")
         assert detected_calls == ["python"]
         assert "python" in result["detected_languages"]
+
+
+class TestRunLintTypeGate:
+    """Tests for run_lint_type_gate -- the pre-test lint+type gate (#293)."""
+
+    def _vr(self, status, findings=None, tool="ruff"):
+        from src.code_sandbox_mcp.edit_verify import VerifyResult
+        return VerifyResult(
+            tool=tool, status=status, findings=findings or [], exit_code=0
+        )
+
+    def _patch_detect(self, monkeypatch, languages={"python"}):
+        from src.code_sandbox_mcp.edit_verify import DetectionResult
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify.detect_languages",
+            lambda *a, **k: DetectionResult(
+                languages=set(languages),
+                scope={lang: "." for lang in languages},
+                reason=None if languages else "no markers",
+            ),
+        )
+
+    def test_clean_passes(self, monkeypatch):
+        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            lambda *a, **k: self._vr("ok"),
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            lambda *a, **k: self._vr("ok", tool="pyright"),
+        )
+        r = run_lint_type_gate(object(), "src")
+        assert r["gate_passed"] is True
+        assert r["incomplete"] is False
+        assert r["gate_fail_reasons"] == []
+
+    def test_warning_severity_lint_rule_still_fails_gate(self, monkeypatch):
+        """Regression for #293: D101 is severity 'warning' but must fail the
+        gate -- CI's ``ruff check`` exits non-zero for it regardless."""
+        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        d101 = self._vr("findings", [{
+            "file": "src/x.py", "line": 1, "rule": "D101",
+            "severity": "warning", "message": "Missing docstring",
+        }])
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            lambda *a, **k: d101,
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            lambda *a, **k: self._vr("ok", tool="pyright"),
+        )
+        r = run_lint_type_gate(object(), "src")
+        assert r["gate_passed"] is False
+        assert any("lint" in reason for reason in r["gate_fail_reasons"])
+
+    def test_type_error_fails_gate(self, monkeypatch):
+        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            lambda *a, **k: self._vr("ok"),
+        )
+        type_err = self._vr("findings", [{
+            "file": "src/x.py", "line": 2, "rule": "reportArgumentType",
+            "severity": "error", "message": "bad type",
+        }], tool="pyright")
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            lambda *a, **k: type_err,
+        )
+        r = run_lint_type_gate(object(), "src")
+        assert r["gate_passed"] is False
+        assert any("type_check" in reason for reason in r["gate_fail_reasons"])
+
+    def test_tool_absence_is_incomplete_but_does_not_block(self, monkeypatch):
+        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            lambda *a, **k: self._vr("not_available"),
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            lambda *a, **k: self._vr("not_available", tool="pyright"),
+        )
+        r = run_lint_type_gate(object(), "src")
+        assert r["gate_passed"] is True
+        assert r["incomplete"] is True
+
+    def test_sentinel_only_findings_do_not_fail_gate(self, monkeypatch):
+        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        sentinel = self._vr("findings", [{
+            "file": "src/x.py", "line": 0, "rule": "no-linter",
+            "message": "no linter",
+        }])
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            lambda *a, **k: sentinel,
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            lambda *a, **k: self._vr("ok", tool="pyright"),
+        )
+        r = run_lint_type_gate(object(), "src")
+        assert r["gate_passed"] is True
+
+    def test_no_languages_passes_vacuously(self, monkeypatch):
+        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch, languages=set())
+        r = run_lint_type_gate(object(), "src")
+        assert r["gate_passed"] is True
+        assert r["detected_languages"] == []
+
+    def test_gate_on_type_false_skips_type_layer(self, monkeypatch):
+        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            lambda *a, **k: self._vr("ok"),
+        )
+        called = {"type": False}
+
+        def _type_runner(*a, **k):
+            called["type"] = True
+            return self._vr("findings", [{"rule": "x", "severity": "error"}],
+                            tool="pyright")
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner", _type_runner
+        )
+        r = run_lint_type_gate(object(), "src", gate_on_type=False)
+        assert called["type"] is False
+        assert r["gate_passed"] is True
+
+    def test_gate_lint_runner_uses_plain_ruff(self, monkeypatch):
+        """The gate must run ruff WITHOUT the security extend-select so it
+        matches CI exactly."""
+        from src.code_sandbox_mcp.edit_verify import _gate_lint_runner
+        captured = {}
+
+        def _fake_ruff(container, path, workdir=None, extra_select=True):
+            captured["extra_select"] = extra_select
+            from src.code_sandbox_mcp.edit_verify import VerifyResult
+            return VerifyResult(tool="ruff", status="ok", findings=[], exit_code=0)
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._run_ruff_verify", _fake_ruff
+        )
+        _gate_lint_runner(object(), "src", "python", None)
+        assert captured["extra_select"] is False
+

@@ -157,6 +157,8 @@ def _ensure_image(image: str) -> None:
 
     Calls ``docker pull`` to fetch the image if not already present.
     """
+    import docker.errors
+
     import docker
 
     client = docker.from_env()
@@ -778,7 +780,7 @@ def sandbox_initialize(
         if err is not None:
             clone_msg = f" (clone_repo failed: {err})"
         else:
-            clone_msg = " " + msg
+            clone_msg = " " + (msg or "")
         if pip_extras is not None and err is None:
             _run_pip_install(container, clone_repo, clone_dest, pip_extras)
     elif clone_repo and pr is not None:
@@ -1180,7 +1182,7 @@ def run_container_and_exec(
         result["pr_warning"] = pr_error
 
     # Cache the result
-    cache_key = compute_cache_key(image, commands, input_hash=input_hash)
+    cache_key = compute_cache_key(resolved, commands, input_hash=input_hash)
     set_cached_result(cache_key, result)
 
     journal_record_exec(

@@ -489,13 +489,15 @@ class TestVerifyInContainer:
                 working_dir="/tmp/repo/code-sandbox-mcp",
             )
 
-            # Verify detect_languages was called with working_dir
-            mock_detect.assert_called_once_with(
-                mock_container,
-                "tests/",
-                None,
-                working_dir="/tmp/repo/code-sandbox-mcp",
-            )
+            # detect_languages runs twice now: once for the test path and
+            # once for the pre-test lint/type gate scope (#293). Both calls
+            # must carry working_dir.
+            assert mock_detect.call_count == 2
+            first_args, first_kwargs = mock_detect.call_args_list[0]
+            assert first_args == (mock_container, "tests/", None)
+            assert first_kwargs == {"working_dir": "/tmp/repo/code-sandbox-mcp"}
+            for _args, _kwargs in mock_detect.call_args_list:
+                assert _kwargs.get("working_dir") == "/tmp/repo/code-sandbox-mcp"
             # Verify exec_run was called with workdir=working_dir
             _, kwargs = mock_container.exec_run.call_args
             assert kwargs.get("workdir") == "/tmp/repo/code-sandbox-mcp"

@@ -137,8 +137,8 @@
 - **`search_in_container`**: `mode: lexical|structural` で ripgrep / ast-grep を切り替え。`{file, line, text}` 配列を返す。`max_results` 上限付き。理想ループの起点。
 - **`read_file_range`**: `offset` / `limit` で該当箇所だけ読む。
 - **`write_file_sandbox`（編集の主役）**: 既知の新テキストを渡す宣言的編集。`overwrite` / 行範囲 / `append` / `old_str`（文字列置換）の各モードを束ねる。LLM 著作編集の既定経路。
-- **`lint_in_container` / `type_check_in_container`**: 編集ループ中の単体確認用。ruff / pyright。
-- **`verify_in_container`**: test 専用。`test_filter`（pytest `-k`）で特定テストだけ実行可能。フィルタ合格時は自動で全件テストを実行し、gate は常に全件ベースで判定。結果に `diff_summary`（`git diff --stat`）を含める。
+- **`lint_in_container` / `type_check_in_container`**: 編集ループ中の単体（単一ファイル）確認用。ruff / pyright。
+- **`verify_in_container`**: 公開前の品質ゲート。pytest の前に lint（プロジェクトの `src/` を素の `ruff check` で。CI と一致）と型チェックを**前提条件**として実行し、どちらかが落ちればテストを走らせず `gate_passed=false` と findings を返す（#293。lint 忘れが CI まで漏れない）。ツール不在（例: `:minimal` イメージ）は `lint_type_incomplete` 扱いでゲートは落とさない。`test_filter`（pytest `-k`）で特定テストだけ実行可能。フィルタ合格時は自動で全件テストを実行し、gate は常に全件ベースで判定。結果に `diff_summary`（`git diff --stat`）を含める。
 
 **編集の2モダリティ（宣言的 / 命令的の直交2本）**
 

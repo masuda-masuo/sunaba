@@ -52,7 +52,7 @@ class VerifyResult:
     exit_code: int = -1
 
 
-def _envelope_ok(tool: str, findings: list[dict[str, Any]] = None, exit_code: int = 0) -> VerifyResult:
+def _envelope_ok(tool: str, findings: list[dict[str, Any]] | None = None, exit_code: int = 0) -> VerifyResult:
     if findings is None:
         findings = []
     return VerifyResult(
@@ -1030,7 +1030,7 @@ _RUFF_SECURITY_SELECT = ",".join([
     # weak hash
     "S324",
     # XML (XXE)
-    "S313", "S314", "S315", "S316", "S317", "S318", "S319", "S320",
+    "S313", "S314", "S315", "S316", "S317", "S318", "S319",
     # network safety
     "S113", "S507",
     # template injection
@@ -1091,18 +1091,36 @@ def _determine_scope(file_path: str) -> ScopeWorkdir:
     return ScopeWorkdir(scope, scope)
 
 
-def _run_ruff_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
-    """Run ruff on *path*.  Returns VerifyResult envelope."""
+def _run_ruff_verify(
+    container: Any,
+    path: str,
+    workdir: str | None = None,
+    extra_select: bool = True,
+) -> VerifyResult:
+    """Run ruff on *path*.  Returns VerifyResult envelope.
+
+    When *extra_select* is ``True`` (default) the curated security
+    rule-set is layered on top of the project's own ruff config for
+    awareness during editing.  Pass ``extra_select=False`` to run ruff
+    with the project config **only** -- this mirrors CI's plain
+    ``ruff check`` exactly and is what the pre-test gate uses, so the
+    gate never diverges from CI on rules the project hasn't opted into.
+    """
     # _quote_path uses shlex.quote (single-quote wrapping), so paths with
     # spaces or special characters are safe. SELECT/IGNORE are comma-separated
     # rule codes with no whitespace, so no quoting is needed for those.
+    security_args = (
+        f"--extend-select {_RUFF_SECURITY_SELECT} "
+        f"--extend-ignore {_RUFF_SECURITY_IGNORE} "
+        if extra_select
+        else ""
+    )
     ec, output = container.exec_run(
         [
             "/bin/sh",
             "-c",
             f"{_SANDBOX_ENV}ruff check --output-format json "
-            f"--extend-select {_RUFF_SECURITY_SELECT} "
-            f"--extend-ignore {_RUFF_SECURITY_IGNORE} "
+            f"{security_args}"
             f"{_quote_path(path)}",
         ],
         stdout=True,
@@ -2191,6 +2209,127 @@ def run_verify(
         result["gate_fail_reasons"] = gate_fail_reasons
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Pre-test lint + type gate (Issue #293)
+# ---------------------------------------------------------------------------
+
+#: "rule" values that denote tool-state (absent / errored), not a real finding.
+_GATE_SENTINEL_RULES = ("no-linter", "no-typechecker", "error")
+
+
+def _gate_lint_runner(
+    container: Any, path: str, lang: str, workdir: str | None
+) -> VerifyResult:
+    """Lint runner for the gate.  Python ruff runs WITHOUT the security
+    extend-select so the gate matches CI's plain ``ruff check`` exactly."""
+    if lang == "python":
+        return _run_ruff_verify(container, path, workdir=workdir, extra_select=False)
+    if lang in ("js", "ts"):
+        return _run_eslint_verify(container, path, workdir=workdir)
+    if lang == "go":
+        return _run_golangci_lint_verify(container, path)
+    return _envelope_skipped(f"{lang}-lint", f"language '{lang}' has no lint layer")
+
+
+def _gate_type_runner(
+    container: Any, path: str, lang: str, workdir: str | None
+) -> VerifyResult:
+    """Type-check runner for the gate."""
+    if lang == "python":
+        return _run_pyright_verify(container, path, workdir=workdir)
+    if lang == "ts":
+        return _run_tsc_verify(container, path, workdir=workdir)
+    return _envelope_skipped(f"{lang}-type", f"language '{lang}' has no type layer")
+
+
+def run_lint_type_gate(
+    container: Any,
+    scope: str,
+    *,
+    working_dir: str | None = None,
+    language: str | None = None,
+    gate_on_lint: bool = True,
+    gate_on_type: bool = True,
+) -> dict[str, Any]:
+    """Run lint + type-check as a pre-test gate over *scope* (Issue #293).
+
+    Detects project languages (from the working-dir root) and runs the
+    project linter and type checker over *scope*.  The Python linter runs
+    with the project's ruff config only -- no security extend-select --
+    so a failing lint gate means CI's ``ruff check`` would also fail.
+
+    Gate decisions:
+
+    * **lint** -- any finding (excluding tool-state sentinels) fails the
+      gate when *gate_on_lint*.  Severity is intentionally irrelevant:
+      ruff exits non-zero for *any* enabled rule (``D``/``I``/``W``
+      included), so the gate mirrors CI rather than the severity
+      heuristic used for presentation.  (This is why the motivating
+      ``D101`` -- a "warning"-severity rule -- is caught here.)
+    * **type** -- any type-checker finding fails the gate when
+      *gate_on_type*.
+
+    Tool absence (``not_available``) or execution errors set
+    ``incomplete=True`` but do **not** fail the gate -- a missing tool is
+    an environment signal (e.g. the lint/type-free ``:minimal`` image),
+    not a code defect.
+
+    Returns a dict with ``gate_passed``, ``incomplete``,
+    ``detected_languages``, ``lint`` / ``types`` (flat finding lists),
+    and ``gate_fail_reasons``.
+    """
+    # Detect from the project root so package markers (pyproject.toml, etc.)
+    # are found; the linter/type-checker then run on the CI-aligned *scope*.
+    detected = detect_languages(container, ".", language, working_dir=working_dir)
+
+    lint_results: list[VerifyResult] = []
+    type_results: list[VerifyResult] = []
+    for lang in sorted(detected.languages):
+        if gate_on_lint:
+            lint_results.append(_gate_lint_runner(container, scope, lang, working_dir))
+        if gate_on_type:
+            type_results.append(_gate_type_runner(container, scope, lang, working_dir))
+
+    gate_fail_reasons: list[str] = []
+    incomplete = any(
+        vr.status in ("not_available", "error")
+        for vr in (*lint_results, *type_results)
+    )
+
+    if gate_on_lint:
+        for vr in lint_results:
+            if vr.status == "findings":
+                violations = [
+                    r for r in vr.findings
+                    if r.get("rule") not in _GATE_SENTINEL_RULES
+                ]
+                if violations:
+                    gate_fail_reasons.append(
+                        f"lint ({vr.tool}): {len(violations)} violation(s)"
+                    )
+
+    if gate_on_type:
+        for vr in type_results:
+            if vr.status == "findings":
+                type_errors = [
+                    r for r in vr.findings
+                    if r.get("rule") not in _GATE_SENTINEL_RULES
+                ]
+                if type_errors:
+                    gate_fail_reasons.append(
+                        f"type_check ({vr.tool}): {len(type_errors)} error(s)"
+                    )
+
+    return {
+        "gate_passed": len(gate_fail_reasons) == 0,
+        "incomplete": incomplete,
+        "detected_languages": sorted(detected.languages),
+        "lint": _flatten_layer(lint_results),
+        "types": _flatten_layer(type_results),
+        "gate_fail_reasons": gate_fail_reasons,
+    }
 
 
 def _flatten_layer(results: list[VerifyResult]) -> list[dict[str, Any]]:

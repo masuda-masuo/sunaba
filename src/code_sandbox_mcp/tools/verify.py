@@ -7,6 +7,7 @@ import json
 from docker.errors import NotFound
 
 from code_sandbox_mcp.edit_verify import (
+    _get_extension,
     apply_patch_to_file,
     lint_file,
     search_files,
@@ -122,6 +123,20 @@ def search_in_container(
     return json.dumps(results)
 
 
+def _determine_scope(file_path: str) -> str:
+    """Determine the project scope for full lint/type-check.
+
+    If the file is under a ``src/`` directory, returns ``"src"``
+    (matching CI's ``ruff check src/``).  Otherwise returns the
+    parent directory of the file, falling back to ``"."``.
+    """
+    normalized = file_path.replace("\\", "/")
+    if normalized.startswith("src/") or "/src/" in normalized:
+        return "src"
+    parent = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
+    return parent or "."
+
+
 def lint_in_container(container_id: str, file_path: str) -> str:
     """Run a linter on *file_path* inside the container.
 
@@ -131,6 +146,11 @@ def lint_in_container(container_id: str, file_path: str) -> str:
     - ``line`` (int): line number
     - ``rule`` (str): rule identifier (e.g. ``"F401"``)
     - ``message`` (str): human-readable message
+
+    **Two-phase check**: the linter first runs on the single file; if
+    no findings are reported, it also runs on the full project scope
+    (e.g. ``"src/"``) to catch issues that only appear in project-wide
+    checks (like I001 import ordering).
 
     Supported:
     - ``.py`` → ``ruff check`` (falls back to ``pylint``)
@@ -181,7 +201,9 @@ def lint_in_container(container_id: str, file_path: str) -> str:
             [{"file": file_path, "line": 0, "rule": "error", "message": str(e)}]
         )
 
-    results = lint_file(client, container_id, file_path)
+    ext = _get_extension(file_path)
+    scope = _determine_scope(file_path) if ext in (".py", ".js", ".ts", ".jsx", ".tsx") else None
+    results = lint_file(client, container_id, file_path, scope=scope)
     return json.dumps(results)
 
 
@@ -189,6 +211,10 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
     """Run a type checker on *file_path* inside the container.
 
     Returns the same format as :func:`lint_in_container`.
+
+    **Two-phase check**: the type checker first runs on the single file;
+    if no findings are reported, it also runs on the full project scope
+    to catch issues that only appear in project-wide checks.
 
     Supported:
     - ``.py`` → ``pyright``
@@ -239,7 +265,9 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
             [{"file": file_path, "line": 0, "rule": "error", "message": str(e)}]
         )
 
-    results = type_check_file(client, container_id, file_path)
+    ext = _get_extension(file_path)
+    scope = _determine_scope(file_path) if ext in (".py", ".ts", ".tsx") else None
+    results = type_check_file(client, container_id, file_path, scope=scope)
     return json.dumps(results)
 
 

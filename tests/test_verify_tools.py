@@ -318,7 +318,28 @@ class TestLintInContainer:
             lint_in_container(container_id="abc123", file_path="/tmp/f.py")
         )
         assert result == [{"file": "f.py", "line": 5, "rule": "F401", "message": "unused import"}]
-        mock_impl.assert_called_once_with(mock_client, "abc123", "/tmp/f.py")
+        mock_impl.assert_called_once_with(mock_client, "abc123", "/tmp/f.py", scope="/tmp")
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("code_sandbox_mcp.tools.verify.lint_file")
+    def test_two_phase_scope_pass(
+        self,
+        mock_impl: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Single-file clean → scope check runs (filter-then-full pattern)."""
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_impl.return_value = [{"file": "src/a.py", "line": 3, "rule": "I001", "message": "import order"}]
+
+        result = json.loads(
+            lint_in_container(container_id="abc123", file_path="src/foo.py")
+        )
+        # scope check returns findings since lint_file is mocked
+        assert result == [{"file": "src/a.py", "line": 3, "rule": "I001", "message": "import order"}]
+        mock_impl.assert_called_once_with(mock_client, "abc123", "src/foo.py", scope="src")
 
 
 # ===================================================================
@@ -371,7 +392,7 @@ class TestTypeCheckInContainer:
             type_check_in_container(container_id="abc123", file_path="/tmp/f.py")
         )
         assert result == [{"file": "f.py", "line": 10, "rule": "arg-type", "message": "incompatible type"}]
-        mock_impl.assert_called_once_with(mock_client, "abc123", "/tmp/f.py")
+        mock_impl.assert_called_once_with(mock_client, "abc123", "/tmp/f.py", scope="/tmp")
 
 
 # ===================================================================

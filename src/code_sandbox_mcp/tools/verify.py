@@ -278,6 +278,7 @@ def verify_in_container(
     verbose: bool = False,
     pytest_args: str | None = None,
     language: str | None = None,
+    working_dir: str | None = None,
 ) -> str:
     """Run pytest with optional filter → full-suite fallback and diff summary.
 
@@ -337,6 +338,9 @@ def verify_in_container(
             full runs.
         language: Explicit language override (``"python"``, ``"js"``,
             ``"ts"``, ``"go"``).  Skips auto-detection.
+        working_dir: Working directory inside the container for test
+            execution.  When ``None``, tests run from the container's
+            default directory (``/home/sandbox``).
 
     Returns:
         JSON string with:
@@ -378,6 +382,7 @@ def verify_in_container(
     def _run(cmd: str) -> tuple[int, str, str]:
         ec, out = container.exec_run(
             ["/bin/sh", "-c", cmd], stdout=True, stderr=True,
+            workdir=working_dir,
         )
         out_stdout, out_stderr = (
             out if isinstance(out, tuple) else (out, b"")

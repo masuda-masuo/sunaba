@@ -167,6 +167,7 @@ class PytestAdapter:
                     test=nodeid,
                     error=error_text,
                     file=crash.get("path", "") or nodeid.split("::", 1)[0],
+                    # or 0 guards against crash.lineno being None (which int() rejects).
                     line=int(crash.get("lineno", t.get("lineno", 0)) or 0),
                 )
             )
@@ -205,6 +206,8 @@ class JestAdapter:
         """Parse a jest --json dict into a TestReport."""
         # Compute duration from startTime and testResults endTime/startTime.
         # numRuntimeMs is NOT a real key in jest --json output.
+        # If startTime is 0 (older jest versions that don't emit it),
+        # duration stays 0.0 as a fallback.
         start_time = float(report.get("startTime", 0))
         duration = 0.0
         if start_time > 0:
@@ -324,6 +327,9 @@ class GoTestAdapter:
                 m = re.search(r"ok\s+\S+\s+([\d]+\.?[\d]*)s", text)
                 if m:
                     duration = max(duration, float(m.group(1)))
+                # May include passing tests' output too, but build failures
+                # typically produce short compile-error text, and
+                # prune_library_frames caps at 5 lines, so it's acceptable.
                 package_output.append(text)
             # Package-level fail (build/compile error, no individual test fails)
             elif action == "fail" and not test_name:

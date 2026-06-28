@@ -133,6 +133,7 @@ def detect_languages(
     container: Any,
     path: str,
     language: str | None = None,
+    working_dir: str | None = None,
 ) -> DetectionResult:
     """Detect languages from a file or directory path inside the container.
 
@@ -144,6 +145,13 @@ def detect_languages(
 
     For polyglot projects, returns a ``scope`` dict mapping each language
     to its root directory so tools can be run per sub-tree.
+
+    Args:
+        container: Docker container object.
+        path: File or directory path (relative to ``working_dir``, or absolute).
+        language: Explicit language override to skip detection.
+        working_dir: Working directory for exec_run. When set, ``path`` is
+            resolved relative to this directory.
 
     Returns:
         ``DetectionResult(languages, scope, reason)`` where *reason* is
@@ -157,7 +165,7 @@ def detect_languages(
         lang = _LANGUAGE_EXT_MAP[ext]
         scope_dir = path
         if lang == "ts":
-            tsconfig_dir = _find_tsconfig_upward(container, path)
+            tsconfig_dir = _find_tsconfig_upward(container, path, working_dir=working_dir)
             if tsconfig_dir is not None:
                 scope_dir = tsconfig_dir
         return DetectionResult(languages={lang}, scope={lang: scope_dir})
@@ -173,6 +181,7 @@ def detect_languages(
         ["/bin/sh", "-c", find_cmd],
         stdout=True,
         stderr=True,
+        workdir=working_dir,
     )
     if ec == 0:
         stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
@@ -202,7 +211,7 @@ def detect_languages(
     return DetectionResult(languages=languages, scope=lang_scope)
 
 
-def _find_tsconfig_upward(container: Any, file_path: str) -> str | None:
+def _find_tsconfig_upward(container: Any, file_path: str, working_dir: str | None = None) -> str | None:
     """Search upward from *file_path* for a tsconfig.json.
 
     Returns the directory containing tsconfig.json, or None if not found.
@@ -213,6 +222,7 @@ def _find_tsconfig_upward(container: Any, file_path: str) -> str | None:
             ["/bin/sh", "-c", f'test -f {shlex.quote(posixpath.join(current, "tsconfig.json"))} && echo found || echo notfound'],
             stdout=True,
             stderr=True,
+            workdir=working_dir,
         )
         stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
         out = stdout_part.decode("utf-8", errors="replace").strip() if stdout_part else ""

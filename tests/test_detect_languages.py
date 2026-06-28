@@ -36,6 +36,32 @@ class TestDetectLanguages:
         assert result.reason is None
         mock_container.exec_run.assert_not_called()
 
+    def test_working_dir_passed_to_exec_run(self) -> None:
+        from unittest.mock import MagicMock
+
+        from src.code_sandbox_mcp.edit_verify import detect_languages
+
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"/app/go.mod\n", b""))
+
+        # working_dir should be passed to exec_run as workdir=
+        detect_languages(mock_container, ".", working_dir="/app")
+        call_kwargs = mock_container.exec_run.call_args[1]
+        assert call_kwargs.get("workdir") == "/app"
+
+    def test_working_dir_none_default(self) -> None:
+        from unittest.mock import MagicMock
+
+        from src.code_sandbox_mcp.edit_verify import detect_languages
+
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"/app/go.mod\n", b""))
+
+        detect_languages(mock_container, "/app")
+        call_kwargs = mock_container.exec_run.call_args[1]
+        # workdir should not be set or be None when working_dir is not passed
+        assert "workdir" not in call_kwargs or call_kwargs.get("workdir") is None
+
     def test_file_extension_python(self) -> None:
         from unittest.mock import MagicMock
 

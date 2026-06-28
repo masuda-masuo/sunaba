@@ -445,3 +445,57 @@ class TestVerifyInContainer:
             language="python",
         ))
         assert result["status"] == "error"  # container not found
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_signature_accepts_working_dir(self, mock_docker: MagicMock) -> None:
+        """verify_in_container accepts working_dir parameter."""
+        mock_client = MagicMock()
+        mock_client.containers.get.side_effect = NotFound("not found")
+        mock_docker.return_value = mock_client
+
+        result = json.loads(verify_in_container(
+            container_id="abc123",
+            path="tests/",
+            working_dir="/tmp/repo/code-sandbox-mcp",
+        ))
+        assert result["status"] == "error"  # container not found
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_working_dir_passed_to_exec_run(self, mock_docker: MagicMock) -> None:
+        """working_dir is passed to exec_run internally."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        # Mock detect_languages to avoid find exec
+        result = DetectionResult(languages={"python"}, scope={"python": "/repo"}, reason=None)
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=result,
+        ) as mock_detect:
+            # Mock exec_run for _run() calls (git diff, pytest)
+            mock_container.exec_run.return_value = (
+                0,
+                (b"", b""),
+            )
+
+            verify_in_container(
+                container_id="abc123",
+                path="tests/",
+                working_dir="/tmp/repo/code-sandbox-mcp",
+            )
+
+            # Verify detect_languages was called with working_dir
+            mock_detect.assert_called_once_with(
+                mock_container,
+                "tests/",
+                None,
+                working_dir="/tmp/repo/code-sandbox-mcp",
+            )
+            # Verify exec_run was called with workdir=working_dir
+            _, kwargs = mock_container.exec_run.call_args
+            assert kwargs.get("workdir") == "/tmp/repo/code-sandbox-mcp"

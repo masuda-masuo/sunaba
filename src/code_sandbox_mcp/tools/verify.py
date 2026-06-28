@@ -328,7 +328,9 @@ def verify_in_container(
     Args:
         container_id: 12-character container ID prefix.
         path: File or directory path inside the container (e.g.
-            ``"tests/"``).
+            ``"tests/"``).  When ``working_dir`` is set, this is
+            resolved relative to ``working_dir``; otherwise it is an
+            absolute path or relative to the container's default directory.
         test_filter: pytest ``-k`` expression for selective test
             execution.  When set, filtered tests run first; if
             they pass, the full suite runs automatically.
@@ -377,7 +379,7 @@ def verify_in_container(
         })
 
     # --- Language detection ---
-    detected = detect_languages(container, path, language)
+    detected = detect_languages(container, path, language, working_dir=working_dir)
 
     def _run(cmd: str) -> tuple[int, str, str]:
         ec, out = container.exec_run(

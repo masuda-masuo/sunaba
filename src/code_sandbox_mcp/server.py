@@ -66,12 +66,6 @@ from .tools.journal import (
 from .tools.package import (
     package_install,
 )
-from .tools.verify import (
-    lint_in_container,
-    search_in_container,
-    type_check_in_container,
-    verify_in_container,
-)
 from .tools.vcs import (
     checkpoint,
     checkpoint_list,
@@ -79,6 +73,12 @@ from .tools.vcs import (
     clone_repo,
     issue_view,
     publish,
+)
+from .tools.verify import (
+    lint_in_container,
+    search_in_container,
+    type_check_in_container,
+    verify_in_container,
 )
 
 logger: logging.Logger = logging.getLogger(__name__)

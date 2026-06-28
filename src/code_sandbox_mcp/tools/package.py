@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import shlex
+import logging
 
 from docker.errors import NotFound
 
@@ -21,7 +21,7 @@ def _run_in_container(container_id: str, cmd: list[str]) -> tuple[int, str, str]
         return -1, "", str(e)
 
     exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", " ".join(shlex.quote(c) for c in cmd)],
+        cmd,
         stdout=True,
         stderr=True,
         demux=True,

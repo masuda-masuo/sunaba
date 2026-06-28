@@ -36,8 +36,9 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Unit test / coverage reports
-htmlcov/
+# pytest-json-report output
+.report.json
+
 .tox/
 .nox/
 .coverage

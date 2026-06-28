@@ -1028,7 +1028,12 @@ _RUFF_SECURITY_SELECT = ",".join([
 ])
 
 _RUFF_SECURITY_IGNORE = ",".join([
-    "S101",          # assert — normal in pytest
+    # S101: assert is idiomatic in pytest and common for invariant guards in
+    # application code (e.g. `assert x is not None`). Excluding it avoids
+    # flooding test suites; the trade-off is that non-test assert-as-guard
+    # patterns are not flagged. Acceptable because LLMs can reason about
+    # assert usage from context without a dedicated lint signal.
+    "S101",
     "S105", "S106", "S107",  # hardcoded-password heuristics — high false-positive rate
     "S311",          # random — usually non-security
     "S110", "S112",  # try-except-pass / try-except-continue — style, not security
@@ -1037,6 +1042,9 @@ _RUFF_SECURITY_IGNORE = ",".join([
 
 def _run_ruff_verify(container: Any, path: str) -> VerifyResult:
     """Run ruff on *path*.  Returns VerifyResult envelope."""
+    # _quote_path uses shlex.quote (single-quote wrapping), so paths with
+    # spaces or special characters are safe. SELECT/IGNORE are comma-separated
+    # rule codes with no whitespace, so no quoting is needed for those.
     ec, output = container.exec_run(
         [
             "/bin/sh",

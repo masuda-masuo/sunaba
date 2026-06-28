@@ -5,12 +5,15 @@ from __future__ import annotations
 import difflib
 import io
 import json
+import logging
 import os
 import posixpath
 import shlex
 import tarfile
 import tempfile
 from pathlib import Path
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 from docker.errors import APIError, NotFound
 
@@ -420,6 +423,10 @@ def copy_project(
     See also:
         :func:`clone_repo` — clone a remote Git repo inside the container.
         :func:`copy_file` — copy a single file instead of a directory.
+
+    Note:
+        After copying, files are ``chown``-ed to the container's running user
+        so they remain writable by tools like :func:`write_file_sandbox`.
     """
     client = _docker()
     try:
@@ -448,11 +455,18 @@ def copy_project(
             container.put_archive(dest_dir, buf)
         except APIError as e:
             return f"Error: {e}"
+        dest_path = f"{dest_dir}/{arcname}"
+        try:
+            container.exec_run(
+                ["sh", "-c", f"chown -R $(id -u):$(id -g) {shlex.quote(dest_path)}"]
+            )
+        except Exception as e:
+            logger.debug("chown failed for %s: %s", dest_path, e)
         record_copy(
-            container_id[:12], "copy_project", local_src_dir, f"{dest_dir}/{arcname}"
+            container_id[:12], "copy_project", local_src_dir, dest_path
         )
         return (
-            f"Copied {local_src_dir} to {dest_dir}/{arcname} "
+            f"Copied {local_src_dir} to {dest_path} "
             f"in container {container_id[:12]}"
         )
     finally:

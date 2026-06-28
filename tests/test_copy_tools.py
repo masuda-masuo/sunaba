@@ -29,6 +29,7 @@ class TestCopyProject:
 
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
+        mock_container.exec_run.return_value = (0, b"")
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -48,6 +49,10 @@ class TestCopyProject:
         mock_container.put_archive.assert_called_once()
         call_args = mock_container.put_archive.call_args
         assert call_args[0][0] == "/root/shiori"
+
+        mock_container.exec_run.assert_called_once_with(
+            ["sh", "-c", "chown -R $(id -u):$(id -g) /root/shiori/myproject"]
+        )
 
         tar_data = call_args[0][1]
         tar_data.seek(0)
@@ -74,6 +79,7 @@ class TestCopyProject:
 
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
+        mock_container.exec_run.return_value = (0, b"")
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -96,6 +102,10 @@ class TestCopyProject:
         with tarfile.open(fileobj=tar_data, mode="r") as tar:
             names = tar.getnames()
         assert "myapp/app.py" in names
+
+        mock_container.exec_run.assert_called_once_with(
+            ["sh", "-c", "chown -R $(id -u):$(id -g) /opt/myapp"]
+        )
 
     @patch("code_sandbox_mcp.tools.file._docker")
     def test_copy_project_container_not_found(
@@ -170,6 +180,33 @@ class TestCopyProject:
             dest_dir="/nonexistent",
         )
         assert "Error" in result
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_copy_project_exec_run_fails(
+        self,
+        mock_docker: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """exec_run chown failure should be non-fatal."""
+        src_dir = tmp_path / "chownfail"
+        src_dir.mkdir()
+        (src_dir / "f.txt").write_text("data")
+
+        mock_container = MagicMock()
+        mock_container.put_archive.return_value = True
+        mock_container.exec_run.side_effect = RuntimeError("exec failed")
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = copy_project(
+            container_id="abc123",
+            local_src_dir=str(src_dir),
+            dest_dir="/tmp",
+        )
+
+        assert "Error" not in result
+        assert "Copied" in result
 
     @patch("code_sandbox_mcp.tools.file._docker")
     @patch("code_sandbox_mcp.tools.file.record_copy")

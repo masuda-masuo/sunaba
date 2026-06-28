@@ -1472,6 +1472,7 @@ def lint_file(
     client: Any,
     container_id: str,
     file_path: str,
+    scope: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run a linter on *file_path* inside the container.
 
@@ -1481,6 +1482,10 @@ def lint_file(
     - ``line`` (int): line number
     - ``rule`` (str): rule identifier (e.g. ``"F401"``, ``"unused-import"``)
     - ``message`` (str): human-readable message
+
+    When *scope* is provided and the single-file check passes (no findings),
+    the linter is also run on the full scope (e.g. ``"src"``) to catch
+    issues that only appear in project-wide checks (like I001 import ordering).
 
     If no suitable linter is installed in the container, returns a
     single entry with ``rule`` set to ``"no-linter"`` and a
@@ -1498,9 +1503,19 @@ def lint_file(
     ext = _get_extension(file_path)
 
     if ext in (".py",):
-        return _run_python_linter(container, file_path)
+        findings = _run_python_linter(container, file_path)
+        if not findings and scope:
+            scope_r = _run_ruff_verify(container, scope)
+            if scope_r.status not in ("not_available", "error"):
+                return scope_r.findings
+        return findings
     elif ext in (".js", ".ts", ".jsx", ".tsx"):
-        return _run_js_linter(container, file_path)
+        findings = _run_js_linter(container, file_path)
+        if not findings and scope:
+            scope_r = _run_eslint_verify(container, scope)
+            if scope_r.status not in ("not_available", "error"):
+                return scope_r.findings
+        return findings
     else:
         return [
             {
@@ -1561,11 +1576,16 @@ def type_check_file(
     client: Any,
     container_id: str,
     file_path: str,
+    scope: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run a type checker on *file_path* inside the container.
 
     Returns the same structure as :func:`lint_file`.
     If no type checker is installed, returns ``rule: "no-typechecker"``.
+
+    When *scope* is provided and the single-file check passes (no findings),
+    the type checker is also run on the full scope to catch issues that
+    only appear in project-wide checks.
 
     Supported:
     - ``.py`` files -> ``pyright``
@@ -1579,9 +1599,19 @@ def type_check_file(
     ext = _get_extension(file_path)
 
     if ext in (".py",):
-        return _run_python_typecheck(container, file_path)
+        findings = _run_python_typecheck(container, file_path)
+        if not findings and scope:
+            scope_r = _run_pyright_verify(container, scope)
+            if scope_r.status not in ("not_available", "error"):
+                return scope_r.findings
+        return findings
     elif ext in (".ts", ".tsx"):
-        return _run_ts_typecheck(container, file_path)
+        findings = _run_ts_typecheck(container, file_path)
+        if not findings and scope:
+            scope_r = _run_tsc_verify(container, scope)
+            if scope_r.status not in ("not_available", "error"):
+                return scope_r.findings
+        return findings
     else:
         return [
             {

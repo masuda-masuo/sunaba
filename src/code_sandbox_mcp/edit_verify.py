@@ -1050,7 +1050,23 @@ _RUFF_SECURITY_IGNORE = ",".join([
 ])
 
 
-def _run_ruff_verify(container: Any, path: str) -> VerifyResult:
+def _resolve_workdir(file_path: str) -> str:
+    """Derive the project root from *file_path* for scope check CWD.
+
+    When the file lives under ``src/``, the project root is the parent of
+    the ``src/`` directory.  Otherwise returns the dirname of the file.
+    """
+    normalized = file_path.replace("\\", "/")
+    idx = normalized.find("/src/")
+    if idx != -1:
+        return normalized[:idx]
+    if normalized.startswith("src/"):
+        return "."
+    parent = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
+    return parent or "."
+
+
+def _run_ruff_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run ruff on *path*.  Returns VerifyResult envelope."""
     # _quote_path uses shlex.quote (single-quote wrapping), so paths with
     # spaces or special characters are safe. SELECT/IGNORE are comma-separated
@@ -1066,6 +1082,7 @@ def _run_ruff_verify(container: Any, path: str) -> VerifyResult:
         ],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -1082,7 +1099,7 @@ def _run_ruff_verify(container: Any, path: str) -> VerifyResult:
     return _envelope_ok("ruff", findings, ec)
 
 
-def _run_eslint_verify(container: Any, path: str) -> VerifyResult:
+def _run_eslint_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run eslint on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
         [
@@ -1092,6 +1109,7 @@ def _run_eslint_verify(container: Any, path: str) -> VerifyResult:
         ],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -1201,7 +1219,7 @@ def _parse_go_vet_output(raw: str, file_path: str) -> list[dict[str, Any]]:
     return results
 
 
-def _run_pyright_verify(container: Any, path: str) -> VerifyResult:
+def _run_pyright_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run pyright on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
         [
@@ -1211,6 +1229,7 @@ def _run_pyright_verify(container: Any, path: str) -> VerifyResult:
         ],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -1229,7 +1248,7 @@ def _run_pyright_verify(container: Any, path: str) -> VerifyResult:
     return _envelope_ok("pyright", findings, ec)
 
 
-def _run_tsc_verify(container: Any, path: str) -> VerifyResult:
+def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run tsc --noEmit on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
         [
@@ -1239,6 +1258,7 @@ def _run_tsc_verify(container: Any, path: str) -> VerifyResult:
         ],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     combined = ""
@@ -1515,14 +1535,16 @@ def lint_file(
     if ext in (".py",):
         findings = _run_python_linter(container, file_path)
         if not findings and scope:
-            scope_r = _run_ruff_verify(container, scope)
+            workdir = _resolve_workdir(file_path)
+            scope_r = _run_ruff_verify(container, scope, workdir=workdir)
             if scope_r.status not in ("not_available", "error"):
                 return scope_r.findings
         return findings
     elif ext in (".js", ".ts", ".jsx", ".tsx"):
         findings = _run_js_linter(container, file_path)
         if not findings and scope:
-            scope_r = _run_eslint_verify(container, scope)
+            workdir = _resolve_workdir(file_path)
+            scope_r = _run_eslint_verify(container, scope, workdir=workdir)
             if scope_r.status not in ("not_available", "error"):
                 return scope_r.findings
         return findings
@@ -1611,14 +1633,16 @@ def type_check_file(
     if ext in (".py",):
         findings = _run_python_typecheck(container, file_path)
         if not findings and scope:
-            scope_r = _run_pyright_verify(container, scope)
+            workdir = _resolve_workdir(file_path)
+            scope_r = _run_pyright_verify(container, scope, workdir=workdir)
             if scope_r.status not in ("not_available", "error"):
                 return scope_r.findings
         return findings
     elif ext in (".ts", ".tsx"):
         findings = _run_ts_typecheck(container, file_path)
         if not findings and scope:
-            scope_r = _run_tsc_verify(container, scope)
+            workdir = _resolve_workdir(file_path)
+            scope_r = _run_tsc_verify(container, scope, workdir=workdir)
             if scope_r.status not in ("not_available", "error"):
                 return scope_r.findings
         return findings

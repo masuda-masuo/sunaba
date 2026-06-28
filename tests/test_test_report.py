@@ -152,8 +152,8 @@ class TestPytestAdapter:
             "summary": {"total": 5, "passed": 5, "failed": 0},
             "duration": 0.8,
             "tests": [
-                {"nodeid": "test_a.py::test_one", "outcome": "passed", "file": "test_a.py", "line": 1},
-                {"nodeid": "test_a.py::test_two", "outcome": "passed", "file": "test_a.py", "line": 5},
+                {"nodeid": "test_a.py::test_one", "outcome": "passed"},
+                {"nodeid": "test_a.py::test_two", "outcome": "passed"},
             ],
         }
         report = PytestAdapter.parse(data)
@@ -166,38 +166,138 @@ class TestPytestAdapter:
 
     def test_some_failed(self) -> None:
         data = {
-            "summary": {"total": 3, "passed": 1, "failed": 2},
+            "summary": {"total": 4, "passed": 2, "failed": 1, "errors": 1},
             "duration": 2.1,
             "tests": [
-                {"nodeid": "test_a.py::test_pass", "outcome": "passed", "file": "test_a.py", "line": 1},
+                {"nodeid": "test_a.py::test_pass", "outcome": "passed"},
+                {"nodeid": "test_a.py::test_pass2", "outcome": "passed"},
                 {
                     "nodeid": "test_a.py::test_fail",
                     "outcome": "failed",
-                    "file": "test_a.py",
-                    "line": 10,
                     "call": {
                         "crash": {
-                            "traceback": '  File "/home/user/project/test_a.py", line 10\n    assert False\nAssertionError'
+                            "path": "test_a.py",
+                            "lineno": 10,
+                            "message": "AssertionError\nassert False",
                         },
-                        "message": "AssertionError",
+                        "longrepr": (
+                            "def test_fail():\n"
+                            "    assert False\n"
+                            "E   AssertionError\n"
+                            "\n"
+                            "test_a.py:10: AssertionError"
+                        ),
+                        "traceback": [
+                            {"path": "test_a.py", "lineno": 10, "message": "AssertionError"},
+                        ],
                     },
                 },
                 {
                     "nodeid": "test_b.py::test_error",
                     "outcome": "error",
-                    "file": "test_b.py",
-                    "line": 20,
-                    "call": {"crash": None, "message": "ZeroDivisionError"},
+                    "setup": {
+                        "crash": {
+                            "path": "test_b.py",
+                            "lineno": 5,
+                            "message": "RuntimeError: fixture boom",
+                        },
+                        "longrepr": (
+                            "    @pytest.fixture\n"
+                            "    def boom():\n"
+                            ">       raise RuntimeError(\"fixture boom\")\n"
+                            "E       RuntimeError: fixture boom\n"
+                            "\n"
+                            "test_b.py:5: RuntimeError"
+                        ),
+                    },
+                    "call": {},
                 },
             ],
         }
         report = PytestAdapter.parse(data)
         assert report.status == "failed"
         assert report.failed == 2
-        assert report.passed == 1
+        assert report.passed == 2
         assert len(report.failures) == 2
         assert report.failures[0].test == "test_a.py::test_fail"
+        assert report.failures[0].error == (
+            "def test_fail():\n"
+            "    assert False\n"
+            "E   AssertionError\n"
+            "\n"
+            "test_a.py:10: AssertionError"
+        )
+        assert report.failures[0].file == "test_a.py"
+        assert report.failures[0].line == 10
         assert report.failures[1].test == "test_b.py::test_error"
+        assert report.failures[1].file == "test_b.py"
+        assert report.failures[1].line == 5
+
+    def test_error_outcome_setup_crash(self) -> None:
+        """error outcome with crash in setup stage (fixture failure)."""
+        data = {
+            "summary": {"total": 2, "passed": 0, "failed": 0, "errors": 1},
+            "duration": 0.5,
+            "tests": [
+                {
+                    "nodeid": "test_fixture.py::test_uses_fixture",
+                    "outcome": "error",
+                    "setup": {
+                        "crash": {
+                            "path": "test_fixture.py",
+                            "lineno": 8,
+                            "message": "ValueError: invalid fixture param",
+                        },
+                        "longrepr": (
+                            "    @pytest.fixture\n"
+                            "    def param():\n"
+                            ">       raise ValueError(\"invalid fixture param\")\n"
+                            "E       ValueError: invalid fixture param\n"
+                            "\n"
+                            "test_fixture.py:8: ValueError"
+                        ),
+                    },
+                    "call": {},
+                },
+                {"nodeid": "test_ok.py::test_ok", "outcome": "passed"},
+            ],
+        }
+        report = PytestAdapter.parse(data)
+        assert report.status == "failed"
+        assert report.failed == 1
+        assert report.passed == 1
+        assert len(report.failures) == 1
+        assert report.failures[0].test == "test_fixture.py::test_uses_fixture"
+        assert "ValueError" in report.failures[0].error
+        assert report.failures[0].file == "test_fixture.py"
+        assert report.failures[0].line == 8
+
+    def test_failure_without_longrepr_falls_back_to_crash_message(self) -> None:
+        """When longrepr is missing, fall back to crash.message."""
+        data = {
+            "summary": {"total": 1, "passed": 0, "failed": 1},
+            "duration": 0.3,
+            "tests": [
+                {
+                    "nodeid": "test_x.py::test_x",
+                    "outcome": "failed",
+                    "call": {
+                        "crash": {
+                            "path": "test_x.py",
+                            "lineno": 3,
+                            "message": "AssertionError: x should be 3",
+                        },
+                    },
+                },
+            ],
+        }
+        report = PytestAdapter.parse(data)
+        assert report.status == "failed"
+        assert report.failed == 1
+        assert len(report.failures) == 1
+        assert report.failures[0].error == "AssertionError: x should be 3"
+        assert report.failures[0].file == "test_x.py"
+        assert report.failures[0].line == 3
 
     def test_empty_report(self) -> None:
         data = {"summary": {"total": 0, "passed": 0, "failed": 0}, "duration": 0.0, "tests": []}
@@ -212,12 +312,55 @@ class TestPytestAdapter:
             {
                 "summary": {"total": 1, "passed": 1, "failed": 0},
                 "duration": 0.3,
-                "tests": [{"nodeid": "t.py::t", "outcome": "passed", "file": "t.py", "line": 1}],
+                "tests": [{"nodeid": "t.py::t", "outcome": "passed"}],
             }
         )
         report = PytestAdapter.parse_json(raw)
         assert report.status == "ok"
         assert report.passed == 1
+
+    def test_snapshot_real_data(self) -> None:
+        """Real pytest-json-report output shape (snapshot test)."""
+        raw = json.dumps({
+            "summary": {"total": 2, "passed": 1, "failed": 1, "errors": 0},
+            "duration": 0.42,
+            "tests": [
+                {"nodeid": "test_x.py::test_ok", "outcome": "passed"},
+                {
+                    "nodeid": "test_x.py::test_fail",
+                    "outcome": "failed",
+                    "call": {
+                        "crash": {
+                            "path": "/work/test_x.py",
+                            "lineno": 6,
+                            "message": "AssertionError: x should be 3\nassert 2 == 3",
+                        },
+                        "traceback": [
+                            {"path": "test_x.py", "lineno": 6, "message": "AssertionError"},
+                        ],
+                        "longrepr": (
+                            "def test_fail():\n"
+                            "        x = 2\n"
+                            ">       assert x == 3, \"x should be 3\"\n"
+                            "E       AssertionError: x should be 3\n"
+                            "E       assert 2 == 3\n"
+                            "\n"
+                            "test_x.py:6: AssertionError"
+                        ),
+                    },
+                },
+            ],
+        })
+        report = PytestAdapter.parse_json(raw)
+        assert report.status == "failed"
+        assert report.failed == 1
+        assert report.passed == 1
+        assert len(report.failures) == 1
+        f = report.failures[0]
+        assert f.test == "test_x.py::test_fail"
+        assert "assert 2 == 3" in f.error
+        assert f.file == "/work/test_x.py"
+        assert f.line == 6
 
 
 # ===================================================================
@@ -231,9 +374,11 @@ class TestJestAdapter:
         data = {
             "numPassedTests": 10,
             "numFailedTests": 0,
-            "numRuntimeMs": 1500,
+            "startTime": 1000000,
             "testResults": [
                 {
+                    "startTime": 1000000,
+                    "endTime": 1001500,
                     "assertionResults": [
                         {"status": "passed", "fullName": "sum adds", "title": "adds"},
                     ],
@@ -250,9 +395,11 @@ class TestJestAdapter:
         data = {
             "numPassedTests": 8,
             "numFailedTests": 2,
-            "numRuntimeMs": 2000,
+            "startTime": 2000000,
             "testResults": [
                 {
+                    "startTime": 2000000,
+                    "endTime": 2002000,
                     "assertionResults": [
                         {
                             "status": "failed",
@@ -277,7 +424,7 @@ class TestJestAdapter:
         data = {
             "numPassedTests": 0,
             "numFailedTests": 0,
-            "numRuntimeMs": 0,
+            "startTime": 0,
             "testResults": [],
         }
         report = JestAdapter.parse(data)
@@ -290,9 +437,11 @@ class TestJestAdapter:
         data = {
             "numPassedTests": 0,
             "numFailedTests": 1,
-            "numRuntimeMs": 100,
+            "startTime": 3000000,
             "testResults": [
                 {
+                    "startTime": 3000000,
+                    "endTime": 3000100,
                     "assertionResults": [
                         {
                             "status": "failed",
@@ -315,9 +464,11 @@ class TestJestAdapter:
             {
                 "numPassedTests": 3,
                 "numFailedTests": 0,
-                "numRuntimeMs": 500,
+                "startTime": 500000,
                 "testResults": [
                     {
+                        "startTime": 500000,
+                        "endTime": 500500,
                         "assertionResults": [
                             {"status": "passed", "fullName": "t1", "title": "t1"},
                         ],
@@ -384,9 +535,11 @@ class TestGoTestAdapter:
             {"Action": "fail", "Package": "github.com/user/project", "Elapsed": 0.1},
         ]
         report = GoTestAdapter.parse(events)
-        assert report.status == "ok"  # no individual test failures => ok
+        assert report.status == "failed"
         assert report.passed == 0
-        assert report.failed == 0
+        assert report.failed == 1
+        assert len(report.failures) == 1
+        assert "undefined" in report.failures[0].error
 
     def test_parse_json_ndjson(self) -> None:
         raw = (
@@ -431,7 +584,7 @@ class TestParseTestReport:
             {
                 "numPassedTests": 5,
                 "numFailedTests": 0,
-                "numRuntimeMs": 100,
+                "startTime": 100000,
                 "testResults": [],
             }
         )

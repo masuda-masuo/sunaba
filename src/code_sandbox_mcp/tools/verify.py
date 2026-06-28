@@ -325,7 +325,6 @@ def verify_in_container(
 
     from code_sandbox_mcp.edit_verify import (
         _SANDBOX_ENV,
-        _quote_path,
         detect_languages,
     )
 
@@ -394,14 +393,14 @@ def verify_in_container(
 
     # --- Run pytest ---
     def _run_pytest(filter_args: str) -> dict:
-        _json_file = "/tmp/_pytest_report.json"
-        full_cmd = (
-            f"{_SANDBOX_ENV}python3 -m pytest --json-report "
-            f"--json-report-file={_json_file} -q{filter_args} "
-            f"{_quote_path(path)} >/dev/null 2>&1; "
-            f"_ec=$?; cat {_json_file} 2>/dev/null; "
-            f"rm -f {_json_file}; exit $_ec"
+        from code_sandbox_mcp.test_report import (
+            PytestAdapter,
+            build_pytest_cmd,
+            split_pytest_output,
         )
+        _json_file = "/tmp/_pytest_report.json"
+        _raw_file = "/tmp/_pytest_raw.txt"
+        full_cmd = build_pytest_cmd(_json_file, _raw_file, filter_args, path, _SANDBOX_ENV)
         ec, stdout_text, stderr_text = _run(full_cmd)
 
         if ec == 127:
@@ -411,16 +410,20 @@ def verify_in_container(
 
         stdout_text_s = stdout_text if isinstance(stdout_text, str) else ""
 
-        if not stdout_text_s.strip():
-            return {"status": "no_tests", "error": "no test output produced"}
+        json_part, raw_tail = split_pytest_output(stdout_text_s)
+
+        if not json_part:
+            return {"status": "no_tests", "error": "no test output produced", "raw_output": raw_tail}
 
         try:
-            from code_sandbox_mcp.test_report import PytestAdapter
-            report = PytestAdapter.parse_json(stdout_text_s)
+            report = PytestAdapter.parse_json(json_part)
             d = report.to_dict()
             return d
         except Exception:
-            return {"status": "error", "error": f"failed to parse pytest output (exit {ec})"}
+            result: dict = {"status": "error", "error": f"failed to parse pytest output (exit {ec})"}
+            if raw_tail:
+                result["raw_output"] = raw_tail
+            return result
 
     if has_filter:
         # Phase 1: filtered test run

@@ -1252,16 +1252,16 @@ def _run_tsc_verify(container: Any, path: str) -> VerifyResult:
 
 def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
     """Run pytest --json-report on *path*.  Returns VerifyResult envelope."""
+    from code_sandbox_mcp.test_report import (
+        PytestAdapter,
+        build_pytest_cmd,
+        split_pytest_output,
+    )
     _json_file = "/tmp/_pytest_report.json"
+    _raw_file = "/tmp/_pytest_raw.txt"
+    cmd = build_pytest_cmd(_json_file, _raw_file, "", _quote_path(path), _SANDBOX_ENV)
     ec, output = container.exec_run(
-        [
-            "/bin/sh",
-            "-c",
-            f"{_SANDBOX_ENV}python3 -m pytest --json-report --json-report-file={_json_file} "
-            f"-q {_quote_path(path)} >/dev/null 2>&1; "
-            f"_ec=$?; cat {_json_file} 2>/dev/null; "
-            f"rm -f {_json_file}; exit $_ec",
-        ],
+        ["/bin/sh", "-c", cmd],
         stdout=True,
         stderr=True,
     )
@@ -1271,20 +1271,22 @@ def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
     if ec == 127:
         return _envelope_not_available("pytest", "python3 not found in container")
     if ec == 5:
-        # pytest exit 5 = no tests collected
         return _envelope_skipped("pytest", "no tests found")
     if ec not in (0, 1):
         return _envelope_error("pytest", stderr_text.strip() or f"exit code {ec}", ec)
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
 
-    if not stdout_text.strip():
-        return _envelope_skipped("pytest", "no test output produced")
+    json_part, raw_tail = split_pytest_output(stdout_text)
+
+    if not json_part:
+        detail = "no test output produced"
+        if raw_tail:
+            detail += f"\n--- raw output ---\n{raw_tail}"
+        return _envelope_skipped("pytest", detail)
 
     try:
-        from code_sandbox_mcp.test_report import PytestAdapter
-
-        report = PytestAdapter.parse_json(stdout_text)
+        report = PytestAdapter.parse_json(json_part)
         d = report.to_dict()
         status = d.get("status", "ok")
         return VerifyResult(
@@ -1295,9 +1297,10 @@ def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
             exit_code=ec,
         )
     except Exception:
-        return _envelope_error(
-            "pytest", "failed to parse pytest output", ec,
-        )
+        detail = "failed to parse pytest output"
+        if raw_tail:
+            detail += f"\n--- raw output ---\n{raw_tail}"
+        return _envelope_error("pytest", detail, ec)
 
 
 def _run_jest_verify(container: Any, path: str) -> VerifyResult:
@@ -1338,9 +1341,11 @@ def _run_jest_verify(container: Any, path: str) -> VerifyResult:
             exit_code=ec,
         )
     except Exception:
-        return _envelope_error(
-            "jest", "failed to parse jest output", ec,
-        )
+        detail = "failed to parse jest output"
+        if stdout_text.strip():
+            tail = "\n".join(stdout_text.strip().split("\n")[-20:])
+            detail += f"\n--- raw output tail ---\n{tail}"
+        return _envelope_error("jest", detail, ec)
 
 
 def _run_go_test_verify(container: Any, path: str) -> VerifyResult:
@@ -1381,9 +1386,11 @@ def _run_go_test_verify(container: Any, path: str) -> VerifyResult:
             exit_code=ec,
         )
     except Exception:
-        return _envelope_error(
-            "go test", "failed to parse go test output", ec,
-        )
+        detail = "failed to parse go test output"
+        if stdout_text.strip():
+            tail = "\n".join(stdout_text.strip().split("\n")[-20:])
+            detail += f"\n--- raw output tail ---\n{tail}"
+        return _envelope_error("go test", detail, ec)
 
 
 def _run_semgrep_verify(container: Any, path: str, lang_config: str = "p/python") -> VerifyResult:

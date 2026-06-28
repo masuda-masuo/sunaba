@@ -49,6 +49,21 @@ def resolve_git_root(
     1. Testing ``/home/sandbox`` with ``git rev-parse --show-toplevel``
     2. Scanning ``/tmp/repo/*/`` for a git repository
 
+    .. note::
+
+       **Known limitations**
+
+       - ``clone_dest`` override: Step 2 only scans
+         ``/tmp/repo/<name>/`` — if the container was created with a
+         custom ``clone_dest`` outside ``/tmp/repo/``, the repository
+         will not be found and the default ``/home/sandbox`` is returned
+         as fallback.  Pass ``working_dir`` explicitly in that case.
+       - **Multiple repositories**: when ``/tmp/repo/`` contains more
+         than one git repository, the first one found in filesystem
+         iteration order (approximately alphabetical) is returned.
+         This is consistent because a sandbox container is normally
+         scoped to a single clone.
+
     Returns the resolved path, or *working_dir* as fallback.
     """
     if working_dir != _DEFAULT_WD:
@@ -60,10 +75,11 @@ def resolve_git_root(
          "cd /home/sandbox && git rev-parse --show-toplevel 2>/dev/null || echo __NO_REPO__"],
         stdout=True,
     )
-    _stdout, _ = (out if isinstance(out, tuple) else (out, b""))
-    path = _stdout.decode("utf-8", errors="replace").strip() if _stdout else "__NO_REPO__"
-    if path != "__NO_REPO__":
-        return path
+    if ec == 0:
+        _stdout, _ = (out if isinstance(out, tuple) else (out, b""))
+        path = _stdout.decode("utf-8", errors="replace").strip() if _stdout else ""
+        if path and path != "__NO_REPO__":
+            return path
 
     # Step 2: scan /tmp/repo/ for cloned repositories
     ec2, out2 = container.exec_run(
@@ -74,10 +90,11 @@ def resolve_git_root(
          "done; echo __NO_REPO__"],
         stdout=True,
     )
-    _stdout2, _ = (out2 if isinstance(out2, tuple) else (out2, b""))
-    _path2 = _stdout2.decode("utf-8", errors="replace").strip() if _stdout2 else "__NO_REPO__"
-    if _path2 != "__NO_REPO__":
-        return _path2
+    if ec2 == 0:
+        _stdout2, _ = (out2 if isinstance(out2, tuple) else (out2, b""))
+        _path2 = _stdout2.decode("utf-8", errors="replace").strip() if _stdout2 else ""
+        if _path2 and _path2 != "__NO_REPO__":
+            return _path2
 
     return working_dir  # fallback
 

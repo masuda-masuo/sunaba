@@ -316,14 +316,17 @@ def _select_initial_image(
     network_clone = bool(target_repo) and (
         pr is not None or (clone_repo is not None and not _shiori_preclone_exists(clone_repo))
     )
-    token: str | None = None
-    if network_clone:
-        token = (
-            token_broker.mint_token()
-            or os.environ.get("GITHUB_TOKEN")
-            or os.environ.get("GH_TOKEN")
-        )
+    # Everything below is best-effort: token minting, the preclone scan, and
+    # the GitHub probe can all raise, and none of them may block init.  Keep
+    # them inside the guard so any failure degrades to the neutral image.
     try:
+        token: str | None = None
+        if network_clone:
+            token = (
+                token_broker.mint_token()
+                or os.environ.get("GITHUB_TOKEN")
+                or os.environ.get("GH_TOKEN")
+            )
         return image_selection.resolve_initial_image(
             explicit_image=image,
             target_repo=target_repo,

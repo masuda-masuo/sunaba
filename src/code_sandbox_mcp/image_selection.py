@@ -57,12 +57,6 @@ _UNSUPPORTED_MARKERS: dict[str, str] = {
     "CMakeLists.txt": "C/C++",
 }
 
-#: Directories whose top-level marker files are noise, not project roots.
-_EXCLUDE_NAMES: frozenset[str] = frozenset(
-    {"node_modules", ".venv", "vendor", "dist", "build"}
-)
-
-
 @dataclass
 class LanguageDetection:
     """Outcome of inspecting a project's root for language markers.

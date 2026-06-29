@@ -24,7 +24,7 @@ from docker.errors import APIError, NotFound
 from fastmcp import Context
 from pydantic import BeforeValidator
 
-from code_sandbox_mcp import token_broker
+from code_sandbox_mcp import image_selection, token_broker
 from code_sandbox_mcp.journal import (
     read_journal,
     record_boundary_crossing,
@@ -66,7 +66,31 @@ from code_sandbox_mcp.tools.vcs import checkpoint_list, resolve_git_root
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-_DEFAULT_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:f5c42ab5544f2defed408d72c7e0c0e8e686b3dd32bb49921e0b812ebe286a15"
+# -- Default sandbox images (Issue #313) ---------------------------------
+# Image selection is detection-based: when ``image`` is not given, the
+# project's language is detected host-side (before container start) and the
+# matching variant image is chosen.  No language is hardcoded as "the
+# default" -- "Python is the default" only made sense because this repo
+# happens to be Python (see code_sandbox_mcp.image_selection).
+#
+# CI (``.github/workflows/build-sandbox-variants.yml``) rewrites these three
+# ``@sha256`` pins after each variant build; keep them on one line each so the
+# sed-based update keeps working.  All refs are digest-pinned per
+# ``docs/design-multilang-support.md`` §6.
+_NEUTRAL_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:8ffc955e78ea96c7dc665516e4969a4a22be70e41de977340b677a618e004892"
+_PYTHON_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:e6041cdb1cd84db10d038d79b9ca1d1f0a129a89a6b58c536e28283b75dd6cdd"
+_GO_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:1fac330f3422bba8a886b933e81a692a80acf5a16543b8e3baf14acdb07ff2da"
+
+#: Neutral fallback used when detection is inconclusive (unknown / unsupported
+#: / py+go polyglot) and for bare ``sandbox_initialize()`` with nothing to
+#: inspect.  Overridable via the ``--default-image`` CLI flag (server.py).
+_DEFAULT_IMAGE: str = _NEUTRAL_IMAGE
+
+#: Detected-language -> variant-image map consumed by image_selection.
+_LANGUAGE_IMAGE_MAP: dict[str, str] = {
+    "python": _PYTHON_IMAGE,
+    "go": _GO_IMAGE,
+}
 
 
 _SHIORI_REPOS_PATH: str | None = None
@@ -247,6 +271,71 @@ def _shiori_preclone_exists(clone_repo: str) -> bool:
     # directory.  Bare clones and git-worktree secondaries (where .git is
     # a file) are not used by Shiori, so is_dir() is the right check.
     return clone_path.is_dir() and (clone_path / ".git").is_dir()
+
+
+def _shiori_preclone_root(repo: str | None) -> Path | None:
+    """Return the host path of a Shiori pre-clone for *repo*, if present.
+
+    Used by detection-based image selection to inspect a project's root
+    markers *before* the container starts, without touching the network.
+    """
+    if not repo or not _SHIORI_REPOS_PATH:
+        return None
+    repos_root = Path(_SHIORI_REPOS_PATH).resolve()
+    clone_path = (repos_root / repo).resolve()
+    # Stay under the configured repos root (path-traversal guard) and require a
+    # real git clone, mirroring _shiori_preclone_exists.
+    try:
+        clone_path.relative_to(repos_root)
+    except ValueError:
+        return None
+    if clone_path.is_dir() and (clone_path / ".git").is_dir():
+        return clone_path
+    return None
+
+
+def _select_initial_image(
+    image: str | None,
+    clone_repo: str | None,
+    repo: str | None,
+    pr: int | None,
+    inject_vcs_token: bool,
+) -> tuple[str, str | None]:
+    """Choose the image (and optional notice) for a new container (Issue #313).
+
+    An explicit *image* wins.  Otherwise the project's language is detected
+    host-side -- from a Shiori pre-clone when available, else the GitHub API
+    when a repo is being cloned -- and the matching variant image is selected,
+    falling back to the neutral ``_DEFAULT_IMAGE`` when detection is
+    inconclusive.  Detection never blocks init: any failure degrades to the
+    neutral image.
+    """
+    target_repo = clone_repo or repo
+    # A GitHub probe is only worthwhile (and only authorized) when we are
+    # actually fetching that repo over the network.
+    network_clone = bool(target_repo) and (
+        pr is not None or (clone_repo is not None and not _shiori_preclone_exists(clone_repo))
+    )
+    token: str | None = None
+    if network_clone:
+        token = (
+            token_broker.mint_token()
+            or os.environ.get("GITHUB_TOKEN")
+            or os.environ.get("GH_TOKEN")
+        )
+    try:
+        return image_selection.resolve_initial_image(
+            explicit_image=image,
+            target_repo=target_repo,
+            preclone_root=_shiori_preclone_root(target_repo),
+            token=token,
+            language_image_map=_LANGUAGE_IMAGE_MAP,
+            neutral_image=_DEFAULT_IMAGE,
+            allow_network_detection=network_clone,
+        )
+    except Exception as e:  # pragma: no cover - defensive: never block init
+        logger.warning("image detection failed, using neutral default: %s", e)
+        return (image or _DEFAULT_IMAGE), None
 
 
 def _write_clone_meta(container: Any, clone_path: str) -> None:
@@ -878,7 +967,12 @@ def sandbox_initialize(
         )
 
     client = _docker()
-    resolved = image or _DEFAULT_IMAGE
+    # Detection-based image selection (Issue #313): when no image is given,
+    # pick the variant that matches the project's language instead of a
+    # hardcoded default.  *image_notice* explains any neutral fallback.
+    resolved, image_notice = _select_initial_image(
+        image, clone_repo, repo, pr, inject_vcs_token
+    )
     env = _container_env(inject_vcs_token=inject_vcs_token)
 
     try:
@@ -1001,7 +1095,8 @@ def sandbox_initialize(
     # usable container, so completion is recorded regardless.
     record_initialize_complete(cid)
 
-    return cid + clone_msg + pr_msg
+    image_msg = f" [image: {image_notice}]" if image_notice else ""
+    return cid + clone_msg + pr_msg + image_msg
 
 
 async def sandbox_initialize_tool(
@@ -1266,7 +1361,12 @@ def run_container_and_exec(
             clone_repo,
         )
 
-    resolved = image or _DEFAULT_IMAGE
+    # Detection-based image selection (Issue #313), same as sandbox_initialize.
+    resolved, image_notice = _select_initial_image(
+        image, clone_repo, repo, pr, inject_vcs_token
+    )
+    if image_notice:
+        logger.info("image selection: %s", image_notice)
     client = _docker()
     env = _container_env(inject_vcs_token=inject_vcs_token)
 

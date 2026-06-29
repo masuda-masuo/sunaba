@@ -88,6 +88,7 @@
 - [x] **失敗のフィンガープリント＋重複圧縮**: 同型失敗は `×N` に畳む（`compress_failures`）。
 - [x] **`rerun_failed(run_id)` / 影響範囲の絞り込み再実行**: 失敗分・変更ファイルが影響するテストだけ実行。
 - [x] **コンテンツアドレスな結果キャッシュ**: image＋コマンド＋入力ハッシュが不変なら `cached: true`（`result_cache.py`）。
+  - **キャッシュ管理ツール**: `sandbox_cache_stats`（ヒット率・エントリ数の統計）/ `sandbox_cache_invalidate`（`key` 指定 or 全件無効化）。キャッシュが古い結果を返すときの手動リセット経路。
 - **`publish` の差分も非通過**: diff はコンテナ内で完結し、LLM には差分サマリ＋ハンドルのみ返す。
 
 ### 3.3 返す前にデノイズ
@@ -151,6 +152,16 @@
 **二次（需要が出てから）**
 - `sd`（テキスト/設定/Markdown の正規表現置換）/ `ast-grep`(rewrite)（コード構造書換）。`transform_file` の内部実装に吸収可。§1改訂の通りコンテナ内 CLI なので可。
 - `format_in_container` / `tree_in_container` / `git_diff_in_container`。
+
+**ファイル操作（`tools/file.py`）**
+
+コア4点とは別に、コンテナ内ファイルの一覧とホスト→コンテナの転送を担うツール群。`read_file_range` / `write_file_sandbox` / `transform_file` と同じ `tools/file.py` に同居する。
+
+- `list_files`: `find` ベースでコンテナ内ファイルを一覧。`path` / `max_depth` / `pattern` フィルタ付き。
+- `copy_file`: 単一ローカルファイルをコンテナへ転送（`local_src_file` → `dest_path`）。
+- `copy_project`: ローカルディレクトリ（またはファイル）を tar アーカイブでコンテナへ転送（`local_src_dir` → `dest_dir`）。
+
+転送はホスト→コンテナの片方向のみ。コンテナ→ホストの逆流は持たない（§5 スコープ境界・§0 リスク階層）。
 
 **スコープ境界**: 対象は使い捨てサンドボックス内のファイルのみ。ユーザの実リポジトリ作業ツリーは対象外。**コア4点が主役**、二次は後追い。
 
@@ -229,7 +240,7 @@ else:
 - **run_id 単位のリプレイ可能トレース出力（HTML / JSON）**: 事後に「なぜそう動いたか」を共有・レビュー。
 - **ローカルWebダッシュボード（localhost限定 / read-mostly / 自動更新）**: 稼働コンテナ・run履歴・pass/fail・リソース使用量・承認待ちを一目で。
 - **承認キュー＋ワンクリック Approve/Reject（縮小）**: §2.2 の境界越え操作トークンと連動。ダッシュボードの一機能。
-- **プッシュ通知（OS通知 / Webhook）**: 境界越え操作・失敗閾値超え・長時間実行のときだけ。
+- **プッシュ通知（OS通知 / Webhook）**（`notify.py`）: 境界越え操作・失敗閾値超え（既定5回）・長時間実行（既定300秒）のときだけ。OS デスクトップ通知は Linux `notify-send` / macOS `osascript` / Windows PowerShell の3OS対応、Webhook は設定 URL への HTTP POST。閾値・宛先は CLI 引数 `--webhook-url` / `--failure-threshold` / `--long-run-seconds` で調整する。
 - **実行前の人間向けプラン表示**: `publish` で対象ブランチ・差分サマリ・上書き有無を提示。
 
 > 注意: ダッシュボードは localhost 限定＋必要なら認証。
@@ -250,6 +261,7 @@ else:
 **ツール**
 
 - **`issue_view`**（read）: issue 本文をコンテナ内ファイルへ落とし、LLM には**要約＋ハンドル**だけ返す（§3.1）。§2.2 read 扱い（ジャーナル記録・ネットワーク明示許可）。
+- **`clone_repo`**（read / 入口）: `gh repo clone` で対象リポジトリをコンテナ内へクローン（`repo` / `dest_dir` / `branch`）。issue_view と並ぶ作業の起点。`sandbox_initialize(clone_repo=…)` / `run_container_and_exec(clone_repo=…)` でも起動と同時にクローンできる。§2.2 read 扱い（ネットワーク明示許可・ジャーナル記録）。
 - **`publish`**（write / 境界越え）: コミット済みの状態を push し、任意で PR を作成する唯一の出口。verify は内蔵せず、LLM が `verify_in_container` で事前に行う。§2.2 の二段階トークン必須、§8 ジャーナルにプランと結果を記録。
 
 **認証（opt-in トークン注入）**
@@ -299,6 +311,18 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 
 `publish` は常に未 push の checkpoint コミットを1コミットに畳んでから push する（`squash_checkpoints` パラメータは削除済み）。squash ベースは clone/branch 時に記録した分岐点 ref を使い、デフォルトブランチ名に依存せず push を常に fast-forward に保つ。API push 経路は HEAD ツリーを単一コミット化するため、checkpoint は元から残らない。
 
+### 11.2 トークン供給の3経路（直交）
+
+`inject_vcs_token=True` でコンテナに渡る `GITHUB_TOKEN` の**供給元**は3経路あり、いずれも opt-in・直交。常駐 HTTP（§7）で mcp-launcher 管理外でも認証を維持するために導入された。
+
+| 経路 | 実装 | 仕組み | 用途 |
+|---|---|---|---|
+| 静的トークン | env 直指定 | `GITHUB_TOKEN` をそのまま注入 | 既定・最小構成 |
+| GitHub App 自己管理 | `github_auth.py` | `AppTokenProvider` が Installation Token を発行・キャッシュし、daemon スレッドで定期リフレッシュ（`setup_github_app_token()`） | 秘密鍵をホストに置き、長時間常駐でも短期トークンを切らさない（PR #223） |
+| トークンブローカー | `token_broker.py` | `GITHUB_TOKEN_COMMAND` / `GITHUB_TOKEN_BROKER_SERVICE` 指定時に pin 済み keystore-broker CLI で新鮮な短期トークンを mint（バイナリ pin＋SHA-256 検証＋platformdirs キャッシュ） | 秘密鍵をホストに置かない第3経路（PR #235） |
+
+**優先順位**: ブローカー mint 成功時は静的 `GITHUB_TOKEN` より優先し、失敗時は従来の静的トークンへ fallback する（`_container_env()`）。GitHub App env / ブローカー env のいずれも未設定なら完全 no-op で、既存の静的注入の挙動を変えない（後方互換）。
+
 ---
 
 ## 12. ベースイメージ（全部入り）
@@ -322,10 +346,17 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 
 ## 13. Dockerライフサイクル（必要最低限）
 
-- `run_container_and_exec`（最重要 / ワンショット）
-- `exec_in_container`
-- `inspect_container`
-- `build_image`（生成Dockerfileの即時検証）
+セッション（コンテナ＋FS＋run履歴）のライフサイクル操作。実装済みのツールは以下。
+
+- `sandbox_initialize`（最重要 / 起動）: コンテナ起動。**async ラッパー**で、image pull / clone / pip install / PR checkout など低速セットアップ中に MCP progress notification を発行し、HTTP・クライアントタイムアウトでコンテナが孤立するのを防ぐ（#298）。
+- `run_container_and_exec`: 起動＋実行のワンショット。
+- `sandbox_exec`: 稼働コンテナでコマンド実行（`commands` / `argv` の2モード）。
+- `sandbox_exec_background` / `sandbox_exec_check`: 長時間コマンドの非同期実行と完了確認。
+- `sandbox_exec_diff` / `rerun_failed`: 前 run 比の差分、失敗・影響範囲の絞り込み再実行（§3.2）。
+- `run_test_environment` / `stop_test_environment` / `wait_for_condition`: Compose 相当環境の起動・停止・条件待機（§10）。
+- `sandbox_stop`: コンテナ停止・削除（未 push の checkpoint があれば警告）。
+
+> 旧構想の `exec_in_container` / `inspect_container` / `build_image` は名前のみで未実装。exec の実体は `sandbox_exec`、ワンショットは `run_container_and_exec` が担う。生成 Dockerfile の即時検証（旧 `build_image`）は現状スコープ外。
 
 **Dockerfile 管理**（リポジトリ内 `docker/` で管理・CI でダイジェスト固定タグをビルド）:
 - `docker/Dockerfile.sandbox` — §11 の全部入りイメージ

@@ -48,6 +48,11 @@ def _package_to_key(pkg: dict[str, str]) -> str:
     return f"{pkg['name']}=={pkg.get('version', '?')}"
 
 
+def _has_uv(container_id: str) -> bool:
+    ec, _, _ = _run_in_container(container_id, ["which", "uv"])
+    return ec == 0
+
+
 def package_install(
     container_id: str,
     packages: Annotated[str | list[str], BeforeValidator(_coerce_list_arg)] | None = None,
@@ -125,7 +130,8 @@ def package_install(
         })
 
     # --- Build pip command ---
-    pip_args: list[str] = ["pip", "install"]
+    use_uv = _has_uv(container_id)
+    pip_args: list[str] = ["uv", "pip", "install"] if use_uv else ["pip", "install"]
 
     if upgrade:
         pip_args.append("--upgrade")

@@ -12,6 +12,7 @@
 # 同梱:
 #   検索(字句)  : ripgrep (rg)
 #   検索(構造)  : ast-grep (sg)
+#   diff適用   : patch          ← ドリフトしたhunkのファジー適用フォールバック
 #   テキスト置換: sd
 #   ファイル検索: fd
 #   シンボル    : universal-ctags
@@ -36,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fd-find \
     jq \
     universal-ctags \
+    patch \
     libatomic1 \
   && rm -rf /var/lib/apt/lists/*
 

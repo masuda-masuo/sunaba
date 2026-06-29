@@ -367,25 +367,6 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 - `docker/Dockerfile.sandbox` — §11 の全部入りイメージ
 - `docker/Dockerfile.sandbox.minimal` — git + python のみ（軽量・高速起動優先）
 
----
-
-## 14. 推奨実装順
-
-| Phase | 内容 | 狙い |
-|------|------|------|
-| **0** | セキュリティ土台 §2.1（マージ済み）＋ 境界越え操作のトークン必須 §2.2（外部VCS含む） | 機能ではなく前提 |
-| **1** | 出力制御（§6）＋ `run_container_and_exec` | トークン削減ROI最大 |
-| **2** | 構造化テスト結果 pytest/jest/go（§4） | AI-firstの本丸 |
-| **2+** | Edit/Verify コア（§5）: `search_in_container`（lexical/structural）＋ `verify`（束ね・強制ゲート）＋ stdout バグ修正（#52） | 失敗→修正→再検証ループを閉じる |
-| **4** | `run_test_environment`＋`wait_for_condition`（§10） | `sleep 30`撲滅 |
-| **5** | 外部VCS連携（§11）: `issue_view` + `publish` | issue→push をコンテキスト非通過で自己完結 |
-| 横断 | トークン削減（§3） | 各Phaseに織り込む |
-| 並行 | 可観測性 §9 | ジャーナル→リプレイ→ダッシュボード→通知 |
-| 基盤 | `docker/Dockerfile.sandbox`（§12・§13） | Phase 1 と並行して整備 |
-
-**切る / 別リポジトリ**: 埋め込みセマンティック検索・code-RAG・永続コードグラフ、snapshot系、ネットワーク系の大半、コンテナ内コマンドの危険度判定ゲート、GitHub 広域運用。
-
----
 
 ## まとめ
 

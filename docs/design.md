@@ -361,11 +361,7 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 - `run_test_environment` / `stop_test_environment` / `wait_for_condition`: Compose 相当環境の起動・停止・条件待機（§10）。
 - `sandbox_stop`: コンテナ停止・削除（未 push の checkpoint があれば警告）。
 
-> 旧構想の `exec_in_container` / `inspect_container` / `build_image` は名前のみで未実装。exec の実体は `sandbox_exec`、ワンショットは `run_container_and_exec` が担う。生成 Dockerfile の即時検証（旧 `build_image`）は現状スコープ外。
-
-**Dockerfile 管理**（リポジトリ内 `docker/` で管理・CI でダイジェスト固定タグをビルド）:
-- `docker/Dockerfile.sandbox` — §11 の全部入りイメージ
-- `docker/Dockerfile.sandbox.minimal` — git + python のみ（軽量・高速起動優先）
+**Dockerfile 管理**: `docker/Dockerfile.{base,python,go}` （§12 参照）。CI でダイジェスト固定タグをビルド・管理。
 
 
 ## まとめ

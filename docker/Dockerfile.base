@@ -12,6 +12,7 @@
 # 同梱:
 #   検索(字句)  : ripgrep (rg)
 #   検索(構造)  : ast-grep (sg)
+#   diff適用   : patch          ← ドリフトしたhunkのファジー適用フォールバック
 #   テキスト置換: sd
 #   ファイル検索: fd
 #   シンボル    : universal-ctags

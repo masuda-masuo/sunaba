@@ -741,7 +741,7 @@ Args:
     branch: Branch name to push.
     message: Git commit message.
     working_dir: Directory in the container containing the git
-        repository (default ``"/home/sandbox"``).
+        repository (default ``None`` = auto-detect).
     create_pr: Whether to create a pull request after push.
     pr_title: PR title (required if ``create_pr=True``).
     pr_body: PR body (optional).
@@ -1159,7 +1159,7 @@ def sandbox_create_pr(
         base_branch: Base branch for the PR (default: repository default
             branch).
         working_dir: Directory in the container containing the git
-            repository (default ``'/home/sandbox'``).
+            repository (default ``None`` = auto-detect).
         dry_run: When ``True``, returns a preview of the HEAD commit that
             would be pushed plus a confirmation token, without pushing or
             creating a PR.

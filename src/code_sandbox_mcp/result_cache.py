@@ -97,8 +97,12 @@ _VOLATILE_NON_GIT_PROGRAMS: frozenset[str] = frozenset({
 # Used as an allow-list for programs we don't recognise otherwise.
 # Programs that are deterministic enough to cache (issue #329).
 # Only these non-git programs are cached; everything else is default-deny.
-# Package managers are included because the cache is namespaced by
-# container_id, and re-installing the same packages is expensive.
+# Package managers are cacheable as a deliberate tradeoff:
+# they are expensive to re-run and usually deterministic for
+# a given manifest (requirements.txt / package.json / Cargo.toml).
+# Stale "ok" on manifest edit is a known risk — the cache key
+# is namespaced by container_id and expires at TTL (7 days).
+# If the manifest changes, use input_hash to force a new key.
 _CACHEABLE_PROGRAMS: frozenset[str] = frozenset({
     # Shell builtins (no side effects, deterministic output)
     "cd", "echo", "printf", "true", "false", "test",
@@ -108,8 +112,6 @@ _CACHEABLE_PROGRAMS: frozenset[str] = frozenset({
     "apt-get", "apt", "dpkg",
     "yum", "dnf", "rpm",
     "gem", "bundle",
-    # Go / Rust toolchains
-    "go", "cargo", "rustup",
 })
 
 
@@ -158,6 +160,19 @@ def _split_compound_commands(cmd: str) -> list[str]:
             parts.append(current)
             current = ""
             i += 2
+            continue
+        if ch == "$" and i + 1 < len(cmd) and cmd[i + 1] == "(":
+            # $(...) command substitution — treat as quoted block
+            current += ch
+            i += 1
+            depth = 1
+            while i < len(cmd) and depth > 0:
+                if cmd[i] == "(":
+                    depth += 1
+                elif cmd[i] == ")":
+                    depth -= 1
+                current += cmd[i]
+                i += 1
             continue
         if ch in (";", "&", "|"):
             parts.append(current)

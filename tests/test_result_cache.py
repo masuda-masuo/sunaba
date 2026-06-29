@@ -51,6 +51,12 @@ class TestComputeCacheKey:
         key2 = compute_cache_key("image", ["cmd1", "cmd2"], input_hash="x")
         assert key1 == key2
 
+    def test_different_container_id_different_key(self):
+        from code_sandbox_mcp.result_cache import compute_cache_key
+        k1 = compute_cache_key("img", ["cmd"], container_id="aaa111")
+        k2 = compute_cache_key("img", ["cmd"], container_id="bbb222")
+        assert k1 != k2
+
 
 class TestSetGetCachedResult:
     """Tests for cache store and retrieve."""
@@ -364,10 +370,10 @@ class TestIsCacheable:
         from code_sandbox_mcp.result_cache import is_cacheable
         assert is_cacheable(["apt-get update && apt-get install -y curl"]) is True
 
-    def test_go_is_cacheable(self):
+    def test_go_is_not_cacheable(self):
         from code_sandbox_mcp.result_cache import is_cacheable
-        assert is_cacheable(["go build ./..."]) is True
-        assert is_cacheable(["cargo build --release"]) is True
+        assert is_cacheable(["go build ./..."]) is False
+        assert is_cacheable(["cargo build --release"]) is False
 
     def test_gcc_is_not_cacheable(self):
         from code_sandbox_mcp.result_cache import is_cacheable
@@ -506,6 +512,7 @@ class TestSplitCompoundQuoted:
         from code_sandbox_mcp.result_cache import _split_compound_commands
         result = _split_compound_commands("echo $(git rev-parse HEAD)")
         assert result == ["echo $(git rev-parse HEAD)"]
+
 
 class TestFirstProgram:
     """Tests for _first_program helper."""

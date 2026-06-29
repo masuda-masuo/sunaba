@@ -38,7 +38,7 @@ from .tools.container import (
     run_container_and_exec,
     run_test_environment,
     sandbox_exec_diff,
-    sandbox_initialize,
+    sandbox_initialize_tool,
     sandbox_stop,
     stop_test_environment,
     wait_for_condition,
@@ -100,7 +100,10 @@ clone_repo = mcp.tool()(clone_repo)
 
 
 # Container lifecycle tool registrations
-sandbox_initialize = mcp.tool()(sandbox_initialize)
+# sandbox_initialize is exposed via its async wrapper (Issue #298): slow setup
+# phases emit progress notifications so the request never times out and leaks a
+# container.  The synchronous sandbox_initialize remains importable for reuse.
+sandbox_initialize_tool = mcp.tool(name="sandbox_initialize")(sandbox_initialize_tool)
 sandbox_stop = mcp.tool()(sandbox_stop)
 run_container_and_exec = mcp.tool()(run_container_and_exec)
 rerun_failed = mcp.tool()(rerun_failed)

@@ -125,6 +125,24 @@ def record_initialize(
     _append_json(entry)
 
 
+def record_initialize_complete(container_id: str) -> None:
+    """Record that ``sandbox_initialize`` finished all setup phases.
+
+    Written only after clone / pip install / PR setup have returned, so a
+    container that has this event is a usable, intentional container — never
+    an orphan from a mid-init timeout.  The orphan reaper (Issue #298) treats
+    the *absence* of this event (together with no ``exec`` and no ``stop``) as
+    the signal that an ``initialize`` was abandoned partway through.
+    """
+    run_id = get_or_create_run_id(container_id)
+    _append_json({
+        "ts": _utcnow_iso(),
+        "run_id": run_id,
+        "container_id": container_id,
+        "operation": "initialize_complete",
+    })
+
+
 def record_exec(
     container_id: str,
     commands: list[str],

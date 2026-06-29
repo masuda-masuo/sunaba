@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import difflib
 import io
@@ -15,10 +16,12 @@ import tempfile
 import threading
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, NamedTuple
 
 from docker.errors import APIError, NotFound
+from fastmcp import Context
 from pydantic import BeforeValidator
 
 from code_sandbox_mcp import token_broker
@@ -27,6 +30,7 @@ from code_sandbox_mcp.journal import (
     record_boundary_crossing,
     record_copy,
     record_initialize,
+    record_initialize_complete,
     record_stop,
     record_test_environment,
 )
@@ -48,7 +52,9 @@ from code_sandbox_mcp.result_cache import (
     set_cached_result,
 )
 from code_sandbox_mcp.security import (
+    CREATED_AT_LABEL,
     DEFAULT_SECURITY_PROFILE,
+    MANAGED_LABEL,
     _detect_host_resources,
     _parse_mem_to_mb,
     build_secure_run_kwargs,
@@ -70,6 +76,17 @@ _CLONE_REPO_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9._-]+$")
 #: Hard cap ratio for per-call mem_limit override (Issue #201).
 #: Override values exceeding this fraction of host memory are rejected.
 _HARD_CAP_RATIO: float = 0.9
+
+#: Grace period before an init-incomplete container is considered orphaned
+#: and reaped (Issue #298).  Comfortably longer than any legitimate
+#: ``sandbox_initialize`` so an in-progress init (possibly in a concurrent
+#: session) is never mistaken for an orphan.
+_ORPHAN_GRACE_SECONDS: int = 600
+
+#: How often the async ``sandbox_initialize`` emits a progress notification to
+#: keep the MCP/HTTP connection alive during slow setup (Issue #298).  Must be
+#: shorter than the client's request timeout (~60s).
+_PROGRESS_INTERVAL_SECONDS: float = 15.0
 
 _SENSITIVE_FILE_BASENAMES: frozenset[str] = frozenset(
     {
@@ -605,6 +622,111 @@ def _setup_pr_branch(
     return f"PR #{pr_number} ({head_ref}) → {clone_dest}/{repo_name} in container {cid}"
 
 
+def _age_seconds(iso_ts: str | None, now: datetime) -> float | None:
+    """Return seconds elapsed since *iso_ts*, or ``None`` if unparseable."""
+    if not iso_ts:
+        return None
+    try:
+        created = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return (now - created).total_seconds()
+
+
+def _journal_container_status() -> dict[str, dict[str, Any]]:
+    """Summarise per-container lifecycle status from the journal.
+
+    Returns a mapping ``container_id -> {complete, used, stopped, init_ts}``
+    where *complete* means an ``initialize_complete`` event was seen, *used*
+    means at least one ``exec``, and *stopped* an explicit ``stop``.
+    """
+    status: dict[str, dict[str, Any]] = {}
+    for entry in read_journal():
+        cid = entry.get("container_id")
+        if not cid:
+            continue
+        s = status.setdefault(
+            cid,
+            {"complete": False, "used": False, "stopped": False, "init_ts": None},
+        )
+        op = entry.get("operation")
+        if op == "initialize":
+            s["init_ts"] = entry.get("ts")
+        elif op == "initialize_complete":
+            s["complete"] = True
+        elif op == "exec":
+            s["used"] = True
+        elif op == "stop":
+            s["stopped"] = True
+    return status
+
+
+def _reap_orphaned_init_containers(client: Any = None) -> list[str]:
+    """Stop & remove containers orphaned by a timed-out ``sandbox_initialize``.
+
+    Best-effort, opportunistic GC (Issue #298).  A container is reaped only
+    when *all* of these hold, so healthy / in-progress containers are never
+    touched:
+
+    - it carries our management label *and* the ``created_at`` label, i.e. it
+      was created by ``sandbox_initialize`` (test-environment and other
+      managed containers lack ``created_at`` and are skipped);
+    - the journal shows no ``initialize_complete`` (setup never finished), no
+      ``exec`` (never used), and no ``stop``;
+    - it is older than :data:`_ORPHAN_GRACE_SECONDS`, so a still-running init
+      (possibly in another session) is never mistaken for an orphan.
+
+    Failures are swallowed: GC must never break the caller's init.  Returns
+    the list of reaped container-id prefixes.
+    """
+    reaped: list[str] = []
+    client = client or _docker(timeout=RECOVERY_DOCKER_TIMEOUT)
+    try:
+        containers = client.containers.list(
+            all=True, filters={"label": f"{MANAGED_LABEL}=true"}
+        )
+    except Exception as e:
+        logger.warning("orphan reap: failed to list containers: %s", e)
+        return reaped
+    if not containers:
+        return reaped
+
+    status = _journal_container_status()
+    now = datetime.now(timezone.utc)
+    for container in containers:
+        cid = container.id[:12]
+        labels = getattr(container, "labels", None) or {}
+        created_label = labels.get(CREATED_AT_LABEL)
+        if created_label is None:
+            # Not a sandbox_initialize container (e.g. test environment) — skip.
+            continue
+        s = status.get(cid, {})
+        if s.get("complete") or s.get("used") or s.get("stopped"):
+            # Setup finished, container used, or already stopped — not an orphan.
+            continue
+        age = _age_seconds(s.get("init_ts") or created_label, now)
+        if age is None or age < _ORPHAN_GRACE_SECONDS:
+            # Unknown age or still within the grace window (in-progress init).
+            continue
+        try:
+            container.kill()
+        except (NotFound, APIError):
+            pass
+        try:
+            container.remove(force=True)
+        except NotFound:
+            pass
+        except Exception as e:
+            logger.warning("orphan reap: failed to remove %s: %s", cid, e)
+            continue
+        record_stop(cid)
+        reaped.append(cid)
+        logger.info("Reaped orphaned init container %s (age=%.0fs)", cid, age)
+    return reaped
+
+
 def sandbox_initialize(
     image: str | None = None,
     allow_network: bool = False,
@@ -712,6 +834,14 @@ def sandbox_initialize(
         :func:`run_container_and_exec` — one-shot init + exec + stop.
         :func:`clone_repo` — clone after container is running.
     """
+    # Opportunistic GC (Issue #298): clean up any containers orphaned by a
+    # previously timed-out init before creating a new one.  Best-effort —
+    # never let cleanup failure abort the init.
+    try:
+        _reap_orphaned_init_containers()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("orphan reap failed: %s", e)
+
     # When pr is specified, implicitly enable network and VCS token
     if pr is not None:
         allow_network = True
@@ -767,12 +897,16 @@ def sandbox_initialize(
             return "Error: cpus exceeds host CPU count"
         resource_overrides["cpu_quota"] = int(cpus * profile.cpu_period)
 
+    # Stamp the creation time so the orphan reaper can age a container even if
+    # this call times out before any journal entry is written (Issue #298).
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     run_kwargs = build_secure_run_kwargs(
         profile,
         command="sleep infinity",
         detach=True,
         remove=False,
         environment=env,
+        labels={CREATED_AT_LABEL: created_at},
         **resource_overrides,
     )
 
@@ -839,7 +973,77 @@ def sandbox_initialize(
                 logger.warning("PR branch setup failed: %s", e)
                 pr_msg = f" (pr setup failed: {e})"
 
+    # All setup phases finished — mark the container as a completed, usable
+    # init so the orphan reaper never touches it (Issue #298).  Clone / PR
+    # failures above are non-fatal: the container is still a deliberate,
+    # usable container, so completion is recorded regardless.
+    record_initialize_complete(cid)
+
     return cid + clone_msg + pr_msg
+
+
+async def sandbox_initialize_tool(
+    image: str | None = None,
+    allow_network: bool = False,
+    inject_vcs_token: bool = False,
+    clone_repo: str | None = None,
+    clone_dest: str = "/tmp/repo",
+    repo: str | None = None,
+    pr: int | None = None,
+    pip_extras: str | None = "[dev]",
+    mem_limit: str | None = None,
+    cpus: float | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Start a new Docker sandbox container (async MCP entry point).
+
+    Thin async wrapper around :func:`sandbox_initialize`.  The slow setup
+    phases (image pull, repo clone, pip install, PR checkout) can run for
+    minutes, which previously tripped the MCP/HTTP request timeout and left
+    the container orphaned (Issue #298).  To prevent that, the synchronous
+    work runs in a thread pool while this coroutine emits a progress
+    notification every :data:`_PROGRESS_INTERVAL_SECONDS`, keeping the
+    connection alive so the real ``container_id`` is always returned.
+
+    *ctx* is injected by FastMCP.  When it is ``None`` (e.g. direct calls in
+    tests) the work runs inline with no progress notifications — identical
+    behaviour to calling :func:`sandbox_initialize` directly.  All other
+    parameters are forwarded verbatim; see :func:`sandbox_initialize`.
+    """
+    def _work() -> str:
+        return sandbox_initialize(
+            image=image,
+            allow_network=allow_network,
+            inject_vcs_token=inject_vcs_token,
+            clone_repo=clone_repo,
+            clone_dest=clone_dest,
+            repo=repo,
+            pr=pr,
+            pip_extras=pip_extras,
+            mem_limit=mem_limit,
+            cpus=cpus,
+        )
+
+    if ctx is None:
+        return _work()
+
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(None, _work)
+    start = time.monotonic()
+    while not future.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(future), timeout=_PROGRESS_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - start
+            try:
+                await ctx.report_progress(
+                    0, None, f"sandbox_initialize running... ({elapsed:.0f}s)"
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                # A dropped connection must not strand the in-flight future;
+                # keep waiting for the work to finish and return its result.
+                logger.warning("report_progress failed: %s", e)
+    return await future
 
 
 def sandbox_stop(

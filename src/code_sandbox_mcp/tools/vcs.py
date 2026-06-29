@@ -754,11 +754,11 @@ Args:
         ``git push --force`` (opt-in; default ``False``).
     author_name: Git commit author name.  When set, takes precedence
         over the image-level default configured in
-        ``docker/Dockerfile.sandbox`` (``code-sandbox-mcp[bot]``).
+        ``docker/Dockerfile.base`` (``code-sandbox-mcp[bot]``).
         When ``None``, the image-level default is used.
     author_email: Git commit author email.  When set, takes precedence
         over the image-level default configured in
-        ``docker/Dockerfile.sandbox``
+        ``docker/Dockerfile.base``
         (``code-sandbox-mcp[bot]@users.noreply.github.com``).
         When ``None``, the image-level default is used.
 

@@ -202,7 +202,15 @@ The default image is a purpose-built sandbox image pushed to GHCR. It bundles al
 | Package install | `uv` | Fast pip alternative |
 | JSON | `jq` | JSON processing |
 
-The image is built from `docker/Dockerfile.sandbox` and automatically published to GHCR via CI. To use a custom image, pull it first and pass it explicitly:
+The images are built from the split `docker/Dockerfile.{base,python,go}` and automatically published to GHCR via CI. When `sandbox_initialize` is called without an explicit `image`, the project's language is detected (from a Shiori pre-clone or the GitHub repo root) and the matching variant is chosen:
+
+| Detected | Image |
+|----------|-------|
+| Python (`pyproject.toml`, `setup.py`, `requirements*.txt`, ...) | `sandbox:python` (base + python + js) |
+| Go (`go.mod`) | `sandbox:go` (base + go + js) |
+| JS only / unknown / unsupported / py+go polyglot | `sandbox:base` (neutral: node + VCS + search, no language toolchain) |
+
+No language is hardcoded as the default. Unknown or unsupported projects fall back to the neutral `sandbox:base` (init never blocks); a notice in the result explains the fallback. To override detection, pass an image explicitly:
 
 ```
 sandbox_initialize(image="my-image@sha256:...")

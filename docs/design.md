@@ -327,7 +327,12 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 
 ## 12. ベースイメージ（全部入り）
 
-ツール同梱はイメージの責務。MCP のツール数は増やさない。`docker/Dockerfile.sandbox` で管理（→ §12）。
+> **更新（#104 / #313）**: 単一の全部入り `docker/Dockerfile.sandbox` は廃止し、
+> `docker/Dockerfile.{base,python,go}` に分割した（`docs/design-multilang-support.md` §6/§7）。
+> 既定イメージは python 固定ではなく**検出ベースで選択**し、不明時は中立 `sandbox:base` に fallback する。
+> 以下の表は base + 各 backend が同梱するツールの総体を示す。
+
+ツール同梱はイメージの責務。MCP のツール数は増やさない。`docker/Dockerfile.{base,python,go}` で管理。
 
 | カテゴリ | ツール | 用途 |
 |---------|--------|------|

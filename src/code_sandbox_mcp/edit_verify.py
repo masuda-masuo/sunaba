@@ -438,6 +438,11 @@ def search_files(
         return _search_lexical(container, pattern, path, max_results)
 
 
+def _needs_pcre2(pattern: str) -> bool:
+    """Check if the regex pattern requires PCRE2 (look-around)."""
+    return bool(re.search(r'\(\?(?:[=!]|<=|<!)', pattern))
+
+
 def _search_lexical(
     container: Any,
     pattern: str,
@@ -448,7 +453,8 @@ def _search_lexical(
     quoted_pattern = shlex.quote(pattern)
     quoted_path = shlex.quote(path)
 
-    cmd = f"rg --json -n {quoted_pattern} {quoted_path} -I 2>/dev/null"
+    pcre2_flag = " -P" if _needs_pcre2(pattern) else ""
+    cmd = f"rg --json -n {quoted_pattern} {quoted_path} -I{pcre2_flag}"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
         stdout=True,
@@ -480,7 +486,7 @@ def _grep_fallback(
     quoted_pattern = shlex.quote(pattern)
     quoted_path = shlex.quote(path)
 
-    cmd = f"grep -rnI {quoted_pattern} {quoted_path} 2>/dev/null"
+    cmd = f"grep -rnI {quoted_pattern} {quoted_path}"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
         stdout=True,
@@ -512,7 +518,7 @@ def _search_structural(
     quoted_pattern = shlex.quote(pattern)
     quoted_path = shlex.quote(path)
 
-    cmd = f"sg run -p {quoted_pattern} {quoted_path} --json=stream 2>/dev/null"
+    cmd = f"sg run -p {quoted_pattern} {quoted_path} --json=stream"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],
         stdout=True,

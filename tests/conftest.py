@@ -24,7 +24,7 @@ def _mock_result_cache() -> None:
         patch("code_sandbox_mcp.tools.exec.set_cached_result"),
         patch("code_sandbox_mcp.tools.container.get_cached_result", return_value=None),
         patch("code_sandbox_mcp.tools.container.set_cached_result"),
-        patch("code_sandbox_mcp.tools.vcs.resolve_git_root", side_effect=lambda c, wd: wd),
+        patch("code_sandbox_mcp.tools.vcs.resolve_git_root", side_effect=lambda c, wd=None: wd if wd is not None else "/home/sandbox"),
     ):
         yield
 

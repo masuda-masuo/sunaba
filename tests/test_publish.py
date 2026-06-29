@@ -364,7 +364,7 @@ class TestPublish:
         mock_gen_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Default working_dir is /home/sandbox."""
+        """Default working_dir (None) auto-resolves, falling back to /home/sandbox."""
         mock_run_id.return_value = "run123"
         mock_gen_token.return_value = "tok_abc123"
 
@@ -386,6 +386,48 @@ class TestPublish:
         assert result["status"] == "dry_run"
         call_args = container.exec_run.call_args[0][0]
         assert "cd /home/sandbox" in call_args[2]
+
+    @patch("code_sandbox_mcp.tools.vcs.resolve_git_root")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.generate_token")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_dry_run_auto_resolves_from_meta(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_gen_token: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+    ) -> None:
+        """Default working_dir auto-resolves from .sandbox-meta.json."""
+        mock_resolve.return_value = "/tmp/repo/code-sandbox-mcp"
+        mock_run_id.return_value = "run123"
+        mock_gen_token.return_value = "tok_abc123"
+
+        container = _make_container_mock([
+            (0, b"M modified.py\n---DIFF---\n 1 file changed", b""),
+            (0, b"", b""),
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/issue-55",
+            message="Fix issue #55",
+            dry_run=True,
+        ))
+
+        assert result["status"] == "dry_run"
+        mock_resolve.assert_called_once()
+        for call in container.exec_run.call_args_list:
+            args, kwargs = call
+            cmd = args[0][2]
+            if "cd " not in cmd:
+                continue
+            assert "/tmp/repo/code-sandbox-mcp" in cmd, f"Expected resolved path in: {cmd}"
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")

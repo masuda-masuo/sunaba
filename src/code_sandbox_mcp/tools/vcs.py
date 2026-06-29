@@ -38,12 +38,12 @@ _DEFAULT_WD = "/home/sandbox"
 
 def resolve_git_root(
     container: Any,
-    working_dir: str = _DEFAULT_WD,
+    working_dir: str | None = None,
 ) -> str:
-    """Auto-detect git repository root when working_dir is the default.
+    """Auto-detect git repository root when *working_dir* is not given.
 
-    When *working_dir* is explicitly set (not ``/home/sandbox``),
-    return it unchanged.  When it is the default, try to locate the
+    When *working_dir* is explicitly provided, return it unchanged.
+    When *working_dir* is ``None`` (default), try to locate the
     actual git repository root by:
 
     0. Reading ``~/.sandbox-meta.json`` (written by
@@ -55,9 +55,9 @@ def resolve_git_root(
     Steps 1-2 are fallbacks for containers that were cloned before the
     metadata mechanism was introduced.
 
-    Returns the resolved path, or *working_dir* as fallback.
+    Returns the resolved path, or ``/home/sandbox`` as fallback.
     """
-    if working_dir != _DEFAULT_WD:
+    if working_dir is not None:
         return working_dir
 
     # Step 0: container metadata — written by sandbox_initialize after clone
@@ -114,7 +114,7 @@ def resolve_git_root(
         if _path2 and _path2 != "__NO_REPO__":
             return _path2
 
-    return working_dir  # fallback
+    return _DEFAULT_WD  # fallback
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ print(json.dumps({"sha": new_sha, "tree_sha": tree["sha"], "parent_sha": parent_
 def checkpoint(
     container_id: str,
     message: str,
-    working_dir: str = "/home/sandbox",
+    working_dir: str | None = None,
 ) -> str:
     """Create a local Git checkpoint (commit only, no push).
 
@@ -252,7 +252,7 @@ def checkpoint(
         container_id: 12-character container ID prefix.
         message: Commit message for the checkpoint.
         working_dir: Directory in the container containing the git
-            repository (default ``"/home/sandbox"``).
+            repository (default ``None`` = auto-detect).
 
     Returns:
         JSON string with ``status``, ``sha`` (short), and ``message``.
@@ -317,7 +317,7 @@ def checkpoint(
 
 def checkpoint_list(
     container_id: str,
-    working_dir: str = "/home/sandbox",
+    working_dir: str | None = None,
     limit: int = 20,
 ) -> str:
     """List unpushed local Git checkpoints (no push, no verify, no token).
@@ -328,7 +328,7 @@ def checkpoint_list(
     Args:
         container_id: 12-character container ID prefix.
         working_dir: Directory in the container containing the git
-            repository (default ``"/home/sandbox"``).
+            repository (default ``None`` = auto-detect).
         limit: Maximum number of checkpoints to return (default 20).
 
     Returns:
@@ -394,7 +394,7 @@ def checkpoint_list(
 def checkpoint_restore(
     container_id: str,
     sha: str,
-    working_dir: str = "/home/sandbox",
+    working_dir: str | None = None,
 ) -> str:
     """Restore working tree to a previous checkpoint via ``git reset --hard``.
 
@@ -409,7 +409,7 @@ def checkpoint_restore(
         container_id: 12-character container ID prefix.
         sha: SHA (or abbreviation) of the checkpoint to restore.
         working_dir: Directory in the container containing the git
-            repository (default ``"/home/sandbox"``).
+            repository (default ``None`` = auto-detect).
 
     Returns:
         JSON string with ``status``, ``restored_to``, and ``warning``.
@@ -676,7 +676,7 @@ def publish(
     repo: str,
     branch: str,
     message: str,
-    working_dir: str = "/home/sandbox",
+    working_dir: str | None = None,
     create_pr: bool = False,
     pr_title: str = "",
     pr_body: str = "",
@@ -741,7 +741,7 @@ Args:
     branch: Branch name to push.
     message: Git commit message.
     working_dir: Directory in the container containing the git
-        repository (default ``"/home/sandbox"``).
+        repository (default ``None`` = auto-detect).
     create_pr: Whether to create a pull request after push.
     pr_title: PR title (required if ``create_pr=True``).
     pr_body: PR body (optional).
@@ -1096,7 +1096,7 @@ def sandbox_create_pr(
     pr_title: str,
     pr_body: str = "",
     base_branch: str = "",
-    working_dir: str = "/home/sandbox",
+    working_dir: str | None = None,
     dry_run: bool = False,
     token: str = "",
 ) -> str:
@@ -1159,7 +1159,7 @@ def sandbox_create_pr(
         base_branch: Base branch for the PR (default: repository default
             branch).
         working_dir: Directory in the container containing the git
-            repository (default ``'/home/sandbox'``).
+            repository (default ``None`` = auto-detect).
         dry_run: When ``True``, returns a preview of the HEAD commit that
             would be pushed plus a confirmation token, without pushing or
             creating a PR.

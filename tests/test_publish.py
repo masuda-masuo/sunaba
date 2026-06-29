@@ -364,7 +364,7 @@ class TestPublish:
         mock_gen_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Default working_dir is /home/sandbox."""
+        """Default working_dir (None) auto-resolves, falling back to /home/sandbox."""
         mock_run_id.return_value = "run123"
         mock_gen_token.return_value = "tok_abc123"
 

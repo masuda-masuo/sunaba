@@ -28,12 +28,12 @@ class TestResolveGitRootExplicit:
         container.exec_run.assert_not_called()
 
     def test_default_value_triggers_autodetect(self) -> None:
-        """'/home/sandbox' matches _DEFAULT_WD, so auto-detection runs."""
+        """None triggers auto-detection."""
         container = _make_container([
             _NO_META,
             (0, (b"/home/sandbox\n", b"")),
         ])
-        result = resolve_git_root(container, "/home/sandbox")
+        result = resolve_git_root(container)
         assert result == "/home/sandbox"
 
 

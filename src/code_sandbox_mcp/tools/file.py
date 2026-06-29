@@ -142,38 +142,81 @@ def _try_whitespace_flexible(
 
 
 def _build_near_miss_echo(existing: str, old_str: str, dest_path: str) -> str:
-    """Build a near-miss error message with the most similar file region.
+    """Build a near-miss error message with diff, context, and indentation hints.
 
-    Uses :mod:`difflib` to locate the area that best matches *old_str*
-    and shows it with line numbers as context for the caller.
+    Uses a sliding-window line match to find the most similar region,
+    shows at most 4 lines of unified diff, 3 lines of surrounding
+    context, and explicitly flags indentation mismatches.
     """
     existing_lines = existing.splitlines()
+    old_lines = old_str.splitlines()
+    n_old = len(old_lines)
+    n_existing = len(existing_lines)
 
-    sm = difflib.SequenceMatcher(None, existing, old_str)
-    match = sm.find_longest_match(0, len(existing), 0, len(old_str))
+    # --- find best-matching block via sliding window ---
+    best_ratio = 0.0
+    best_start = 0  # line index in existing_lines
+    best_end = 0
 
-    lines_to_show: list[str] = []
+    if n_old <= n_existing:
+        for i in range(n_existing - n_old + 1):
+            block = "\n".join(existing_lines[i:i + n_old])
+            sm = difflib.SequenceMatcher(None, old_str, block)
+            r = sm.ratio()
+            if r > best_ratio:
+                best_ratio = r
+                best_start = i
+                best_end = i + n_old
+    elif n_existing > 0:
+        # old_str longer than file -- compare with whole file
+        sm = difflib.SequenceMatcher(None, old_str, existing)
+        best_ratio = sm.ratio()
+        best_start = 0
+        best_end = n_existing
 
-    if match.size >= max(5, len(old_str) * 0.3):
-        match_line = existing[: match.a].count("\n") + 1
-        match_end = existing[match.a : match.a + match.size].count("\n") + match_line
+    # --- build context (3 lines before / after) ---
+    ctx_start = max(0, best_start - 3)
+    ctx_end = min(n_existing, best_end + 3)
+    context_lines: list[str] = []
+    for i in range(ctx_start, ctx_end):
+        prefix = ">>>" if best_start <= i < best_end else "   "
+        context_lines.append(f"{prefix} {i + 1:4d} | {existing_lines[i]}")
+    context_block = "\n".join(context_lines)
 
-        ctx_start = max(0, match_line - 4)
-        ctx_end = min(len(existing_lines), match_end + 3)
+    # --- unified diff (limited to 4 lines) ---
+    matched_lines = existing_lines[best_start:best_end] if best_end > best_start else []
+    diff_lines = list(
+        difflib.unified_diff(
+            old_lines,
+            matched_lines,
+            fromfile="old_str (provided)",
+            tofile=f"{dest_path} (file)",
+            lineterm="",
+        )
+    )
+    # Cap diff output to at most 6 lines (+ header may show more)
+    if len(diff_lines) > 6:
+        diff_lines = diff_lines[:6] + ["... (diff truncated)"]
+    diff_block = "\n".join(diff_lines) if diff_lines else "(identical content, whitespace differs)"
 
-        for i in range(ctx_start, ctx_end):
-            prefix = ">>>" if match_line - 1 <= i < match_end else "   "
-            lines_to_show.append(f"{prefix} {i + 1:4d} | {existing_lines[i]}")
-    else:
-        for i in range(min(8, len(existing_lines))):
-            lines_to_show.append(f"    {i + 1:4d} | {existing_lines[i]}")
-
-    context_block = "\n".join(lines_to_show)
+    # --- indentation hint ---
+    indent_hint = ""
+    if old_lines and matched_lines:
+        old_first_indent = _get_line_indent(old_lines[0])
+        file_first_indent = _get_line_indent(matched_lines[0])
+        if old_first_indent != file_first_indent:
+            indent_hint = (
+                f"\n(Indentation mismatch: old_str indent={old_first_indent}, "
+                f"file indent={file_first_indent})"
+            )
 
     return (
         f"Error: old_str not found in {dest_path}.\n"
-        f"Most relevant file area:\n"
+        f"Best matching region (similarity={best_ratio:.0%}):\n"
         f"{context_block}\n"
+        f"Unified diff (old_str vs file region):\n"
+        f"{diff_block}"
+        f"{indent_hint}\n"
         "Tip: Use read_file_range first to confirm the exact content "
         "(including whitespace)."
     )

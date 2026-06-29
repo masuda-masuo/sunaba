@@ -630,9 +630,49 @@ class TestWriteFileSandboxReplaceEnhanced:
         )
         assert "Error" in result
         assert "not found" in result
-        # Should show most similar area
-        assert "Most relevant file area:" in result
+        # Should show best matching region
+        assert "Best matching region" in result
+        assert "Unified diff" in result
         assert "def foo" in result or "def bar" in result
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_near_miss_indentation_hint(self, mock_docker: MagicMock) -> None:
+        """Near-miss shows indentation mismatch hint."""
+        # old_str has indent=2 AND different content ("fox" vs "foo")
+        # so whitespace-flexible won't match — near-miss fires.
+        existing = "def foo():\n    pass\n\ndef bar():\n    pass\n"
+        self._mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.txt",
+            file_contents="new",
+            dest_dir="/root",
+            old_str="  def fox():",
+        )
+        assert "Error" in result
+        assert "Indentation mismatch" in result
+        assert "old_str indent=2" in result
+        assert "file indent=0" in result
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_near_miss_shows_diff(self, mock_docker: MagicMock) -> None:
+        """Near-miss shows unified diff including ---/+++ headers."""
+        existing = "def foo():\n    pass\n\ndef bar():\n    pass\n"
+        self._mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.txt",
+            file_contents="new",
+            dest_dir="/root",
+            old_str="def baz():",
+        )
+        assert "Error" in result
+        assert "--- old_str (provided)" in result
+        assert "+++ /root/test.txt (file)" in result
+        assert "-def baz():" in result
+        assert "+def bar():" in result
 
 
 class TestWriteFileSandboxMutualExclusivity:

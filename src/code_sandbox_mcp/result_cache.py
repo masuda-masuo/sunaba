@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -43,11 +44,156 @@ def _ensure_cache_dir() -> None:
 # Cache key computation
 # ---------------------------------------------------------------------------
 
+# --- Volatile command detection (issue #329) ---
+
+# Git subcommands whose output or side effects depend on the
+# working-tree / index / HEAD state.  Caching these returns
+# stale results from a potentially different context
+# (issue #329 § P1).
+_VOLATILE_GIT_COMMANDS: frozenset[str] = frozenset({
+    # Mutating — change repository state
+    "add", "rm", "mv",
+    "commit",
+    "checkout", "switch",
+    "merge",
+    "rebase",
+    "stash",
+    "reset",
+    "clean",
+    "cherry-pick", "cherry",
+    "revert",
+    "am",
+    "bisect",
+    "clone", "init",
+    "fetch", "pull", "push",
+    "remote",
+    "submodule",
+    "worktree",
+    "tag",                               # creating / deleting tags
+    "branch",                            # creating / deleting branches
+    # Inspecting — output reflects current state
+    "diff",
+    "status",
+    "log",
+    "show",
+    "blame",
+    "describe",
+    "rev-parse", "rev-list",
+    "ls-files", "ls-tree",
+    "grep",
+    "shortlog",
+    "whatchanged",
+})
+
+# Non-git commands that depend on or mutate mutable filesystem state
+# and should not be cached (issue #329 § P2).
+_VOLATILE_NON_GIT_PROGRAMS: frozenset[str] = frozenset({
+    "ls", "cat", "stat", "file", "find",
+    "du", "df", "wc", "head", "tail",
+    "touch", "mkdir", "rmdir", "chmod", "chown",
+    "cp", "mv", "rm",
+})
+
+# Commands that are known to be safe to cache (non-volatile builds/installs).
+# Used as an allow-list for programs we don't recognise otherwise.
+_CACHEABLE_PROGRAMS: frozenset[str] = frozenset({
+    "cd",  # shell builtin (no-output navigation)
+    "echo", "printf",
+    "pip", "pip3", "python", "python3",
+    "npm", "npx", "yarn", "pnpm",
+    "apt-get", "apt", "dpkg",
+    "yum", "dnf", "rpm",
+    "go", "cargo", "rustup",
+    "gcc", "g++", "clang", "clang++",
+    "make", "cmake", "ninja",
+    "gem", "bundle",
+    "curl", "wget",
+    "pytest", "ruff", "pyright", "eslint", "mypy",
+    "npx", "tsc", "node",
+    "systemctl", "docker", "gh",
+})
+
+
+def _split_compound_commands(cmd: str) -> list[str]:
+    """Split *cmd* on ``&&``, ``;``, ``||``, and ``|`` boundaries."""
+    parts = re.split(r"&&|\|\||[;&|]", cmd)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _first_program(sub: str) -> str:
+    """Return the program name from a subcommand string.
+
+    Strips leading variable assignments (``VAR=val``) and returns
+    the bare program name without flags or path components.
+    """
+    tokens = sub.strip().split()
+    idx = 0
+    while idx < len(tokens) and "=" in tokens[idx] and not tokens[idx].startswith("-"):
+        idx += 1
+    if idx >= len(tokens):
+        return ""
+    prog = tokens[idx]
+    # Strip leading ./ ../ prefixes
+    while prog.startswith("../") or prog.startswith("./"):
+        prog = prog[2:] if prog.startswith("./") else prog[3:]
+        # Re-check after stripping
+    return prog.rsplit("/", 1)[-1]
+
+
+def is_cacheable(commands: list[str]) -> bool:
+    """Check whether *commands* can safely be cached (issue #329).
+
+    Returns ``False`` for:
+
+    * **Git subcommands** that mutate or inspect repository state
+      (e.g. ``git add``, ``git diff``, ``git status``, ``git commit``)
+      — :issue:`329` § P1.
+    * **Non-git volatile programs** that read or write mutable files
+      (e.g. ``ls``, ``cat``, ``rm``, ``touch``) when they appear
+      outside a known-cacheable pipeline — :issue:`329` § P2.
+    * **Compound commands** (``&&`` / ``;`` / ``||`` chaining or pipes)
+      where **any** subcommand is volatile — caching the chain would
+      skip the side-effect subcommands as well — :issue:`329` § P4.
+    """
+    for cmd in commands:
+        stripped = cmd.strip()
+        if not stripped:
+            continue
+        # P4: Split on &&, ;, ||, and | — if any subcommand is
+        # volatile the whole chain is non-cacheable.
+        subcommands = _split_compound_commands(stripped)
+        for sub in subcommands:
+            prog = _first_program(sub)
+            if not prog:
+                continue
+            # P1: Volatile git subcommands
+            if prog == "git":
+                tokens = sub.strip().split()
+                git_idx = 0
+                while git_idx < len(tokens) and tokens[git_idx] != "git":
+                    git_idx += 1
+                if git_idx + 1 < len(tokens):
+                    git_cmd_idx = git_idx + 1
+                    while git_cmd_idx < len(tokens) and tokens[git_cmd_idx].startswith("-"):
+                        git_cmd_idx += 1
+                    if git_cmd_idx < len(tokens):
+                        if tokens[git_cmd_idx] in _VOLATILE_GIT_COMMANDS:
+                            return False
+                continue
+            # P2: Non-git volatile programs (deny-list only).
+            # Unknown programs (scripts, tool wrappers, custom
+            # binaries) are treated as potentially cacheable —
+            # they produce deterministic output for a given input.
+            if prog in _VOLATILE_NON_GIT_PROGRAMS:
+                return False
+    return True
+
 
 def compute_cache_key(
     image: str,
     commands: list[str],
     input_hash: str = "",
+    workspace_fingerprint: str = "",
 ) -> str:
     """Compute a content-addressable cache key.
 
@@ -55,11 +201,17 @@ def compute_cache_key(
         image: Docker image reference (e.g. ``python@sha256:abcd``).
         commands: List of shell commands.
         input_hash: Optional hash of any input data that affects output.
+        workspace_fingerprint: Optional hash of workspace state
+            (e.g. ``git rev-parse HEAD`` + ``git status --porcelain``)
+            to namespace the cache key per working-tree state
+            (issue #329 § P3).
 
     Returns:
         Hex digest suitable for use as a cache filename.
     """
     parts = [image, json.dumps(commands, sort_keys=True), input_hash]
+    if workspace_fingerprint:
+        parts.append(workspace_fingerprint)
     canonical = "\0".join(parts)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

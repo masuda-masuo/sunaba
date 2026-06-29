@@ -49,6 +49,7 @@ from code_sandbox_mcp.output_control import (
 from code_sandbox_mcp.result_cache import (
     compute_cache_key,
     get_cached_result,
+    is_cacheable,
     set_cached_result,
 )
 from code_sandbox_mcp.security import (
@@ -1544,9 +1545,10 @@ def run_container_and_exec(
     if pr_error:
         result["pr_warning"] = pr_error
 
-    # Cache the result
-    cache_key = compute_cache_key(resolved, commands, input_hash=input_hash)
-    set_cached_result(cache_key, result)
+    # Cache the result (skip for volatile commands)
+    if is_cacheable(commands):
+        cache_key = compute_cache_key(resolved, commands, input_hash=input_hash)
+        set_cached_result(cache_key, result)
 
     journal_record_exec(
         container_id,
@@ -1686,9 +1688,10 @@ def rerun_failed(
     if new_exit_code != 0:
         result["exit_code"] = new_exit_code
 
-    # Store new result in cache
-    new_cache_key = compute_cache_key(image_ref, target_commands, input_hash=input_hash)
-    set_cached_result(new_cache_key, result)
+    # Store new result in cache (skip for volatile commands)
+    if is_cacheable(target_commands):
+        new_cache_key = compute_cache_key(image_ref, target_commands, input_hash=input_hash)
+        set_cached_result(new_cache_key, result)
 
     journal_record_exec(
         container_id[:12],
@@ -1741,8 +1744,13 @@ def sandbox_exec_diff(
         image_ref = str(raw) if not isinstance(raw, str) else raw
     except Exception:
         image_ref = container_id[:12]
+    cacheable = is_cacheable(commands)
     cache_key = "diff:" + compute_cache_key(image_ref, commands, input_hash=input_hash)
-    previous = get_cached_result(cache_key)
+
+    if cacheable:
+        previous = get_cached_result(cache_key)
+    else:
+        previous = None
 
     joined = " && ".join(commands)
     encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
@@ -1821,8 +1829,9 @@ def sandbox_exec_diff(
     if exit_code != 0:
         result["exit_code"] = exit_code
 
-    # Update cache
-    set_cached_result(cache_key, result)
+    # Update cache (skip for volatile commands)
+    if cacheable:
+        set_cached_result(cache_key, result)
     journal_record_exec(container_id[:12], commands, exit_code, verbose=verbose)
     return json.dumps(result)
 

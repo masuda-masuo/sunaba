@@ -25,6 +25,7 @@ from code_sandbox_mcp.output_control import (
 from code_sandbox_mcp.result_cache import (
     compute_cache_key,
     get_cached_result,
+    is_cacheable,
     set_cached_result,
 )
 from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _coerce_list_arg, _docker
@@ -173,8 +174,16 @@ def sandbox_exec(
     else:
         assert commands is not None  # guaranteed by validation above
         cache_subject = commands
+    # Volatile commands (git diff/status/add, mutable file ops) must never
+    # be cached — their output depends on the current working-tree / index
+    # state (issue #329 P1/P2/P4).
+    cacheable = is_cacheable(cache_subject)
     cache_key = compute_cache_key(image_ref, cache_subject, input_hash=input_hash)
-    cached = get_cached_result(cache_key)
+
+    if cacheable:
+        cached = get_cached_result(cache_key)
+    else:
+        cached = None
     if cached is not None:
         # Journal the cache hit
         journal_record_exec(
@@ -284,8 +293,9 @@ def sandbox_exec(
     if stderr_text and verbose != "error_only":
         result["stderr"] = stderr_text
 
-    # Store in result cache
-    set_cached_result(cache_key, result)
+    # Store in result cache (skip for volatile commands)
+    if cacheable:
+        set_cached_result(cache_key, result)
 
     journal_record_exec(
         container_id[:12],

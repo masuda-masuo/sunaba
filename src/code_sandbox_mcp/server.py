@@ -359,6 +359,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=0.25,
         help="Fraction of host CPU for default cpu quota (default: 0.25)",
     )
+    parser.add_argument(
+        "--prewarm-interval-seconds",
+        type=int,
+        default=3600,
+        help=(
+            "Pull the default sandbox image at startup and re-check every N "
+            "seconds so the first sandbox_initialize is warm (Issue #303). "
+            "Set to 0 to disable prewarming (default: 3600)."
+        ),
+    )
     return parser
 
 
@@ -391,6 +401,34 @@ def _start_github_app_token_refresh(interval_seconds: int = 120) -> None:
     )
     thread.start()
     logger.info("started GitHub App token refresh thread (every %ss)", interval_seconds)
+
+
+def _start_image_prewarm(interval_seconds: int = 3600) -> None:
+    """Pull the default sandbox image now and re-check it periodically.
+
+    Removes the cold-start cliff where the first ``sandbox_initialize`` trips
+    the client request timeout while the initial ``docker pull`` runs longer
+    than the timeout (Issue #303).  Runs in a daemon thread so startup is
+    never blocked; the initial pull happens on the first iteration and each
+    subsequent cycle is a cheap local presence check (a no-op once the
+    digest-pinned image is cached).  A non-positive *interval_seconds*
+    disables prewarming entirely.
+    """
+    if interval_seconds <= 0:
+        return
+
+    from code_sandbox_mcp.tools.container import prewarm_default_image
+
+    def _prewarm_loop() -> None:
+        while True:
+            prewarm_default_image()
+            time.sleep(interval_seconds)
+
+    thread = threading.Thread(
+        target=_prewarm_loop, name="image-prewarm", daemon=True
+    )
+    thread.start()
+    logger.info("started default image prewarm thread (every %ss)", interval_seconds)
 
 
 def main() -> None:
@@ -457,6 +495,10 @@ def main() -> None:
     # (launcher-injected or manual) is left untouched -> zero impact on
     # existing deployments.
     _start_github_app_token_refresh()
+
+    # Keep the default sandbox image warm so the first sandbox_initialize does
+    # not time out on a cold-start docker pull (Issue #303).
+    _start_image_prewarm(args.prewarm_interval_seconds)
 
     transport = args.transport
     if transport == "stdio":

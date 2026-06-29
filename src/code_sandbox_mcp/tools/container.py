@@ -187,6 +187,28 @@ def _ensure_image(image: str) -> None:
         client.images.pull(image)
 
 
+def prewarm_default_image() -> None:
+    """Pull the default sandbox image so the first ``sandbox_initialize`` is warm.
+
+    A cold-start image pull can exceed the MCP/HTTP request timeout, so the
+    first ``sandbox_initialize`` fails even though the pull finishes in the
+    background and the next call succeeds (Issue #303).  Pulling the image
+    ahead of time — at server startup and periodically — removes that
+    first-call cliff and does not depend on progress notifications keeping the
+    connection alive.
+
+    Reads the module-level :data:`_DEFAULT_IMAGE` at call time so a
+    ``--default-image`` override applied before the prewarm thread starts is
+    honoured.  Any failure (registry hiccup, Docker down) is swallowed so it
+    never blocks startup; the next refresh cycle retries.
+    """
+    try:
+        _ensure_image(_DEFAULT_IMAGE)
+        logger.info("prewarmed default sandbox image %s", _DEFAULT_IMAGE)
+    except Exception:  # noqa: BLE001 - prewarm must never break startup
+        logger.exception("prewarm of default image failed")
+
+
 def _validate_clone_repo(clone_repo: str) -> tuple[str, str]:
     """Validate *clone_repo* as ``owner/name`` format.
 
@@ -1036,8 +1058,13 @@ async def sandbox_initialize_tool(
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - start
             try:
+                # Progress value must increase every notification (MCP spec
+                # "SHOULD increase, even if total is unknown"); a constant 0
+                # can be ignored by clients that only reset their request
+                # timeout on advancing progress (Issue #303).  Elapsed seconds
+                # is monotonically increasing.
                 await ctx.report_progress(
-                    0, None, f"sandbox_initialize running... ({elapsed:.0f}s)"
+                    elapsed, None, f"sandbox_initialize running... ({elapsed:.0f}s)"
                 )
             except Exception as e:  # pragma: no cover - defensive
                 # A dropped connection must not strand the in-flight future;

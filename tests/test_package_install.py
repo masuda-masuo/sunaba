@@ -245,20 +245,19 @@ class TestPackageInstall:
         ))
         assert result["status"] == "ok"
 
-    @patch("code_sandbox_mcp.tools.package._has_uv", return_value=True)
+    @patch("code_sandbox_mcp.tools.package._has_uv", return_value=False)
     @patch("code_sandbox_mcp.tools.package._docker")
     def test_uv_install_fallback_to_pip(self, mock_docker: MagicMock, mock_has_uv: MagicMock) -> None:
         """When uv is not available, pip install is used as fallback."""
         container = MagicMock()
 
         def exec_run_side_effect(cmd, **kwargs):
-            shell_cmd = cmd[-1] if isinstance(cmd, list) else ""
-            if "pip list" in shell_cmd and "install" not in shell_cmd:
+            if isinstance(cmd, list) and cmd[:2] == ["pip", "list"]:
                 return (0, (
                     b'[{"name": "pip", "version": "23.0"}]',
                     b"",
                 ))
-            if "pip install" in shell_cmd:
+            if isinstance(cmd, list) and cmd[:2] == ["pip", "install"]:
                 return (0, (
                     b"Successfully installed requests-2.31.0",
                     b"",

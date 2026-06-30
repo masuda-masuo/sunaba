@@ -22,6 +22,11 @@ code-sandbox-mcp = "code_sandbox_mcp.server:main"
 where = ["src"]
 include = ["code_sandbox_mcp*"]
 
+[tool.setuptools.package-data]
+# Ship the digest pin data file inside the wheel so importlib.resources can
+# read it at runtime (Issue #331).
+code_sandbox_mcp = ["image_pins.json"]
+
 [project.optional-dependencies]
 test = ["pytest"]
 dev = ["pytest", "ruff"]

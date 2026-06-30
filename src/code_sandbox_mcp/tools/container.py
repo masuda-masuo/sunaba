@@ -24,7 +24,7 @@ from docker.errors import APIError, NotFound
 from fastmcp import Context
 from pydantic import BeforeValidator
 
-from code_sandbox_mcp import image_selection, token_broker
+from code_sandbox_mcp import image_pins, image_selection, token_broker
 from code_sandbox_mcp.journal import (
     read_journal,
     record_boundary_crossing,
@@ -80,13 +80,16 @@ logger: logging.Logger = logging.getLogger(__name__)
 # default" -- "Python is the default" only made sense because this repo
 # happens to be Python (see code_sandbox_mcp.image_selection).
 #
-# CI (``.github/workflows/build-sandbox-variants.yml``) rewrites these three
-# ``@sha256`` pins after each variant build; keep them on one line each so the
-# sed-based update keeps working.  All refs are digest-pinned per
-# ``docs/design-multilang-support.md`` §6.
-_NEUTRAL_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:8ffc955e78ea96c7dc665516e4969a4a22be70e41de977340b677a618e004892"
-_PYTHON_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:e6041cdb1cd84db10d038d79b9ca1d1f0a129a89a6b58c536e28283b75dd6cdd"
-_GO_IMAGE: str = "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:1fac330f3422bba8a886b933e81a692a80acf5a16543b8e3baf14acdb07ff2da"
+# The digest pins live as data in ``code_sandbox_mcp/image_pins.json``; CI
+# (``.github/workflows/build-sandbox-variants.yml``) rewrites that file after
+# each variant build, then verifies this loader returns the new digest.  This
+# replaces the old ``sed``-on-source approach that broke silently when the
+# constants moved or were reformatted (#214 / #331).  All refs are digest-pinned
+# per ``docs/design-multilang-support.md`` section 6.
+_image_pins: dict[str, str] = image_pins.load_image_pins()
+_NEUTRAL_IMAGE: str = _image_pins["neutral"]
+_PYTHON_IMAGE: str = _image_pins["python"]
+_GO_IMAGE: str = _image_pins["go"]
 
 #: Neutral fallback used when detection is inconclusive (unknown / unsupported
 #: / py+go polyglot) and for bare ``sandbox_initialize()`` with nothing to

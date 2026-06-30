@@ -165,14 +165,14 @@ jobs:
             echo "| python | \`${{ steps.python.outputs.digest }}\` | ✅ verified | — |"
             echo "| go     | \`${{ steps.go.outputs.digest }}\` | ✅ verified | — |"
             echo ""
-            echo "container.py の _NEUTRAL_IMAGE / _PYTHON_IMAGE / _GO_IMAGE を上の digest へ更新する PR を自動作成します（#313）。"
+            echo "image_pins.json の neutral / python / go pin を上の digest へ更新する PR を自動作成します（#313）。"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 8) 既定イメージの digest pin を container.py に書き戻して PR を作成（#313）
+      # 8) 既定イメージの digest pin を image_pins.json に書き戻して PR を作成（#313）
       #    検出ベースの画像選択（image_selection.py）が参照する 3 つの pin を
       #    最新ビルドの digest に揃える。旧 build-sandbox-image.yml が
       #    _DEFAULT_IMAGE をモノリスへ巻き戻していた問題を置き換える。
-      - name: Update default image pins in container.py and open PR
+      - name: Update default image pins in image_pins.json and open PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -183,17 +183,22 @@ jobs:
           GO_DIGEST: ${{ steps.go.outputs.digest }}
         run: |
           set -euo pipefail
-          F=src/code_sandbox_mcp/tools/container.py
+          F=src/code_sandbox_mcp/image_pins.json
 
-          sed -i \
-            -e "s|^_NEUTRAL_IMAGE: str = \".*\"|_NEUTRAL_IMAGE: str = \"ghcr.io/${REPO}/sandbox@${BASE_DIGEST}\"|" \
-            -e "s|^_PYTHON_IMAGE: str = \".*\"|_PYTHON_IMAGE: str = \"ghcr.io/${REPO}/sandbox@${PYTHON_DIGEST}\"|" \
-            -e "s|^_GO_IMAGE: str = \".*\"|_GO_IMAGE: str = \"ghcr.io/${REPO}/sandbox@${GO_DIGEST}\"|" \
-            "$F"
+          # Rewrite the digest pins and verify the loader returns them (#331).
+          # PYTHONPATH=src makes the package importable without installing; the
+          # helper writes image_pins.json and re-reads it through the SAME loader
+          # the server uses, so a key/path drift fails loudly here instead of
+          # silently leaving a stale pin (the #214 failure mode).
+          PYTHONPATH=src python3 scripts/update_image_pins.py \
+            --repo "${REPO}" \
+            --neutral "${BASE_DIGEST}" \
+            --python "${PYTHON_DIGEST}" \
+            --go "${GO_DIGEST}"
 
           # digest が変わっていなければ PR 不要
           if git diff --quiet; then
-            echo "No digest change in container.py pins, skipping PR."
+            echo "No digest change in image_pins.json, skipping PR."
             exit 0
           fi
 
@@ -218,7 +223,7 @@ jobs:
             --body "## 自動生成 PR（#313: 検出ベース既定イメージの pin 更新）
 
           CI で \`docker/Dockerfile.{base,python,go}\` のビルドが完了したため、
-          \`container.py\` の \`_NEUTRAL_IMAGE\` / \`_PYTHON_IMAGE\` / \`_GO_IMAGE\` を
+          \`image_pins.json\` の \`neutral\` / \`python\` / \`go\` pin を
           新しい digest へ更新します。
 
           | tag | digest |

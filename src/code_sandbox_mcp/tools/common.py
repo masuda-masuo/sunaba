@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from typing import Any
 
 #: Short per-request Docker API timeout (seconds) for *recovery* and
@@ -72,3 +73,38 @@ def _docker(timeout: float | None = None) -> Any:
         # intentional here (sub-second recovery budgets); accepted at runtime.
         return docker.from_env(timeout=timeout)  # type: ignore[arg-type]
     return docker.from_env()
+
+
+def _build_clone_command(
+    repo: str,
+    target: str,
+    branch: str = "",
+    authenticated: bool = False,
+) -> str:
+    """Build the in-container clone command, choosing transport by auth.
+
+    *repo* must already be validated as ``owner/name`` by the caller
+    (``_REPO_FORMAT_RE`` / ``_validate_clone_repo``), so interpolating it
+    into the HTTPS URL is injection-safe.
+
+    - **authenticated** (a VCS token is present, e.g. ``inject_vcs_token``
+      or ``gh auth setup-git`` succeeded): use ``gh repo clone``, which
+      authenticates via ``GH_TOKEN`` and so handles private *and* public
+      repositories.
+    - **anonymous** (no token): use a plain ``git clone`` over HTTPS.
+      Public repos clone without credentials; ``GIT_TERMINAL_PROMPT=0``
+      makes a *private* repo fail fast instead of hanging on an
+      interactive credential prompt.  ``gh repo clone`` cannot be used
+      here because ``gh`` requires authentication even for public repos
+      (Issue #333).
+    """
+    safe_repo = shlex.quote(repo)
+    safe_target = shlex.quote(target)
+    if authenticated:
+        cmd = f"gh repo clone {safe_repo} {safe_target}"
+        if branch:
+            cmd += f" -- -b {shlex.quote(branch)}"
+        return cmd
+    url = shlex.quote(f"https://github.com/{repo}.git")
+    branch_opt = f"-b {shlex.quote(branch)} " if branch else ""
+    return f"GIT_TERMINAL_PROMPT=0 git clone {branch_opt}{url} {safe_target}"

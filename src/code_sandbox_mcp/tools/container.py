@@ -62,7 +62,12 @@ from code_sandbox_mcp.security import (
     get_default_profile,
     validate_image_ref,
 )
-from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _coerce_list_arg, _docker
+from code_sandbox_mcp.tools.common import (
+    RECOVERY_DOCKER_TIMEOUT,
+    _build_clone_command,
+    _coerce_list_arg,
+    _docker,
+)
 from code_sandbox_mcp.tools.vcs import checkpoint_list, resolve_git_root
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -500,7 +505,7 @@ def _clone_repo_via_network(
     Note on private repositories (Issue #146, PR #170 review):
         Network access is auto-enabled for ``clone_repo``, but the VCS
         token is *not* auto-injected.  Public repos (the common case)
-        clone fine without credentials, and injecting the token
+        clone fine without credentials via an anonymous ``git clone`` (Issue #333), and injecting the token
         unconditionally would expose it to in-container code for no
         benefit, violating the host-permission-minimization principle.
         Private repos therefore require the caller to opt in with
@@ -515,7 +520,7 @@ def _clone_repo_via_network(
     _validate_clone_repo(clone_repo)
     repo_name = clone_repo.split("/")[-1]
     clone_path = clone_dest.rstrip("/") + "/" + repo_name
-    cmd = "gh repo clone " + shlex.quote(clone_repo) + " " + shlex.quote(clone_path)
+    cmd = _build_clone_command(clone_repo, clone_path, authenticated=inject_vcs_token)
     exit_code, output = container.exec_run(["/bin/sh", "-c", cmd])
     if exit_code != 0:
         detail = output.decode("utf-8", errors="replace").strip()

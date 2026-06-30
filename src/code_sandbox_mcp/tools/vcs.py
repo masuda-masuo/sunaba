@@ -14,7 +14,7 @@ from docker.errors import NotFound
 
 from code_sandbox_mcp.journal import get_or_create_run_id, record_boundary_crossing
 from code_sandbox_mcp.token import generate_token, verify_and_consume
-from code_sandbox_mcp.tools.common import _docker
+from code_sandbox_mcp.tools.common import _build_clone_command, _docker
 
 logger = logging.getLogger(__name__)
 
@@ -1360,7 +1360,11 @@ def clone_repo(
     dest_dir: str = "/home/sandbox",
     branch: str = "",
 ) -> str:
-    """Clone a Git repository inside the container using ``gh repo clone``.
+    """Clone a Git repository inside the container.
+
+    Uses ``gh repo clone`` when a VCS token is present, otherwise an
+    anonymous ``git clone`` over HTTPS — public repos clone without
+    credentials (Issue #333).
 
     Requires a container started with ``allow_network=True`` and
     ``inject_vcs_token=True`` for private repositories.
@@ -1430,28 +1434,21 @@ def clone_repo(
     repo_name = repo.split("/")[-1]
     clone_path = f"{dest_dir.rstrip('/')}/{repo_name}"
 
-    safe_target = shlex.quote(clone_path)
-    safe_repo = shlex.quote(repo)
-
-    # Best-effort: configure gh as git credential helper so that
-    # ``git push`` works with the injected token.  Failure is intentionally
-    # ignored — when inject_vcs_token=False (no GH_TOKEN in env) the command
-    # exits non-zero but cloning public repos still succeeds.  If push later
-    # fails with an auth error the cause will be clear from that message.
-    _auth_ec, _ = container.exec_run(
+    # ``gh auth setup-git`` configures gh as the git credential helper so a
+    # later ``git push`` works with the injected token.  Its exit code also
+    # tells us whether a VCS token is present (0 = authenticated / GH_TOKEN
+    # set, non-zero = no token), which selects the clone transport
+    # (Issue #333): ``gh repo clone`` when authenticated (handles private),
+    # an anonymous ``git clone`` otherwise (public repos clone without
+    # credentials; ``gh`` cannot, as it requires auth even for public).
+    auth_ec, _ = container.exec_run(
         ["/bin/sh", "-c", "gh auth setup-git"],
         stdout=True,
         stderr=True,
     )
-    del _auth_ec  # intentionally ignored; see comment above
+    authenticated = auth_ec == 0
 
-    if branch:
-        cmd = (
-            f"gh repo clone {safe_repo} {safe_target}"
-            f" -- -b {shlex.quote(branch)}"
-        )
-    else:
-        cmd = f"gh repo clone {safe_repo} {safe_target}"
+    cmd = _build_clone_command(repo, clone_path, branch, authenticated)
 
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", cmd],

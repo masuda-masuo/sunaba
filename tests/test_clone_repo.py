@@ -416,3 +416,59 @@ class TestCloneRepoViaNetwork:
                 inject_vcs_token=True,
             )
         assert "inject_vcs_token=True" not in str(exc.value)
+
+    def test_anonymous_git_clone_without_token(self) -> None:
+        """Issue #333: no token -> anonymous git clone (public works)."""
+        c = self._container(0, b"")
+        _clone_repo_via_network(c, "abc123def456", "owner/repo", "/tmp/repo")
+        cmd = c.exec_run.call_args_list[0][0][0][-1]
+        assert "git clone" in cmd
+        assert "https://github.com/owner/repo.git" in cmd
+        assert "GIT_TERMINAL_PROMPT=0" in cmd
+        assert "gh repo clone" not in cmd
+
+    def test_gh_clone_with_token(self) -> None:
+        """Issue #333: inject_vcs_token=True keeps gh repo clone (private)."""
+        c = self._container(0, b"")
+        _clone_repo_via_network(
+            c, "abc123def456", "owner/repo", "/tmp/repo",
+            inject_vcs_token=True,
+        )
+        cmd = c.exec_run.call_args_list[0][0][0][-1]
+        assert "gh repo clone owner/repo" in cmd
+
+
+class TestCloneRepoTransportSelection:
+    """Issue #333: clone_repo picks gh vs anonymous git by token presence."""
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    def test_anonymous_when_setup_git_fails(self, mock_record, mock_docker) -> None:
+        container = _make_container([
+            (1, b"", b"gh: not logged in\n"),
+            (0, b"Cloning into 'mytool'...\n", b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(clone_repo("abc123def456", "owner/mytool"))
+        assert result["status"] == "ok"
+        cmd = container.exec_run.call_args[0][0][-1]
+        assert "GIT_TERMINAL_PROMPT=0 git clone" in cmd
+        assert "https://github.com/owner/mytool.git" in cmd
+        assert "gh repo clone" not in cmd
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    def test_gh_when_setup_git_succeeds(self, mock_record, mock_docker) -> None:
+        container = _make_container([
+            (0, b"", b""),
+            (0, b"Cloning into 'mytool'...\n", b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(clone_repo("abc123def456", "owner/mytool"))
+        assert result["status"] == "ok"
+        cmd = container.exec_run.call_args[0][0][-1]
+        assert "gh repo clone owner/mytool" in cmd

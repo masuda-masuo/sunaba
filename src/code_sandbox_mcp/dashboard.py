@@ -13,13 +13,14 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
 
 from code_sandbox_mcp.journal import (
     get_active_environments,
     get_journal_path,
     get_pending_approvals,
     get_runs,
+    get_tool_usage,
     read_journal,
     record_boundary_crossing,
 )
@@ -71,6 +72,20 @@ button.approve {{ background: #1b3820; border-color: #7ee787; color: #7ee787; }}
 button.reject {{ background: #381620; border-color: #f97583; color: #f97583; }}
 button:hover {{ opacity: 0.8; }}
 .empty {{ color: #484f58; font-style: italic; padding: 12px 0; }}
+.bar-wrap {{ display: flex; align-items: center; gap: 6px; margin: 1px 0; font-size: 11px; }}
+.bar-label {{ width: 90px; text-align: right; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.bar-track {{ flex: 1; background: #21262d; border-radius: 3px; height: 14px; }}
+.bar-fill {{ display: block; height: 100%; border-radius: 3px; background: #58a6ff; }}
+.bar-num {{ width: 50px; text-align: right; color: #f0f6fc; font-family: monospace; }}
+.filter-form {{ display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }}
+.filter-form input {{ background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 3px 6px; font-size: 11px; border-radius: 4px; }}
+.filter-form button {{ background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 3px 10px; font-size: 11px; border-radius: 4px; cursor: pointer; }}
+.metric-row {{ margin-bottom: 6px; }}
+.metric-label {{ color: #f0f6fc; }}
+.metric-val {{ font-size: 18px; font-weight: 600; }}
+.metric-note {{ font-size: 11px; color: #484f58; }}
+details {{ font-size: 10px; color: #484f58; margin-top: 8px; }}
+.section-header {{ font-size: 11px; color: #8b949e; margin-bottom: 2px; margin-top: 8px; }}
 </style>
 </head>
 <body>
@@ -95,6 +110,8 @@ button:hover {{ opacity: 0.8; }}
     <div class="meta" style="margin-top:8px">Running Services</div>
     <div class="val">{running_services}</div>
   </div>
+
+  {tool_usage_panel}
 
   <div class="card">
     <h2>Journal</h2>
@@ -199,12 +216,161 @@ tr:hover {{ background: #161b22; }}
 
 
 # ---------------------------------------------------------------------------
-# Request handler
+# Helper
 # ---------------------------------------------------------------------------
 
 
 def _escape(text: str) -> str:
     return _html.escape(text, quote=True)
+
+
+def _render_bar(n: int, max_val: int, label: str, color: str = "#58a6ff") -> str:
+    pct = round(n / max_val * 100) if max_val > 0 else 0
+    return (
+        f'<div class="bar-wrap">'
+        f'<span class="bar-label" title="{_escape(label)}">{_escape(label)}</span>'
+        f'<span class="bar-track">'
+        f'<span class="bar-fill" style="background:{color};width:{pct}%"></span>'
+        f'</span>'
+        f'<span class="bar-num">{n} ({pct}%)</span>'
+        f'</div>'
+    )
+
+
+def _render_tool_usage_panel(
+    from_date: str | None,
+    to_date: str | None,
+) -> str:
+    """Render the tool usage panel HTML (Issue #229)."""
+    usage = get_tool_usage(from_date=from_date, to_date=to_date)
+
+    time_from = _escape(usage["time_range"]["from"][:10])
+    time_to = _escape(usage["time_range"]["to"][:10])
+    if time_to.endswith("T00:00:00"):
+        time_to = time_to.split("T")[0]
+
+    # Date filter form
+    filter_html = (
+        f'<div class="filter-form">'
+        f'<form method="get" action="/" style="display:flex;gap:8px;align-items:center">'
+        f'<input type="date" name="tool_from" value="{time_from}">'
+        f'<span style="color:#484f58;font-size:11px">to</span>'
+        f'<input type="date" name="tool_to" value="{time_to}">'
+        f'<button type="submit">Apply</button>'
+        f'</form>'
+        f'</div>'
+    )
+
+    # Exec share
+    exec_share_color = "#ffa657" if usage["exec_share_pct"] > 50 else "#7ee787"
+    exec_html = (
+        f'<div class="metric-row">'
+        f'<span class="metric-label">exec share:</span> '
+        f'<span class="metric-val" style="color:{exec_share_color}">{usage["exec_share_pct"]}%</span> '
+        f'<span class="metric-note">({usage["exec_ops"]} / {usage["total_ops"]} ops)</span>'
+        f'</div>'
+    )
+
+    # CD rate
+    cd_html = (
+        f'<div class="metric-row">'
+        f'<span class="metric-label">cd rate:</span> '
+        f'<span class="metric-val" style="color:#ffa657">{usage["cd_rate_pct"]}%</span> '
+        f'<span class="metric-note">({usage["cd_count"]} / {usage["exec_entry_count"]} exec entries)</span>'
+        f'</div>'
+    )
+
+    # Bypass rate
+    bypass_total = usage["bypass_count"]
+    struct_total = sum(
+        n for k, n in usage["structured_ops"].items()
+        if not k.startswith("boundary:")
+    )
+    bypass_denom = bypass_total + struct_total
+    bypass_color = "#f97583" if usage["bypass_rate_pct"] > 20 else "#7ee787"
+    bypass_html = (
+        f'<div class="metric-row">'
+        f'<span class="metric-label">bypass rate:</span> '
+        f'<span class="metric-val" style="color:{bypass_color}">{usage["bypass_rate_pct"]}%</span> '
+        f'<span class="metric-note">({bypass_total} bypass / {bypass_denom} total)</span>'
+        f'</div>'
+    )
+
+    # Command buckets
+    buckets = usage["command_buckets"]
+    total_exec = usage["exec_entry_count"]
+    bucket_bars = ""
+    if buckets and total_exec:
+        for label, count in sorted(buckets.items(), key=lambda x: -x[1]):
+            bucket_bars += _render_bar(count, total_exec, label)
+    else:
+        bucket_bars = '<div class="empty">No exec entries</div>'
+    buckets_html = (
+        f'<div class="section-header">Exec command buckets ({total_exec} entries):</div>'
+        f'{bucket_bars}'
+    )
+
+    # Structured tool ops
+    structured = usage["structured_ops"]
+    struct_bars = ""
+    struct_counts = [
+        (k, n) for k, n in structured.items() if not k.startswith("boundary:")
+    ]
+    if struct_counts:
+        struct_max = max(n for _, n in struct_counts)
+        for label, count in sorted(struct_counts, key=lambda x: -x[1]):
+            struct_bars += _render_bar(count, struct_max, label, color="#7ee787")
+        struct_bars_display = struct_bars
+    else:
+        struct_bars_display = '<div class="empty">No structured ops</div>'
+    struct_html = (
+        f'<div class="section-header">Structured tool ops ({struct_total} total):</div>'
+        f'{struct_bars_display}'
+    )
+
+    # Bypass detail
+    bypass_detail = usage["bypass_detail"]
+    bypass_detail_bars = ""
+    if bypass_detail:
+        bypass_max = max(bypass_detail.values())
+        for cmd, count in sorted(bypass_detail.items(), key=lambda x: -x[1]):
+            bypass_detail_bars += _render_bar(count, bypass_max, f"shell:{cmd}", color="#f97583")
+
+    bypass_detail_html = ""
+    if bypass_detail_bars:
+        bypass_detail_html = (
+            f'<div class="section-header">Bypass by shell command:</div>'
+            f'{bypass_detail_bars}'
+        )
+
+    # Tool intro dates
+    intro_dates = usage.get("_tool_intro_dates", {})
+    intro_lines = ""
+    for tool_name, intro_date in sorted(intro_dates.items(), key=lambda x: x[1]):
+        intro_lines += (
+            f'<div style="font-size:10px;color:#484f58">'
+            f'{_escape(tool_name)}: {_escape(intro_date)}'
+            f'</div>'
+        )
+
+    return (
+        f'<div class="card" id="tool-usage-card">'
+        f'<h2>Tool Usage '
+        f'<span style="font-size:11px;color:#8b949e;font-weight:400;">'
+        f'(sandbox_exec dependency | #229)'
+        f'</span></h2>'
+        f'{filter_html}'
+        f'{exec_html}'
+        f'{cd_html}'
+        f'{bypass_html}'
+        f'{buckets_html}'
+        f'{bypass_detail_html}'
+        f'{struct_html}'
+        f'<details><summary>Tool intro dates (bias control)</summary>'
+        f'{intro_lines}'
+        f'</details>'
+        f'</div>'
+    )
 
 
 def _render_approval_queue() -> str:
@@ -305,6 +471,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._serve_api_runs()
         elif path == "/api/journal":
             self._serve_api_journal()
+        elif path == "/api/tool-usage":
+            self._serve_api_tool_usage()
         elif path.startswith("/trace/"):
             self._serve_trace(path)
         else:
@@ -317,6 +485,20 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._handle_approval(path)
         else:
             self.send_error(404)
+
+    def _serve_api_tool_usage(self) -> None:
+        qs = ""
+        if "?" in self.path:
+            qs = self.path.split("?", 1)[1]
+        params = {}
+        for pair in qs.split("&"):
+            if "=" in pair:
+                key, val = pair.split("=", 1)
+                params[key] = unquote(val)
+        from_date = params.get("from")
+        to_date = params.get("to")
+        usage = get_tool_usage(from_date=from_date, to_date=to_date)
+        self._send_json(usage)
 
     def _handle_approval(self, path: str) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -397,6 +579,17 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 status_cls=status_cls,
             ))
 
+        # Parse tool usage time range from query string
+        tool_from: str | None = None
+        tool_to: str | None = None
+        if "?" in self.path:
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            tool_from = qs.get("tool_from", [None])[0]
+            tool_to = qs.get("tool_to", [None])[0]
+
+        tool_usage_panel = _render_tool_usage_panel(tool_from, tool_to)
+
         approval_section = _render_approval_queue()
         active_section = _render_active_environments()
 
@@ -422,6 +615,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             run_rows="\n".join(run_rows_parts) if run_rows_parts else '<tr><td colspan="7" class="empty">No runs recorded</td></tr>',
             approval_section=approval_section,
             active_environments=active_section,
+            tool_usage_panel=tool_usage_panel,
         )
         self._send_html(html_content)
 

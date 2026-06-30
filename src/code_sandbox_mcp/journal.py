@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -451,3 +451,293 @@ def get_active_environments() -> list[dict[str, Any]]:
             active[cid] = entry
 
     return list(active.values())
+
+
+# ---------------------------------------------------------------------------
+# Command classification (for tool usage dashboard — Issue #229)
+# ---------------------------------------------------------------------------
+
+#: Tool introduction dates for time-windowed bias correction.
+#  Each key is a tool name and its value is the ISO date when it became available.
+_TOOL_INTRO_DATES: dict[str, str] = {
+    "search_in_container": "2026-06-07",
+    "read_file_range": "2026-06-07",
+    "list_files": "2026-06-07",
+    "verify_in_container": "2026-06-07",
+    "transform_file": "2026-06-07",
+    "lint_in_container": "2026-06-07",
+    "type_check_in_container": "2026-06-07",
+    "write_file_sandbox": "2026-06-07",
+    "copy_project": "2026-06-07",
+    "copy_file": "2026-06-07",
+}
+
+#: Shell-program → tool-name mapping for structured-tool bypass detection.
+#  When a shell command's first word matches a key below, the dedicated
+#  tool in the value existed and could have been used instead.
+_SHELL_TO_TOOL: dict[str, str] = {
+    "grep": "search_in_container",
+    "rg": "search_in_container",
+    "ag": "search_in_container",
+    "cat": "read_file_range",
+    "head": "read_file_range",
+    "tail": "read_file_range",
+    "less": "read_file_range",
+    "find": "list_files",
+    "ls": "list_files",
+    "sed": "transform_file",
+    "awk": "transform_file",
+    "ruff": "lint_in_container",
+    "pyright": "type_check_in_container",
+    "pytest": "verify_in_container",
+}
+
+
+def classify_exec_command(cmd: str) -> str:
+    """Classify a single shell command string into a bucket category.
+
+    The first token (after stripping leading whitespace) determines the
+    bucket.  Special-case detection for piped / chained commands is
+    handled by checking for ``&&`` and ``;`` separators — in that case
+    only the first sub-command is used for classification.
+    """
+    cmd = cmd.strip()
+    if not cmd:
+        return "empty"
+
+    # Extract the first sub-command before && or ;
+    for sep in ("&&", ";", "||", "|"):
+        idx = cmd.find(sep)
+        if idx > 0:
+            # Only split on separators that are outside quotes
+            quoted = False
+            for i, ch in enumerate(cmd[:idx]):
+                if ch in ("'", '"'):
+                    quoted = not quoted
+            if not quoted:
+                cmd = cmd[:idx].strip()
+                break
+
+    tokens = cmd.split()
+    if not tokens:
+        return "empty"
+
+    first = tokens[0].rstrip(";")
+
+    # SCM
+    if first == "git":
+        return "git"
+    if first in ("gh", "hub"):
+        return "gh"
+
+    # Testing / linting / type checking
+    if first in ("pytest", "tox", "coverage"):
+        return "pytest"
+    if first == "ruff":
+        return "lint"
+    if first == "pyright" or first == "mypy":
+        return "type_check"
+
+    # Search
+    if first in ("grep", "rg", "ag", "ack"):
+        return "search"
+
+    # Read
+    if first in ("cat", "head", "tail", "less", "more"):
+        return "read"
+
+    # Edit / transform
+    if first in ("sed", "awk", "cut", "tr", "sort", "uniq", "wc"):
+        return "edit"
+
+    # Package management
+    if first in ("pip", "pip3", "uv", "npm", "yarn", "apt", "apt-get",
+                 "yum", "dnf", "gem", "cargo", "brew"):
+        return "install"
+
+    # File listing
+    if first in ("find", "ls", "locate", "tree"):
+        return "list"
+
+    # Python interpreter
+    if first in ("python", "python3", "pypy"):
+        # Check if it's pytest invocation
+        for tok in tokens[1:3]:
+            if tok in ("-m", "pytest") or "pytest" in tok:
+                return "pytest"
+        return "python"
+
+    # Echo / print
+    if first in ("echo", "printf"):
+        return "echo"
+
+    # cd
+    if first == "cd":
+        return "cd"
+
+    # File operations
+    if first in ("cp", "mv", "rm", "mkdir", "rmdir", "touch",
+                 "chmod", "chown", "ln", "stat", "dd", "tee"):
+        return "file_ops"
+
+    # Shell builtins / control
+    if first in ("export", "source", ".", "set", "unset", "env",
+                 "alias", "unalias", "type", "which", "command"):
+        return "shell"
+
+    # Container / Docker
+    if first in ("docker", "podman", "nerdctl"):
+        return "container"
+
+    # System
+    if first in ("curl", "wget", "tar", "gzip", "gunzip", "zip", "unzip",
+                 "ssh", "scp", "rsync", "ps", "kill", "sleep", "timeout",
+                 "date", "df", "du", "free", "uptime", "hostname", "whoami"):
+        return "system"
+
+    return "other"
+
+
+def get_tool_usage(
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> dict[str, Any]:
+    """Aggregate tool usage statistics from journal entries within a time range.
+
+    Args:
+        from_date: Inclusive start date in ``"YYYY-MM-DD"`` format.
+            Defaults to 7 days ago.
+        to_date: Inclusive end date in ``"YYYY-MM-DD"`` format.
+            Defaults to today.
+
+    Returns:
+        A dict with keys:
+
+        - ``time_range`` — ``{from, to}`` ISO dates used
+        - ``total_ops`` — count of all operations (excl. init/stop)
+        - ``exec_ops`` — count of ``exec`` operations
+        - ``exec_share_pct`` — exec as % of total
+        - ``non_exec_ops`` — count of non-exec tool operations
+        - ``command_buckets`` — ``{bucket: count}`` for exec commands
+        - ``cd_count`` — count of exec entries whose first command is ``cd``
+        - ``cd_rate_pct`` — cd entries as % of exec entries
+        - ``structured_ops`` — count of each structured tool operation
+        - ``bypass_count`` — exec commands that could have used a dedicated tool
+        - ``bypass_rate_pct`` — bypass as % of (dedicated + bypass)
+        - ``exec_entry_count`` — total number of exec *entries* (not sub-commands)
+    """
+    if to_date is None:
+        to_dt = date.today()
+    else:
+        to_dt = date.fromisoformat(to_date)
+
+    if from_date is None:
+        from_dt = to_dt - timedelta(days=7)
+    else:
+        from_dt = date.fromisoformat(from_date)
+
+    from_iso = from_dt.isoformat()
+    to_iso = (to_dt + timedelta(days=1)).isoformat()  # exclusive upper bound
+
+    entries = read_journal()
+
+    total_ops = 0
+    exec_ops = 0
+    exec_entry_count = 0
+    command_buckets: dict[str, int] = {}
+    cd_count = 0
+    structured_ops: dict[str, int] = {}
+    bypass_count = 0
+    bypass_detail: dict[str, int] = {}
+
+    for entry in entries:
+        ts = entry.get("ts", "")
+        if ts < from_iso or ts >= to_iso:
+            continue
+
+        op = entry.get("operation", "")
+        if op in ("initialize", "initialize_complete", "stop", "test_environment"):
+            continue
+
+        if op == "exec":
+            exec_ops += 1
+            exec_entry_count += 1
+            commands = entry.get("commands", [])
+
+            if commands and isinstance(commands, list):
+                first_cmd = commands[0] if commands else ""
+                bucket = classify_exec_command(first_cmd)
+                command_buckets[bucket] = command_buckets.get(bucket, 0) + 1
+
+                if bucket == "cd":
+                    cd_count += 1
+
+                # Bypass detection: does a structured tool exist for this command?
+                first_word = first_cmd.strip().split()[0] if first_cmd.strip() else ""
+                first_word = first_word.rstrip(";")
+                tool = _SHELL_TO_TOOL.get(first_word)
+                if tool:
+                    tool_intro = _TOOL_INTRO_DATES.get(tool, "")
+                    # Only count as bypass if the tool existed at the time
+                    if tool_intro and ts[:10] >= tool_intro:
+                        bypass_count += 1
+                        bypass_detail[first_word] = bypass_detail.get(first_word, 0) + 1
+
+        elif op == "boundary_crossing":
+            sub_op = entry.get("sub_operation", "")
+            key = f"boundary:{sub_op}" if sub_op else "boundary:unknown"
+            structured_ops[key] = structured_ops.get(key, 0) + 1
+            total_ops += 1
+
+        else:
+            structured_ops[op] = structured_ops.get(op, 0) + 1
+            total_ops += 1
+
+    total_ops += exec_ops
+
+    exec_share_pct = round(exec_ops / total_ops * 100, 1) if total_ops else 0.0
+    cd_rate_pct = round(cd_count / exec_entry_count * 100, 1) if exec_entry_count else 0.0
+
+    # Bypass rate: bypass_count / (bypass_count + dedicated_usage)
+    dedicated_usage = struct_tool_ops_from_journal(structured_ops)
+    bypass_denom = bypass_count + dedicated_usage
+    bypass_rate_pct = round(bypass_count / bypass_denom * 100, 1) if bypass_denom else 0.0
+
+    return {
+        "time_range": {"from": from_iso, "to": to_iso},
+        "total_ops": total_ops,
+        "exec_ops": exec_ops,
+        "exec_share_pct": exec_share_pct,
+        "non_exec_ops": total_ops - exec_ops,
+        "command_buckets": dict(sorted(command_buckets.items(), key=lambda x: -x[1])),
+        "cd_count": cd_count,
+        "cd_rate_pct": cd_rate_pct,
+        "structured_ops": dict(sorted(structured_ops.items(), key=lambda x: -x[1])),
+        "bypass_count": bypass_count,
+        "bypass_rate_pct": bypass_rate_pct,
+        "bypass_detail": dict(sorted(bypass_detail.items(), key=lambda x: -x[1])),
+        "exec_entry_count": exec_entry_count,
+        "_tool_intro_dates": _TOOL_INTRO_DATES,
+    }
+
+
+def struct_tool_ops_from_journal(structured_ops: dict[str, int]) -> int:
+    """Count structured tool operations that have shell equivalents.
+
+    Only counts operations that map to tools in ``_SHELL_TO_TOOL.values()``.
+    ``boundary:*`` entries are excluded.
+    """
+    tool_values = set(_SHELL_TO_TOOL.values())
+    op_to_tool: dict[str, str] = {
+        "write_file": "write_file_sandbox",
+        "lint_in_container": "lint_in_container",
+        "type_check_in_container": "type_check_in_container",
+    }
+    count = 0
+    for key, n in structured_ops.items():
+        if key.startswith("boundary:"):
+            continue
+        tool = op_to_tool.get(key, key)
+        if tool in tool_values:
+            count += n
+    return count

@@ -402,8 +402,8 @@ def main() -> None:
     # not time out on a cold-start docker pull (Issue #303).
     _start_image_prewarm(args.prewarm_interval_seconds)
 
-    transport = args.transport
     try:
+        transport = args.transport
         if transport == "stdio":
             mcp.run(transport=transport)
         else:

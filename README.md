@@ -1,6 +1,21 @@
 # code-sandbox-mcp
 
-MCP server for Docker sandbox execution — AI-driven test, lint, type-check, and VCS workflows in disposable containers.
+**Most AI coding tools optimize for humans. code-sandbox-mcp optimizes for frontier LLMs.**
+
+> Less context. Less trust. More structure.
+
+An MCP server that runs an AI's test → verify → publish workflow inside disposable Docker containers. It assumes the model is already capable, so it spends its effort elsewhere: stripping away the context bloat, the broad host trust, and the raw-log noise that frontier models don't need — and shouldn't have.
+
+## What's different
+
+Most sandboxing tools are built around a human watching a terminal. This one is built around a model reasoning over a small, structured context window:
+
+- **The LLM is assumed competent.** No sprawling toolset to hand-hold it — a small set of first-class verbs (search, edit, verify, publish) plus an image full of CLIs it already knows.
+- **The context is never polluted.** The payload — issue bodies, source files, diffs — stays inside the container. The model carries only `run_id`s, handles, and structured summaries.
+- **Output is structured, not raw.** A green run is one line; a failure is `{test, error, file, line}`. No 5000-line logs scrolling through the context window.
+- **Trust is structural, not policy.** The host is cut off by construction, so you grant the AI *less* standing access — not more careful prompts.
+
+The result is an MCP whose value is as much about **what it withholds from the model** — context, trust, noise — as what it gives it.
 
 ## Why sandbox?
 
@@ -18,8 +33,6 @@ This MCP routes all AI operations through **disposable Docker containers** with 
 
 The value of this MCP is as much about **what the AI cannot do** as what it can.
 
-For the full design rationale and decision-making principles, see [docs/design.md](docs/design.md).
-
 ### Reducing host permissions
 
 A less obvious but equally important benefit: **this MCP lets you turn off broad host permissions in your AI client.**
@@ -27,6 +40,90 @@ A less obvious but equally important benefit: **this MCP lets you turn off broad
 Without a sandbox MCP, AI agents operate directly on the host via shell tools (`Bash`, `PowerShell`, etc.). Every file edit, git command, or config change triggers a permission prompt — and permission fatigue sets in fast. Users end up allowing everything just to keep work flowing, which means the AI effectively has unrestricted access to the host.
 
 With this MCP, all real work happens inside the container. Host-level shell tools become unnecessary for the vast majority of tasks, so you can keep those permissions off by default. The result: the AI is structurally constrained, not just policy-constrained.
+
+## Design philosophy
+
+This is not "an MCP that drives Docker." It is **a foundation for an AI to run test → verify → publish workflows safely, with minimal context**. Adding features is never the goal; the goal is to spend fewer tokens, preserve reasoning accuracy, and keep the human in final control. Four principles drive every decision.
+
+### 1. Security and convenience are not a tradeoff — the sandbox dissolves it
+
+Normally, security and convenience pull against each other: widen permissions and you gain convenience, narrow them and you lose it. This MCP places a disposable container as a *middle layer* so you don't have to choose:
+
+- **To the AI**, it feels like working locally — same operations, same speed.
+- **To the host**, the AI is structurally cut off — you can turn host shell permissions off entirely.
+
+The corollary is a strict stance: **"if it can't be done inside the sandbox, that's a bug in the tooling."** Reaching for direct local work to dodge a limitation just hides a design failure. Every feature is judged against this goal.
+
+### 2. AI-first: return structure and diffs, not raw logs
+
+The most expensive thing an AI coding loop does is re-read output. So the contract is **don't show everything — return structure, not raw data, and reveal detail progressively.**
+
+- **Structured results, not 5000-line logs.** A passing test run is a one-liner: `{status: ok, passed: 120, duration: 4.2s}`. A failure is `{test, error, file, line}` — the exact assertion and location, no scrollback.
+- **State lives on the server; the LLM holds a handle.** Every result is keyed by a `run_id`. "Show me the rest of the log" or "re-run only what failed" cost a handle, not a giant re-submission. Large artifacts (coverage, generated files) come back as sized resource handles, never inlined.
+- **Diffs, not full text.** Across an iteration loop the tools return only what changed since last time (`sandbox_exec_diff`, `rerun_failed`), fold duplicate failures into `×N`, and serve cached results when inputs are unchanged.
+- **Denoise before returning.** ANSI color, timestamps, progress bars, and library/framework stack frames are stripped so only the user's code remains.
+
+> The escape hatch is always present: defaults are diffs and summaries, but the full output is *always* retrievable by handle via `offset`/`limit`.
+
+### 3. The line to defend is the sandbox boundary — not "dangerous" commands
+
+Most sandboxing tools try to classify each command as safe or dangerous. That depends on self-reporting and can't be structurally enforced. This MCP draws the line elsewhere: **the question is not "is this command dangerous?" but "does this operation leave the sandbox?"**
+
+- **Inside the container, nothing is gated.** It's disposable — whatever happens in there just gets deleted with the container.
+- **Boundary-crossing operations are gated structurally.** Network access, host mounts, persistent-volume deletion, and external VCS writes (`git push`, PR creation) require an explicit two-step approval token; there is no way to perform them without it.
+- **What can't be perfectly gated is caught after the fact.** An append-only journal records every operation, so the real safety net is *post-hoc auditability*, not pre-execution approval. The human's control shifts from "watch and approve everything" to "audit anything, anytime."
+
+This is the three-lock model: **network off by default · non-root enforced · VCS token opt-in.** Half the value of this MCP is the *guarantee of what the AI cannot do*.
+
+### 4. The payload never passes through the LLM
+
+In the `issue → fix → verify → publish` flow, the issue body, the source files, and the diff all stay inside the container. The LLM only ever carries `run_id`s, handles, and structured summaries — never the raw payload. This keeps context small and keeps sensitive content (tokens, large diffs) out of the model's window. Tokens injected for VCS access are opt-in per container and automatically masked (`KEY=***`) in all output.
+
+For the full rationale and the decision principles behind each tool, see [docs/design.md](docs/design.md).
+
+## Core ideas at a glance
+
+```
+                 Your AI client
+                       │
+             (host shell tools OFF)
+                       │
+        ┌──────────────────────────────┐
+        │        code-sandbox-mcp       │
+        │   structured, minimal-context │
+        │          control plane        │
+        │  ──────────────────────────── │
+        │   • container lifecycle       │
+        │   • structured outputs        │
+        │   • boundary approval gate    │
+        │   • append-only journal       │
+        └──────────────────────────────┘
+                       │
+              Disposable container
+                       │
+            payload stays in here:
+          source · diffs · tests · git
+```
+
+The model drives the control plane with small, structured messages. The heavy data — repos, diffs, logs — lives and dies inside the container. The only thing that ever crosses the boundary on purpose is a `publish`.
+
+## Typical workflow
+
+You don't need the 30-tool reference to understand what this is for. A normal session is one pipeline:
+
+```
+clone_repo            # pull the repo into a fresh container
+    ↓
+write_file_sandbox    # edit in place (or transform_file for bulk/computed edits)
+    ↓
+verify_in_container   # lint + type-check gate, then tests → structured result
+    ↓
+checkpoint            # cheap in-container save point (no token, no gate)
+    ↓
+publish               # the one boundary-crossing exit: push + optional PR
+```
+
+The issue body, the source, and the diff never leave the container; the model only ever sees `run_id`s and structured summaries. Everything else — backgrounding, search, caching, observability — exists to make this loop cheaper to run and easier to audit. The full per-tool reference is [further down](#available-tools).
 
 ## Quick start
 
@@ -112,6 +209,8 @@ Starts a local read-only web dashboard at `http://127.0.0.1:8766` showing active
 Sends OS desktop notifications (Linux) or webhook notifications on boundary-crossing operations, failure threshold exceeded, or long-running executions.
 
 ## Available tools
+
+This is the full reference. You almost never touch most of it directly — the common path is the five-step [Typical workflow](#typical-workflow) above. The rest exists to make that loop cheaper (caching, diffs, backgrounding) and auditable (journal, trace, dashboard).
 
 ### Lifecycle
 

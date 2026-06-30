@@ -11,7 +11,10 @@ context managers).
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+import asyncio
+import inspect
+import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -31,12 +34,6 @@ def _mock_result_cache() -> None:
 # -------------------------------------------------------------------
 # Shared helpers for VCS tool tests
 # -------------------------------------------------------------------
-
-
-import asyncio
-import inspect
-import json
-from unittest.mock import MagicMock
 
 
 def _make_container_mock(exec_returns: list[tuple[int, bytes, bytes]]):

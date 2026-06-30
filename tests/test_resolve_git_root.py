@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from code_sandbox_mcp.tools.vcs import resolve_git_root
 

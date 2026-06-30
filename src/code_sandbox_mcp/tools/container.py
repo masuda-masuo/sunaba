@@ -528,7 +528,8 @@ def _clone_repo_via_network(
         hint = ""
         if not inject_vcs_token:
             hint = " (if this is a private repository, retry with inject_vcs_token=True so gh can authenticate)"
-        raise RuntimeError(f"gh repo clone failed (exit {exit_code}): {detail}{hint}")
+        transport = "anonymous git clone" if not inject_vcs_token else "gh repo clone"
+        raise RuntimeError(f"{transport} failed (exit {exit_code}): {detail}{hint}")
     _write_clone_meta(container, clone_path)
     return "Cloned {} via network into {} in container {}".format(clone_repo, clone_path, container_id[:12])
 

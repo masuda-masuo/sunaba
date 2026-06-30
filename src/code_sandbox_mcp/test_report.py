@@ -460,19 +460,3 @@ class GoTestAdapter:
 # Convenience dispatcher
 # ---------------------------------------------------------------------------
 
-
-def parse_test_report(framework: str, raw_output: str) -> str:
-    """Parse raw test output for *framework* and return JSON string.
-
-    Supported frameworks: ``pytest``, ``jest``, ``go-test``.
-    """
-    adapter_map: dict[str, Any] = {
-        "pytest": PytestAdapter.parse_json,
-        "jest": JestAdapter.parse_json,
-        "go-test": GoTestAdapter.parse_json,
-    }
-    parser = adapter_map.get(framework)
-    if parser is None:
-        raise ValueError(f"Unsupported test framework: {framework!r}")
-    report = parser(raw_output)
-    return export_test_report(report)

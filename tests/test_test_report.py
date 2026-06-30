@@ -13,7 +13,6 @@ from src.code_sandbox_mcp.test_report import (
     TestFailure,
     TestReport,
     export_test_report,
-    parse_test_report,
     prune_library_frames,
 )
 
@@ -557,52 +556,3 @@ class TestGoTestAdapter:
         ]
         report = GoTestAdapter.parse(events)
         assert report.duration == pytest.approx(1.234, rel=1e-3)
-
-
-# ===================================================================
-# parse_test_report dispatcher tests
-# ===================================================================
-
-
-class TestParseTestReport:
-
-    def test_pytest_dispatch(self) -> None:
-        raw = json.dumps(
-            {
-                "summary": {"total": 1, "passed": 1, "failed": 0},
-                "duration": 0.1,
-                "tests": [{"nodeid": "t.py::t", "outcome": "passed", "file": "t.py", "line": 1}],
-            }
-        )
-        result = parse_test_report("pytest", raw)
-        parsed = json.loads(result)
-        assert parsed["status"] == "ok"
-        assert parsed["passed"] == 1
-
-    def test_jest_dispatch(self) -> None:
-        raw = json.dumps(
-            {
-                "numPassedTests": 5,
-                "numFailedTests": 0,
-                "startTime": 100000,
-                "testResults": [],
-            }
-        )
-        result = parse_test_report("jest", raw)
-        parsed = json.loads(result)
-        assert parsed["status"] == "ok"
-        assert parsed["passed"] == 5
-
-    def test_go_test_dispatch(self) -> None:
-        raw = (
-            '{"Action":"pass","Test":"TestX","Elapsed":0.1}\n'
-            '{"Action":"pass","Package":"pkg","Elapsed":0.2}\n'
-        )
-        result = parse_test_report("go-test", raw)
-        parsed = json.loads(result)
-        assert parsed["status"] == "ok"
-        assert parsed["passed"] == 1
-
-    def test_unsupported_framework_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unsupported test framework"):
-            parse_test_report("unknown", "{}")

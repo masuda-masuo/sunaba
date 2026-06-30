@@ -382,10 +382,12 @@ def main() -> None:
         )
 
     # Start dashboard if requested
+    dashboard_started = False
     if args.dashboard_port > 0:
         from code_sandbox_mcp.dashboard import start_dashboard
 
         msg = start_dashboard(port=args.dashboard_port)
+        dashboard_started = True
         logger.info(msg)
 
     # Self-manage a GitHub App installation token so that VCS auth keeps
@@ -400,11 +402,19 @@ def main() -> None:
     # not time out on a cold-start docker pull (Issue #303).
     _start_image_prewarm(args.prewarm_interval_seconds)
 
-    transport = args.transport
-    if transport == "stdio":
-        mcp.run(transport=transport)
-    else:
-        mcp.run(transport=transport, host=args.host, port=args.port)
+    try:
+        transport = args.transport
+        if transport == "stdio":
+            mcp.run(transport=transport)
+        else:
+            mcp.run(transport=transport, host=args.host, port=args.port)
+    finally:
+        # Stop the observability dashboard on shutdown so the background
+        # HTTP server thread does not outlive the process (issue #345).
+        if dashboard_started:
+            from code_sandbox_mcp.dashboard import stop_dashboard
+
+            logger.info(stop_dashboard())
 
 
 if __name__ == "__main__":

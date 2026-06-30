@@ -408,15 +408,6 @@ def set_default_profile(profile: SecurityProfile) -> None:
     _effective_default_profile = profile
 
 
-def reset_default_profile() -> None:
-    """Reset the effective default profile to the static default.
-
-    Intended for test teardown to avoid cross-test leakage.
-    """
-    global _effective_default_profile
-    _effective_default_profile = None
-
-
 def _detect_host_resources() -> tuple[int, int]:
     """Return (host_memory_mb, host_cpu_count).
 

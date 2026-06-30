@@ -15,7 +15,6 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -43,10 +42,6 @@ class _TokenEntry:
 
 _lock: threading.Lock = threading.Lock()
 _store: dict[str, _TokenEntry] = {}
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _purge_expired() -> None:

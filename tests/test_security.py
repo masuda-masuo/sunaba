@@ -514,8 +514,9 @@ class TestGetSetDefaultProfile:
     """Tests for get_default_profile / set_default_profile."""
 
     def teardown_method(self) -> None:
-        from code_sandbox_mcp.security import reset_default_profile
-        reset_default_profile()
+        # Reset the module-level effective profile so tests don't leak state.
+        import code_sandbox_mcp.security as security
+        security._effective_default_profile = None
 
     def test_returns_static_default_by_default(self) -> None:
         from code_sandbox_mcp.security import (
@@ -535,21 +536,6 @@ class TestGetSetDefaultProfile:
         set_default_profile(custom)
         result = get_default_profile()
         assert result is custom
-
-    def test_reset_restores_default(self) -> None:
-        from code_sandbox_mcp.security import (
-            DEFAULT_SECURITY_PROFILE,
-            SecurityProfile,
-            get_default_profile,
-            reset_default_profile,
-            set_default_profile,
-        )
-        custom = SecurityProfile(mem_limit="2g")
-        set_default_profile(custom)
-        reset_default_profile()
-        result = get_default_profile()
-        assert result is DEFAULT_SECURITY_PROFILE
-
 
 class TestDetectHostResources:
     """Tests for _detect_host_resources."""

@@ -1762,14 +1762,6 @@ def _run_ts_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _run_ruff(container: Any, file_path: str) -> list[dict[str, Any]] | None:
-    """Run ``ruff check --output-format json``. Returns None if ruff is not installed."""
-    result = _run_ruff_verify(container, file_path)
-    if result.status == "not_available":
-        return None
-    return result.findings
-
-
 def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``pylint --output-format json``. Returns None if pylint is not installed."""
     exit_code, output = container.exec_run(
@@ -1786,30 +1778,6 @@ def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     return _parse_pylint_output(stdout_text, file_path)
-
-
-def _run_eslint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
-    """Run ``eslint --format json``. Returns None if eslint is not installed."""
-    result = _run_eslint_verify(container, file_path)
-    if result.status == "not_available":
-        return None
-    return result.findings
-
-
-def _run_pyright(container: Any, file_path: str) -> list[dict[str, Any]] | None:
-    """Run ``pyright --outputjson``. Returns None if pyright is not installed."""
-    result = _run_pyright_verify(container, file_path)
-    if result.status == "not_available":
-        return None
-    return result.findings
-
-
-def _run_tsc(container: Any, file_path: str) -> list[dict[str, Any]] | None:
-    """Run ``tsc --noEmit``. Returns None if tsc is not installed."""
-    result = _run_tsc_verify(container, file_path)
-    if result.status == "not_available":
-        return None
-    return result.findings
 
 
 # ---------------------------------------------------------------------------

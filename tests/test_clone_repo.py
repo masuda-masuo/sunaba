@@ -457,6 +457,7 @@ class TestCloneRepoTransportSelection:
         assert "GIT_TERMINAL_PROMPT=0 git clone" in cmd
         assert "https://github.com/owner/mytool.git" in cmd
         assert "gh repo clone" not in cmd
+        assert "inject_vcs_token=True" in result["warning"]
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
@@ -472,3 +473,34 @@ class TestCloneRepoTransportSelection:
         assert result["status"] == "ok"
         cmd = container.exec_run.call_args[0][0][-1]
         assert "gh repo clone owner/mytool" in cmd
+        assert "warning" not in result
+
+
+class TestCloneWarnsWithoutToken:
+    """Issue #333 follow-up: warn at clone time when no token (push fails)."""
+
+    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists",
+           return_value=False)
+    def test_network_clone_without_token_warns(self, _mock_pre) -> None:
+        from code_sandbox_mcp.tools.container import _try_clone_into_container
+        c = MagicMock()
+        c.exec_run.return_value = (0, b"")
+        res = _try_clone_into_container(
+            c, "abc123def456", "owner/repo", "/tmp/repo"
+        )
+        assert res.error is None
+        assert "WARNING" in res.msg
+        assert "inject_vcs_token=True" in res.msg
+
+    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists",
+           return_value=False)
+    def test_network_clone_with_token_no_warning(self, _mock_pre) -> None:
+        from code_sandbox_mcp.tools.container import _try_clone_into_container
+        c = MagicMock()
+        c.exec_run.return_value = (0, b"")
+        res = _try_clone_into_container(
+            c, "abc123def456", "owner/repo", "/tmp/repo",
+            inject_vcs_token=True,
+        )
+        assert res.error is None
+        assert "WARNING" not in res.msg

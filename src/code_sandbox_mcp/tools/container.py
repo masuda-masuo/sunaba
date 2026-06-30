@@ -63,6 +63,7 @@ from code_sandbox_mcp.security import (
     validate_image_ref,
 )
 from code_sandbox_mcp.tools.common import (
+    CLONE_NO_TOKEN_WARNING,
     RECOVERY_DOCKER_TIMEOUT,
     _build_clone_command,
     _coerce_list_arg,
@@ -606,6 +607,11 @@ def _try_clone_into_container(
                 clone_repo,
                 clone_dest,
             )
+        if not inject_vcs_token:
+            # Both clone paths (Shiori pre-clone and network fallback) land
+            # here; warn once when there is no token so the caller knows the
+            # clone is read-only before attempting to publish (Issue #333).
+            msg = f"{msg} — WARNING: {CLONE_NO_TOKEN_WARNING}"
         return CloneResult(msg, None)
     except Exception as e:
         logger.warning("Clone failed: %s", e)

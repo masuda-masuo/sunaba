@@ -14,7 +14,11 @@ from docker.errors import NotFound
 
 from code_sandbox_mcp.journal import get_or_create_run_id, record_boundary_crossing
 from code_sandbox_mcp.token import generate_token, verify_and_consume
-from code_sandbox_mcp.tools.common import _build_clone_command, _docker
+from code_sandbox_mcp.tools.common import (
+    CLONE_NO_TOKEN_WARNING,
+    _build_clone_command,
+    _docker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1489,9 +1493,12 @@ def clone_repo(
         approved=True,
     )
 
-    return json.dumps({
+    result: dict[str, Any] = {
         "status": "ok",
         "repo": repo,
         "clone_path": clone_path,
         "branch": branch or "default",
-    })
+    }
+    if not authenticated:
+        result["warning"] = CLONE_NO_TOKEN_WARNING
+    return json.dumps(result)

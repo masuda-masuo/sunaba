@@ -75,6 +75,18 @@ def _docker(timeout: float | None = None) -> Any:
     return docker.from_env()
 
 
+#: Warning appended to a clone result when the repo was cloned *without* a
+#: VCS token.  Such a clone is read-only: ``publish`` / ``git push`` will
+#: fail because the container has no credentials, and a running container's
+#: token cannot be added afterward (Issue #333 follow-up).  Surfacing this at
+#: clone time stops an LLM from looping on edit -> publish-fails -> retry.
+CLONE_NO_TOKEN_WARNING = (
+    "cloned without a VCS token (read-only): publish / git push WILL fail. "
+    "To push changes, re-initialize the container with inject_vcs_token=True "
+    "and clone again (a running container's token cannot be added afterward)."
+)
+
+
 def _build_clone_command(
     repo: str,
     target: str,

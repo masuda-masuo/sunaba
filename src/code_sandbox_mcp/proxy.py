@@ -90,6 +90,10 @@ CONTROL_TOKEN_HEADER = "X-Control-Token"
 #: Authorization-window lifetime used when a caller omits ``ttl_seconds``.
 DEFAULT_WINDOW_TTL_SECONDS = 30.0
 
+#: Cap on the control-request body; payloads are tiny JSON, so anything larger
+#: is rejected (413) unread, bounding handler memory (review of PR #367).
+MAX_CONTROL_BODY_BYTES = 4096
+
 
 def git_service_from_request(path: str, query_service: str | None) -> str | None:
     """Return the git smart-HTTP service name for a request, or ``None``.
@@ -189,7 +193,9 @@ class EgressGuard:
         """Permit push to *repo* for the next *ttl_seconds* (both git requests).
 
         *now* defaults to ``time.monotonic()``; pass it explicitly to keep the
-        expiry deterministic in tests, mirroring :meth:`decide`.
+        expiry deterministic in tests, mirroring :meth:`decide`.  Opening a
+        window for a repo outside the allowlist is harmless -- :meth:`decide`
+        still denies the push -- so callers need not pre-check membership.
         """
         base = time.monotonic() if now is None else now
         with self._lock:
@@ -329,25 +335,41 @@ def handle_control_request(
 def _make_control_handler(
     guard: EgressGuard, secret: str | None
 ) -> type[BaseHTTPRequestHandler]:
-    """Build a POST handler bound to *guard* / *secret* (avoids module globals)."""
+    """Build a POST handler bound to *guard* / *secret* (avoids module globals).
+
+    Called once per :class:`AuthControlServer`, so binding the guard via a
+    closure-scoped class (rather than module globals or ``functools.partial``)
+    keeps the reference explicit with no per-request cost.
+    """
 
     class _AuthControlHandler(BaseHTTPRequestHandler):
+        #: Bound a stuck client read so AuthControlServer.stop() cannot hang on
+        #: an in-flight handler (review of PR #367).
+        timeout = 5
+
         def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
             """Handle an ``/auth/allow`` or ``/auth/revoke`` control request."""
             length = int(self.headers.get("Content-Length", 0) or 0)
+            if length > MAX_CONTROL_BODY_BYTES:
+                self._respond(ControlResult(413, {"error": "control body too large"}))
+                return
             raw = self.rfile.read(length) if length else b""
             try:
                 payload = json.loads(raw or b"{}")
             except json.JSONDecodeError:
-                result = ControlResult(400, {"error": "body is not valid JSON"})
-            else:
-                result = handle_control_request(
+                self._respond(ControlResult(400, {"error": "body is not valid JSON"}))
+                return
+            self._respond(
+                handle_control_request(
                     guard,
                     secret,
                     self.path,
                     self.headers.get(CONTROL_TOKEN_HEADER),
                     payload,
                 )
+            )
+
+        def _respond(self, result: ControlResult) -> None:
             body = json.dumps(result.body).encode()
             self.send_response(result.status)
             self.send_header("Content-Type", "application/json")
@@ -380,6 +402,9 @@ class AuthControlServer:
         self._httpd = ThreadingHTTPServer(
             (host, port), _make_control_handler(guard, secret)
         )
+        # Daemon handler threads so stop()/interpreter exit never block on an
+        # in-flight request (review of PR #367).
+        self._httpd.daemon_threads = True
         self._thread: threading.Thread | None = None
 
     @property

@@ -328,6 +328,26 @@ class TestControlServerOverHttp:
         finally:
             server.stop()
 
+    def test_oversized_body_rejected(self) -> None:
+        # A body over MAX_CONTROL_BODY_BYTES is rejected 413, unread (PR #367 review).
+        guard = EgressGuard({"o/r"})
+        server = AuthControlServer(guard, secret="s3cr3t")
+        server.start()
+        try:
+            base = f"http://127.0.0.1:{server.port}"
+            oversized = {"repo": "o/r", "pad": "x" * 8192}
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                self._post(
+                    base + "/auth/allow",
+                    oversized,
+                    {"X-Control-Token": "s3cr3t"},
+                )
+            assert ei.value.code == 413
+            now = time.monotonic()
+            assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now).allow is False
+        finally:
+            server.stop()
+
     def test_wrong_secret_over_http_is_403(self) -> None:
         guard = EgressGuard({"o/r"})
         server = AuthControlServer(guard, secret="s3cr3t")

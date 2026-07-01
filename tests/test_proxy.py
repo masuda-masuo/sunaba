@@ -8,14 +8,22 @@ module docstring in ``code_sandbox_mcp.proxy``.
 """
 from __future__ import annotations
 
+import json
 import time
+import urllib.error
+import urllib.request
+
+import pytest
 
 from code_sandbox_mcp.proxy import (
+    DEFAULT_WINDOW_TTL_SECONDS,
     FETCH_SERVICE,
     PUSH_SERVICE,
+    AuthControlServer,
     EgressGuard,
     allowed_repos_from_env,
     git_service_from_request,
+    handle_control_request,
     is_push,
     repo_from_path,
 )
@@ -151,3 +159,209 @@ class TestAllowlistFromEnv:
     def test_empty(self) -> None:
         assert allowed_repos_from_env({}) == set()
         assert allowed_repos_from_env({"CODE_SANDBOX_ALLOWED_REPOS": ""}) == set()
+
+
+class TestTokenInjection:
+    """Only authorized pushes, and only when a token is held, get credentials."""
+
+    def test_no_token_injects_nothing(self) -> None:
+        guard = EgressGuard({"o/r"})  # no token configured
+        guard.open_window("o/r", ttl_seconds=30, now=100.0)
+        d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
+        assert d.allow is True
+        assert guard.token_headers_for(d, is_push_request=True) == {}
+
+    def test_authorized_push_gets_bearer(self) -> None:
+        guard = EgressGuard({"o/r"}, token="ghs_secret")
+        guard.open_window("o/r", ttl_seconds=30, now=100.0)
+        d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
+        assert d.allow is True
+        assert guard.token_headers_for(d, is_push_request=True) == {
+            "Authorization": "Bearer ghs_secret"
+        }
+
+    def test_denied_push_gets_no_token(self) -> None:
+        guard = EgressGuard({"o/r"}, token="ghs_secret")  # allowlisted but no window
+        d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
+        assert d.allow is False
+        assert guard.token_headers_for(d, is_push_request=True) == {}
+
+    def test_clone_gets_no_token(self) -> None:
+        # Even an allowed fetch must not receive push credentials.
+        guard = EgressGuard({"o/r"}, token="ghs_secret")
+        d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now=101.0)
+        assert d.allow is True
+        assert guard.token_headers_for(d, is_push_request=False) == {}
+
+
+class TestControlRequestDispatch:
+    """The pure control dispatcher: auth, validation, and window open/close."""
+
+    def test_allow_opens_window(self) -> None:
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard,
+            secret=None,
+            path="/auth/allow",
+            provided_secret=None,
+            payload={"repo": "o/r", "ttl_seconds": 30},
+            now=100.0,
+        )
+        assert res.status == 200
+        assert res.body["ok"] is True
+        assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now=101.0).allow is True
+
+    def test_allow_uses_default_ttl(self) -> None:
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard, None, "/auth/allow", None, {"repo": "o/r"}, now=100.0
+        )
+        assert res.status == 200
+        assert res.body["ttl_seconds"] == DEFAULT_WINDOW_TTL_SECONDS
+
+    def test_revoke_closes_window(self) -> None:
+        guard = EgressGuard({"o/r"})
+        guard.open_window("o/r", ttl_seconds=30, now=100.0)
+        res = handle_control_request(guard, None, "/auth/revoke", None, {"repo": "o/r"})
+        assert res.status == 200
+        assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now=101.0).allow is False
+
+    def test_wrong_secret_rejected_and_window_untouched(self) -> None:
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard,
+            secret="s3cr3t",
+            path="/auth/allow",
+            provided_secret="wrong",
+            payload={"repo": "o/r"},
+            now=100.0,
+        )
+        assert res.status == 403
+        # Auth failure must not have opened a window.
+        assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now=101.0).allow is False
+
+    def test_correct_secret_accepted(self) -> None:
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard, "s3cr3t", "/auth/allow", "s3cr3t", {"repo": "o/r"}, now=100.0
+        )
+        assert res.status == 200
+
+    def test_missing_secret_when_required_rejected(self) -> None:
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard, "s3cr3t", "/auth/allow", None, {"repo": "o/r"}, now=100.0
+        )
+        assert res.status == 403
+
+    def test_bad_repo_rejected(self) -> None:
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard, None, "/auth/allow", None, {"repo": "no-slash"}
+        )
+        assert res.status == 400
+
+    def test_non_object_payload_rejected(self) -> None:
+        guard = EgressGuard()
+        res = handle_control_request(
+            guard, None, "/auth/allow", None, ["not", "a", "dict"]
+        )
+        assert res.status == 400
+
+    def test_non_positive_ttl_rejected(self) -> None:
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard, None, "/auth/allow", None, {"repo": "o/r", "ttl_seconds": 0}
+        )
+        assert res.status == 400
+
+    def test_bool_ttl_rejected(self) -> None:
+        # bool is an int subclass; True must not be accepted as a 1-second TTL.
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard, None, "/auth/allow", None, {"repo": "o/r", "ttl_seconds": True}
+        )
+        assert res.status == 400
+
+    def test_unknown_endpoint(self) -> None:
+        guard = EgressGuard()
+        res = handle_control_request(guard, None, "/auth/other", None, {"repo": "o/r"})
+        assert res.status == 404
+
+
+class TestControlServerOverHttp:
+    """End-to-end over a real socket, mirroring publish's HTTP control calls."""
+
+    @staticmethod
+    def _post(url: str, payload: dict, headers: dict | None = None) -> tuple[int, dict]:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            url, data=data, headers=headers or {}, method="POST"
+        )
+        with urllib.request.urlopen(req) as resp:  # noqa: S310 (localhost test URL)
+            return resp.status, json.loads(resp.read())
+
+    def test_allow_then_revoke_over_http(self) -> None:
+        guard = EgressGuard({"o/r"})
+        server = AuthControlServer(guard, secret="s3cr3t")
+        server.start()
+        try:
+            base = f"http://127.0.0.1:{server.port}"
+            status, body = self._post(
+                base + "/auth/allow",
+                {"repo": "o/r", "ttl_seconds": 30},
+                {"X-Control-Token": "s3cr3t"},
+            )
+            assert status == 200
+            assert body["ok"] is True
+            now = time.monotonic()
+            assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now).allow is True
+
+            status, _ = self._post(
+                base + "/auth/revoke",
+                {"repo": "o/r"},
+                {"X-Control-Token": "s3cr3t"},
+            )
+            assert status == 200
+            now = time.monotonic()
+            assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now).allow is False
+        finally:
+            server.stop()
+
+    def test_oversized_body_rejected(self) -> None:
+        # A body over MAX_CONTROL_BODY_BYTES is rejected 413, unread (PR #367 review).
+        guard = EgressGuard({"o/r"})
+        server = AuthControlServer(guard, secret="s3cr3t")
+        server.start()
+        try:
+            base = f"http://127.0.0.1:{server.port}"
+            oversized = {"repo": "o/r", "pad": "x" * 8192}
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                self._post(
+                    base + "/auth/allow",
+                    oversized,
+                    {"X-Control-Token": "s3cr3t"},
+                )
+            assert ei.value.code == 413
+            now = time.monotonic()
+            assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now).allow is False
+        finally:
+            server.stop()
+
+    def test_wrong_secret_over_http_is_403(self) -> None:
+        guard = EgressGuard({"o/r"})
+        server = AuthControlServer(guard, secret="s3cr3t")
+        server.start()
+        try:
+            base = f"http://127.0.0.1:{server.port}"
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                self._post(
+                    base + "/auth/allow",
+                    {"repo": "o/r"},
+                    {"X-Control-Token": "nope"},
+                )
+            assert ei.value.code == 403
+            now = time.monotonic()
+            assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now).allow is False
+        finally:
+            server.stop()

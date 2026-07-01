@@ -26,9 +26,9 @@ Policy
 * ``git-receive-pack`` (push) is **denied by default** and only allowed when
   *both* hold: the target ``owner/repo`` is in the allowlist, *and* a
   short-lived authorization window is currently open for it.  The window is
-  opened/closed by the control plane that ``publish`` will drive (#356 / #357);
-  this module provides the in-proxy decision core and state, not yet the
-  control API transport.
+  opened/closed via the internal control API (:class:`AuthControlServer`,
+  ``POST /auth/allow`` / ``/auth/revoke``) that ``publish`` drives host-side
+  (#356 / #357), authenticated by a shared secret the container never learns.
 
 Because push is blocked at ref-discovery -- before any credentials are sent --
 the guarantee holds even before tokens are moved out of the container (#356).
@@ -36,18 +36,22 @@ the guarantee holds even before tokens are moved out of the container (#356).
 Validated by a PoC on 2026-07-01: a real ``git clone`` succeeds through the
 TLS-terminating proxy while ``git push`` is rejected.
 
-Still out of scope here (own issues): the control-API server + ``publish``
-integration that opens windows (#356 / #357), gating non-push write APIs on
+Still out of scope here (own issues): the host-side ``publish`` client that
+calls this control API (#357), dropping the token from the container env now
+that the proxy can inject it (#356 remainder), gating non-push write APIs on
 ``api.github.com`` -- which this addon still passes through (#360), network
 isolation so the proxy is the only egress and SSH is blocked (#355), and
 sidecar image packaging + container CA wiring (#358).
 """
 from __future__ import annotations
 
+import hmac
+import json
 import os
 import threading
 import time
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:  # pragma: no cover - only importable inside the proxy sidecar image
     from mitmproxy import http
@@ -66,6 +70,29 @@ _KNOWN_SERVICES = frozenset({FETCH_SERVICE, PUSH_SERVICE})
 
 #: Environment variable holding a comma-separated owner/repo allowlist (#358).
 ALLOWED_REPOS_ENV = "CODE_SANDBOX_ALLOWED_REPOS"
+
+#: Bearer token the proxy injects into authorized pushes (#356); once #355/#358
+#: land the sandbox container no longer needs to hold it.  Unset = no injection.
+PROXY_TOKEN_ENV = "CODE_SANDBOX_PROXY_TOKEN"
+
+#: TCP port for the internal authorization control API; unset = decision-only
+#: proxy (no window can be opened, matching today's inert behaviour).
+CONTROL_PORT_ENV = "CODE_SANDBOX_PROXY_CONTROL_PORT"
+
+#: Shared secret authenticating control-API callers (#356 / #357).  ``publish``
+#: sends it in the ``X-Control-Token`` header; the sandbox container never sees
+#: it, so it cannot open its own push window.
+CONTROL_SECRET_ENV = "CODE_SANDBOX_PROXY_CONTROL_SECRET"
+
+#: Request header carrying the control secret on ``/auth/*`` calls.
+CONTROL_TOKEN_HEADER = "X-Control-Token"
+
+#: Authorization-window lifetime used when a caller omits ``ttl_seconds``.
+DEFAULT_WINDOW_TTL_SECONDS = 30.0
+
+#: Cap on the control-request body; payloads are tiny JSON, so anything larger
+#: is rejected (413) unread, bounding handler memory (review of PR #367).
+MAX_CONTROL_BODY_BYTES = 4096
 
 
 def git_service_from_request(path: str, query_service: str | None) -> str | None:
@@ -140,17 +167,25 @@ class EgressGuard:
     :meth:`request`.  Window state is therefore guarded by ``self._lock``.
     """
 
-    def __init__(self, allowed_repos: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        allowed_repos: set[str] | None = None,
+        token: str | None = None,
+    ) -> None:
         """Create a guard.
 
         *allowed_repos* is the set of ``owner/repo`` strings that may ever be
         pushed to (matched case-insensitively); anything outside it is denied
-        regardless of windows.
+        regardless of windows.  *token*, when given, is the bearer token the
+        proxy injects into authorized pushes so the container need not hold
+        GitHub credentials (#356).
         """
         self._allowed: set[str] = {r.lower() for r in (allowed_repos or ())}
         #: repo -> monotonic expiry timestamp of an open push window.
         self._windows: dict[str, float] = {}
         self._lock = threading.Lock()
+        #: bearer token injected into authorized pushes; ``None`` disables it.
+        self._token = token
 
     # -- authorization window control (to be driven by publish; #356 / #357) --
 
@@ -158,7 +193,9 @@ class EgressGuard:
         """Permit push to *repo* for the next *ttl_seconds* (both git requests).
 
         *now* defaults to ``time.monotonic()``; pass it explicitly to keep the
-        expiry deterministic in tests, mirroring :meth:`decide`.
+        expiry deterministic in tests, mirroring :meth:`decide`.  Opening a
+        window for a repo outside the allowlist is harmless -- :meth:`decide`
+        still denies the push -- so callers need not pre-check membership.
         """
         base = time.monotonic() if now is None else now
         with self._lock:
@@ -189,6 +226,43 @@ class EgressGuard:
             return Decision(False, f"no open authorization window for {repo}")
         return Decision(True, f"push authorized for {repo}")
 
+    # -- token injection (pure) --
+
+    def token_headers_for(
+        self, decision: Decision, is_push_request: bool
+    ) -> dict[str, str]:
+        """Return the ``Authorization`` header to add to an authorized push.
+
+        Empty unless the request is an *allowed* push **and** a token is held:
+        only pushes the policy permits get credentials, and with no token (the
+        inert default) nothing is injected.  Pure, so the injection policy is
+        unit-testable without mitmproxy.
+        """
+        if decision.allow and is_push_request and self._token:
+            return {"Authorization": f"Bearer {self._token}"}
+        return {}
+
+    # -- mitmproxy lifecycle: internal control API (#356 / #357) --
+
+    def running(self) -> None:  # pragma: no cover - mitmproxy lifecycle hook
+        """Start the authorization control server if the env configures a port.
+
+        Reads the port/secret from the environment so the sidecar image (#358)
+        can enable it; with no port the proxy stays decision-only (as today).
+        """
+        port = os.environ.get(CONTROL_PORT_ENV)
+        if not port:
+            return
+        secret = os.environ.get(CONTROL_SECRET_ENV) or None
+        self._control = AuthControlServer(self, port=int(port), secret=secret)
+        self._control.start()
+
+    def done(self) -> None:  # pragma: no cover - mitmproxy lifecycle hook
+        """Stop the control server on proxy shutdown, if one was started."""
+        control = getattr(self, "_control", None)
+        if control is not None:
+            control.stop()
+
     # -- mitmproxy hook --
 
     def request(self, flow) -> None:  # pragma: no cover - exercised under mitmdump
@@ -207,6 +281,152 @@ class EgressGuard:
                 block_body(decision.reason),
                 {"Content-Type": "text/plain"},
             )
+            return
+        for name, value in self.token_headers_for(
+            decision, is_push(path, query_service)
+        ).items():
+            flow.request.headers[name] = value
+
+
+@dataclass(frozen=True)
+class ControlResult:
+    """Outcome of a control-API request: an HTTP status and a JSON-able body."""
+
+    status: int
+    body: dict[str, object]
+
+
+def handle_control_request(
+    guard: EgressGuard,
+    secret: str | None,
+    path: str,
+    provided_secret: str | None,
+    payload: object,
+    now: float | None = None,
+) -> ControlResult:
+    """Dispatch one authorization-control request against *guard* (pure).
+
+    Authenticates the caller against *secret* with a constant-time compare --
+    the sandboxed container never learns the secret, so it cannot open its own
+    push window -- then opens (``/auth/allow``) or closes (``/auth/revoke``) a
+    window for ``payload["repo"]``.  Kept free of socket/HTTP glue so the
+    protocol is unit-testable on its own.
+    """
+    if secret is not None and not hmac.compare_digest(provided_secret or "", secret):
+        return ControlResult(403, {"error": "invalid or missing control secret"})
+    if not isinstance(payload, dict):
+        return ControlResult(400, {"error": "request body must be a JSON object"})
+    repo = payload.get("repo")
+    if not isinstance(repo, str) or "/" not in repo:
+        return ControlResult(400, {"error": "'repo' must be an 'owner/name' string"})
+    if path == "/auth/allow":
+        ttl = payload.get("ttl_seconds", DEFAULT_WINDOW_TTL_SECONDS)
+        # bool is an int subclass; reject it so True/False is not read as a TTL.
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl <= 0:
+            return ControlResult(400, {"error": "'ttl_seconds' must be a positive number"})
+        guard.open_window(repo, float(ttl), now=now)
+        return ControlResult(200, {"ok": True, "repo": repo.lower(), "ttl_seconds": float(ttl)})
+    if path == "/auth/revoke":
+        guard.close_window(repo)
+        return ControlResult(200, {"ok": True, "repo": repo.lower()})
+    return ControlResult(404, {"error": f"unknown control endpoint: {path}"})
+
+
+def _make_control_handler(
+    guard: EgressGuard, secret: str | None
+) -> type[BaseHTTPRequestHandler]:
+    """Build a POST handler bound to *guard* / *secret* (avoids module globals).
+
+    Called once per :class:`AuthControlServer`, so binding the guard via a
+    closure-scoped class (rather than module globals or ``functools.partial``)
+    keeps the reference explicit with no per-request cost.
+    """
+
+    class _AuthControlHandler(BaseHTTPRequestHandler):
+        #: Bound a stuck client read so AuthControlServer.stop() cannot hang on
+        #: an in-flight handler (review of PR #367).
+        timeout = 5
+
+        def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+            """Handle an ``/auth/allow`` or ``/auth/revoke`` control request."""
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length > MAX_CONTROL_BODY_BYTES:
+                self._respond(ControlResult(413, {"error": "control body too large"}))
+                return
+            raw = self.rfile.read(length) if length else b""
+            try:
+                payload = json.loads(raw or b"{}")
+            except json.JSONDecodeError:
+                self._respond(ControlResult(400, {"error": "body is not valid JSON"}))
+                return
+            self._respond(
+                handle_control_request(
+                    guard,
+                    secret,
+                    self.path,
+                    self.headers.get(CONTROL_TOKEN_HEADER),
+                    payload,
+                )
+            )
+
+        def _respond(self, result: ControlResult) -> None:
+            body = json.dumps(result.body).encode()
+            self.send_response(result.status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (base API name)
+            """Silence the handler's default request logging to stderr."""
+
+    return _AuthControlHandler
+
+
+class AuthControlServer:
+    """Internal HTTP control plane opening/closing push windows on a guard.
+
+    ``publish`` (host-side, #357) POSTs ``/auth/allow`` before a push and
+    ``/auth/revoke`` afterwards, authenticated by a shared secret the sandboxed
+    container never sees.  Bind to a proxy-internal interface only.
+    """
+
+    def __init__(
+        self,
+        guard: EgressGuard,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        secret: str | None = None,
+    ) -> None:
+        """Create (but do not start) the control server on *host*:*port*."""
+        self._httpd = ThreadingHTTPServer(
+            (host, port), _make_control_handler(guard, secret)
+        )
+        # Daemon handler threads so stop()/interpreter exit never block on an
+        # in-flight request (review of PR #367).
+        self._httpd.daemon_threads = True
+        self._thread: threading.Thread | None = None
+
+    @property
+    def port(self) -> int:
+        """The bound TCP port (resolved when constructed with ``port=0``)."""
+        return self._httpd.server_address[1]
+
+    def start(self) -> None:
+        """Serve control requests on a daemon background thread."""
+        self._thread = threading.Thread(
+            target=self._httpd.serve_forever,
+            name="egress-auth-control",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop serving and release the listening socket."""
+        self._httpd.shutdown()
+        self._httpd.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
 
 
 def allowed_repos_from_env(environ: dict[str, str] | None = None) -> set[str]:
@@ -218,4 +438,9 @@ def allowed_repos_from_env(environ: dict[str, str] | None = None) -> set[str]:
 
 #: mitmproxy discovers addons via a module-level ``addons`` list.  Built from
 #: the environment so the sidecar image (#358) can configure the allowlist.
-addons = [EgressGuard(allowed_repos_from_env())]
+addons = [
+    EgressGuard(
+        allowed_repos_from_env(),
+        token=os.environ.get(PROXY_TOKEN_ENV) or None,
+    )
+]

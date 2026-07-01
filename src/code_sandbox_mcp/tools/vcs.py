@@ -15,6 +15,7 @@ from docker.errors import NotFound
 
 from code_sandbox_mcp import token_broker
 from code_sandbox_mcp.journal import get_or_create_run_id, record_boundary_crossing
+from code_sandbox_mcp.proxy_client import ProxyAuthError, authorized_push_window
 from code_sandbox_mcp.token import generate_token, verify_and_consume
 from code_sandbox_mcp.tools.common import (
     CLONE_NO_TOKEN_WARNING,
@@ -995,36 +996,57 @@ Returns:
         f"-c credential.helper='!f() {{ echo username=x-access-token; echo password=$GITHUB_TOKEN; }}; f' "
         f"push origin {shlex.quote(branch)}{force_flag}"
     )
-    push_ec, push_out, push_err = _run(push_cmd, env=push_env)
+    # Open a short-lived push-authorization window on the egress proxy so
+    # the sidecar lets *this* push through (#356 / #357).  When no proxy is
+    # configured this is a no-op, so publish behaves exactly as before.  The
+    # window is revoked on exit -- including the early return below -- so a
+    # failed push (either transport) still closes it.  (The gh-pr-create call
+    # below hits api.github.com, a non-push write gated separately by #360.)
+    try:
+        with authorized_push_window(repo):
+            push_ec, push_out, push_err = _run(push_cmd, env=push_env)
 
-    # Get the SHA of the pushed commit
-    sha = ""
-    sha_ec, sha_out, _ = _run("git rev-parse HEAD")
-    if sha_ec == 0:
-        sha = sha_out.strip()[:7]
+            # Get the SHA of the pushed commit
+            sha = ""
+            sha_ec, sha_out, _ = _run("git rev-parse HEAD")
+            if sha_ec == 0:
+                sha = sha_out.strip()[:7]
 
-    # Transport fallback: git push failed -> try GitHub API push
-    if push_ec != 0:
-        push_result = _try_api_push(
-            container, cid, repo, branch, working_dir, env=push_env
+            # Transport fallback: git push failed -> try GitHub API push
+            if push_ec != 0:
+                push_result = _try_api_push(
+                    container, cid, repo, branch, working_dir, env=push_env
+                )
+                if push_result.get("status") == "ok":
+                    sha = push_result.get("sha", sha)
+                    push_ec = 0  # mark success for downstream logic
+                else:
+                    record_boundary_crossing(
+                        cid,
+                        "publish",
+                        f"repo={repo} branch={branch} push_failed transport=both",
+                        approved=False,
+                        token=token,
+                    )
+                    return json.dumps({
+                        "status": "error",
+                        "step": "git_push",
+                        "error": push_err or push_out,
+                        "sha": sha,
+                    })
+    except ProxyAuthError as exc:
+        record_boundary_crossing(
+            cid,
+            "publish",
+            f"repo={repo} branch={branch} proxy_auth_failed",
+            approved=False,
+            token=token,
         )
-        if push_result.get("status") == "ok":
-            sha = push_result.get("sha", sha)
-            push_ec = 0  # mark success for downstream logic
-        else:
-            record_boundary_crossing(
-                cid,
-                "publish",
-                f"repo={repo} branch={branch} push_failed transport=both",
-                approved=False,
-                token=token,
-            )
-            return json.dumps({
-                "status": "error",
-                "step": "git_push",
-                "error": push_err or push_out,
-                "sha": sha,
-            })
+        return json.dumps({
+            "status": "error",
+            "step": "proxy_auth",
+            "error": str(exc),
+        })
     # --- Optionally create PR ---
     pr_url: str | None = None
     if create_pr:

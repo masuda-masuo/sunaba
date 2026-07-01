@@ -1,10 +1,11 @@
 """Egress proxy addon: gate git push at the network layer (Issue #354, part of #353).
 
 A **mitmproxy addon** loaded by the proxy sidecar via ``mitmdump -s proxy.py``.
-It is intentionally *not* imported anywhere in the MCP server and adds no
-runtime dependency (``mitmproxy`` lives only in the dedicated proxy image), so
-merging it changes no existing behaviour until the sidecar is wired in
-(#355 / #358).
+Its addon behaviour runs only under ``mitmdump`` and adds no runtime dependency
+(``mitmproxy`` is imported lazily, so this module imports fine without it).  The
+host-side ``publish`` client (#357) imports only the wire-contract constants
+below, and no addon behaviour runs at import time, so nothing changes until the
+sidecar is wired in (#355 / #358).
 
 Why service names, not HTTP methods
 -----------------------------------
@@ -36,9 +37,9 @@ the guarantee holds even before tokens are moved out of the container (#356).
 Validated by a PoC on 2026-07-01: a real ``git clone`` succeeds through the
 TLS-terminating proxy while ``git push`` is rejected.
 
-Still out of scope here (own issues): the host-side ``publish`` client that
-calls this control API (#357), dropping the token from the container env now
-that the proxy can inject it (#356 remainder), gating non-push write APIs on
+Still out of scope here (own issues): dropping the token from the container
+env now that the proxy can inject it (#356 remainder), gating non-push write
+APIs on
 ``api.github.com`` -- which this addon still passes through (#360), network
 isolation so the proxy is the only egress and SSH is blocked (#355), and
 sidecar image packaging + container CA wiring (#358).

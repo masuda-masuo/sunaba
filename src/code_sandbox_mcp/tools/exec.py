@@ -363,6 +363,18 @@ def sandbox_exec_background(container_id: str, commands: Annotated[list[str], Be
         stdout=False,
         stderr=False,
     )
+
+    # Record the dispatch in the audit journal.  The command runs detached
+    # so its exit code is unknown at this point; -1 is a sentinel meaning
+    # "background launch, outcome not yet known" (poll via sandbox_exec_check).
+    # Without this, background execs were completely invisible to the
+    # journal while foreground sandbox_exec records every call (Issue #359).
+    journal_record_exec(
+        container_id[:12],
+        commands,
+        -1,
+        verbose="background",
+    )
     return job_id
 
 

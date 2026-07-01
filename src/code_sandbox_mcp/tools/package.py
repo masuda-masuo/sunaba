@@ -9,6 +9,7 @@ from typing import Annotated
 from docker.errors import NotFound
 from pydantic import BeforeValidator
 
+from code_sandbox_mcp.journal import record_exec as journal_record_exec
 from code_sandbox_mcp.tools.common import _coerce_list_arg, _docker
 
 
@@ -160,6 +161,17 @@ def package_install(
 
     # --- Run pip install ---
     ec, stdout_text, stderr_text = _run_in_container(container_id, pip_args)
+
+    # Record the install in the audit journal.  package_install mutates
+    # container state (and may reach the network), so it must leave a trail
+    # just like ``sandbox_exec pip install ...`` does; a dedicated tool must
+    # not become an audit blind spot (Issue #359).
+    journal_record_exec(
+        container_id[:12],
+        pip_args,
+        ec,
+        verbose="package_install",
+    )
 
     # --- Snapshot installed packages after ---
     after = _get_installed_packages(container_id)

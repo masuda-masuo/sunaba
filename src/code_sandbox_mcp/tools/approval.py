@@ -94,6 +94,12 @@ def sandbox_reject(token: str) -> str:
     Returns:
         JSON string with ``status`` and message.
     """
+    # Peek the token metadata *before* rejecting so the rejection can be
+    # recorded in the journal.  Without this, a rejected boundary crossing
+    # leaves its original ``approved=None`` entry unresolved and
+    # ``get_pending_approvals()`` reports the token as pending forever
+    # (asymmetry with sandbox_approve; Issue #359).
+    meta = verify_token(token)
     ok = reject_token(token)
     if not ok:
         return json.dumps(
@@ -101,6 +107,14 @@ def sandbox_reject(token: str) -> str:
                 "status": "error",
                 "error": "Token not found or already resolved",
             }
+        )
+    if meta is not None:
+        record_boundary_crossing(
+            meta["container_id"],
+            meta["operation"],
+            meta["details"],
+            approved=False,
+            token=token,
         )
     return json.dumps(
         {

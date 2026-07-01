@@ -789,3 +789,62 @@ class TestCoerceListArg:
         # Plain string passes through
         result2 = ta.validate_python("requests")
         assert result2 == "requests"
+
+
+class TestBackgroundExecJournalRecording:
+    """sandbox_exec_background must leave an audit trail (Issue #359).
+
+    Foreground sandbox_exec records every call; before this fix the
+    detached background path was completely invisible to the journal.
+    """
+
+    @patch("code_sandbox_mcp.tools.exec.journal_record_exec")
+    @patch("code_sandbox_mcp.tools.exec._docker")
+    def test_background_records_exec(
+        self,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        sandbox_exec_background("abc123def456", ["echo done"])
+
+        assert mock_record.called
+        args = mock_record.call_args[0]
+        assert args[0] == "abc123def456"
+        assert args[1] == ["echo done"]
+        # -1 is the sentinel for "background launch, outcome not yet known".
+        assert args[2] == -1
+
+
+class TestPackageInstallJournalRecording:
+    """package_install must record like ``sandbox_exec pip install`` (Issue #359)."""
+
+    @patch("code_sandbox_mcp.tools.package.journal_record_exec")
+    @patch("code_sandbox_mcp.tools.package._get_installed_packages")
+    @patch("code_sandbox_mcp.tools.package._has_uv")
+    @patch("code_sandbox_mcp.tools.package._run_in_container")
+    def test_install_records_exec(
+        self,
+        mock_run: MagicMock,
+        mock_has_uv: MagicMock,
+        mock_pkgs: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        from code_sandbox_mcp.tools.package import package_install
+
+        mock_has_uv.return_value = False
+        mock_pkgs.return_value = []
+        mock_run.return_value = (0, "Successfully installed requests", "")
+
+        result = json.loads(package_install("abc123def456", packages="requests"))
+        assert result["status"] == "ok"
+
+        assert mock_record.called
+        args = mock_record.call_args[0]
+        assert args[0] == "abc123def456"
+        assert args[1] == ["pip", "install", "requests"]
+        assert args[2] == 0

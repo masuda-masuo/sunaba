@@ -321,3 +321,59 @@ def _read_log(path: Path) -> list[dict]:
 def _append_json_test(path: Path, entry: dict) -> None:
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+class TestSandboxRejectRecording:
+    """sandbox_reject must resolve the pending approval it rejects (Issue #359).
+
+    Previously sandbox_reject removed the token from the store but never
+    wrote a resolving journal entry, so the original ``approved=None``
+    boundary crossing stayed unresolved and get_pending_approvals()
+    reported the token as pending forever (asymmetry with sandbox_approve).
+    """
+
+    def test_reject_resolves_pending_approval(self, tmp_path: Path) -> None:
+        from code_sandbox_mcp.journal import get_pending_approvals
+        from code_sandbox_mcp.token import generate_token
+        from code_sandbox_mcp.tools.approval import sandbox_reject
+
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            token = generate_token("git_push", "push to main", "abc123def456", "run1")
+            # The requesting tool records the pending crossing (approved=None).
+            record_boundary_crossing(
+                "abc123def456", "git_push", "push to main",
+                approved=None, token=token,
+            )
+            assert token in {p["token"] for p in get_pending_approvals()}
+
+            result = json.loads(sandbox_reject(token))
+            assert result["status"] == "ok"
+
+            # The pending entry must now be resolved (the Issue #359 bug).
+            assert token not in {p.get("token") for p in get_pending_approvals()}
+            rejects = [
+                e for e in read_journal()
+                if e.get("operation") == "boundary_crossing"
+                and e.get("approved") is False
+                and e.get("token") == token
+            ]
+            assert len(rejects) == 1
+            assert rejects[0]["sub_operation"] == "git_push"
+
+    def test_reject_unknown_token_records_nothing(self, tmp_path: Path) -> None:
+        from code_sandbox_mcp.tools.approval import sandbox_reject
+
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            result = json.loads(sandbox_reject("deadbeefdeadbeef"))
+            assert result["status"] == "error"
+            assert read_journal() == []

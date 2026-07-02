@@ -128,3 +128,27 @@ class TestStartImagePrewarm:
             # thread is a daemon so the sleeping cycle never blocks teardown.
             _start_image_prewarm(3600)
             assert called.wait(timeout=2.0)
+
+    def test_startup_event_signaled_after_first_prewarm(self) -> None:
+        startup_ready = threading.Event()
+
+        with patch(
+            "code_sandbox_mcp.tools.container.prewarm_default_image",
+        ):
+            _start_image_prewarm(3600, startup_ready)
+            assert startup_ready.wait(timeout=2.0)
+
+    def test_startup_event_signaled_even_on_prewarm_failure(self) -> None:
+        startup_ready = threading.Event()
+
+        with patch(
+            "code_sandbox_mcp.tools.container.prewarm_default_image",
+            side_effect=RuntimeError("docker down"),
+        ):
+            _start_image_prewarm(3600, startup_ready)
+            assert startup_ready.wait(timeout=2.0)
+
+    def test_startup_event_set_when_disabled(self) -> None:
+        startup_ready = threading.Event()
+        _start_image_prewarm(0, startup_ready)
+        assert startup_ready.is_set()

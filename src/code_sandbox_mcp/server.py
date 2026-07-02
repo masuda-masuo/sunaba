@@ -311,7 +311,10 @@ def _start_github_app_token_refresh(interval_seconds: int = 120) -> None:
     logger.info("started GitHub App token refresh thread (every %ss)", interval_seconds)
 
 
-def _start_image_prewarm(interval_seconds: int = 3600) -> None:
+def _start_image_prewarm(
+    interval_seconds: int = 3600,
+    startup_event: threading.Event | None = None,
+) -> None:
     """Pull the default and variant sandbox images now and re-check periodically.
 
     Removes the cold-start cliff where the first ``sandbox_initialize`` trips
@@ -323,15 +326,28 @@ def _start_image_prewarm(interval_seconds: int = 3600) -> None:
     subsequent cycle is a cheap local presence check (a no-op once the
     digest-pinned images are cached).  A non-positive *interval_seconds*
     disables prewarming entirely.
+
+    When *startup_event* is provided, the first prewarm cycle signals it so
+    the caller can wait for the initial pull before accepting requests,
+    preventing a race between server startup and the first
+    ``sandbox_initialize`` (Issue #371).
     """
     if interval_seconds <= 0:
+        if startup_event:
+            startup_event.set()
         return
 
     from code_sandbox_mcp.tools.container import prewarm_default_image
 
     def _prewarm_loop() -> None:
+        first = True
         while True:
-            prewarm_default_image()
+            try:
+                prewarm_default_image()
+            finally:
+                if first and startup_event:
+                    startup_event.set()
+                    first = False
             time.sleep(interval_seconds)
 
     thread = threading.Thread(
@@ -417,7 +433,12 @@ def main() -> None:
 
     # Keep the default sandbox image warm so the first sandbox_initialize does
     # not time out on a cold-start docker pull (Issue #303).
-    _start_image_prewarm(args.prewarm_interval_seconds)
+    # Wait for the first prewarm cycle to complete before accepting requests
+    # so that the initial docker pull never races with sandbox_initialize
+    # (Issue #371).
+    prewarm_ready = threading.Event()
+    _start_image_prewarm(args.prewarm_interval_seconds, prewarm_ready)
+    prewarm_ready.wait()
 
     try:
         transport = args.transport

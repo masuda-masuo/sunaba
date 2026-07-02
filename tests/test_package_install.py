@@ -208,10 +208,10 @@ class TestPackageInstall:
         assert result["status"] == "ok"
 
     @patch("code_sandbox_mcp.tools.package._docker")
-    def test_uses_plain_pip_never_uv(self, mock_docker: MagicMock) -> None:
-        """Regression for #380: stock sandbox images have no venv and run as
-        a non-root user, so ``uv pip install`` cannot work there — the built
-        command must be plain pip."""
+    def test_runtime_installer_selection(self, mock_docker: MagicMock) -> None:
+        """#390: the installer is chosen at runtime inside the container —
+        ``uv pip`` when ``$VIRTUAL_ENV`` is set (venv-baked images, PR #388),
+        plain ``pip`` otherwise (venv-less images, the #380 constraint)."""
         container = MagicMock()
         seen_cmds = []
 
@@ -231,7 +231,17 @@ class TestPackageInstall:
             packages="requests",
         ))
         assert result["status"] == "ok"
-        install_cmds = [c for c in seen_cmds if isinstance(c, list) and "install" in c]
+        install_cmds = [
+            c for c in seen_cmds if isinstance(c, list) and c[:2] == ["sh", "-c"]
+        ]
         assert install_cmds, "no install command was executed"
-        assert all(c[:2] == ["pip", "install"] for c in install_cmds)
-        assert all("uv" not in c for c in seen_cmds if isinstance(c, list))
+        script = install_cmds[0][2]
+        assert '[ -n "$VIRTUAL_ENV" ]' in script
+        assert "then exec uv pip install requests;" in script
+        assert "else exec pip install requests;" in script
+        # package snapshots must stay plain pip (they parse pip's JSON)
+        assert all(
+            c[:2] == ["pip", "list"]
+            for c in seen_cmds
+            if isinstance(c, list) and c[:2] != ["sh", "-c"]
+        )

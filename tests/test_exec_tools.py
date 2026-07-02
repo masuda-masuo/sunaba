@@ -857,5 +857,8 @@ class TestPackageInstallJournalRecording:
         assert mock_record.called
         args = mock_record.call_args[0]
         assert args[0] == "abc123def456"
-        assert args[1] == ["pip", "install", "requests"]
+        # #390: the journal records the runtime installer-selection command
+        assert args[1][:2] == ["sh", "-c"]
+        assert "uv pip install requests" in args[1][2]
+        assert "else exec pip install requests" in args[1][2]
         assert args[2] == 0

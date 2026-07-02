@@ -562,15 +562,20 @@ class CloneResult(NamedTuple):
 def _editable_install_cmd(target: str) -> str:
     """Build a shell command that pip-installs *target* (e.g. ``".[dev]"``).
 
-    Deliberately plain ``pip``: stock sandbox images have no venv and run as
-    a non-root user, so ``uv pip install`` cannot persist anything there
-    (``--system`` hits root-owned site-packages, ``--user`` is unsupported,
-    and the former mktemp-venv workaround deleted the install together with
-    the venv — Issue #383).  pip falls back to the user site (``~/.local``)
-    on its own.  A user-owned persistent venv baked into the image would let
-    ``uv`` work again (Issue #380).
+    The installer is chosen at runtime inside the container (#390): images
+    with the persistent sandbox-owned venv (PR #388) set ``$VIRTUAL_ENV``,
+    where ``uv pip install`` works and is much faster.  Venv-less images
+    (older pins, custom images) keep plain ``pip``, whose user-site
+    (``~/.local``) fallback is the only working path for a non-root user —
+    uv has no ``--user``, ``--system`` hits root-owned site-packages, and
+    the former mktemp-venv workaround discarded the install (#380 / #383).
     """
-    return f"pip install -e {shlex.quote(target)} -q"
+    quoted = shlex.quote(target)
+    return (
+        'if [ -n "$VIRTUAL_ENV" ] && command -v uv >/dev/null 2>&1; '
+        f"then uv pip install -q -e {quoted}; "
+        f"else pip install -e {quoted} -q; fi"
+    )
 
 
 def _run_pip_install(
@@ -758,8 +763,8 @@ def _setup_pr_branch(
         cid,
     )
 
-    # Step 4: Install dev dependencies (non-fatal) via plain pip (see
-    # _editable_install_cmd for why uv isn't used); network is always
+    # Step 4: Install dev dependencies (non-fatal); the installer is
+    # chosen at runtime by _editable_install_cmd (#390); network is always
     # available here since sandbox_initialize forces allow_network=True
     # whenever pr is set.
     if pip_extras is not None:

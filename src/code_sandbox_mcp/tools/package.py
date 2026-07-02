@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from typing import Annotated
 
 from docker.errors import NotFound
@@ -125,40 +126,50 @@ def package_install(
             "error": "packages and editable are mutually exclusive",
         })
 
-    # --- Build pip command ---
-    # Deliberately plain pip: stock sandbox images have no venv and run as
-    # a non-root user, so ``uv pip install`` cannot work there (no venv is
-    # a hard error, ``--system`` hits root-owned site-packages, and uv has
-    # no ``--user``).  pip falls back to the user site (``~/.local``) on
-    # its own.  A user-owned persistent venv baked into the image would
-    # let ``uv`` work again (Issue #380; same rationale as #383 / PR #384).
-    pip_args: list[str] = ["pip", "install"]
+    # --- Build install arguments (shared by both installers) ---
+    install_args: list[str] = ["install"]
 
     if upgrade:
-        pip_args.append("--upgrade")
+        install_args.append("--upgrade")
 
     if constraints:
-        pip_args.extend(["-c", constraints])
+        install_args.extend(["-c", constraints])
 
     if requirements:
-        pip_args.extend(["-r", requirements])
+        install_args.extend(["-r", requirements])
 
     if editable:
-        pip_args.extend(["-e", editable])
+        install_args.extend(["-e", editable])
         if extras:
-            pip_args[-1] = f"{editable}{extras}"
+            install_args[-1] = f"{editable}{extras}"
     elif packages:
         if isinstance(packages, str):
-            pip_args.append(packages)
+            install_args.append(packages)
         else:
-            pip_args.extend(packages)
+            install_args.extend(packages)
+
+    # --- Choose the installer at runtime inside the container (#390) ---
+    # Images with the persistent sandbox-owned venv (PR #388) set
+    # ``$VIRTUAL_ENV``; there ``uv pip install`` works and is much faster.
+    # Venv-less images (older pins, custom images) fall back to plain
+    # ``pip``, whose user-site (``~/.local``) fallback is the only working
+    # path for a non-root user: uv has no ``--user`` and ``--system`` hits
+    # root-owned site-packages (#380 / #383).
+    quoted_args = " ".join(shlex.quote(a) for a in install_args)
+    install_cmd = [
+        "sh",
+        "-c",
+        'if [ -n "$VIRTUAL_ENV" ] && command -v uv >/dev/null 2>&1; '
+        f"then exec uv pip {quoted_args}; "
+        f"else exec pip {quoted_args}; fi",
+    ]
 
     # --- Snapshot installed packages before ---
     before = _get_installed_packages(container_id)
     before_keys = {_package_to_key(p) for p in before}
 
-    # --- Run pip install ---
-    ec, stdout_text, stderr_text = _run_in_container(container_id, pip_args)
+    # --- Run the install ---
+    ec, stdout_text, stderr_text = _run_in_container(container_id, install_cmd)
 
     # Record the install in the audit journal.  package_install mutates
     # container state (and may reach the network), so it must leave a trail
@@ -166,7 +177,7 @@ def package_install(
     # not become an audit blind spot (Issue #359).
     journal_record_exec(
         container_id[:12],
-        pip_args,
+        install_cmd,
         ec,
         verbose="package_install",
     )
@@ -180,7 +191,7 @@ def package_install(
     if ec != 0:
         return json.dumps({
             "status": "error",
-            "error": f"pip install failed (exit code {ec})",
+            "error": f"package install failed (exit code {ec})",
             "stderr": stderr_text or stdout_text,
             "installed_packages": new_or_changed,
             "changed": len(new_or_changed),

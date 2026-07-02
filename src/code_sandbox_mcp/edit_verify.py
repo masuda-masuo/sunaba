@@ -363,9 +363,9 @@ def _owner_for_write(
 
     ``put_archive`` extracts tar entries with the ownership recorded in the
     archive (root:root by default), so we set it explicitly: an existing file
-    keeps its own uid/gid/mode; a new file inherits its parent directory's
-    owner with a default mode of ``0o644``.  Falls back to ``0, 0, 0o644`` when
-    ``stat`` is unavailable.
+    keeps its own uid/gid/mode; a new file uses the container's running user
+    so it remains writable by other tools (Issue #372).  Falls back to
+    ``999, 999, 0o644`` when ``stat`` is unavailable.
     """
     def _stat(path: str, fmt: str) -> list[str] | None:
         code, out = container.exec_run(
@@ -385,14 +385,14 @@ def _owner_for_write(
         except ValueError:
             pass
 
-    parent = _stat(parent_dir, "%u %g")
-    if parent and len(parent) == 2:
+    running = _stat("/proc/self", "%u %g")
+    if running and len(running) == 2:
         try:
-            return int(parent[0]), int(parent[1]), 0o644
+            return int(running[0]), int(running[1]), 0o644
         except ValueError:
             pass
 
-    return 0, 0, 0o644
+    return 999, 999, 0o644
 
 
 # ---------------------------------------------------------------------------

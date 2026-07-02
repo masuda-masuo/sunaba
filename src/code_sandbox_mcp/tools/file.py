@@ -553,16 +553,33 @@ def copy_file(
 
     dest = dest_path
     if not dest.endswith("/") and not dest.endswith(src.name):
-        # If dest_path is a directory, include the filename
         dest = posixpath.join(dest_path, src.name)
+
+    parent_dir = posixpath.dirname(dest)
+    base_name = posixpath.basename(dest)
 
     with open(src, "rb") as f:
         data = f.read()
-    buf = io.BytesIO(data)
+
+    tar_stream = io.BytesIO()
+    with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+        info = tarfile.TarInfo(name=base_name)
+        info.size = len(data)
+        info.uid = 999
+        info.gid = 999
+        info.mtime = int(src.stat().st_mtime)
+        tar.addfile(info, io.BytesIO(data))
+
     try:
-        container.put_archive(dest, buf)
+        container.put_archive(parent_dir, tar_stream.getvalue())
     except APIError as e:
         return f"Error: {e}"
+    try:
+        container.exec_run(
+            ["sh", "-c", f"chown -R $(id -u):$(id -g) {shlex.quote(dest)}"]
+        )
+    except Exception as e:
+        logger.debug("chown failed for %s: %s", dest, e)
     record_copy(container_id[:12], "copy_file", local_src_file, dest)
     return f"Copied {local_src_file} to {dest} in container {container_id[:12]}"
 

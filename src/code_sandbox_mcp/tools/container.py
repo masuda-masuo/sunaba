@@ -720,9 +720,17 @@ def _resolve_pr_head_ref(repo: str, pr_number: int) -> str:
         with urllib.request.urlopen(request, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        hint = ""
+        if e.code in (403, 429):
+            # Anonymous requests share the 60 req/h per-IP budget, so this
+            # is the failure mode a token-less host hits first.
+            hint = (
+                " (possibly rate-limited: anonymous GitHub API requests are"
+                " capped at 60/h per IP; configuring a host token raises it)"
+            )
         raise RuntimeError(
             f"Failed to resolve head ref for PR #{pr_number} in {repo}:"
-            f" GitHub API returned HTTP {e.code}"
+            f" GitHub API returned HTTP {e.code}{hint}"
         ) from e
     except urllib.error.URLError as e:
         raise RuntimeError(
@@ -809,7 +817,9 @@ def _setup_pr_branch(
         checkout_cmd = f"cd {safe_dest} && gh pr checkout {pr_number}"
     else:
         # Step 1 (anonymous): the head ref comes from the host, and the
-        # container-side commands below are token-free git.
+        # container-side commands below are token-free git.  The clone
+        # command's quoting is delegated to _build_clone_command; safe_repo /
+        # safe_dest above still serve the shared logging and checkout below.
         head_ref = _resolve_pr_head_ref(repo, pr_number)
         clone_cmd = _build_clone_command(repo, f"{clone_dest}/{repo_name}")
         checkout_cmd = (

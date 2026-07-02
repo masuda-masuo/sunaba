@@ -198,6 +198,22 @@ class TestResolvePrHeadRef:
 
     @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="")
     @patch("urllib.request.urlopen")
+    def test_403_hints_rate_limit(self, mock_urlopen, mock_token):
+        import urllib.error
+
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.github.com/repos/owner/repo/pulls/136",
+            403,
+            "rate limit exceeded",
+            None,
+            None,
+        )
+
+        with pytest.raises(RuntimeError, match="rate-limited"):
+            _resolve_pr_head_ref("owner/repo", 136)
+
+    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="")
+    @patch("urllib.request.urlopen")
     def test_missing_head_ref_raises(self, mock_urlopen, mock_token):
         mock_urlopen.return_value = self._mock_urlopen_response({"head": {}})
 

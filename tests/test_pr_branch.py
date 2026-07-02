@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from code_sandbox_mcp.tools.container import (
+    _resolve_pr_head_ref,
     _setup_pr_branch,
     run_container_and_exec,
     sandbox_initialize,
@@ -142,6 +144,166 @@ class TestSetupPrBranch:
         assert "/tmp/repo/myrepo" in result
 
 
+class TestResolvePrHeadRef:
+    """Tests for _resolve_pr_head_ref: host-side head-ref resolution (#403)."""
+
+    @staticmethod
+    def _mock_urlopen_response(payload: dict):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(payload).encode()
+        cm = MagicMock()
+        cm.__enter__.return_value = resp
+        return cm
+
+    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="")
+    @patch("urllib.request.urlopen")
+    def test_returns_head_ref(self, mock_urlopen, mock_token):
+        mock_urlopen.return_value = self._mock_urlopen_response(
+            {"head": {"ref": "feature-branch"}}
+        )
+
+        assert _resolve_pr_head_ref("owner/repo", 136) == "feature-branch"
+
+        request = mock_urlopen.call_args.args[0]
+        assert request.full_url == "https://api.github.com/repos/owner/repo/pulls/136"
+        assert not request.has_header("Authorization")
+
+    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="ghs_tok")
+    @patch("urllib.request.urlopen")
+    def test_attaches_host_token_when_available(self, mock_urlopen, mock_token):
+        mock_urlopen.return_value = self._mock_urlopen_response(
+            {"head": {"ref": "feature-branch"}}
+        )
+
+        _resolve_pr_head_ref("owner/repo", 136)
+
+        request = mock_urlopen.call_args.args[0]
+        assert request.get_header("Authorization") == "Bearer ghs_tok"
+
+    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="")
+    @patch("urllib.request.urlopen")
+    def test_http_error_becomes_runtime_error(self, mock_urlopen, mock_token):
+        import urllib.error
+
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.github.com/repos/owner/repo/pulls/999",
+            404,
+            "Not Found",
+            None,
+            None,
+        )
+
+        with pytest.raises(RuntimeError, match="HTTP 404"):
+            _resolve_pr_head_ref("owner/repo", 999)
+
+    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="")
+    @patch("urllib.request.urlopen")
+    def test_403_hints_rate_limit(self, mock_urlopen, mock_token):
+        import urllib.error
+
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.github.com/repos/owner/repo/pulls/136",
+            403,
+            "rate limit exceeded",
+            None,
+            None,
+        )
+
+        with pytest.raises(RuntimeError, match="rate-limited"):
+            _resolve_pr_head_ref("owner/repo", 136)
+
+    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="")
+    @patch("urllib.request.urlopen")
+    def test_missing_head_ref_raises(self, mock_urlopen, mock_token):
+        mock_urlopen.return_value = self._mock_urlopen_response({"head": {}})
+
+        with pytest.raises(RuntimeError, match="no head ref"):
+            _resolve_pr_head_ref("owner/repo", 136)
+
+    def test_invalid_repo_rejected_before_any_request(self):
+        with pytest.raises(ValueError):
+            _resolve_pr_head_ref("owner/repo/evil?x=1", 136)
+
+
+class TestSetupPrBranchAnonymous:
+    """_setup_pr_branch with authenticated=False: anonymous checkout (#403)."""
+
+    def test_success_uses_git_not_gh(self):
+        container = _make_container_mock([
+            (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
+            (0, (b"Switched to branch 'feature-branch'\n", b"")),
+            (0, (b"Installed\n", b"")),
+            (0, (b"", b"")),
+        ])
+
+        with patch(
+            "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
+            return_value="feature-branch",
+        ) as mock_resolve, patch("code_sandbox_mcp.tools.container.logger"):
+            result = _setup_pr_branch(
+                container, "abc123def456", "owner/repo", 136, "/tmp/repo",
+                authenticated=False,
+            )
+
+        assert "PR #136" in result
+        assert "feature-branch" in result
+        mock_resolve.assert_called_once_with("owner/repo", 136)
+
+        executed = " ;; ".join(
+            call.args[0][2] for call in container.exec_run.call_args_list
+        )
+        assert "gh " not in executed
+        assert "git clone" in executed
+        assert "git fetch origin pull/136/head" in executed
+        assert "git checkout -B feature-branch FETCH_HEAD" in executed
+
+    def test_clone_failure_hints_private_repo(self):
+        container = _make_container_mock([
+            (1, (b"", b"fatal: could not read Username")),
+        ])
+
+        with patch(
+            "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
+            return_value="feature-branch",
+        ), patch("code_sandbox_mcp.tools.container.logger"):
+            with pytest.raises(RuntimeError, match="private repositories"):
+                _setup_pr_branch(
+                    container, "abc123def456", "owner/repo", 136, "/tmp/repo",
+                    authenticated=False,
+                )
+
+    def test_fetch_or_checkout_failure(self):
+        container = _make_container_mock([
+            (0, (b"Cloned\n", b"")),
+            (1, (b"", b"fatal: couldn't find remote ref pull/136/head")),
+        ])
+
+        with patch(
+            "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
+            return_value="feature-branch",
+        ), patch("code_sandbox_mcp.tools.container.logger"):
+            with pytest.raises(RuntimeError, match="Failed to checkout PR #136"):
+                _setup_pr_branch(
+                    container, "abc123def456", "owner/repo", 136, "/tmp/repo",
+                    authenticated=False,
+                )
+
+    def test_head_ref_resolution_failure_stops_before_any_exec(self):
+        container = MagicMock()
+
+        with patch(
+            "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
+            side_effect=RuntimeError("GitHub API returned HTTP 404"),
+        ):
+            with pytest.raises(RuntimeError, match="HTTP 404"):
+                _setup_pr_branch(
+                    container, "abc123def456", "owner/repo", 136, "/tmp/repo",
+                    authenticated=False,
+                )
+
+        container.exec_run.assert_not_called()
+
+
 class TestSandboxInitializePrParam:
     """Tests for sandbox_initialize with pr parameter."""
 
@@ -275,16 +437,20 @@ class TestRunContainerAndExecPrParam:
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = json.loads(run_container_and_exec(
-            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            commands=["echo hello"],
-            repo="owner/repo",
-            pr=136,
-        ))
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=False):
+            result = json.loads(run_container_and_exec(
+                image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                commands=["echo hello"],
+                repo="owner/repo",
+                pr=136,
+            ))
 
         assert result["status"] == "ok"
+        # pr=N forces inject_vcs_token, and the host env above carries a
+        # token, so the container env has one -> authenticated gh path.
         mock_setup.assert_called_once_with(
             mock_container, "abc123def456", "owner/repo", 136, "/tmp/repo", "[dev]",
+            authenticated=True,
         )
 
     @patch("code_sandbox_mcp.tools.container._docker")

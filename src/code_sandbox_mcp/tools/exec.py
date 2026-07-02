@@ -293,8 +293,8 @@ def sandbox_exec(
     if stderr_text and verbose != "error_only":
         result["stderr"] = stderr_text
 
-    # Store in result cache (skip for volatile commands)
-    if cacheable:
+    # Store in result cache (skip for volatile commands and failures)
+    if cacheable and exit_code == 0:
         set_cached_result(cache_key, result)
 
     journal_record_exec(

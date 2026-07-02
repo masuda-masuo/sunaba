@@ -14,6 +14,7 @@ from code_sandbox_mcp.edit_verify import (
     search_files,
     type_check_file,
 )
+from code_sandbox_mcp.journal import record_tool_use
 from code_sandbox_mcp.tools.common import _docker
 
 
@@ -118,6 +119,11 @@ def search_in_container(
     except Exception as e:
         return json.dumps([{"error": str(e)}])
 
+    record_tool_use(
+        container_id[:12],
+        "search_in_container",
+        {"pattern": pattern, "path": path, "mode": mode},
+    )
     results = search_files(
         client, container_id, pattern, path=path, mode=mode, max_results=max_results
     )
@@ -207,6 +213,11 @@ def lint_in_container(container_id: str, file_path: str, fix: bool = False) -> s
 
     ext = _get_extension(file_path)
     scope_workdir = _determine_scope(file_path) if ext in (".py", ".js", ".ts", ".jsx", ".tsx") else None
+    record_tool_use(
+        container_id[:12],
+        "lint_in_container",
+        {"file_path": file_path, "fix": fix},
+    )
     results = lint_file(
         client, container_id, file_path, scope_workdir=scope_workdir, fix=fix
     )
@@ -273,6 +284,11 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
 
     ext = _get_extension(file_path)
     scope_workdir = _determine_scope(file_path) if ext in (".py", ".ts", ".tsx") else None
+    record_tool_use(
+        container_id[:12],
+        "type_check_in_container",
+        {"file_path": file_path},
+    )
     results = type_check_file(client, container_id, file_path, scope_workdir=scope_workdir)
     return json.dumps(results)
 
@@ -407,6 +423,12 @@ def verify_in_container(
             "gate_passed": False,
             "error": str(e),
         })
+
+    record_tool_use(
+        container_id[:12],
+        "verify_in_container",
+        {"path": path, "test_filter": test_filter, "verbose": verbose},
+    )
 
     # --- Language detection ---
     detected = detect_languages(container, path, language, working_dir=working_dir)

@@ -15,6 +15,7 @@ import time
 from fastmcp import FastMCP
 
 from code_sandbox_mcp.github_auth import setup_github_app_token
+from code_sandbox_mcp.journal import record_tool_use
 from code_sandbox_mcp.result_cache import (
     get_cache_stats,
     invalidate_cache,
@@ -163,6 +164,14 @@ def sandbox_cache_invalidate(key: str | None = None) -> str:
     Returns:
         JSON string with ``invalidated`` count.
     """
+    # "system" is a sentinel container_id for tools without a container
+    # context.  Downstream consumers (dashboard, trace) must handle it as
+    # a valid container-less entry.
+    record_tool_use(
+        "system",
+        "sandbox_cache_invalidate",
+        {"key": key},
+    )
     count = invalidate_cache(key=key)
     return json.dumps({"invalidated": count})
 

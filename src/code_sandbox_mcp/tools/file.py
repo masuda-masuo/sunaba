@@ -21,7 +21,7 @@ from code_sandbox_mcp.edit_verify import (
     transform_file_in_container,
     write_file,
 )
-from code_sandbox_mcp.journal import record_copy
+from code_sandbox_mcp.journal import record_copy, record_tool_use
 from code_sandbox_mcp.output_control import paginate_output, truncate_output
 from code_sandbox_mcp.tools.common import _docker
 
@@ -682,6 +682,11 @@ def read_file_range(
             resolved_limit = end_line - start_line + 1
         else:
             resolved_limit = -1
+    record_tool_use(
+        container_id[:12],
+        "read_file_range",
+        {"file_path": file_path},
+    )
     result = read_file_lines(
         _, file_path, offset=resolved_offset, limit=resolved_limit
     )
@@ -777,8 +782,12 @@ def list_files(
     if exit_code != 0:
         return json.dumps({"error": stderr_text or stdout_text})
 
+    record_tool_use(
+        container_id[:12],
+        "list_files",
+        {"path": path, "max_depth": max_depth, "pattern": pattern},
+    )
     files = [f for f in stdout_text.strip().split("\n") if f]
-
     return json.dumps({
         "path": path,
         "total": len(files),

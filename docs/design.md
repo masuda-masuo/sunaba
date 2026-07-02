@@ -245,6 +245,57 @@ else:
 
 > 注意: ダッシュボードは localhost 限定＋必要なら認証。
 
+### 9.1 ツール別記録マトリクス（Issue #359 対応）
+
+すべてのツールはジャーナルにエントリを記録**しなければならない**。
+記録がないツールは監査ギャップ（trace に現れない）と #229 ダッシュボードの
+集計不整合（`bypass_rate_pct` の過大評価）の原因となる。
+
+| ツール | 記録種別 | operation | 補足 |
+|--------|----------|-----------|------|
+| `sandbox_initialize` | `record_initialize` / `record_initialize_complete` | `initialize` / `initialize_complete` | — |
+| `sandbox_exec` | `record_exec` | `exec` | — |
+| `sandbox_exec_background` | `record_exec` (exit_code=-1) | `exec` | #361 で追加 |
+| `sandbox_exec_check` | （なし） | — | ポーリング。内部で `exec` しない |
+| `sandbox_exec_diff` | `record_exec`（内部で `sandbox_exec` 利用） | `exec` | — |
+| `rerun_failed` | （内部で `sandbox_exec` 利用） | `exec` | — |
+| `run_container_and_exec` | `record_initialize` + （内部で `sandbox_exec` 利用）+ `record_stop` | initialize/exec/stop | — |
+| `sandbox_stop` | `record_stop` | `stop` | — |
+| `write_file_sandbox` | `record_file_write`（内部で `record_file_write` 呼び出し）| `write_file` | — |
+| `transform_file` | （なし） | — | 編集ツール。内部で `write_file` を経由 |
+| `copy_project` | `record_copy` | `copy_project` | — |
+| `copy_file` | `record_copy` | `copy_file` | — |
+| `read_file_range` | `record_tool_use` | `tool_use` | #359 Tier 3 |
+| `list_files` | `record_tool_use` | `tool_use` | #359 Tier 3 |
+| `search_in_container` | `record_tool_use` | `tool_use` | #359 Tier 3 |
+| `lint_in_container` | `record_tool_use` | `tool_use` | #359 Tier 3 |
+| `type_check_in_container` | `record_tool_use` | `tool_use` | #359 Tier 3 |
+| `verify_in_container` | `record_tool_use` | `tool_use` | #359 Tier 3 |
+| `package_install` | `record_exec` | `exec` | #361 で追加 |
+| `issue_view` | `record_boundary_crossing`（approved=None）+ `record_exec`（内部で `gh` 呼び出し）| `boundary_crossing` | 読取専用 VCS |
+| `clone_repo` | `record_boundary_crossing`（approved=None）+ `record_exec`（内部の gh clone）| `boundary_crossing` | 読取専用 VCS |
+| `checkpoint` | （内部で `sandbox_exec` の `git add/commit` を経由） | `exec` | — |
+| `checkpoint_list` | （なし） | — | 読取専用 |
+| `checkpoint_restore` | （内部で `sandbox_exec` の `git reset --hard` を経由） | `exec` | — |
+| `publish` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write） |
+| `sandbox_approve` | `record_boundary_crossing`（approved=True） | `boundary_crossing` | トークン解決 |
+| `sandbox_reject` | `record_boundary_crossing`（approved=False） | `boundary_crossing` | #361 で追加 |
+| `sandbox_approval_status` | （なし） | — | 読取専用 |
+| `sandbox_read_journal` | （なし） | — | 読取専用 |
+| `sandbox_trace` | （なし） | — | 読取専用 |
+| `sandbox_list_runs` | （なし） | — | 読取専用 |
+| `sandbox_journal_path` | （なし） | — | 読取専用 |
+| `sandbox_trace_dir` | （なし） | — | 読取専用 |
+| `sandbox_cache_invalidate` | `record_tool_use` | `tool_use` | #359 Tier 4 |
+| `sandbox_cache_stats` | （なし） | — | 読取専用 |
+| `run_test_environment` | `record_test_environment`（status="starting"） | `test_environment` | — |
+| `stop_test_environment` | `record_test_environment`（status="stopped"） | `test_environment` | — |
+| `wait_for_condition` | （なし） | — | ポーリング |
+| `package_install` | `record_exec` | `exec` | #361 で追加 |
+
+テストファイル: `tests/test_journal.py` に対応する単体テストを追加済み（#359 用の
+`TestRecordToolUse` クラス）。新しいツールを追加するときは必ずテストも追加すること。
+
 ---
 
 ## 10. テスト環境クイックパス

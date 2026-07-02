@@ -269,6 +269,37 @@ def record_copy(
     })
 
 
+
+def record_tool_use(
+    container_id: str,
+    tool_name: str,
+    params: dict[str, Any] | None = None,
+) -> None:
+    """Record a structured-tool usage event (read / verify / lint / type).
+
+    Lightweight record for tools that don't run arbitrary shell commands
+    (e.g. ``read_file_range``, ``list_files``, ``search_in_container``,
+    ``lint_in_container``, ``type_check_in_container``,
+    ``verify_in_container``).  Fixes the bypass-rate overcount on the
+    #229 tool-usage dashboard by adding dedicated-tool entries to the
+    journal alongside the ``exec`` entries they replace.
+
+    *params* is an optional dict of tool-specific parameters (file path,
+    search pattern, language, etc.) for audit context.
+    """
+    run_id = get_or_create_run_id(container_id)
+    entry: dict[str, Any] = {
+        "ts": _utcnow_iso(),
+        "run_id": run_id,
+        "container_id": container_id,
+        "operation": "tool_use",
+        "tool_name": tool_name,
+    }
+    if params:
+        entry["params"] = params
+    _append_json(entry)
+
+
 def record_test_environment(
     container_id: str,
     services: list[dict[str, str]],
@@ -699,6 +730,12 @@ def get_tool_usage(
                     if tool_intro and entry.get("ts", "")[:10] >= tool_intro:
                         bypass_count += 1
                         bypass_detail[first_word] = bypass_detail.get(first_word, 0) + 1
+
+        elif op == "tool_use":
+            tool_name = entry.get("tool_name", "")
+            key = tool_name if tool_name else "tool_use:unknown"
+            structured_ops[key] = structured_ops.get(key, 0) + 1
+            total_ops += 1
 
         elif op == "boundary_crossing":
             sub_op = entry.get("sub_operation", "")

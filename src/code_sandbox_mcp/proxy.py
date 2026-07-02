@@ -49,6 +49,7 @@ sandbox trust store -- is handled host-side by
 """
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import os
@@ -99,7 +100,7 @@ _KNOWN_SERVICES = frozenset({FETCH_SERVICE, PUSH_SERVICE})
 #: Environment variable holding a comma-separated owner/repo allowlist (#358).
 ALLOWED_REPOS_ENV = "CODE_SANDBOX_ALLOWED_REPOS"
 
-#: Static fallback bearer token injected into authorized pushes.  The primary
+#: Static fallback push token injected into authorized pushes.  The primary
 #: path is the window-scoped token ``publish`` hands over on ``/auth/allow``
 #: (#356), which needs no sidecar configuration and never outlives its window;
 #: this env var remains for operators who prefer a sidecar-held credential.
@@ -182,6 +183,20 @@ class Decision:
     reason: str
 
 
+def basic_auth_header(token: str) -> str:
+    """Build the ``Authorization`` value GitHub's git endpoint accepts.
+
+    git-over-HTTPS on github.com rejects ``Bearer <token>`` with 401 and
+    requires HTTP Basic with the token as the password (verified 2026-07-03:
+    Bearer -> 401, ``x-access-token:<token>`` Basic -> 200 on
+    ``info/refs?service=git-receive-pack``).  The ``x-access-token``
+    username matches what publish's credential helper uses for the same
+    transport.
+    """
+    credentials = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return f"Basic {credentials}"
+
+
 def block_body(reason: str) -> bytes:
     """Build the plain-text 403 body returned to git for a denied request."""
     return (
@@ -214,18 +229,18 @@ class EgressGuard:
 
         *allowed_repos* is the set of ``owner/repo`` strings that may ever be
         pushed to (matched case-insensitively); anything outside it is denied
-        regardless of windows.  *token*, when given, is the bearer token the
+        regardless of windows.  *token*, when given, is the push token the
         proxy injects into authorized pushes so the container need not hold
         GitHub credentials (#356).
         """
         self._allowed: set[str] = {r.lower() for r in (allowed_repos or ())}
-        #: repo -> (monotonic expiry, window-scoped bearer token or ``None``).
+        #: repo -> (monotonic expiry, window-scoped push token or ``None``).
         #: The token travels with the window (#356): ``publish`` hands it over
         #: on ``/auth/allow`` and it is dropped on revoke/expiry, so the proxy
         #: never holds a credential longer than one authorized push.
         self._windows: dict[str, tuple[float, str | None]] = {}
         self._lock = threading.Lock()
-        #: static fallback bearer token; ``None`` disables it.  A window-scoped
+        #: static fallback push token; ``None`` disables it.  A window-scoped
         #: token, when present, takes precedence.
         self._token = token
 
@@ -245,7 +260,7 @@ class EgressGuard:
         window for a repo outside the allowlist is harmless -- :meth:`decide`
         still denies the push -- so callers need not pre-check membership.
 
-        *token*, when given, is a window-scoped bearer credential injected
+        *token*, when given, is a window-scoped push credential injected
         into the authorized push (#356).  It lives and dies with the window:
         revoke or expiry discards it, so the proxy holds no long-lived token.
         """
@@ -328,7 +343,7 @@ class EgressGuard:
         base = time.monotonic() if now is None else now
         token = self._window_token(repo, base) or self._token
         if token:
-            return {"Authorization": f"Bearer {token}"}
+            return {"Authorization": basic_auth_header(token)}
         return {}
 
     # -- mitmproxy lifecycle: internal control API (#356 / #357) --

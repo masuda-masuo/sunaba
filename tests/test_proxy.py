@@ -26,6 +26,7 @@ from code_sandbox_mcp.proxy import (
     Decision,
     EgressGuard,
     allowed_repos_from_env,
+    basic_auth_header,
     control_bind_from_env,
     git_service_from_request,
     handle_control_request,
@@ -169,6 +170,14 @@ class TestAllowlistFromEnv:
 class TestTokenInjection:
     """Only authorized pushes, and only when a token is held, get credentials."""
 
+    def test_basic_auth_header_format(self) -> None:
+        # GitHub's git endpoint rejects Bearer (401) and requires Basic with
+        # the x-access-token username (verified live 2026-07-03); pin the exact
+        # wire format so a refactor cannot silently regress it.
+        assert basic_auth_header("ghs_secret") == (
+            "Basic eC1hY2Nlc3MtdG9rZW46Z2hzX3NlY3JldA=="
+        )
+
     def test_no_token_injects_nothing(self) -> None:
         guard = EgressGuard({"o/r"})  # no token configured
         guard.open_window("o/r", ttl_seconds=30, now=100.0)
@@ -182,7 +191,7 @@ class TestTokenInjection:
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert d.allow is True
         assert guard.token_headers_for(d, is_push_request=True) == {
-            "Authorization": "Bearer ghs_secret"
+            "Authorization": basic_auth_header("ghs_secret")
         }
 
     def test_denied_push_gets_no_token(self) -> None:
@@ -205,7 +214,7 @@ class TestTokenInjection:
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert d.allow is True
         assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {
-            "Authorization": "Bearer ghs_window"
+            "Authorization": basic_auth_header("ghs_window")
         }
 
     def test_window_token_beats_static_token(self) -> None:
@@ -213,7 +222,7 @@ class TestTokenInjection:
         guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_window")
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {
-            "Authorization": "Bearer ghs_window"
+            "Authorization": basic_auth_header("ghs_window")
         }
 
     def test_no_repo_falls_back_to_static_token(self) -> None:
@@ -221,7 +230,7 @@ class TestTokenInjection:
         guard.open_window("o/r", ttl_seconds=30, now=100.0)
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert guard.token_headers_for(d, is_push_request=True, now=101.0) == {
-            "Authorization": "Bearer ghs_static"
+            "Authorization": basic_auth_header("ghs_static")
         }
 
     def test_expired_window_token_not_injected(self) -> None:
@@ -279,7 +288,7 @@ class TestControlRequestDispatch:
 
     def test_allow_with_token_arms_window_scoped_injection(self) -> None:
         # publish hands the push credential over with the window (#356); the
-        # authorized push must then carry it as a Bearer header.
+        # authorized push must then carry it as the Authorization header.
         guard = EgressGuard({"o/r"})
         res = handle_control_request(
             guard,
@@ -294,7 +303,7 @@ class TestControlRequestDispatch:
         assert "ghs_window" not in json.dumps(res.body)
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {
-            "Authorization": "Bearer ghs_window"
+            "Authorization": basic_auth_header("ghs_window")
         }
 
     def test_allow_with_non_string_token_rejected(self) -> None:

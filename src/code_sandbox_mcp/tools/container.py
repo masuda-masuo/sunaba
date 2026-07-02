@@ -1157,13 +1157,18 @@ def sandbox_initialize(
     # When pr is set, _setup_pr_branch handles its own clone,
     # so skip the Shiori clone copy to avoid redundant clone.
     clone_msg = ""
+    # Ground truth for "can gh authenticate in there": the env actually
+    # built above, not the request flag -- a proxied container gets no
+    # token even with inject_vcs_token=True (#356), so the network clone
+    # must take the anonymous git-clone path (#403 fallout).
+    container_has_token = "GITHUB_TOKEN" in env or "GH_TOKEN" in env
     if clone_repo and pr is None:
         msg, err = _try_clone_into_container(
             container,
             cid,
             clone_repo,
             clone_dest,
-            inject_vcs_token,
+            container_has_token,
         )
         if err is not None:
             clone_msg = f" (clone_repo failed: {err})"
@@ -1186,6 +1191,17 @@ def sandbox_initialize(
         if not repo:
             logger.warning("pr parameter requires repo, got repo=None")
             pr_msg = " (pr setup failed: repo is required when pr is specified)"
+        elif proxied:
+            # PR checkout still requires an authenticated gh in the
+            # container, and the egress proxy deliberately withholds the
+            # token (#356).  Fail with a pointer instead of gh's puzzling
+            # "gh auth login" error; anonymous checkout is tracked in #403.
+            logger.warning("pr=%s requested with egress proxy active (#403)", pr)
+            pr_msg = (
+                " (pr setup failed: the egress proxy withholds the VCS token"
+                " from the container (#356), and PR checkout still requires"
+                " an authenticated gh -- see #403)"
+            )
         else:
             try:
                 pr_msg = " " + _setup_pr_branch(
@@ -1550,13 +1566,16 @@ def run_container_and_exec(
     # When pr is set, _setup_pr_branch handles its own clone,
     # so skip the Shiori clone copy to avoid redundant clone.
     clone_error: str | None = None
+    # Same ground truth as sandbox_initialize: a proxied container holds no
+    # token (#356), so the network clone must go anonymous (#403 fallout).
+    container_has_token = "GITHUB_TOKEN" in env or "GH_TOKEN" in env
     if clone_repo and pr is None:
         _, clone_error = _try_clone_into_container(
             container,
             container_id,
             clone_repo,
             clone_dest,
-            inject_vcs_token,
+            container_has_token,
         )
         if pip_extras is not None and clone_error is None:
             _run_pip_install(
@@ -1575,6 +1594,15 @@ def run_container_and_exec(
         if not repo:
             logger.warning("pr parameter requires repo, got repo=None")
             pr_error = "repo is required when pr is specified"
+        elif proxied:
+            # Same guard as sandbox_initialize: PR checkout needs an
+            # authenticated gh, which a proxied container cannot have (#356).
+            logger.warning("pr=%s requested with egress proxy active (#403)", pr)
+            pr_error = (
+                "the egress proxy withholds the VCS token from the container"
+                " (#356), and PR checkout still requires an authenticated gh"
+                " -- see #403"
+            )
         else:
             try:
                 _setup_pr_branch(

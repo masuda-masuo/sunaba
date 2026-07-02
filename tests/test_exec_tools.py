@@ -142,6 +142,79 @@ class TestSandboxInitialize:
         # The proxy wiring itself still lands in the env.
         assert env.get("HTTPS_PROXY") == "http://egress-proxy:8080"
 
+    @patch("code_sandbox_mcp.tools.container._run_pip_install")
+    @patch("code_sandbox_mcp.tools.container._try_clone_into_container")
+    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_proxied_clone_goes_anonymous(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_docker: MagicMock,
+        mock_proxy_lifecycle: MagicMock,
+        mock_clone: MagicMock,
+        mock_pip: MagicMock,
+    ) -> None:
+        """Proxied init holds no token, so the clone must not pick gh (#403)."""
+        from code_sandbox_mcp.tools.container import CloneResult
+
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_proxy_lifecycle.egress_proxy_enabled.return_value = True
+        mock_proxy_lifecycle.sandbox_proxy_env.return_value = {}
+        mock_proxy_lifecycle.apply_network.side_effect = lambda kwargs, runtime: kwargs
+        mock_clone.return_value = CloneResult("cloned", None)
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
+            sandbox_initialize(
+                image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                inject_vcs_token=True,
+                allow_network=True,
+                clone_repo="owner/repo",
+            )
+
+        # 5th positional arg = authenticated: must reflect the (token-free)
+        # container env, not the inject_vcs_token request flag.
+        assert mock_clone.call_args.args[4] is False
+
+    @patch("code_sandbox_mcp.tools.container._setup_pr_branch")
+    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_proxied_pr_checkout_fails_fast_with_pointer(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_docker: MagicMock,
+        mock_proxy_lifecycle: MagicMock,
+        mock_setup_pr: MagicMock,
+    ) -> None:
+        """pr=N under the proxy cannot work yet; fail with the #403 pointer."""
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_proxy_lifecycle.egress_proxy_enabled.return_value = True
+        mock_proxy_lifecycle.sandbox_proxy_env.return_value = {}
+        mock_proxy_lifecycle.apply_network.side_effect = lambda kwargs, runtime: kwargs
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
+            result = sandbox_initialize(
+                image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                repo="owner/repo",
+                pr=7,
+            )
+
+        assert "#403" in result
+        mock_setup_pr.assert_not_called()
+
     @patch("code_sandbox_mcp.tools.container._docker")
     @patch("code_sandbox_mcp.tools.container._ensure_image")
     @patch("code_sandbox_mcp.tools.container.validate_image_ref")

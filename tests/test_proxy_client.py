@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from code_sandbox_mcp.proxy import AuthControlServer, EgressGuard
+from code_sandbox_mcp.proxy import AuthControlServer, EgressGuard, basic_auth_header
 from code_sandbox_mcp.proxy_client import (
     CONTROL_SECRET_ENV,
     CONTROL_URL_ENV,
@@ -132,7 +132,7 @@ class TestWindowScopedToken:
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
         open_window(REPO, token="ghs_window", config=config)
-        assert _push_headers(guard) == {"Authorization": "Bearer ghs_window"}
+        assert _push_headers(guard) == {"Authorization": basic_auth_header("ghs_window")}
         close_window(REPO, config=config)
         # Revoked window -> credential gone with it.
         assert _push_headers(guard) == {}
@@ -141,7 +141,7 @@ class TestWindowScopedToken:
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
         with authorized_push_window(REPO, token="ghs_window", config=config):
-            assert _push_headers(guard) == {"Authorization": "Bearer ghs_window"}
+            assert _push_headers(guard) == {"Authorization": basic_auth_header("ghs_window")}
         assert _push_headers(guard) == {}
 
     def test_windows_without_token_inject_nothing(

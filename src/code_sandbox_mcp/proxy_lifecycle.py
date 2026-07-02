@@ -210,8 +210,8 @@ def sandbox_proxy_env(runtime: EgressProxyRuntime) -> dict[str, str]:
         "HTTPS_PROXY": proxy,
         "http_proxy": proxy,
         "https_proxy": proxy,
-        "NO_PROXY": "localhost,127.0.0.1",
-        "no_proxy": "localhost,127.0.0.1",
+        "NO_PROXY": "localhost,127.0.0.1,::1",
+        "no_proxy": "localhost,127.0.0.1,::1",
         "SSL_CERT_FILE": _SYSTEM_CA_BUNDLE,
         "REQUESTS_CA_BUNDLE": _SYSTEM_CA_BUNDLE,
         "PIP_CERT": _SYSTEM_CA_BUNDLE,
@@ -255,7 +255,10 @@ def install_ca(container: Any, ca_pem: bytes) -> None:
         info.size = len(ca_pem)
         info.mode = 0o644
         tar.addfile(info, io.BytesIO(ca_pem))
-    container.put_archive(cert_dir, buf.getvalue())
+    # docker-py raises APIError on failure, but the return value is also
+    # specified -- check it too rather than assume (fail closed).
+    if not container.put_archive(cert_dir, buf.getvalue()):
+        raise EgressProxyError(f"put_archive of the proxy CA into {cert_dir} was refused")
 
     exit_code, output = container.exec_run(["update-ca-certificates"], user="root")
     if exit_code == 0:
@@ -335,6 +338,12 @@ def _start_proxy_container(
         environment=proxy_env,
         labels={MANAGED_LABEL: "true"},
         ports={f"{_CONTROL_PORT}/tcp": ("127.0.0.1", _control_host_port(source))},
+        # unless-stopped (not always): it still auto-starts after a daemon
+        # restart; only a manually `docker stop`ped sidecar stays down, which
+        # keeps the operator's off switch meaningful.  A missing sidecar is
+        # fail closed either way -- sandboxes sit on an internal-only network,
+        # so without the proxy they have no egress at all, and the next
+        # ensure_egress_proxy() recreates it.
         restart_policy={"Name": "unless-stopped"},
     )
     network.connect(container, aliases=[PROXY_NETWORK_ALIAS])
@@ -368,6 +377,10 @@ def _recover_secret(container: Any) -> str | None:
     ``docker inspect`` already exposes the container's env to anyone with
     Docker access, so this adds no exposure beyond what starting the sidecar
     with the secret already implies -- and none of it is sandbox-visible.
+
+    Read via ``attrs`` (inspect) rather than ``exec_run(["printenv", ...])``
+    deliberately: inspect works even when the container has no exec-able
+    state, and mirrors how :func:`_published_control_port` recovers the port.
     """
     for item in (container.attrs.get("Config") or {}).get("Env") or []:
         key, _, value = item.partition("=")

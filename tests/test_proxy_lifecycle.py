@@ -42,7 +42,7 @@ def _running_sidecar(secret: str | None) -> MagicMock:
     """Mock of an already-running sidecar container."""
     container = MagicMock()
     container.status = "running"
-    container.id = "f" * 64
+    container.id = "a" * 64
     env = [f"{CONTROL_SECRET_ENV}={secret}"] if secret else []
     container.attrs = {
         "Config": {"Env": env},
@@ -201,7 +201,9 @@ class TestSandboxWiring:
     def test_sandbox_proxy_env(self) -> None:
         env = pl.sandbox_proxy_env(self._runtime())
         assert env["HTTPS_PROXY"] == env["https_proxy"] == "http://egress-proxy:8080"
-        assert env["NO_PROXY"] == "localhost,127.0.0.1"
+        # ::1 included so IPv6-loopback traffic is not misrouted via the proxy
+        # (kept in sync with proxy.py's _LOOPBACK_HOSTS).
+        assert env["NO_PROXY"] == env["no_proxy"] == "localhost,127.0.0.1,::1"
         assert env["SSL_CERT_FILE"] == "/etc/ssl/certs/ca-certificates.crt"
         assert env["NODE_EXTRA_CA_CERTS"] == pl.CA_CERT_PATH_IN_SANDBOX
 
@@ -243,3 +245,10 @@ class TestInstallCA:
         container.exec_run.side_effect = [(1, b"boom"), (1, b"still boom")]
         with pytest.raises(pl.EgressProxyError, match="could not install proxy CA"):
             pl.install_ca(container, CA_PEM)
+
+    def test_raises_when_put_archive_is_refused(self) -> None:
+        container = MagicMock()
+        container.put_archive.return_value = False
+        with pytest.raises(pl.EgressProxyError, match="put_archive"):
+            pl.install_ca(container, CA_PEM)
+        container.exec_run.assert_not_called()

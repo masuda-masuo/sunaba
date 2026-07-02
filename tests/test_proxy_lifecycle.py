@@ -134,6 +134,41 @@ class TestEnsureEgressProxyFresh:
             pl.ensure_egress_proxy(client, env={})
 
 
+class TestCertsVolume:
+    """CA persistence via the named certs volume (#400)."""
+
+    def test_sidecar_mounts_certs_volume(self) -> None:
+        client, _, _ = _fresh_client()
+        pl.ensure_egress_proxy(client, env={})
+        run_kwargs = client.containers.run.call_args.kwargs
+        assert run_kwargs["volumes"] == {
+            pl.CERTS_VOLUME_NAME: {"bind": "/certs", "mode": "rw"}
+        }
+
+    def test_missing_volume_created_with_managed_label(self) -> None:
+        client, _, _ = _fresh_client()
+        client.volumes.get.side_effect = docker.errors.NotFound("no volume")
+        pl.ensure_egress_proxy(client, env={})
+        client.volumes.create.assert_called_once_with(
+            pl.CERTS_VOLUME_NAME, labels={MANAGED_LABEL: "true"}
+        )
+
+    def test_existing_volume_reused(self) -> None:
+        client, _, _ = _fresh_client()
+        pl.ensure_egress_proxy(client, env={})
+        client.volumes.get.assert_called_once_with(pl.CERTS_VOLUME_NAME)
+        client.volumes.create.assert_not_called()
+
+    def test_reused_sidecar_does_not_touch_volume(self) -> None:
+        client, _, _ = _fresh_client()
+        client.containers.get.side_effect = None
+        client.containers.get.return_value = _running_sidecar("s3cret")
+        pl.ensure_egress_proxy(client, env={})
+        client.containers.run.assert_not_called()
+        client.volumes.get.assert_not_called()
+        client.volumes.create.assert_not_called()
+
+
 class TestEnsureEgressProxyReuse:
     """Idempotency: a running sidecar is reused, a dead one replaced."""
 

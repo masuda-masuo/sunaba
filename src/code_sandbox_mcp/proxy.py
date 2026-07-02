@@ -99,8 +99,11 @@ _KNOWN_SERVICES = frozenset({FETCH_SERVICE, PUSH_SERVICE})
 #: Environment variable holding a comma-separated owner/repo allowlist (#358).
 ALLOWED_REPOS_ENV = "CODE_SANDBOX_ALLOWED_REPOS"
 
-#: Bearer token the proxy injects into authorized pushes (#356); once #355/#358
-#: land the sandbox container no longer needs to hold it.  Unset = no injection.
+#: Static fallback bearer token injected into authorized pushes.  The primary
+#: path is the window-scoped token ``publish`` hands over on ``/auth/allow``
+#: (#356), which needs no sidecar configuration and never outlives its window;
+#: this env var remains for operators who prefer a sidecar-held credential.
+#: Unset = no static injection.
 PROXY_TOKEN_ENV = "CODE_SANDBOX_PROXY_TOKEN"
 
 #: TCP port for the internal authorization control API; unset = decision-only
@@ -216,35 +219,76 @@ class EgressGuard:
         GitHub credentials (#356).
         """
         self._allowed: set[str] = {r.lower() for r in (allowed_repos or ())}
-        #: repo -> monotonic expiry timestamp of an open push window.
-        self._windows: dict[str, float] = {}
+        #: repo -> (monotonic expiry, window-scoped bearer token or ``None``).
+        #: The token travels with the window (#356): ``publish`` hands it over
+        #: on ``/auth/allow`` and it is dropped on revoke/expiry, so the proxy
+        #: never holds a credential longer than one authorized push.
+        self._windows: dict[str, tuple[float, str | None]] = {}
         self._lock = threading.Lock()
-        #: bearer token injected into authorized pushes; ``None`` disables it.
+        #: static fallback bearer token; ``None`` disables it.  A window-scoped
+        #: token, when present, takes precedence.
         self._token = token
 
     # -- authorization window control (to be driven by publish; #356 / #357) --
 
-    def open_window(self, repo: str, ttl_seconds: float, now: float | None = None) -> None:
+    def open_window(
+        self,
+        repo: str,
+        ttl_seconds: float,
+        now: float | None = None,
+        token: str | None = None,
+    ) -> None:
         """Permit push to *repo* for the next *ttl_seconds* (both git requests).
 
         *now* defaults to ``time.monotonic()``; pass it explicitly to keep the
         expiry deterministic in tests, mirroring :meth:`decide`.  Opening a
         window for a repo outside the allowlist is harmless -- :meth:`decide`
         still denies the push -- so callers need not pre-check membership.
+
+        *token*, when given, is a window-scoped bearer credential injected
+        into the authorized push (#356).  It lives and dies with the window:
+        revoke or expiry discards it, so the proxy holds no long-lived token.
         """
         base = time.monotonic() if now is None else now
         with self._lock:
-            self._windows[repo.lower()] = base + ttl_seconds
+            self._windows[repo.lower()] = (base + ttl_seconds, token)
 
     def close_window(self, repo: str) -> None:
-        """Revoke any open push window for *repo*."""
+        """Revoke any open push window for *repo* (dropping its token, if any)."""
         with self._lock:
             self._windows.pop(repo.lower(), None)
 
     def _window_open(self, repo: str, now: float) -> bool:
         with self._lock:
-            expiry = self._windows.get(repo)
-        return expiry is not None and now < expiry
+            entry = self._windows.get(repo)
+            if entry is None:
+                return False
+            expiry, _token = entry
+            if now >= expiry:
+                # Scrub eagerly: a window-scoped token must not sit in memory
+                # past its authorization (#356).
+                self._windows.pop(repo, None)
+                return False
+        return True
+
+    def _window_token(self, repo: str | None, now: float) -> str | None:
+        """Return the unexpired window-scoped token for *repo*, or ``None``.
+
+        Scrubs an expired entry just like :meth:`_window_open` (PR #402
+        review): callers such as :meth:`token_headers_for` are usable on
+        their own, so neither read path may leave an expired token behind.
+        """
+        if repo is None:
+            return None
+        with self._lock:
+            entry = self._windows.get(repo.lower())
+            if entry is None:
+                return None
+            expiry, token = entry
+            if now >= expiry:
+                self._windows.pop(repo.lower(), None)
+                return None
+        return token
 
     # -- decision core (pure) --
 
@@ -264,17 +308,27 @@ class EgressGuard:
     # -- token injection (pure) --
 
     def token_headers_for(
-        self, decision: Decision, is_push_request: bool
+        self,
+        decision: Decision,
+        is_push_request: bool,
+        repo: str | None = None,
+        now: float | None = None,
     ) -> dict[str, str]:
         """Return the ``Authorization`` header to add to an authorized push.
 
         Empty unless the request is an *allowed* push **and** a token is held:
         only pushes the policy permits get credentials, and with no token (the
-        inert default) nothing is injected.  Pure, so the injection policy is
-        unit-testable without mitmproxy.
+        inert default) nothing is injected.  A window-scoped token for *repo*
+        (handed over on ``/auth/allow``, #356) takes precedence over the
+        static ``CODE_SANDBOX_PROXY_TOKEN`` fallback.  Pure, so the injection
+        policy is unit-testable without mitmproxy.
         """
-        if decision.allow and is_push_request and self._token:
-            return {"Authorization": f"Bearer {self._token}"}
+        if not (decision.allow and is_push_request):
+            return {}
+        base = time.monotonic() if now is None else now
+        token = self._window_token(repo, base) or self._token
+        if token:
+            return {"Authorization": f"Bearer {token}"}
         return {}
 
     # -- mitmproxy lifecycle: internal control API (#356 / #357) --
@@ -324,7 +378,7 @@ class EgressGuard:
             )
             return
         for name, value in self.token_headers_for(
-            decision, is_push(path, query_service)
+            decision, is_push(path, query_service), repo=repo_from_path(path)
         ).items():
             flow.request.headers[name] = value
 
@@ -365,7 +419,12 @@ def handle_control_request(
         # bool is an int subclass; reject it so True/False is not read as a TTL.
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl <= 0:
             return ControlResult(400, {"error": "'ttl_seconds' must be a positive number"})
-        guard.open_window(repo, float(ttl), now=now)
+        # Optional window-scoped push credential (#356).  Never echoed back:
+        # the response must stay safe to log.
+        window_token = payload.get("token")
+        if window_token is not None and not isinstance(window_token, str):
+            return ControlResult(400, {"error": "'token' must be a string when present"})
+        guard.open_window(repo, float(ttl), now=now, token=window_token or None)
         return ControlResult(200, {"ok": True, "repo": repo.lower(), "ttl_seconds": float(ttl)})
     if path == "/auth/revoke":
         guard.close_window(repo)

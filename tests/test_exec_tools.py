@@ -60,6 +60,20 @@ class TestContainerEnv:
             env = _container_env(inject_vcs_token=True)
             assert env == {}
 
+    def test_egress_proxied_suppresses_token_injection(self) -> None:
+        """A proxied container must not receive a VCS token in its env (#356)."""
+        with patch.dict(
+            os.environ,
+            {"GITHUB_TOKEN": "ghp_fake", "GH_TOKEN": "gho_fake", "GITHUB_TOKEN_SOURCE": "s"},
+            clear=True,
+        ):
+            env = _container_env(inject_vcs_token=True, egress_proxied=True)
+            assert env == {}
+
+    def test_egress_proxied_without_inject_is_still_empty(self) -> None:
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
+            assert _container_env(inject_vcs_token=False, egress_proxied=True) == {}
+
 
 class TestSandboxInitialize:
     """Tests for sandbox_initialize."""
@@ -90,6 +104,43 @@ class TestSandboxInitialize:
         # Verify environment was passed with the token
         call_kwargs = mock_client.containers.run.call_args[1]
         assert call_kwargs["environment"].get("GITHUB_TOKEN") == "ghp_fake"
+
+    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_proxied_container_env_carries_no_vcs_token(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_docker: MagicMock,
+        mock_proxy_lifecycle: MagicMock,
+    ) -> None:
+        """With the egress proxy on, inject_vcs_token must not reach the env (#356)."""
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_proxy_lifecycle.egress_proxy_enabled.return_value = True
+        mock_proxy_lifecycle.sandbox_proxy_env.return_value = {
+            "HTTPS_PROXY": "http://egress-proxy:8080"
+        }
+        mock_proxy_lifecycle.apply_network.side_effect = lambda kwargs, runtime: kwargs
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
+            result = sandbox_initialize(
+                image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                inject_vcs_token=True,
+                allow_network=True,
+            )
+
+        assert result == "abc123def456"
+        env = mock_client.containers.run.call_args[1]["environment"]
+        assert "GITHUB_TOKEN" not in env
+        assert "GH_TOKEN" not in env
+        # The proxy wiring itself still lands in the env.
+        assert env.get("HTTPS_PROXY") == "http://egress-proxy:8080"
 
     @patch("code_sandbox_mcp.tools.container._docker")
     @patch("code_sandbox_mcp.tools.container._ensure_image")

@@ -542,6 +542,131 @@ class TestPublishLazyTokenInjection:
         }
 
 
+class TestPublishProxiedCredentialRouting:
+    """With the egress proxy configured the credential goes to the proxy (#356).
+
+    The push exec and the API-push fallback must stay token-free (the proxy
+    injects ``Authorization`` into the authorized push itself, and a token in
+    the fallback would let the Objects API bypass the proxy gate); only the
+    gh-pr-create exec still carries it, because api.github.com writes are not
+    proxy-gated yet (#360).
+    """
+
+    @staticmethod
+    def _env_of(call) -> dict | None:
+        return call.kwargs.get("environment")
+
+    @patch("code_sandbox_mcp.tools.vcs.authorized_push_window")
+    @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
+    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_push_exec_token_free_and_window_carries_credential(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+        mock_proxied: MagicMock,
+        mock_window: MagicMock,
+    ) -> None:
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "publish",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+        mock_resolve.return_value = "ghs_lazytoken"
+
+        container = _make_container_mock(
+            TestPublishLazyTokenInjection._simple_push_returns()
+        )
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=False,
+            token="tok_good",
+        ))
+        assert result["status"] == "pushed"
+
+        # The credential rode the authorization window to the proxy...
+        mock_window.assert_called_once_with("owner/repo", token="ghs_lazytoken")
+        # ...and no exec in the container ever saw it.
+        calls = container.exec_run.call_args_list
+        assert calls  # sanity
+        assert all(self._env_of(c) is None for c in calls)
+
+    @patch("code_sandbox_mcp.tools.vcs.authorized_push_window")
+    @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
+    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_pr_create_exec_still_carries_token(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+        mock_proxied: MagicMock,
+        mock_window: MagicMock,
+    ) -> None:
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "publish",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+        mock_resolve.return_value = "ghs_lazytoken"
+
+        returns = TestPublishLazyTokenInjection._simple_push_returns()
+        returns.append((0, b"https://github.com/owner/repo/pull/9", b""))  # gh pr create
+        container = _make_container_mock(returns)
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=False,
+            token="tok_good",
+            create_pr=True,
+            pr_title="Fix",
+        ))
+        assert result["status"] == "pushed"
+        assert result["pr_url"] == "https://github.com/owner/repo/pull/9"
+
+        calls = container.exec_run.call_args_list
+        pr_calls = [c for c in calls if "gh pr create" in c.args[0][2]]
+        assert len(pr_calls) == 1
+        # api.github.com writes are not proxy-gated yet (#360), so the PR
+        # exec keeps the ephemeral credential.
+        assert self._env_of(pr_calls[0]) == {
+            "GITHUB_TOKEN": "ghs_lazytoken",
+            "GH_TOKEN": "ghs_lazytoken",
+        }
+        # But the push exec stayed token-free.
+        push_calls = [c for c in calls if "push origin" in c.args[0][2]]
+        assert len(push_calls) == 1
+        assert self._env_of(push_calls[0]) is None
+
+
 class TestResolvePushToken:
     """Unit tests for the host-side token resolver (Issue #347)."""
 

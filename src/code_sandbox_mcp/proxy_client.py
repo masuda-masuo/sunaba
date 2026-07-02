@@ -96,13 +96,28 @@ def _post(config: ProxyControlConfig, path: str, payload: dict[str, object]) -> 
         raise ProxyAuthError(f"control API {path} returned HTTP {status}")
 
 
+def proxy_configured(env: dict[str, str] | None = None) -> bool:
+    """Return ``True`` when the egress-proxy control API is configured.
+
+    ``publish`` uses this to decide whether the push credential should stay
+    host-side (handed to the proxy per window, #356) instead of entering the
+    container's exec environment.
+    """
+    return ProxyControlConfig.from_env(env) is not None
+
+
 def open_window(
     repo: str,
     ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
     *,
+    token: str | None = None,
     config: ProxyControlConfig | None = None,
 ) -> None:
     """Open a push-authorization window for *repo* (no-op when the proxy is unset).
+
+    *token*, when given, is handed to the proxy as the window-scoped push
+    credential (#356): the proxy injects it into the authorized push and
+    discards it on revoke/expiry, so the sandbox container never holds it.
 
     Pass *config* explicitly in tests; in production it is resolved from the
     environment, and a missing configuration makes this a no-op.
@@ -110,7 +125,10 @@ def open_window(
     cfg = config or ProxyControlConfig.from_env()
     if cfg is None:
         return
-    _post(cfg, _ALLOW_PATH, {"repo": repo, "ttl_seconds": ttl_seconds})
+    payload: dict[str, object] = {"repo": repo, "ttl_seconds": ttl_seconds}
+    if token:
+        payload["token"] = token
+    _post(cfg, _ALLOW_PATH, payload)
 
 
 def close_window(repo: str, *, config: ProxyControlConfig | None = None) -> None:
@@ -126,21 +144,24 @@ def authorized_push_window(
     repo: str,
     ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
     *,
+    token: str | None = None,
     config: ProxyControlConfig | None = None,
 ) -> Iterator[None]:
     """Open a push window for *repo*, then always revoke it on exit.
 
     A no-op when the proxy is unconfigured.  When configured, an ``open`` that
-    fails raises :class:`ProxyAuthError` (fail closed).  The ``close`` in the
-    ``finally`` is best-effort: a revoke failure is swallowed because the
-    window's TTL guarantees it lapses anyway, and the push has already run -- so
-    a proxy hiccup on teardown must not mask the push's real outcome.
+    fails raises :class:`ProxyAuthError` (fail closed).  *token* is forwarded
+    to :func:`open_window` as the window-scoped push credential (#356).  The
+    ``close`` in the ``finally`` is best-effort: a revoke failure is swallowed
+    because the window's TTL guarantees it lapses anyway, and the push has
+    already run -- so a proxy hiccup on teardown must not mask the push's real
+    outcome.
     """
     cfg = config or ProxyControlConfig.from_env()
     if cfg is None:
         yield
         return
-    open_window(repo, ttl_seconds, config=cfg)
+    open_window(repo, ttl_seconds, token=token, config=cfg)
     try:
         yield
     finally:

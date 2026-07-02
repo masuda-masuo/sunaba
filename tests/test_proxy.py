@@ -231,6 +231,9 @@ class TestTokenInjection:
         guard.open_window("o/r", ttl_seconds=5.0, now=100.0, token="ghs_window")
         d = Decision(True, "fabricated allow")
         assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=106.0) == {}
+        # This read path bypasses decide()/_window_open(), so it must scrub
+        # the expired entry itself (PR #402 review).
+        assert guard._windows == {}
 
     def test_closed_window_drops_token(self) -> None:
         guard = EgressGuard({"o/r"})

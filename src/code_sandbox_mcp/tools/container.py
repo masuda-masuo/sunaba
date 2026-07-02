@@ -157,7 +157,10 @@ def _container_env(
     *inject_vcs_token* set (#356): the container's egress runs through the
     proxy sidecar, ``publish`` hands the credential to the proxy per push
     window, and a token in the container env would let a raw ``git push``
-    from ``sandbox_exec`` bypass that gate.
+    from ``sandbox_exec`` bypass that gate.  *egress_proxied* suppresses
+    **only** this token injection -- any non-VCS env vars this function may
+    grow later must be built outside the branch below so proxied containers
+    still receive them.
     """
     env: dict[str, str] = {}
     if inject_vcs_token and egress_proxied:
@@ -165,8 +168,7 @@ def _container_env(
             "egress proxy active: VCS token kept out of container env (#356); "
             "publish supplies it to the proxy per push window"
         )
-        return env
-    if inject_vcs_token:
+    elif inject_vcs_token:
         # Prefer a freshly minted token from the keystore broker (Issue #232):
         # GITHUB_TOKEN_COMMAND or the pinned mcp-token CLI mint a short-lived
         # token per container start. Falls back to the static host env vars

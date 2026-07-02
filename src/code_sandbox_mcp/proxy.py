@@ -272,15 +272,23 @@ class EgressGuard:
         return True
 
     def _window_token(self, repo: str | None, now: float) -> str | None:
-        """Return the unexpired window-scoped token for *repo*, or ``None``."""
+        """Return the unexpired window-scoped token for *repo*, or ``None``.
+
+        Scrubs an expired entry just like :meth:`_window_open` (PR #402
+        review): callers such as :meth:`token_headers_for` are usable on
+        their own, so neither read path may leave an expired token behind.
+        """
         if repo is None:
             return None
         with self._lock:
             entry = self._windows.get(repo.lower())
-        if entry is None:
-            return None
-        expiry, token = entry
-        return token if now < expiry else None
+            if entry is None:
+                return None
+            expiry, token = entry
+            if now >= expiry:
+                self._windows.pop(repo.lower(), None)
+                return None
+        return token
 
     # -- decision core (pure) --
 

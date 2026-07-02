@@ -270,6 +270,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "(Issue #303). Set to 0 to disable prewarming (default: 3600)."
         ),
     )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level (default: INFO).",
+    )
     return parser
 
 
@@ -340,7 +347,8 @@ def main() -> None:
     ``--default-image`` for overriding the default Docker image,
     ``--transport`` to select the MCP transport protocol,
     ``--dashboard-port`` for the observability dashboard,
-    and ``--webhook-url`` for push notifications.
+    ``--webhook-url`` for push notifications,
+    and ``--log-level`` to control logging verbosity (default: INFO).
 
     HTTP-based transports (``sse``, ``http``, ``streamable-http``)
     are not subject to the ~60-second client timeout that affects
@@ -350,6 +358,12 @@ def main() -> None:
     """
     parser = _build_arg_parser()
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
 
     from dataclasses import replace
 

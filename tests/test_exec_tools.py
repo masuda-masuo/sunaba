@@ -543,6 +543,20 @@ class TestServerArgs:
         assert args.host == "127.0.0.1"
         assert args.port == 8765
 
+    def test_log_level_default(self) -> None:
+        """Default log level should be INFO."""
+        from code_sandbox_mcp.server import _build_arg_parser
+        parser = _build_arg_parser()
+        args = parser.parse_args([])
+        assert args.log_level == "INFO"
+
+    def test_log_level_debug(self) -> None:
+        """--log-level DEBUG should be parsed correctly."""
+        from code_sandbox_mcp.server import _build_arg_parser
+        parser = _build_arg_parser()
+        args = parser.parse_args(["--log-level", "DEBUG"])
+        assert args.log_level == "DEBUG"
+
 
 class TestContainerEnvBroker:
     """_container_env broker integration (Issue #232): COMMAND-first, static fallback."""

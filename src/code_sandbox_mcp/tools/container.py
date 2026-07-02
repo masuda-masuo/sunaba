@@ -758,10 +758,10 @@ def _setup_pr_branch(
         cid,
     )
 
-    # Step 4: Install dev dependencies (non-fatal). Prefer uv (preinstalled on
-    # stock sandbox images, markedly faster than pip) with a pip fallback for
-    # custom images; network is always available here since
-    # sandbox_initialize forces allow_network=True whenever pr is set.
+    # Step 4: Install dev dependencies (non-fatal) via plain pip (see
+    # _editable_install_cmd for why uv isn't used); network is always
+    # available here since sandbox_initialize forces allow_network=True
+    # whenever pr is set.
     if pip_extras is not None:
         install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}')}"
         exit_code, output = container.exec_run(

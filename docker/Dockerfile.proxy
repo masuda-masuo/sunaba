@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+# docker/Dockerfile.proxy
+#
+# Code Sandbox MCP — egress プロキシ sidecar イメージ（Issue #358 / Epic #353）
+# 公開タグ: ghcr.io/<owner>/code-sandbox-mcp/proxy
+# 用途: sandbox コンテナの egress を TLS 終端 MITM で受け、git push
+#       (git-receive-pack) をネットワーク層で遮断する sidecar。
+# ビルド: docker build -f docker/Dockerfile.proxy -t code-sandbox-mcp/proxy .
+#
+# 設計: docs/design.md / designegressproxygitcontrol.md、src/code_sandbox_mcp/proxy.py
+#   proxy.py（mitmproxy addon 本体）と proxy_entrypoint.py（mitmdump 起動）を同梱し、
+#   allowlist・注入トークン・認可制御ポート/シークレットはすべて環境変数で設定する
+#   （proxy.py の ALLOWED_REPOS_ENV / PROXY_TOKEN_ENV / CONTROL_PORT_ENV /
+#   CONTROL_SECRET_ENV を参照）。コンテナのライフサイクル統合・専用ネットワーク・
+#   CA 配線は #358 の後続 / #355 で行う。ここではイメージ本体のみ。
+#
+# 運用ではイメージはダイジェスト固定で参照すること (image@sha256:...)。
+
+# base イメージと同じ Python ベースをダイジェスト固定で共有する。
+FROM python:3.12-slim-bookworm@sha256:93ab4b7fa528b25124c97bcc755415e60eb671a86b4dbe0328df2fe2d1c1193d
+
+# ── mitmproxy（TLS 終端プロキシ本体） ───────────────────────────────────
+# PoC(#354) で git clone/push の識別に使用。バージョンは固定して再現性を担保。
+RUN pip install --no-cache-dir mitmproxy==12.2.3
+
+# ── 非 root ユーザ（proxy 自身も最小権限で走らせる） ───────────────────
+RUN groupadd -r proxy && useradd -r -g proxy -m -d /home/proxy proxy
+
+# ── addon 本体と起動スクリプトを同梱 ───────────────────────────────────
+# proxy.py は stdlib + 遅延 import の mitmproxy のみに依存する単体モジュール、
+# proxy_entrypoint.py も stdlib のみ。パッケージ全体を入れずにこの 2 ファイルで足りる。
+COPY src/code_sandbox_mcp/proxy.py /app/proxy.py
+COPY src/code_sandbox_mcp/proxy_entrypoint.py /app/proxy_entrypoint.py
+
+# ── mitmproxy の CA/設定ディレクトリ（proxy ユーザが書ける固定パス） ──
+# 初回起動時にここへ CA を生成する。#358 後続でこの mitmproxy-ca-cert.pem を
+# sandbox コンテナの信頼ストアへ配る。
+RUN mkdir -p /certs && chown proxy:proxy /certs
+ENV CODE_SANDBOX_PROXY_CONFDIR=/certs
+
+USER proxy
+WORKDIR /app
+
+# 既定の listen ポート（HTTPS_PROXY=http://proxy:8080 と対応）。
+EXPOSE 8080
+
+# ── ヘルスチェック（プロキシポートが listen しているか） ───────────────
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD python -c "import socket,sys; s=socket.socket(); s.settimeout(3); sys.exit(s.connect_ex(('127.0.0.1', 8080)))" || exit 1
+
+ENTRYPOINT ["python", "/app/proxy_entrypoint.py"]

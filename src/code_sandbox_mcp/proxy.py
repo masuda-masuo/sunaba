@@ -42,17 +42,37 @@ env now that the proxy can inject it (#356 remainder), gating non-push write
 APIs on
 ``api.github.com`` -- which this addon still passes through (#360), network
 isolation so the proxy is the only egress and SSH is blocked (#355), and
-sidecar image packaging + container CA wiring (#358).
+wiring the sidecar into the container lifecycle -- starting it, joining the
+sandbox to a private network, and installing this proxy's CA into the sandbox
+trust store (#358 follow-up).  The sidecar *image* that runs this addon is
+built by ``docker/Dockerfile.proxy`` via ``proxy_entrypoint.py``.
 """
 from __future__ import annotations
 
 import hmac
 import json
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# mitmproxy's script loader (``mitmdump -s proxy.py``) execs this file as a
+# module but does not register it in ``sys.modules`` under its ``__name__``.
+# Under ``from __future__ import annotations`` every dataclass field annotation
+# is a string, and ``dataclasses`` resolves it via
+# ``sys.modules[cls.__module__].__dict__`` -- which is ``None`` here, crashing
+# the first ``@dataclass`` below and preventing the addon from loading at all
+# (found by the #358 sidecar smoke test).  Registering ourselves makes that
+# lookup find a real module; on normal package import the entry already exists,
+# so this is a no-op.
+if sys.modules.get(__name__) is None:  # pragma: no cover - only under mitmdump
+    import types as _types
+
+    _self_module = _types.ModuleType(__name__)
+    _self_module.__dict__.update(globals())
+    sys.modules[__name__] = _self_module
 
 try:  # pragma: no cover - only importable inside the proxy sidecar image
     from mitmproxy import http

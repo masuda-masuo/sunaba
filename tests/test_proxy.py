@@ -365,3 +365,35 @@ class TestControlServerOverHttp:
             assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now).allow is False
         finally:
             server.stop()
+
+
+class TestLoadsUnderMitmdump:
+    """Regression: the addon must import when its module is not in sys.modules.
+
+    ``mitmdump -s proxy.py`` execs the file as a module without registering it
+    in ``sys.modules`` under its ``__name__``.  Under ``from __future__ import
+    annotations`` that used to crash the first ``@dataclass`` (dataclasses
+    resolves string field annotations via ``sys.modules[cls.__module__]``,
+    which was ``None``), so the sidecar addon failed to load at all -- caught by
+    the #358 smoke test.  This reproduces that load path.
+    """
+
+    def test_exec_module_when_absent_from_sys_modules(self) -> None:
+        import importlib.util
+        import sys
+
+        from code_sandbox_mcp import proxy as installed_proxy
+
+        name = "cs_proxy_mitmdump_probe"
+        spec = importlib.util.spec_from_file_location(name, installed_proxy.__file__)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        # Mimic mitmproxy's loader: do NOT pre-register the module.
+        assert name not in sys.modules
+        try:
+            spec.loader.exec_module(module)  # must not raise
+            # The dataclasses that used to crash are present and usable.
+            assert module.Decision(True, "ok").allow is True
+            assert module.EgressGuard(allowed_repos={"o/r"}) is not None
+        finally:
+            sys.modules.pop(name, None)

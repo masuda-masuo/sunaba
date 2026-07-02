@@ -510,6 +510,10 @@ def verify_in_container(
         json_part, raw_tail = split_pytest_output(stdout_text)
 
         if not json_part:
+            if ("No module named pytest" in raw_tail
+                    or "No module named pytest" in stderr_text):
+                return {"status": "not_available", "error": "pytest not installed",
+                        "raw_output": raw_tail}
             return {"status": "no_tests", "error": "no test output produced", "raw_output": raw_tail}
 
         try:

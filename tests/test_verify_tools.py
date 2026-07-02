@@ -877,3 +877,88 @@ class TestVerifyInContainer:
         assert "collection error" in result["gate_fail_reasons"][0]
         assert result["tests"]["filtered"]["status"] == "collection_error"
 
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_no_pytest_module_gate_fail(self, mock_docker: MagicMock) -> None:
+        """pytest not installed → not_available, gate fail (issue #381)."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        # Exit code 1 + "No module named pytest" in raw output
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (1, (
+                b"---PYTEST-RAW---\n"
+                b"python3: No module named pytest\n",
+                b"",
+            )),
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+            ))
+
+        assert result["gate_passed"] is False
+        assert result["tests"]["full"]["status"] == "not_available"
+        assert "pytest not available" in result["gate_fail_reasons"][0]
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_no_pytest_module_with_filter_gate_fail(self, mock_docker: MagicMock) -> None:
+        """pytest not installed + filter → not_available, gate fail (issue #381)."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        # Exit code 1 + "No module named pytest" in raw output
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (1, (
+                b"---PYTEST-RAW---\n"
+                b"python3: No module named pytest\n",
+                b"",
+            )),
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+                test_filter="TestFoo",
+            ))
+
+        assert result["gate_passed"] is False
+        assert result["tests"]["filtered"]["status"] == "not_available"

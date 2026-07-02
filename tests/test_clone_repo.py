@@ -513,21 +513,33 @@ class TestCloneWarnsWithoutToken:
 class TestEditableInstallCmd:
     """Tests for _editable_install_cmd."""
 
-    def test_uses_plain_pip(self) -> None:
+    def test_runtime_installer_selection(self) -> None:
+        # #390: uv when $VIRTUAL_ENV is set (venv-baked images, PR #388),
+        # plain pip otherwise (venv-less images, the #380 constraint).
         from code_sandbox_mcp.tools.container import _editable_install_cmd
 
         cmd = _editable_install_cmd('".[dev]"')
 
-        assert cmd == "pip install -e '\".[dev]\"' -q"
+        assert cmd.startswith('if [ -n "$VIRTUAL_ENV" ]')
+        assert "command -v uv" in cmd
+        assert "then uv pip install -q -e" in cmd
 
-    def test_no_uv_and_no_temp_venv(self) -> None:
-        # Regression for #383: the uv path installed into a mktemp venv and
-        # deleted it right away, discarding the install.
+    def test_pip_fallback_branch(self) -> None:
+        # The pip branch must stay byte-identical to the pre-#390 command so
+        # venv-less images keep the user-site fallback behaviour.
         from code_sandbox_mcp.tools.container import _editable_install_cmd
 
         cmd = _editable_install_cmd('".[dev]"')
 
-        assert "uv " not in cmd
+        assert "else pip install -e '\".[dev]\"' -q; fi" in cmd
+
+    def test_no_temp_venv(self) -> None:
+        # Regression for #383: the former uv path installed into a mktemp
+        # venv and deleted it right away, discarding the install.
+        from code_sandbox_mcp.tools.container import _editable_install_cmd
+
+        cmd = _editable_install_cmd('".[dev]"')
+
         assert "mktemp" not in cmd
         assert "rm -rf" not in cmd
 

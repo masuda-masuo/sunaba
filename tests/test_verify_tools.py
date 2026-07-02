@@ -674,3 +674,206 @@ class TestVerifyInContainer:
         _args, kwargs = mock_gate.call_args
         assert kwargs["gate_on_lint"] is False
         assert kwargs["gate_on_type"] is True
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_collection_error_ec2_gate_fail(self, mock_docker: MagicMock) -> None:
+        """ec=2 (collection error) → gate_passed=false, raw_output in reasons."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (2, (b"---PYTEST-RAW---\nImportError: No module named 'foo'\n", b"")),
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+            ))
+
+        assert result["gate_passed"] is False
+        assert result["tests"]["full"]["status"] == "collection_error"
+        assert "collection error" in result["gate_fail_reasons"][0]
+        assert "ImportError" in result["gate_fail_reasons"][0]
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_no_tests_with_filter_gate_fail(self, mock_docker: MagicMock) -> None:
+        """has_filter + no_tests → gate fail (explicit filter mis-specified)."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (5, (b"collected 0 items\n", b"")),
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+                test_filter="NonExistentTest",
+            ))
+
+        assert result["gate_passed"] is False
+        assert result["partial_test_run"] is True
+        assert "no_tests" in result["gate_fail_reasons"][0]
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_no_tests_without_filter_gate_pass(self, mock_docker: MagicMock) -> None:
+        """no filter + no_tests → gate pass (project without tests is ok)."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (5, (b"collected 0 items\n", b"")),
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+            ))
+
+        assert result["gate_passed"] is True
+        assert result["gate_pass_reason"] == "no tests found — gate passes"
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_collected_metadata_in_result(self, mock_docker: MagicMock) -> None:
+        """Result dict includes collected / collection_errors from pytest summary."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        json_report = json.dumps({
+            "summary": {
+                "collected": 10, "total": 10,
+                "passed": 10, "failed": 0, "errors": 0,
+            },
+            "duration": 1.5,
+            "tests": [],
+        })
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (0, (f"{json_report}\n---PYTEST-RAW---\n".encode(), b"")),
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+            ))
+
+        full = result["tests"]["full"]
+        assert full["collected"] == 10
+        assert full["collection_errors"] == 0
+        assert result["gate_passed"] is True
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_filtered_collection_error_partial_run(self, mock_docker: MagicMock) -> None:
+        """Filtered tests collection error → partial_test_run, gate fail."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (2, (b"---PYTEST-RAW---\nImportError: No module named 'bar'\n", b"")),
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+                test_filter="TestFoo",
+            ))
+
+        assert result["gate_passed"] is False
+        assert result["partial_test_run"] is True
+        assert "collection error" in result["gate_fail_reasons"][0]
+        assert result["tests"]["filtered"]["status"] == "collection_error"
+

@@ -1365,6 +1365,13 @@ def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
 
     if ec == 127:
         return _envelope_not_available("pytest", "python3 not found in container")
+    if ec == 2:
+        stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+        _, raw_tail = split_pytest_output(stdout_text)
+        detail = "test collection failed"
+        if raw_tail:
+            detail += f"\n{raw_tail}"
+        return _envelope_error("pytest", detail, ec)
     if ec == 5:
         return _envelope_skipped("pytest", "no tests found")
     if ec not in (0, 1):

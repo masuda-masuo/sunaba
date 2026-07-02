@@ -377,3 +377,76 @@ class TestSandboxRejectRecording:
             result = json.loads(sandbox_reject("deadbeefdeadbeef"))
             assert result["status"] == "error"
             assert read_journal() == []
+
+
+class TestRecordToolUse:
+    """Tests for record_tool_use (Issue #359 tier 3+4)."""
+
+    def test_record_tool_use_creates_entry(self, tmp_path: Path) -> None:
+        from code_sandbox_mcp.journal import record_tool_use
+
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            record_tool_use(
+                "abc123def456",
+                "read_file_range",
+                {"file_path": "/tmp/repo/repo/foo.py"},
+            )
+
+        entries = _read_log(log_path)
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["operation"] == "tool_use"
+        assert e["tool_name"] == "read_file_range"
+        assert e["container_id"] == "abc123def456"
+        assert e["params"] == {"file_path": "/tmp/repo/repo/foo.py"}
+
+    def test_record_tool_use_without_params(self, tmp_path: Path) -> None:
+        from code_sandbox_mcp.journal import record_tool_use
+
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            record_tool_use("abc123def456", "search_in_container")
+
+        entries = _read_log(log_path)
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["operation"] == "tool_use"
+        assert e["tool_name"] == "search_in_container"
+        assert "params" not in e
+
+    def test_get_tool_usage_counts_tool_use_entries(self, tmp_path: Path) -> None:
+        from code_sandbox_mcp.journal import get_tool_usage, record_tool_use
+
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            record_tool_use("abc123def456", "read_file_range")
+            record_tool_use("abc123def456", "list_files")
+            record_tool_use("abc123def456", "search_in_container")
+            record_tool_use("abc123def456", "lint_in_container")
+            record_tool_use("abc123def456", "type_check_in_container")
+            record_tool_use("abc123def456", "verify_in_container")
+
+            usage = get_tool_usage()
+
+        structured = usage["structured_ops"]
+        assert structured.get("read_file_range") == 1
+        assert structured.get("list_files") == 1
+        assert structured.get("search_in_container") == 1
+        assert structured.get("lint_in_container") == 1
+        assert structured.get("type_check_in_container") == 1
+        assert structured.get("verify_in_container") == 1
+        assert usage["total_ops"] == 6
+        assert usage["exec_ops"] == 0

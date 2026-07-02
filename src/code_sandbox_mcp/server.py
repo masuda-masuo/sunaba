@@ -15,6 +15,7 @@ import time
 from fastmcp import FastMCP
 
 from code_sandbox_mcp.github_auth import setup_github_app_token
+from code_sandbox_mcp.journal import record_tool_use
 from code_sandbox_mcp.result_cache import (
     get_cache_stats,
     invalidate_cache,
@@ -164,6 +165,11 @@ def sandbox_cache_invalidate(key: str | None = None) -> str:
         JSON string with ``invalidated`` count.
     """
     count = invalidate_cache(key=key)
+    record_tool_use(
+        "system",
+        "sandbox_cache_invalidate",
+        {"key": key},
+    )
     return json.dumps({"invalidated": count})
 
 

@@ -34,7 +34,9 @@ WORKDIR /home/sandbox
 RUN pyright --version
 
 # ── ヘルスチェック (base 継承 + python 固有ツール) ──────────────
+# HEALTHCHECK は base を上書きするため、base 側の pip --version
+# （venv 健全性チェック）もここに含める必要がある
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD rg --version && sg --version && node --version && ruff --version && pyright --version && pytest --version || exit 1
+  CMD rg --version && sg --version && node --version && pip --version && ruff --version && pyright --version && pytest --version || exit 1
 
 CMD ["bash"]

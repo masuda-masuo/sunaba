@@ -565,8 +565,6 @@ def copy_file(
     with tarfile.open(fileobj=tar_stream, mode="w") as tar:
         info = tarfile.TarInfo(name=base_name)
         info.size = len(data)
-        info.uid = 999
-        info.gid = 999
         info.mtime = int(src.stat().st_mtime)
         tar.addfile(info, io.BytesIO(data))
 

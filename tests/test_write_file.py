@@ -894,7 +894,7 @@ class TestWriteFileOwnership:
         # stat of the existing file: uid=1000 gid=1000 mode=644 (octal).
         container.exec_run.return_value = (0, (b"1000 1000 644\n", b""))
         uid, gid, mode = _owner_for_write(
-            container, "/home/sandbox/f.py", "/home/sandbox"
+            container, "/home/sandbox/f.py"
         )
         assert (uid, gid, mode) == (1000, 1000, 0o644)
 
@@ -911,7 +911,7 @@ class TestWriteFileOwnership:
 
         container.exec_run.side_effect = _side_effect
         uid, gid, mode = _owner_for_write(
-            container, "/tmp/new.py", "/tmp"
+            container, "/tmp/new.py"
         )
         assert (uid, gid, mode) == (999, 999, 0o644)
 
@@ -920,7 +920,7 @@ class TestWriteFileOwnership:
 
         container = MagicMock()
         container.exec_run.return_value = (127, (b"", b"stat: not found"))
-        uid, gid, mode = _owner_for_write(container, "/x/f", "/x")
+        uid, gid, mode = _owner_for_write(container, "/x/f")
         assert (uid, gid, mode) == (999, 999, 0o644)
 
     @patch("code_sandbox_mcp.tools.file._docker")

@@ -322,7 +322,7 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
 
     # Preserve ownership/mode: keep an existing file's, otherwise inherit the
     # parent directory's owner so the new file is not left owned by root.
-    uid, gid, mode = _owner_for_write(container, file_path, parent_dir)
+    uid, gid, mode = _owner_for_write(container, file_path)
 
     data = content.encode("utf-8")
     tar_stream = io.BytesIO()
@@ -357,7 +357,7 @@ def _quote_path(path: str) -> str:
 
 
 def _owner_for_write(
-    container: Any, file_path: str, parent_dir: str
+    container: Any, file_path: str
 ) -> tuple[int, int, int]:
     """Resolve ``(uid, gid, mode)`` for a file about to be written via put_archive.
 

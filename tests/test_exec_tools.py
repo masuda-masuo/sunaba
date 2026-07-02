@@ -187,7 +187,7 @@ class TestSandboxInitialize:
     @patch("code_sandbox_mcp.tools.container._docker")
     @patch("code_sandbox_mcp.tools.container._ensure_image")
     @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_proxied_pr_checkout_fails_fast_with_pointer(
+    def test_proxied_pr_checkout_goes_anonymous(
         self,
         mock_validate: MagicMock,
         mock_ensure_image: MagicMock,
@@ -195,7 +195,7 @@ class TestSandboxInitialize:
         mock_proxy_lifecycle: MagicMock,
         mock_setup_pr: MagicMock,
     ) -> None:
-        """pr=N under the proxy cannot work yet; fail with the #403 pointer."""
+        """pr=N under the proxy must take the anonymous checkout path (#403)."""
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
         mock_client = MagicMock()
@@ -204,6 +204,7 @@ class TestSandboxInitialize:
         mock_proxy_lifecycle.egress_proxy_enabled.return_value = True
         mock_proxy_lifecycle.sandbox_proxy_env.return_value = {}
         mock_proxy_lifecycle.apply_network.side_effect = lambda kwargs, runtime: kwargs
+        mock_setup_pr.return_value = "PR #7 (feature) → /tmp/repo/repo in container abc123def456"
 
         with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
             result = sandbox_initialize(
@@ -212,8 +213,10 @@ class TestSandboxInitialize:
                 pr=7,
             )
 
-        assert "#403" in result
-        mock_setup_pr.assert_not_called()
+        assert "PR #7" in result
+        # authenticated must reflect the (token-free) proxied container env,
+        # not the inject_vcs_token flag that pr=N force-enables.
+        assert mock_setup_pr.call_args.kwargs["authenticated"] is False
 
     @patch("code_sandbox_mcp.tools.container._docker")
     @patch("code_sandbox_mcp.tools.container._ensure_image")

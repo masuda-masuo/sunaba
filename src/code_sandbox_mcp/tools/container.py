@@ -69,7 +69,11 @@ from code_sandbox_mcp.tools.common import (
     _coerce_list_arg,
     _docker,
 )
-from code_sandbox_mcp.tools.vcs import checkpoint_list, resolve_git_root
+from code_sandbox_mcp.tools.vcs import (
+    _resolve_push_token,
+    checkpoint_list,
+    resolve_git_root,
+)
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -682,6 +686,56 @@ def _try_clone_into_container(
         return CloneResult(None, str(e))
 
 
+def _resolve_pr_head_ref(repo: str, pr_number: int) -> str:
+    """Resolve a PR's head branch name host-side via the GitHub REST API.
+
+    A proxied container deliberately holds no VCS token (#356), so it cannot
+    run the authenticated ``gh pr view`` the gh checkout path relies on.  The
+    host process *can* authenticate, and this metadata read goes out directly
+    from the host (not through the sandbox egress proxy), so resolving the
+    head ref here and handing only the branch name to the container keeps the
+    container credential-free (#403).
+
+    The host token (broker mint -> static env, the same resolution publish
+    uses for lazy push injection) is attached when available; anonymous
+    requests still work for public repos.  The REST API accepts ``Bearer`` --
+    the Basic-only quirk is specific to GitHub's git smart-HTTP endpoints
+    (see ``proxy.basic_auth_header``).
+    """
+    import urllib.error
+    import urllib.request
+
+    # Also makes interpolating *repo* into the URL injection-safe.
+    _validate_clone_repo(repo)
+    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "code-sandbox-mcp",
+    }
+    token = _resolve_push_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f"Failed to resolve head ref for PR #{pr_number} in {repo}:"
+            f" GitHub API returned HTTP {e.code}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"Failed to resolve head ref for PR #{pr_number} in {repo}: {e.reason}"
+        ) from e
+    head_ref = (data.get("head") or {}).get("ref") or ""
+    if not head_ref:
+        raise RuntimeError(
+            f"GitHub API returned no head ref for PR #{pr_number} in {repo}"
+        )
+    return head_ref
+
+
 def _setup_pr_branch(
     container: Any,
     container_id: str,
@@ -689,12 +743,21 @@ def _setup_pr_branch(
     pr_number: int,
     clone_dest: str,
     pip_extras: str | None = "[dev]",
+    *,
+    authenticated: bool = True,
 ) -> str:
     """Clone repo and check out PR branch inside the container.
 
-    Uses ``gh`` (authenticated via injected VCS token) to fetch PR info,
-    clone the repository, check out the PR's head branch, and install
-    dev dependencies.
+    Two transports, chosen by *authenticated* (mirroring
+    :func:`_build_clone_command`):
+
+    - **authenticated** (the container env carries a VCS token): ``gh``
+      fetches the PR info, clones, and checks out the head branch.
+    - **anonymous** (#403, e.g. a proxied container that deliberately holds
+      no token per #356): the head ref is resolved host-side via
+      :func:`_resolve_pr_head_ref` and everything in the container is plain
+      git -- ``refs/pull/N/head`` lives on the base repo, so this covers
+      fork PRs too.  Private repositories cannot be checked out this way.
 
     Args:
         container: Docker container object.
@@ -704,6 +767,8 @@ def _setup_pr_branch(
         clone_dest: Destination directory inside the container.
         pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
             Pass ``None`` to skip pip install entirely.
+        authenticated: Whether the container env actually carries a VCS
+            token (ground truth, not the ``inject_vcs_token`` request flag).
 
     Returns:
         Success message string.
@@ -713,34 +778,46 @@ def _setup_pr_branch(
     safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
     safe_repo = shlex.quote(repo)
 
-    # Step 1: Get PR head branch info
-    gh_info_cmd = f"gh pr view {pr_number} --repo {safe_repo} --json headRefName"
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", gh_info_cmd],
-        stdout=True,
-        stderr=True,
-        demux=True,
-    )
-    stdout_part, stderr_part = output or (b"", b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+    if authenticated:
+        # Step 1: Get PR head branch info via in-container gh
+        gh_info_cmd = f"gh pr view {pr_number} --repo {safe_repo} --json headRefName"
+        exit_code, output = container.exec_run(
+            ["/bin/sh", "-c", gh_info_cmd],
+            stdout=True,
+            stderr=True,
+            demux=True,
+        )
+        stdout_part, stderr_part = output or (b"", b"")
+        stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+        stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
-    if exit_code != 0:
-        raise RuntimeError(f"Failed to fetch PR #{pr_number} from {repo}: {stderr_text or stdout_text}")
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to fetch PR #{pr_number} from {repo}: {stderr_text or stdout_text}")
 
-    try:
-        pr_info = json.loads(stdout_text)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"Failed to parse PR info JSON: {stdout_text[:200]}")
+        try:
+            pr_info = json.loads(stdout_text)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"Failed to parse PR info JSON: {stdout_text[:200]}")
 
-    head_ref = pr_info.get("headRefName", "")
-    if not head_ref:
-        raise RuntimeError(f"Incomplete PR info: head_ref={head_ref!r}")
+        head_ref = pr_info.get("headRefName", "")
+        if not head_ref:
+            raise RuntimeError(f"Incomplete PR info: head_ref={head_ref!r}")
+
+        # Clone the base repo (not head/fork) so that gh pr checkout
+        # works correctly with the PR number from the base repository.
+        clone_cmd = f"gh repo clone {safe_repo} {safe_dest}"
+        checkout_cmd = f"cd {safe_dest} && gh pr checkout {pr_number}"
+    else:
+        # Step 1 (anonymous): the head ref comes from the host, and the
+        # container-side commands below are token-free git.
+        head_ref = _resolve_pr_head_ref(repo, pr_number)
+        clone_cmd = _build_clone_command(repo, f"{clone_dest}/{repo_name}")
+        checkout_cmd = (
+            f"cd {safe_dest} && git fetch origin pull/{pr_number}/head"
+            f" && git checkout -B {shlex.quote(head_ref)} FETCH_HEAD"
+        )
 
     # Step 2: Clone the base repo
-    # Clone the base repo (not head/fork) so that gh pr checkout
-    # works correctly with the PR number from the base repository.
-    clone_cmd = f"gh repo clone {safe_repo} {safe_dest}"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", clone_cmd],
         stdout=True,
@@ -752,12 +829,19 @@ def _setup_pr_branch(
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if exit_code != 0:
-        raise RuntimeError(f"Failed to clone repo {repo}: {stderr_text or clone_output}")
+        hint = (
+            ""
+            if authenticated
+            else (
+                " (anonymous clone: the container holds no VCS token (#356);"
+                " private repositories cannot be checked out this way, see #403)"
+            )
+        )
+        raise RuntimeError(f"Failed to clone repo {repo}: {stderr_text or clone_output}{hint}")
 
     logger.info("Cloned %s → %s in container %s", safe_repo, safe_dest, cid)
 
     # Step 3: Checkout PR branch
-    checkout_cmd = f"cd {safe_dest} && gh pr checkout {pr_number}"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", checkout_cmd],
         stdout=True,
@@ -1191,19 +1275,11 @@ def sandbox_initialize(
         if not repo:
             logger.warning("pr parameter requires repo, got repo=None")
             pr_msg = " (pr setup failed: repo is required when pr is specified)"
-        elif proxied:
-            # PR checkout still requires an authenticated gh in the
-            # container, and the egress proxy deliberately withholds the
-            # token (#356).  Fail with a pointer instead of gh's puzzling
-            # "gh auth login" error; anonymous checkout is tracked in #403.
-            logger.warning("pr=%s requested with egress proxy active (#403)", pr)
-            pr_msg = (
-                " (pr setup failed: the egress proxy withholds the VCS token"
-                " from the container (#356), and PR checkout still requires"
-                " an authenticated gh -- see #403)"
-            )
         else:
             try:
+                # A token-free container (e.g. proxied, #356) takes the
+                # anonymous checkout path: head ref resolved host-side,
+                # plain git in the container (#403).
                 pr_msg = " " + _setup_pr_branch(
                     container,
                     cid,
@@ -1211,6 +1287,7 @@ def sandbox_initialize(
                     pr,
                     clone_dest,
                     pip_extras,
+                    authenticated=container_has_token,
                 )
             except Exception as e:
                 # PR setup failure is non-fatal: the container is still usable.
@@ -1594,17 +1671,10 @@ def run_container_and_exec(
         if not repo:
             logger.warning("pr parameter requires repo, got repo=None")
             pr_error = "repo is required when pr is specified"
-        elif proxied:
-            # Same guard as sandbox_initialize: PR checkout needs an
-            # authenticated gh, which a proxied container cannot have (#356).
-            logger.warning("pr=%s requested with egress proxy active (#403)", pr)
-            pr_error = (
-                "the egress proxy withholds the VCS token from the container"
-                " (#356), and PR checkout still requires an authenticated gh"
-                " -- see #403"
-            )
         else:
             try:
+                # Same as sandbox_initialize: a token-free container takes
+                # the anonymous checkout path (#403).
                 _setup_pr_branch(
                     container,
                     container_id,
@@ -1612,6 +1682,7 @@ def run_container_and_exec(
                     pr,
                     clone_dest,
                     pip_extras,
+                    authenticated=container_has_token,
                 )
             except Exception as e:
                 logger.warning("PR branch setup failed: %s", e)

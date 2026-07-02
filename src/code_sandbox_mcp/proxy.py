@@ -67,6 +67,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # (found by the #358 sidecar smoke test).  Registering ourselves makes that
 # lookup find a real module; on normal package import the entry already exists,
 # so this is a no-op.
+#
+# NOTE: _self_module.__dict__ only captures globals at registration time, so a
+# dataclass field annotation naming a module-level type defined *below* this
+# point would not resolve.  Currently safe: every dataclass field here uses
+# builtin types only.  Keep it that way, or refresh the registered dict.
 if sys.modules.get(__name__) is None:  # pragma: no cover - only under mitmdump
     import types as _types
 

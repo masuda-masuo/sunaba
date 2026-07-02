@@ -133,4 +133,4 @@ def main(
 
 
 if __name__ == "__main__":  # pragma: no cover - container entrypoint
-    raise SystemExit(main())
+    sys.exit(main())

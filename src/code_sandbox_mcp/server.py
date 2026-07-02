@@ -164,12 +164,15 @@ def sandbox_cache_invalidate(key: str | None = None) -> str:
     Returns:
         JSON string with ``invalidated`` count.
     """
-    count = invalidate_cache(key=key)
+    # "system" is a sentinel container_id for tools without a container
+    # context.  Downstream consumers (dashboard, trace) must handle it as
+    # a valid container-less entry.
     record_tool_use(
         "system",
         "sandbox_cache_invalidate",
         {"key": key},
     )
+    count = invalidate_cache(key=key)
     return json.dumps({"invalidated": count})
 
 

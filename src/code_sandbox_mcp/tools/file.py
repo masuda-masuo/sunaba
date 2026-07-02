@@ -682,13 +682,13 @@ def read_file_range(
             resolved_limit = end_line - start_line + 1
         else:
             resolved_limit = -1
-    result = read_file_lines(
-        _, file_path, offset=resolved_offset, limit=resolved_limit
-    )
     record_tool_use(
         container_id[:12],
         "read_file_range",
         {"file_path": file_path},
+    )
+    result = read_file_lines(
+        _, file_path, offset=resolved_offset, limit=resolved_limit
     )
     return json.dumps(result)
 
@@ -782,13 +782,12 @@ def list_files(
     if exit_code != 0:
         return json.dumps({"error": stderr_text or stdout_text})
 
-    files = [f for f in stdout_text.strip().split("\n") if f]
-
     record_tool_use(
         container_id[:12],
         "list_files",
         {"path": path, "max_depth": max_depth, "pattern": pattern},
     )
+    files = [f for f in stdout_text.strip().split("\n") if f]
     return json.dumps({
         "path": path,
         "total": len(files),

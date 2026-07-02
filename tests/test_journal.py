@@ -450,3 +450,61 @@ class TestRecordToolUse:
         assert structured.get("verify_in_container") == 1
         assert usage["total_ops"] == 6
         assert usage["exec_ops"] == 0
+
+    def test_end_to_end_via_sandbox_cache_invalidate(self, tmp_path: Path) -> None:
+        """Integration test: call a real tool and verify the journal entry."""
+        from code_sandbox_mcp.journal import get_tool_usage, read_journal
+
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            from code_sandbox_mcp.server import sandbox_cache_invalidate
+            result = json.loads(sandbox_cache_invalidate(key="e2e_test_key"))
+
+            assert result == {"invalidated": 0}
+
+            entries = read_journal()
+            tool_entries = [e for e in entries if e.get("operation") == "tool_use"]
+            assert len(tool_entries) == 1
+            e = tool_entries[0]
+            assert e["tool_name"] == "sandbox_cache_invalidate"
+            assert e["container_id"] == "system"
+            assert e["params"] == {"key": "e2e_test_key"}
+
+            # Verify get_tool_usage() aggregates correctly
+            usage = get_tool_usage()
+            assert usage["structured_ops"].get("sandbox_cache_invalidate") == 1
+            assert usage["total_ops"] >= 1
+
+    def test_end_to_end_tool_use_with_exec_entries(self, tmp_path: Path) -> None:
+        """Integration test: tool_use entries coexist with exec entries in get_tool_usage()."""
+        from code_sandbox_mcp.journal import (
+            get_or_create_run_id,
+            get_tool_usage,
+            record_exec,
+            record_tool_use,
+        )
+
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            get_or_create_run_id("cid-e2e")
+            record_exec("cid-e2e", ["ls"], 0)
+            record_exec("cid-e2e", ["cat foo"], 0)
+            record_tool_use("cid-e2e", "read_file_range", {"file_path": "foo"})
+            record_tool_use("cid-e2e", "lint_in_container", {"file_path": "bar.py"})
+
+            usage = get_tool_usage()
+
+            assert usage["exec_ops"] == 2
+            assert usage["structured_ops"]["read_file_range"] == 1
+            assert usage["structured_ops"]["lint_in_container"] == 1
+            assert usage["total_ops"] >= 4
+            # verify_in_container is NOT in this fixture, so it should not appear
+            assert "verify_in_container" not in usage["structured_ops"]

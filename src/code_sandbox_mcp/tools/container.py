@@ -558,13 +558,17 @@ def _editable_install_cmd(target: str) -> str:
 
     Prefers ``uv`` — preinstalled on every stock sandbox image and markedly
     faster than pip — falling back to plain ``pip`` for custom images that
-    don't have it.  Resolved in a single ``exec_run`` call (no
-    extra round trip to probe for ``uv`` first).
+    don't have it.  ``uv`` needs an explicit venv because the sandbox user
+    is non-root and cannot write to system site-packages, yet ``uv`` does not
+    support ``--user`` (Issue #368).  Resolved in a single ``exec_run`` call.
     """
     quoted = shlex.quote(target)
     return (
         f"if command -v uv >/dev/null 2>&1; then "
-        f"uv pip install --system -e {quoted} -q; "
+        f"VENV=$(mktemp -d) && "
+        f"uv venv --clear \"$VENV\" >/dev/null 2>&1 && "
+        f"uv pip install --python \"$VENV/bin/python\" -e {quoted} -q; "
+        f"rc=$?; rm -rf \"$VENV\"; exit $rc; "
         f"else pip install -e {quoted} -q; fi"
     )
 

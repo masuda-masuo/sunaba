@@ -159,6 +159,14 @@ class TestCertsVolume:
         client.volumes.get.assert_called_once_with(pl.CERTS_VOLUME_NAME)
         client.volumes.create.assert_not_called()
 
+    def test_volume_create_failure_fails_closed(self) -> None:
+        client, _, _ = _fresh_client()
+        client.volumes.get.side_effect = docker.errors.NotFound("no volume")
+        client.volumes.create.side_effect = RuntimeError("volume quota exceeded")
+        with pytest.raises(pl.EgressProxyError, match="volume quota exceeded"):
+            pl.ensure_egress_proxy(client, env={})
+        client.containers.run.assert_not_called()
+
     def test_reused_sidecar_does_not_touch_volume(self) -> None:
         client, _, _ = _fresh_client()
         client.containers.get.side_effect = None

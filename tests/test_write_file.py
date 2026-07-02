@@ -30,10 +30,10 @@ def _exec_run_for(
     the file via ``put_archive``:
 
     - ``stat -c '%u %g %a'`` (existing file) -> ``uid gid mode``
-    - ``stat -c '%u %g'`` (parent dir) -> ``uid gid``
+    - ``stat -c '%u %g'`` (running user via /proc/self) -> ``uid gid``
 
     Returning real ``stat`` output exercises the ownership-preservation path
-    instead of letting every write fall back to ``0, 0, 0o644``.  Defaults keep
+    instead of letting every write fall back to ``999, 999, 0o644``.  Defaults keep
     existing callers working without changes.
     """
     def _side_effect(cmd, **kwargs):  # noqa: ANN001, ANN202
@@ -894,11 +894,11 @@ class TestWriteFileOwnership:
         # stat of the existing file: uid=1000 gid=1000 mode=644 (octal).
         container.exec_run.return_value = (0, (b"1000 1000 644\n", b""))
         uid, gid, mode = _owner_for_write(
-            container, "/home/sandbox/f.py", "/home/sandbox"
+            container, "/home/sandbox/f.py"
         )
         assert (uid, gid, mode) == (1000, 1000, 0o644)
 
-    def test_owner_for_write_inherits_parent_for_new_file(self) -> None:
+    def test_owner_for_write_uses_running_user_for_new_file(self) -> None:
         from code_sandbox_mcp.edit_verify import _owner_for_write
 
         container = MagicMock()
@@ -907,21 +907,21 @@ class TestWriteFileOwnership:
             shell = cmd[2]
             if "%a" in shell:  # stat of (missing) target file
                 return (1, (b"", b"No such file"))
-            return (0, (b"1000 1000\n", b""))  # stat of parent dir
+            return (0, (b"999 999\n", b""))  # stat of running user (/proc/self)
 
         container.exec_run.side_effect = _side_effect
         uid, gid, mode = _owner_for_write(
-            container, "/home/sandbox/new.py", "/home/sandbox"
+            container, "/tmp/new.py"
         )
-        assert (uid, gid, mode) == (1000, 1000, 0o644)
+        assert (uid, gid, mode) == (999, 999, 0o644)
 
     def test_owner_for_write_falls_back_when_stat_unavailable(self) -> None:
         from code_sandbox_mcp.edit_verify import _owner_for_write
 
         container = MagicMock()
         container.exec_run.return_value = (127, (b"", b"stat: not found"))
-        uid, gid, mode = _owner_for_write(container, "/x/f", "/x")
-        assert (uid, gid, mode) == (0, 0, 0o644)
+        uid, gid, mode = _owner_for_write(container, "/x/f")
+        assert (uid, gid, mode) == (999, 999, 0o644)
 
     @patch("code_sandbox_mcp.tools.file._docker")
     def test_write_carries_existing_owner_into_archive(

@@ -467,6 +467,12 @@ def _clone_shiori_repo_to_container(
         os.unlink(tmp.name)
 
     clone_path = f"{clone_dest}/{repo_name}"
+    try:
+        container.exec_run(
+            ["sh", "-c", f"chown -R $(id -u):$(id -g) {shlex.quote(clone_path)}"]
+        )
+    except Exception as e:
+        logger.debug("chown failed for %s: %s", clone_path, e)
     _write_clone_meta(container, clone_path)
 
     record_copy(

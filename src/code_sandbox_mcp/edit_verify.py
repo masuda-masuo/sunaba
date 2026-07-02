@@ -322,7 +322,7 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
 
     # Preserve ownership/mode: keep an existing file's, otherwise inherit the
     # parent directory's owner so the new file is not left owned by root.
-    uid, gid, mode = _owner_for_write(container, file_path, parent_dir)
+    uid, gid, mode = _owner_for_write(container, file_path)
 
     data = content.encode("utf-8")
     tar_stream = io.BytesIO()
@@ -357,15 +357,15 @@ def _quote_path(path: str) -> str:
 
 
 def _owner_for_write(
-    container: Any, file_path: str, parent_dir: str
+    container: Any, file_path: str
 ) -> tuple[int, int, int]:
     """Resolve ``(uid, gid, mode)`` for a file about to be written via put_archive.
 
     ``put_archive`` extracts tar entries with the ownership recorded in the
     archive (root:root by default), so we set it explicitly: an existing file
-    keeps its own uid/gid/mode; a new file inherits its parent directory's
-    owner with a default mode of ``0o644``.  Falls back to ``0, 0, 0o644`` when
-    ``stat`` is unavailable.
+    keeps its own uid/gid/mode; a new file uses the container's running user
+    so it remains writable by other tools (Issue #372).  Falls back to
+    ``999, 999, 0o644`` when ``stat`` is unavailable.
     """
     def _stat(path: str, fmt: str) -> list[str] | None:
         code, out = container.exec_run(
@@ -385,14 +385,14 @@ def _owner_for_write(
         except ValueError:
             pass
 
-    parent = _stat(parent_dir, "%u %g")
-    if parent and len(parent) == 2:
+    running = _stat("/proc/self", "%u %g")
+    if running and len(running) == 2:
         try:
-            return int(parent[0]), int(parent[1]), 0o644
+            return int(running[0]), int(running[1]), 0o644
         except ValueError:
             pass
 
-    return 0, 0, 0o644
+    return 999, 999, 0o644
 
 
 # ---------------------------------------------------------------------------

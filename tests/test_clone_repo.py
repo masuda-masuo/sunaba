@@ -146,7 +146,7 @@ class TestCloneShioriRepoToContainer:
         assert "Copied Shiori clone" in result
         assert "/tmp/repo/repo" in result
         mock_container.put_archive.assert_called_once()
-        assert mock_container.exec_run.call_count == 2
+        assert mock_container.exec_run.call_count == 3
 
     def test_unshallow_fails_but_copy_succeeds(
             self, tmp_path: Path, caplog: pytest.LogCaptureFixture,

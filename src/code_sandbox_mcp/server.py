@@ -348,10 +348,6 @@ def main() -> None:
     operations such as ``docker pull`` or ``copy_project`` on
     large directories.
     """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
     parser = _build_arg_parser()
     args = parser.parse_args()
 

@@ -508,3 +508,33 @@ class TestCloneWarnsWithoutToken:
         )
         assert res.error is None
         assert "WARNING" not in res.msg
+
+
+class TestEditableInstallCmd:
+    """Tests for _editable_install_cmd."""
+
+    def test_uses_uv_with_venv_when_uv_available(self) -> None:
+        from code_sandbox_mcp.tools.container import _editable_install_cmd
+
+        cmd = _editable_install_cmd('".[dev]"')
+
+        assert "if command -v uv >/dev/null 2>&1; then " in cmd
+        assert "uv venv \"$VENV\" >/dev/null 2>&1" in cmd
+        assert "uv pip install --python \"$VENV/bin/python\" -e " in cmd
+        assert "; rc=$?; rm -rf \"$VENV\"; exit $rc; " in cmd
+        assert "else pip install -e " in cmd
+
+    def test_falls_back_to_pip(self) -> None:
+        from code_sandbox_mcp.tools.container import _editable_install_cmd
+
+        cmd = _editable_install_cmd('".[dev]"')
+
+        assert "else pip install -e " in cmd
+        assert ".[dev]" in cmd
+
+    def test_quotes_target(self) -> None:
+        from code_sandbox_mcp.tools.container import _editable_install_cmd
+
+        cmd = _editable_install_cmd("foo[bar]")
+
+        assert "foo[bar]" in cmd

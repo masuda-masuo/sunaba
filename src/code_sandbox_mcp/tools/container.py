@@ -565,8 +565,10 @@ def _editable_install_cmd(target: str) -> str:
     quoted = shlex.quote(target)
     return (
         f"if command -v uv >/dev/null 2>&1; then "
-        f"uv venv --clear /tmp/.sandbox-venv >/dev/null 2>&1 && "
-        f"uv pip install --python /tmp/.sandbox-venv/bin/python -e {quoted} -q; "
+        f"VENV=$(mktemp -u) && "
+        f"uv venv \"$VENV\" >/dev/null 2>&1 && "
+        f"uv pip install --python \"$VENV/bin/python\" -e {quoted} -q; "
+        f"rc=$?; rm -rf \"$VENV\"; exit $rc; "
         f"else pip install -e {quoted} -q; fi"
     )
 

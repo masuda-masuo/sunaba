@@ -1,0 +1,416 @@
+"""Host-side lifecycle for the egress-proxy sidecar (#358, Epic #353).
+
+``sandbox_initialize`` (and ``run_container_and_exec``) call
+:func:`ensure_egress_proxy` before starting a networked sandbox container.
+It idempotently starts the shared proxy sidecar (built by
+``docker/Dockerfile.proxy``) and the dedicated Docker network, then returns
+the wiring the sandbox needs: proxy env vars, the network to join, and the
+proxy's CA certificate to install (:func:`install_ca`).
+
+Inert unless ``CODE_SANDBOX_ENABLE_EGRESS_PROXY=true`` (staged rollout,
+default off).  When the flag is on but the sidecar cannot be started, callers
+must **fail closed** -- refuse to start a networked sandbox rather than fall
+back to an unproxied bridge network.
+
+Topology (one sidecar shared by all sandboxes)::
+
+    [internet] <-> [proxy sidecar] <-> [internal docker network] <-> [sandbox]
+                        |
+              control API published on host loopback only
+              (publish opens push windows through it, #357)
+
+The sandbox-facing network is created ``internal=True`` so the *only* route
+out of a sandbox is the proxy itself -- SSH and direct IP egress have no
+route at all (#355's requirement falls out of the topology).  The proxy
+container additionally sits on the default bridge for upstream access.
+
+Runs **host-side** (in the MCP server process), never inside the sandbox:
+the control secret is passed to the proxy container and exported to this
+process's environment for :mod:`code_sandbox_mcp.proxy_client`, but is never
+added to a sandbox container's environment.
+"""
+from __future__ import annotations
+
+import io
+import logging
+import os
+import secrets
+import tarfile
+import time
+from collections.abc import MutableMapping
+from dataclasses import dataclass
+from typing import Any
+
+from code_sandbox_mcp.proxy import (
+    ALLOWED_REPOS_ENV,
+    CONTROL_HOST_ENV,
+    CONTROL_PORT_ENV,
+    CONTROL_SECRET_ENV,
+    PROXY_TOKEN_ENV,
+)
+from code_sandbox_mcp.proxy_client import CONTROL_URL_ENV
+from code_sandbox_mcp.security import MANAGED_LABEL
+
+logger = logging.getLogger(__name__)
+
+#: Feature flag: the whole egress-proxy integration is opt-in (default off)
+#: for staged rollout.  Truthy values: ``1/true/yes/on`` (case-insensitive).
+ENABLE_EGRESS_PROXY_ENV = "CODE_SANDBOX_ENABLE_EGRESS_PROXY"
+
+#: Image reference for the sidecar.  Defaults to the locally built tag from
+#: ``docker/Dockerfile.proxy``; switch to a pinned ``ghcr.io/...@sha256:...``
+#: once registry publishing for the proxy image exists (follow-up of #358 --
+#: ``image_pins.json`` deliberately rejects unknown keys today).
+PROXY_IMAGE_ENV = "CODE_SANDBOX_PROXY_IMAGE"
+_DEFAULT_PROXY_IMAGE = "code-sandbox-mcp/proxy:latest"
+
+#: Host loopback port the control API is published on (``127.0.0.1`` only;
+#: the server and dashboard use 8766/8767, so the sidecar takes the next one).
+CONTROL_HOST_PORT_ENV = "CODE_SANDBOX_PROXY_CONTROL_HOST_PORT"
+_DEFAULT_CONTROL_HOST_PORT = 8768
+
+#: Dedicated sandbox-facing network (``internal=True``: no direct egress).
+EGRESS_NETWORK_NAME = "code-sandbox-egress"
+
+#: Fixed sidecar container name -- the idempotency key for reuse.
+PROXY_CONTAINER_NAME = "code-sandbox-egress-proxy"
+
+#: DNS alias sandboxes use to reach the proxy on the internal network.
+PROXY_NETWORK_ALIAS = "egress-proxy"
+
+#: mitmproxy listen port inside the sidecar (``docker/Dockerfile.proxy``).
+_PROXY_LISTEN_PORT = 8080
+
+#: Control-API port inside the sidecar (bound ``0.0.0.0`` so the Docker
+#: port publish reaches it; the shared secret gates every request).
+_CONTROL_PORT = 9099
+
+#: Where mitmproxy writes its generated CA inside the sidecar (confdir is
+#: ``/certs``, set by the image).
+_CA_PATH_IN_PROXY = "/certs/mitmproxy-ca-cert.pem"
+
+#: Where the CA lands in the sandbox; ``update-ca-certificates`` folds it
+#: into the system bundle so git/curl trust the TLS-terminating proxy.
+CA_CERT_PATH_IN_SANDBOX = "/usr/local/share/ca-certificates/code-sandbox-egress-ca.crt"
+
+#: Debian system bundle (includes the proxy CA after ``update-ca-certificates``).
+_SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+
+#: How long to wait for mitmproxy to generate its CA on first start.
+_CA_WAIT_SECONDS = 30.0
+_CA_POLL_INTERVAL_SECONDS = 0.5
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+class EgressProxyError(RuntimeError):
+    """The egress proxy is enabled but could not be started or wired up.
+
+    Callers must fail closed on this: a networked sandbox must not start
+    without the proxy when ``CODE_SANDBOX_ENABLE_EGRESS_PROXY`` is on.
+    """
+
+
+@dataclass(frozen=True)
+class EgressProxyRuntime:
+    """Wiring a sandbox container needs to route its egress via the sidecar."""
+
+    #: Sandbox-facing internal network to join instead of the bridge.
+    network_name: str
+
+    #: Proxy URL for ``HTTP(S)_PROXY`` inside the sandbox.
+    proxy_url: str
+
+    #: Host-side control-API base URL (for ``publish``'s push window, #357).
+    control_url: str
+
+    #: The proxy's CA certificate (PEM) to install into the sandbox.
+    ca_pem: bytes
+
+
+def egress_proxy_enabled(env: MutableMapping[str, str] | None = None) -> bool:
+    """Return whether the egress-proxy integration is switched on."""
+    source = os.environ if env is None else env
+    return (source.get(ENABLE_EGRESS_PROXY_ENV) or "").strip().lower() in _TRUTHY
+
+
+def ensure_egress_proxy(
+    client: Any,
+    env: MutableMapping[str, str] | None = None,
+) -> EgressProxyRuntime:
+    """Start (or reuse) the proxy sidecar + network; return the sandbox wiring.
+
+    Idempotent per host: one sidecar (fixed name) and one internal network are
+    shared by all sandbox containers.  Also exports the control URL/secret
+    into *env* (default ``os.environ``) so :mod:`proxy_client`'s
+    ``from_env`` -- and therefore ``publish``'s push window (#357) -- picks
+    them up with no further configuration.
+
+    Note: the allowlist/token env vars are baked into the sidecar at creation;
+    changing them on the host requires removing the sidecar container so the
+    next call recreates it.
+
+    Raises:
+        EgressProxyError: When the sidecar cannot be started or its CA does
+            not appear.  Callers must fail closed.
+    """
+    source = os.environ if env is None else env
+    try:
+        network = _ensure_network(client)
+        container = _find_proxy_container(client)
+        if container is not None and container.status != "running":
+            logger.info("Removing exited egress-proxy container %s", container.id[:12])
+            container.remove(force=True)
+            container = None
+        if container is None:
+            secret = source.get(CONTROL_SECRET_ENV) or secrets.token_hex(32)
+            container = _start_proxy_container(client, network, secret, source)
+        else:
+            recovered = _recover_secret(container)
+            if recovered is None:
+                # A sidecar whose secret we cannot recover is unusable for
+                # publish's push window -- recreate it with a known secret.
+                logger.info("Recreating egress-proxy container (secret not recoverable)")
+                container.remove(force=True)
+                secret = source.get(CONTROL_SECRET_ENV) or secrets.token_hex(32)
+                container = _start_proxy_container(client, network, secret, source)
+            else:
+                secret = recovered
+        ca_pem = _wait_for_ca(container)
+    except EgressProxyError:
+        raise
+    except Exception as e:
+        raise EgressProxyError(f"failed to start egress-proxy sidecar: {e}") from e
+
+    control_url = f"http://127.0.0.1:{_published_control_port(container, source)}"
+    # publish (#357) reads proxy_client.ProxyControlConfig.from_env() at call
+    # time, so exporting here is all it takes to arm the push window.
+    source[CONTROL_URL_ENV] = control_url
+    source[CONTROL_SECRET_ENV] = secret
+    return EgressProxyRuntime(
+        network_name=EGRESS_NETWORK_NAME,
+        proxy_url=f"http://{PROXY_NETWORK_ALIAS}:{_PROXY_LISTEN_PORT}",
+        control_url=control_url,
+        ca_pem=ca_pem,
+    )
+
+
+def sandbox_proxy_env(runtime: EgressProxyRuntime) -> dict[str, str]:
+    """Env vars pointing a sandbox's tools at the proxy and its CA.
+
+    The CA paths reference files :func:`install_ca` creates right after the
+    container starts, before anything in the sandbox touches the network.
+    ``SSL_CERT_FILE``/``REQUESTS_CA_BUNDLE``/``PIP_CERT`` point at the *full
+    system bundle* (which contains the proxy CA after install), so trust in
+    regular public CAs is preserved, not replaced.
+    """
+    proxy = runtime.proxy_url
+    return {
+        "HTTP_PROXY": proxy,
+        "HTTPS_PROXY": proxy,
+        "http_proxy": proxy,
+        "https_proxy": proxy,
+        "NO_PROXY": "localhost,127.0.0.1,::1",
+        "no_proxy": "localhost,127.0.0.1,::1",
+        "SSL_CERT_FILE": _SYSTEM_CA_BUNDLE,
+        "REQUESTS_CA_BUNDLE": _SYSTEM_CA_BUNDLE,
+        "PIP_CERT": _SYSTEM_CA_BUNDLE,
+        "GIT_SSL_CAINFO": _SYSTEM_CA_BUNDLE,
+        # Node keeps its builtin roots and *adds* this file, so it gets the
+        # bare proxy CA rather than the system bundle.
+        "NODE_EXTRA_CA_CERTS": CA_CERT_PATH_IN_SANDBOX,
+    }
+
+
+def apply_network(run_kwargs: dict[str, Any], runtime: EgressProxyRuntime) -> dict[str, Any]:
+    """Swap the bridge ``network_mode`` for the proxy's internal network.
+
+    docker-py treats ``network`` and ``network_mode`` as mutually exclusive,
+    so the ``"bridge"`` that ``build_secure_run_kwargs`` sets for networked
+    profiles is removed rather than overridden.
+    """
+    kwargs = dict(run_kwargs)
+    kwargs.pop("network_mode", None)
+    kwargs["network"] = runtime.network_name
+    return kwargs
+
+
+def install_ca(container: Any, ca_pem: bytes) -> None:
+    """Install the proxy CA into a sandbox container's trust store.
+
+    Writes the PEM under ``/usr/local/share/ca-certificates/`` and runs
+    ``update-ca-certificates`` (as root -- the sandbox user cannot, which is
+    the point: the trust store is wired by the host, not by sandboxed code).
+    Falls back to appending to the system bundle directly if the Debian
+    helper is unavailable.
+
+    Raises:
+        EgressProxyError: When the CA cannot be installed; callers must fail
+            closed (TLS through the proxy would break in confusing ways).
+    """
+    cert_dir, cert_name = os.path.split(CA_CERT_PATH_IN_SANDBOX)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        info = tarfile.TarInfo(name=cert_name)
+        info.size = len(ca_pem)
+        info.mode = 0o644
+        tar.addfile(info, io.BytesIO(ca_pem))
+    # docker-py raises APIError on failure, but the return value is also
+    # specified -- check it too rather than assume (fail closed).
+    if not container.put_archive(cert_dir, buf.getvalue()):
+        raise EgressProxyError(f"put_archive of the proxy CA into {cert_dir} was refused")
+
+    exit_code, output = container.exec_run(["update-ca-certificates"], user="root")
+    if exit_code == 0:
+        return
+    logger.warning(
+        "update-ca-certificates failed (exit %s), appending to bundle: %s",
+        exit_code,
+        _tail(output),
+    )
+    exit_code, output = container.exec_run(
+        ["sh", "-c", f"cat {CA_CERT_PATH_IN_SANDBOX} >> {_SYSTEM_CA_BUNDLE}"],
+        user="root",
+    )
+    if exit_code != 0:
+        raise EgressProxyError(f"could not install proxy CA into sandbox: {_tail(output)}")
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
+def _ensure_network(client: Any) -> Any:
+    """Return the internal sandbox-facing network, creating it if missing."""
+    import docker.errors
+
+    try:
+        return client.networks.get(EGRESS_NETWORK_NAME)
+    except docker.errors.NotFound:
+        logger.info("Creating egress network %s (internal)", EGRESS_NETWORK_NAME)
+        return client.networks.create(
+            EGRESS_NETWORK_NAME,
+            driver="bridge",
+            internal=True,
+            labels={MANAGED_LABEL: "true"},
+        )
+
+
+def _find_proxy_container(client: Any) -> Any | None:
+    """Return the sidecar container by its fixed name, or ``None``."""
+    import docker.errors
+
+    try:
+        return client.containers.get(PROXY_CONTAINER_NAME)
+    except docker.errors.NotFound:
+        return None
+
+
+def _start_proxy_container(
+    client: Any,
+    network: Any,
+    secret: str,
+    source: MutableMapping[str, str],
+) -> Any:
+    """Create and start the sidecar; attach it to the internal network.
+
+    The container is created on the default bridge (for upstream internet and
+    the loopback port publish -- ``internal`` networks cannot publish ports),
+    then *additionally* connected to the internal network under the
+    :data:`PROXY_NETWORK_ALIAS` DNS name sandboxes use.
+    """
+    image = source.get(PROXY_IMAGE_ENV) or _DEFAULT_PROXY_IMAGE
+    proxy_env = {
+        CONTROL_PORT_ENV: str(_CONTROL_PORT),
+        CONTROL_HOST_ENV: "0.0.0.0",
+        CONTROL_SECRET_ENV: secret,
+    }
+    for key in (ALLOWED_REPOS_ENV, PROXY_TOKEN_ENV):
+        value = source.get(key)
+        if value:
+            proxy_env[key] = value
+    logger.info("Starting egress-proxy sidecar %s (image=%s)", PROXY_CONTAINER_NAME, image)
+    container = client.containers.run(
+        image,
+        detach=True,
+        name=PROXY_CONTAINER_NAME,
+        environment=proxy_env,
+        labels={MANAGED_LABEL: "true"},
+        ports={f"{_CONTROL_PORT}/tcp": ("127.0.0.1", _control_host_port(source))},
+        # unless-stopped (not always): it still auto-starts after a daemon
+        # restart; only a manually `docker stop`ped sidecar stays down, which
+        # keeps the operator's off switch meaningful.  A missing sidecar is
+        # fail closed either way -- sandboxes sit on an internal-only network,
+        # so without the proxy they have no egress at all, and the next
+        # ensure_egress_proxy() recreates it.
+        restart_policy={"Name": "unless-stopped"},
+    )
+    network.connect(container, aliases=[PROXY_NETWORK_ALIAS])
+    return container
+
+
+def _control_host_port(source: MutableMapping[str, str]) -> int:
+    """Host loopback port to publish the control API on."""
+    raw = (source.get(CONTROL_HOST_PORT_ENV) or "").strip()
+    return int(raw) if raw else _DEFAULT_CONTROL_HOST_PORT
+
+
+def _published_control_port(container: Any, source: MutableMapping[str, str]) -> int:
+    """Recover the actually-published control port from a (reused) sidecar.
+
+    A sidecar surviving a server restart may have been published on a port
+    configured differently from the current environment, so the container's
+    own ``HostConfig.PortBindings`` wins over the env/default.
+    """
+    bindings = (container.attrs.get("HostConfig") or {}).get("PortBindings") or {}
+    for binding in bindings.get(f"{_CONTROL_PORT}/tcp") or []:
+        host_port = (binding or {}).get("HostPort")
+        if host_port:
+            return int(host_port)
+    return _control_host_port(source)
+
+
+def _recover_secret(container: Any) -> str | None:
+    """Read the control secret back from a running sidecar's own env.
+
+    ``docker inspect`` already exposes the container's env to anyone with
+    Docker access, so this adds no exposure beyond what starting the sidecar
+    with the secret already implies -- and none of it is sandbox-visible.
+
+    Read via ``attrs`` (inspect) rather than ``exec_run(["printenv", ...])``
+    deliberately: inspect works even when the container has no exec-able
+    state, and mirrors how :func:`_published_control_port` recovers the port.
+    """
+    for item in (container.attrs.get("Config") or {}).get("Env") or []:
+        key, _, value = item.partition("=")
+        if key == CONTROL_SECRET_ENV and value:
+            return value
+    return None
+
+
+def _wait_for_ca(
+    container: Any,
+    timeout: float = _CA_WAIT_SECONDS,
+    interval: float = _CA_POLL_INTERVAL_SECONDS,
+) -> bytes:
+    """Poll the sidecar until mitmproxy has generated its CA; return the PEM."""
+    deadline = time.monotonic() + timeout
+    while True:
+        exit_code, output = container.exec_run(["cat", _CA_PATH_IN_PROXY])
+        if exit_code == 0 and b"BEGIN CERTIFICATE" in output:
+            return output
+        if time.monotonic() >= deadline:
+            raise EgressProxyError(
+                f"egress proxy CA did not appear at {_CA_PATH_IN_PROXY} "
+                f"within {timeout:.0f}s (is the sidecar healthy?)"
+            )
+        time.sleep(interval)
+
+
+def _tail(output: bytes | str | None, limit: int = 300) -> str:
+    """Last *limit* characters of exec output, for error messages."""
+    if output is None:
+        return ""
+    text = output.decode(errors="replace") if isinstance(output, bytes) else str(output)
+    return text[-limit:]

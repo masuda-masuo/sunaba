@@ -3,6 +3,14 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from code_sandbox_mcp.proxy_lifecycle import (
+    EGRESS_NETWORK_NAME,
+    ENABLE_EGRESS_PROXY_ENV,
+    EgressProxyError,
+    EgressProxyRuntime,
+)
 from code_sandbox_mcp.tools.container import (
     sandbox_initialize,
 )
@@ -351,3 +359,141 @@ class TestSandboxInitializeCloneRepoPipExtras:
 
         assert "clone_repo failed" in result
         assert mock_container.exec_run.call_count == 0
+
+
+class TestSandboxInitializeEgressProxy:
+    """Egress-proxy wiring in sandbox_initialize (#358): opt-in, fail closed."""
+
+    _IMAGE = "python@sha256:" + "0" * 64
+    _CA = b"-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+
+    def _runtime(self) -> EgressProxyRuntime:
+        return EgressProxyRuntime(
+            network_name=EGRESS_NETWORK_NAME,
+            proxy_url="http://egress-proxy:8080",
+            control_url="http://127.0.0.1:8768",
+            ca_pem=self._CA,
+        )
+
+    def _client(self) -> tuple[MagicMock, MagicMock]:
+        container = MagicMock()
+        container.id = "abc123def456abc123def456"
+        container.exec_run.return_value = (0, (b"", b""))
+        client = MagicMock()
+        client.containers.run.return_value = container
+        return client, container
+
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_flag_off_keeps_plain_bridge(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_docker: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv(ENABLE_EGRESS_PROXY_ENV, raising=False)
+        client, _ = self._client()
+        mock_docker.return_value = client
+
+        result = sandbox_initialize(image=self._IMAGE, allow_network=True)
+        assert not result.startswith("Error")
+        run_kwargs = client.containers.run.call_args.kwargs
+        assert run_kwargs["network_mode"] == "bridge"
+        assert "HTTPS_PROXY" not in run_kwargs["environment"]
+
+    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle.install_ca")
+    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle.ensure_egress_proxy")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_flag_on_wires_proxy_network_env_and_ca(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_docker: MagicMock,
+        mock_ensure_proxy: MagicMock,
+        mock_install_ca: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
+        client, container = self._client()
+        mock_docker.return_value = client
+        mock_ensure_proxy.return_value = self._runtime()
+
+        result = sandbox_initialize(image=self._IMAGE, allow_network=True)
+        assert not result.startswith("Error")
+
+        run_kwargs = client.containers.run.call_args.kwargs
+        assert run_kwargs["network"] == EGRESS_NETWORK_NAME
+        assert "network_mode" not in run_kwargs
+        env = run_kwargs["environment"]
+        assert env["HTTPS_PROXY"] == "http://egress-proxy:8080"
+        mock_install_ca.assert_called_once_with(container, self._CA)
+
+    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle.ensure_egress_proxy")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_flag_on_fails_closed_when_sidecar_unavailable(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_docker: MagicMock,
+        mock_ensure_proxy: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
+        client, _ = self._client()
+        mock_docker.return_value = client
+        mock_ensure_proxy.side_effect = EgressProxyError("sidecar image missing")
+
+        result = sandbox_initialize(image=self._IMAGE, allow_network=True)
+        assert result.startswith("Error: egress proxy is enabled but unavailable")
+        client.containers.run.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle.ensure_egress_proxy")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_flag_on_without_network_skips_proxy(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_docker: MagicMock,
+        mock_ensure_proxy: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
+        client, _ = self._client()
+        mock_docker.return_value = client
+
+        result = sandbox_initialize(image=self._IMAGE, allow_network=False)
+        assert not result.startswith("Error")
+        mock_ensure_proxy.assert_not_called()
+        assert client.containers.run.call_args.kwargs["network_mode"] == "none"
+
+    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle.install_ca")
+    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle.ensure_egress_proxy")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container._ensure_image")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_ca_install_failure_tears_the_sandbox_down(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_docker: MagicMock,
+        mock_ensure_proxy: MagicMock,
+        mock_install_ca: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
+        client, container = self._client()
+        mock_docker.return_value = client
+        mock_ensure_proxy.return_value = self._runtime()
+        mock_install_ca.side_effect = EgressProxyError("update-ca-certificates broke")
+
+        result = sandbox_initialize(image=self._IMAGE, allow_network=True)
+        assert result.startswith("Error: egress proxy CA install failed")
+        container.remove.assert_called_once_with(force=True)

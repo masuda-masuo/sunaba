@@ -16,12 +16,16 @@ import urllib.request
 import pytest
 
 from code_sandbox_mcp.proxy import (
+    CONTROL_HOST_ENV,
+    CONTROL_PORT_ENV,
+    CONTROL_SECRET_ENV,
     DEFAULT_WINDOW_TTL_SECONDS,
     FETCH_SERVICE,
     PUSH_SERVICE,
     AuthControlServer,
     EgressGuard,
     allowed_repos_from_env,
+    control_bind_from_env,
     git_service_from_request,
     handle_control_request,
     is_push,
@@ -397,3 +401,35 @@ class TestLoadsUnderMitmdump:
             assert module.EgressGuard(allowed_repos={"o/r"}) is not None
         finally:
             sys.modules.pop(name, None)
+
+
+class TestControlBindFromEnv:
+    """Control-API bind config: non-loopback binds must carry a secret (#358)."""
+
+    def test_unset_port_returns_none(self) -> None:
+        assert control_bind_from_env({}) is None
+        assert control_bind_from_env({CONTROL_PORT_ENV: "  "}) is None
+
+    def test_default_binds_loopback_without_secret(self) -> None:
+        assert control_bind_from_env({CONTROL_PORT_ENV: "9099"}) == ("127.0.0.1", 9099, None)
+
+    def test_non_loopback_with_secret_is_allowed(self) -> None:
+        env = {
+            CONTROL_PORT_ENV: "9099",
+            CONTROL_HOST_ENV: "0.0.0.0",
+            CONTROL_SECRET_ENV: "s3cret",
+        }
+        assert control_bind_from_env(env) == ("0.0.0.0", 9099, "s3cret")
+
+    def test_non_loopback_without_secret_is_refused(self) -> None:
+        env = {CONTROL_PORT_ENV: "9099", CONTROL_HOST_ENV: "0.0.0.0"}
+        with pytest.raises(ValueError, match="requires"):
+            control_bind_from_env(env)
+
+    def test_blank_host_falls_back_to_loopback(self) -> None:
+        env = {CONTROL_PORT_ENV: "9099", CONTROL_HOST_ENV: "   "}
+        assert control_bind_from_env(env) == ("127.0.0.1", 9099, None)
+
+    def test_non_integer_port_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="not an integer"):
+            control_bind_from_env({CONTROL_PORT_ENV: "not-a-port"})

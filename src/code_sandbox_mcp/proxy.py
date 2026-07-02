@@ -38,14 +38,14 @@ Validated by a PoC on 2026-07-01: a real ``git clone`` succeeds through the
 TLS-terminating proxy while ``git push`` is rejected.
 
 Still out of scope here (own issues): dropping the token from the container
-env now that the proxy can inject it (#356 remainder), gating non-push write
-APIs on
-``api.github.com`` -- which this addon still passes through (#360), network
-isolation so the proxy is the only egress and SSH is blocked (#355), and
-wiring the sidecar into the container lifecycle -- starting it, joining the
-sandbox to a private network, and installing this proxy's CA into the sandbox
-trust store (#358 follow-up).  The sidecar *image* that runs this addon is
-built by ``docker/Dockerfile.proxy`` via ``proxy_entrypoint.py``.
+env now that the proxy can inject it (#356 remainder), and gating non-push
+write APIs on ``api.github.com`` -- which this addon still passes through
+(#360).  The sidecar *image* that runs this addon is built by
+``docker/Dockerfile.proxy`` via ``proxy_entrypoint.py``, and its container
+lifecycle -- starting the sidecar, joining sandboxes to the internal network
+(the only egress route, #355/#358), and installing this proxy's CA into the
+sandbox trust store -- is handled host-side by
+:mod:`code_sandbox_mcp.proxy_lifecycle`.
 """
 from __future__ import annotations
 
@@ -106,6 +106,13 @@ PROXY_TOKEN_ENV = "CODE_SANDBOX_PROXY_TOKEN"
 #: TCP port for the internal authorization control API; unset = decision-only
 #: proxy (no window can be opened, matching today's inert behaviour).
 CONTROL_PORT_ENV = "CODE_SANDBOX_PROXY_CONTROL_PORT"
+
+#: Bind address for the control API (default ``127.0.0.1``).  The sidecar
+#: (#358) sets ``0.0.0.0`` so the host can reach the port Docker publishes;
+#: a non-loopback bind **requires** the shared secret, because inside the
+#: sidecar the control port is reachable from the sandbox-facing Docker
+#: network and must never accept unauthenticated window requests.
+CONTROL_HOST_ENV = "CODE_SANDBOX_PROXY_CONTROL_HOST"
 
 #: Shared secret authenticating control-API callers (#356 / #357).  ``publish``
 #: sends it in the ``X-Control-Token`` header; the sandbox container never sees
@@ -278,11 +285,17 @@ class EgressGuard:
         Reads the port/secret from the environment so the sidecar image (#358)
         can enable it; with no port the proxy stays decision-only (as today).
         """
-        port = os.environ.get(CONTROL_PORT_ENV)
-        if not port:
+        try:
+            bind = control_bind_from_env(dict(os.environ))
+        except ValueError as e:
+            # Fail closed: with no control server no window can ever open, so
+            # every push stays denied -- but say why instead of dying silently.
+            print(f"egress proxy control API not started: {e}", file=sys.stderr)
             return
-        secret = os.environ.get(CONTROL_SECRET_ENV) or None
-        self._control = AuthControlServer(self, port=int(port), secret=secret)
+        if bind is None:
+            return
+        host, port, secret = bind
+        self._control = AuthControlServer(self, host=host, port=port, secret=secret)
         self._control.start()
 
     def done(self) -> None:  # pragma: no cover - mitmproxy lifecycle hook
@@ -462,6 +475,34 @@ def allowed_repos_from_env(environ: dict[str, str] | None = None) -> set[str]:
     env = os.environ if environ is None else environ
     raw = env.get(ALLOWED_REPOS_ENV, "")
     return {r.strip() for r in raw.split(",") if r.strip()}
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def control_bind_from_env(env: dict[str, str]) -> tuple[str, int, str | None] | None:
+    """Return ``(host, port, secret)`` for the control API, or ``None`` when unset.
+
+    A non-loopback bind without a shared secret is refused (``ValueError``):
+    inside the sidecar the control port is reachable from the sandbox-facing
+    Docker network, so exposing it unauthenticated would let sandboxed code
+    open its own push window.
+    """
+    raw_port = (env.get(CONTROL_PORT_ENV) or "").strip()
+    if not raw_port:
+        return None
+    try:
+        port = int(raw_port)
+    except ValueError:
+        raise ValueError(f"{CONTROL_PORT_ENV}={raw_port!r} is not an integer") from None
+    secret = env.get(CONTROL_SECRET_ENV) or None
+    host = (env.get(CONTROL_HOST_ENV) or "").strip() or "127.0.0.1"
+    if host not in _LOOPBACK_HOSTS and secret is None:
+        raise ValueError(
+            f"{CONTROL_HOST_ENV}={host!r} is a non-loopback bind and requires "
+            f"{CONTROL_SECRET_ENV} to be set"
+        )
+    return host, port, secret
 
 
 #: mitmproxy discovers addons via a module-level ``addons`` list.  Built from

@@ -59,6 +59,125 @@ class TestReadFileRange:
         assert "not found" in result["error"]
 
 
+
+
+class TestReadFileRangeStartEndLine:
+    """Issue #386: start_line/end_line params must work correctly."""
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_start_line_end_line_both_specified(self, mock_docker):
+        """start_line=2, end_line=3 returns lines 2-3 (1-indexed, inclusive)."""
+        file_body = "line0\nline1\nline2\nline3\nline4\n"
+        container = _make_container([
+            (0, file_body.encode(), b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        result = json.loads(
+            read_file_range("abc123def456", "/f.txt", start_line=2, end_line=3)
+        )
+        assert result["error"] is None
+        assert result["content"] == "line1\nline2"
+        assert result["shown"] == 2
+        assert result["total_lines"] == 6
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_start_line_only_reads_to_end(self, mock_docker):
+        """start_line=3 (no end_line) reads from line 3 to end."""
+        file_body = "line0\nline1\nline2\nline3\nline4\n"
+        container = _make_container([
+            (0, file_body.encode(), b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        result = json.loads(
+            read_file_range("abc123def456", "/f.txt", start_line=3)
+        )
+        assert result["error"] is None
+        assert result["content"] == "line2\nline3\nline4\n"
+        assert result["shown"] == 4  # trailing newline -> empty final line
+        assert result["total_lines"] == 6
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_start_line_end_line_single_line(self, mock_docker):
+        """start_line=1, end_line=1 returns exactly one line."""
+        file_body = "line0\nline1\nline2\n"
+        container = _make_container([
+            (0, file_body.encode(), b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        result = json.loads(
+            read_file_range("abc123def456", "/f.txt", start_line=1, end_line=1)
+        )
+        assert result["error"] is None
+        assert result["content"] == "line0"
+        assert result["shown"] == 1
+
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_start_line_and_offset_mutually_exclusive(self, mock_docker):
+        """start_line and non-zero offset together raise error."""
+        file_body = "line0\nline1\nline2\n"
+        container = _make_container([
+            (0, file_body.encode(), b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        result = json.loads(
+            read_file_range("abc123def456", "/f.txt", start_line=2, offset=3)
+        )
+        assert "error" in result
+        assert "mutually exclusive" in result["error"]
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_start_line_zero_rejected(self, mock_docker):
+        """start_line=0 is rejected (must be >= 1)."""
+        file_body = "line0\nline1\nline2\n"
+        container = _make_container([
+            (0, file_body.encode(), b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        result = json.loads(
+            read_file_range("abc123def456", "/f.txt", start_line=0)
+        )
+        assert "error" in result
+        assert "must be >= 1" in result["error"]
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_end_line_less_than_start_line_rejected(self, mock_docker):
+        """end_line < start_line is rejected."""
+        file_body = "line0\nline1\nline2\n"
+        container = _make_container([
+            (0, file_body.encode(), b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        result = json.loads(
+            read_file_range("abc123def456", "/f.txt", start_line=3, end_line=1)
+        )
+        assert "error" in result
+        assert "end_line must be >= start_line" in result["error"]
+
+
+    @patch("code_sandbox_mcp.tools.file._docker")
+    def test_offset_limit_still_works(self, mock_docker):
+        """Backward compatibility: offset/limit still function."""
+        file_body = "line0\nline1\nline2\n"
+        container = _make_container([
+            (0, file_body.encode(), b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        result = json.loads(
+            read_file_range("abc123def456", "/f.txt", offset=0, limit=2)
+        )
+        assert result["error"] is None
+        assert result["content"] == "line0\nline1"
+        assert result["shown"] == 2
+
+
 class TestListFiles:
     """Tests for list_files tool."""
 

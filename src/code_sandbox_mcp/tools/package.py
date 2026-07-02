@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import functools
 import json
 from typing import Annotated
 
@@ -48,12 +47,6 @@ def _get_installed_packages(container_id: str) -> list[dict[str, str]]:
 
 def _package_to_key(pkg: dict[str, str]) -> str:
     return f"{pkg['name']}=={pkg.get('version', '?')}"
-
-
-@functools.lru_cache(maxsize=None)
-def _has_uv(container_id: str) -> bool:
-    ec, _, _ = _run_in_container(container_id, ["which", "uv"])
-    return ec == 0
 
 
 def package_install(
@@ -133,8 +126,13 @@ def package_install(
         })
 
     # --- Build pip command ---
-    use_uv = _has_uv(container_id)
-    pip_args: list[str] = ["uv", "pip", "install"] if use_uv else ["pip", "install"]
+    # Deliberately plain pip: stock sandbox images have no venv and run as
+    # a non-root user, so ``uv pip install`` cannot work there (no venv is
+    # a hard error, ``--system`` hits root-owned site-packages, and uv has
+    # no ``--user``).  pip falls back to the user site (``~/.local``) on
+    # its own.  A user-owned persistent venv baked into the image would
+    # let ``uv`` work again (Issue #380; same rationale as #383 / PR #384).
+    pip_args: list[str] = ["pip", "install"]
 
     if upgrade:
         pip_args.append("--upgrade")

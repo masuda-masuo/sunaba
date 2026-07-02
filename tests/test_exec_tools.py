@@ -839,18 +839,15 @@ class TestPackageInstallJournalRecording:
 
     @patch("code_sandbox_mcp.tools.package.journal_record_exec")
     @patch("code_sandbox_mcp.tools.package._get_installed_packages")
-    @patch("code_sandbox_mcp.tools.package._has_uv")
     @patch("code_sandbox_mcp.tools.package._run_in_container")
     def test_install_records_exec(
         self,
         mock_run: MagicMock,
-        mock_has_uv: MagicMock,
         mock_pkgs: MagicMock,
         mock_record: MagicMock,
     ) -> None:
         from code_sandbox_mcp.tools.package import package_install
 
-        mock_has_uv.return_value = False
         mock_pkgs.return_value = []
         mock_run.return_value = (0, "Successfully installed requests", "")
 

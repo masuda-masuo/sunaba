@@ -85,9 +85,21 @@ _PROXY_LISTEN_PORT = 8080
 #: port publish reaches it; the shared secret gates every request).
 _CONTROL_PORT = 9099
 
-#: Where mitmproxy writes its generated CA inside the sidecar (confdir is
-#: ``/certs``, set by the image).
-_CA_PATH_IN_PROXY = "/certs/mitmproxy-ca-cert.pem"
+#: mitmproxy confdir inside the sidecar (set by the image).  Backed by the
+#: :data:`CERTS_VOLUME_NAME` named volume so the CA survives sidecar
+#: recreation (#400).
+_CERTS_DIR_IN_PROXY = "/certs"
+
+#: Named volume mounted at :data:`_CERTS_DIR_IN_PROXY`.  mitmproxy reuses an
+#: existing CA in its confdir, so persisting the directory keeps the CA
+#: stable across sidecar recreations (allowlist changes, image updates,
+#: crashes) -- running sandboxes that trust the old CA keep working (#400).
+#: Deliberate CA rotation: ``docker volume rm code-sandbox-egress-certs``
+#: (with the sidecar removed), then let the next start regenerate it.
+CERTS_VOLUME_NAME = "code-sandbox-egress-certs"
+
+#: Where mitmproxy writes its generated CA inside the sidecar.
+_CA_PATH_IN_PROXY = f"{_CERTS_DIR_IN_PROXY}/mitmproxy-ca-cert.pem"
 
 #: Where the CA lands in the sandbox; ``update-ca-certificates`` folds it
 #: into the system bundle so git/curl trust the TLS-terminating proxy.
@@ -148,7 +160,9 @@ def ensure_egress_proxy(
 
     Note: the allowlist/token env vars are baked into the sidecar at creation;
     changing them on the host requires removing the sidecar container so the
-    next call recreates it.
+    next call recreates it.  Recreation is safe for running sandboxes: the CA
+    lives in the :data:`CERTS_VOLUME_NAME` named volume and stays the same
+    (#400).
 
     Raises:
         EgressProxyError: When the sidecar cannot be started or its CA does
@@ -297,6 +311,23 @@ def _ensure_network(client: Any) -> Any:
         )
 
 
+def _ensure_certs_volume(client: Any) -> None:
+    """Ensure the CA named volume exists, labelled as managed.
+
+    Docker would auto-create a missing named volume on container start, but
+    without labels; creating it explicitly keeps it discoverable next to the
+    other managed resources (the orphan reaper only ever touches containers,
+    so the label carries no GC risk).
+    """
+    import docker.errors
+
+    try:
+        client.volumes.get(CERTS_VOLUME_NAME)
+    except docker.errors.NotFound:
+        logger.info("Creating CA volume %s", CERTS_VOLUME_NAME)
+        client.volumes.create(CERTS_VOLUME_NAME, labels={MANAGED_LABEL: "true"})
+
+
 def _find_proxy_container(client: Any) -> Any | None:
     """Return the sidecar container by its fixed name, or ``None``."""
     import docker.errors
@@ -319,8 +350,14 @@ def _start_proxy_container(
     the loopback port publish -- ``internal`` networks cannot publish ports),
     then *additionally* connected to the internal network under the
     :data:`PROXY_NETWORK_ALIAS` DNS name sandboxes use.
+
+    The confdir is backed by the :data:`CERTS_VOLUME_NAME` named volume so
+    the CA persists across recreations (#400).  On the volume's first mount
+    Docker copies the image's ``/certs`` into it -- including its
+    ``egressproxy`` ownership -- so the non-root mitmproxy can write there.
     """
     image = source.get(PROXY_IMAGE_ENV) or _DEFAULT_PROXY_IMAGE
+    _ensure_certs_volume(client)
     proxy_env = {
         CONTROL_PORT_ENV: str(_CONTROL_PORT),
         CONTROL_HOST_ENV: "0.0.0.0",
@@ -337,6 +374,7 @@ def _start_proxy_container(
         name=PROXY_CONTAINER_NAME,
         environment=proxy_env,
         labels={MANAGED_LABEL: "true"},
+        volumes={CERTS_VOLUME_NAME: {"bind": _CERTS_DIR_IN_PROXY, "mode": "rw"}},
         ports={f"{_CONTROL_PORT}/tcp": ("127.0.0.1", _control_host_port(source))},
         # unless-stopped (not always): it still auto-starts after a daemon
         # restart; only a manually `docker stop`ped sidecar stays down, which

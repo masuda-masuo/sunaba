@@ -135,7 +135,9 @@ _SENSITIVE_FILE_BASENAMES: frozenset[str] = frozenset(
 )
 
 
-def _container_env(inject_vcs_token: bool = False) -> dict[str, str]:
+def _container_env(
+    inject_vcs_token: bool = False, *, egress_proxied: bool = False
+) -> dict[str, str]:
     """Build environment variables to pass to sandbox containers.
 
     When *inject_vcs_token* is ``True``, passes through
@@ -150,8 +152,20 @@ def _container_env(inject_vcs_token: bool = False) -> dict[str, str]:
     When a keystore broker is configured (``GITHUB_TOKEN_COMMAND`` or
     ``GITHUB_TOKEN_BROKER_SERVICE``) a fresh token is minted per call and
     takes precedence over the static host ``GITHUB_TOKEN`` (Issue #232).
+
+    When *egress_proxied* is ``True`` no token is injected even with
+    *inject_vcs_token* set (#356): the container's egress runs through the
+    proxy sidecar, ``publish`` hands the credential to the proxy per push
+    window, and a token in the container env would let a raw ``git push``
+    from ``sandbox_exec`` bypass that gate.
     """
     env: dict[str, str] = {}
+    if inject_vcs_token and egress_proxied:
+        logger.info(
+            "egress proxy active: VCS token kept out of container env (#356); "
+            "publish supplies it to the proxy per push window"
+        )
+        return env
     if inject_vcs_token:
         # Prefer a freshly minted token from the keystore broker (Issue #232):
         # GITHUB_TOKEN_COMMAND or the pinned mcp-token CLI mint a short-lived
@@ -1041,11 +1055,13 @@ def sandbox_initialize(
     resolved, image_notice = _select_initial_image(
         image, clone_repo, repo, pr, inject_vcs_token
     )
-    env = _container_env(inject_vcs_token=inject_vcs_token)
-
     # -- Egress proxy sidecar (#358, Epic #353): opt-in, fail closed --
+    # A proxied container gets no VCS token in its env (#356); publish
+    # hands the credential to the proxy per push window instead.
+    proxied = allow_network and proxy_lifecycle.egress_proxy_enabled()
+    env = _container_env(inject_vcs_token=inject_vcs_token, egress_proxied=proxied)
     proxy_runtime = None
-    if allow_network and proxy_lifecycle.egress_proxy_enabled():
+    if proxied:
         try:
             proxy_runtime = proxy_lifecycle.ensure_egress_proxy(client)
         except Exception as e:
@@ -1464,11 +1480,13 @@ def run_container_and_exec(
     if image_notice:
         logger.info("image selection: %s", image_notice)
     client = _docker()
-    env = _container_env(inject_vcs_token=inject_vcs_token)
-
     # -- Egress proxy sidecar (#358, Epic #353): opt-in, fail closed --
+    # A proxied container gets no VCS token in its env (#356); publish
+    # hands the credential to the proxy per push window instead.
+    proxied = allow_network and proxy_lifecycle.egress_proxy_enabled()
+    env = _container_env(inject_vcs_token=inject_vcs_token, egress_proxied=proxied)
     proxy_runtime = None
-    if allow_network and proxy_lifecycle.egress_proxy_enabled():
+    if proxied:
         try:
             proxy_runtime = proxy_lifecycle.ensure_egress_proxy(client)
         except Exception as e:

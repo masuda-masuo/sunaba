@@ -23,6 +23,7 @@ from code_sandbox_mcp.proxy import (
     FETCH_SERVICE,
     PUSH_SERVICE,
     AuthControlServer,
+    Decision,
     EgressGuard,
     allowed_repos_from_env,
     control_bind_from_env,
@@ -197,6 +198,56 @@ class TestTokenInjection:
         assert d.allow is True
         assert guard.token_headers_for(d, is_push_request=False) == {}
 
+    def test_window_scoped_token_injected(self) -> None:
+        # No static token: the credential travels with the window (#356).
+        guard = EgressGuard({"o/r"})
+        guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_window")
+        d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
+        assert d.allow is True
+        assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {
+            "Authorization": "Bearer ghs_window"
+        }
+
+    def test_window_token_beats_static_token(self) -> None:
+        guard = EgressGuard({"o/r"}, token="ghs_static")
+        guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_window")
+        d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
+        assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {
+            "Authorization": "Bearer ghs_window"
+        }
+
+    def test_no_repo_falls_back_to_static_token(self) -> None:
+        guard = EgressGuard({"o/r"}, token="ghs_static")
+        guard.open_window("o/r", ttl_seconds=30, now=100.0)
+        d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
+        assert guard.token_headers_for(d, is_push_request=True, now=101.0) == {
+            "Authorization": "Bearer ghs_static"
+        }
+
+    def test_expired_window_token_not_injected(self) -> None:
+        # Even against a (fabricated) allow decision, an expired window's
+        # token must never leave the guard.
+        guard = EgressGuard({"o/r"})
+        guard.open_window("o/r", ttl_seconds=5.0, now=100.0, token="ghs_window")
+        d = Decision(True, "fabricated allow")
+        assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=106.0) == {}
+
+    def test_closed_window_drops_token(self) -> None:
+        guard = EgressGuard({"o/r"})
+        guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_window")
+        guard.close_window("o/r")
+        d = Decision(True, "fabricated allow")
+        assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {}
+
+    def test_expired_window_entry_is_scrubbed(self) -> None:
+        # decide() on an expired window must also evict the entry so the
+        # window-scoped token does not linger in memory past expiry (#356).
+        guard = EgressGuard({"o/r"})
+        guard.open_window("o/r", ttl_seconds=5.0, now=100.0, token="ghs_window")
+        d = guard.decide("/o/r.git/git-receive-pack", None, now=106.0)
+        assert d.allow is False
+        assert guard._windows == {}
+
 
 class TestControlRequestDispatch:
     """The pure control dispatcher: auth, validation, and window open/close."""
@@ -222,6 +273,33 @@ class TestControlRequestDispatch:
         )
         assert res.status == 200
         assert res.body["ttl_seconds"] == DEFAULT_WINDOW_TTL_SECONDS
+
+    def test_allow_with_token_arms_window_scoped_injection(self) -> None:
+        # publish hands the push credential over with the window (#356); the
+        # authorized push must then carry it as a Bearer header.
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard,
+            None,
+            "/auth/allow",
+            None,
+            {"repo": "o/r", "ttl_seconds": 30, "token": "ghs_window"},
+            now=100.0,
+        )
+        assert res.status == 200
+        # The credential must never be echoed back (the response is loggable).
+        assert "ghs_window" not in json.dumps(res.body)
+        d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
+        assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {
+            "Authorization": "Bearer ghs_window"
+        }
+
+    def test_allow_with_non_string_token_rejected(self) -> None:
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard, None, "/auth/allow", None, {"repo": "o/r", "token": 12345}
+        )
+        assert res.status == 400
 
     def test_revoke_closes_window(self) -> None:
         guard = EgressGuard({"o/r"})

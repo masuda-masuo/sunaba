@@ -19,6 +19,7 @@ from code_sandbox_mcp.proxy_client import (
     authorized_push_window,
     close_window,
     open_window,
+    proxy_configured,
 )
 
 REPO = "owner/repo"
@@ -30,6 +31,13 @@ _SECRET = "s3cret"
 def _push_allowed(guard: EgressGuard) -> bool:
     """Whether the guard would currently let a push to REPO through."""
     return guard.decide(_PUSH_PATH, _PUSH_SERVICE, time.monotonic()).allow
+
+
+def _push_headers(guard: EgressGuard) -> dict[str, str]:
+    """Headers the guard would inject into a push to REPO right now."""
+    now = time.monotonic()
+    decision = guard.decide(_PUSH_PATH, _PUSH_SERVICE, now)
+    return guard.token_headers_for(decision, is_push_request=True, repo=REPO, now=now)
 
 
 @pytest.fixture
@@ -115,6 +123,41 @@ class TestWindowLifecycle:
                 raise RuntimeError("boom")
         # Window revoked despite the push raising.
         assert not _push_allowed(guard)
+
+
+class TestWindowScopedToken:
+    """The push credential travels with the window over the control API (#356)."""
+
+    def test_token_rides_the_window(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        open_window(REPO, token="ghs_window", config=config)
+        assert _push_headers(guard) == {"Authorization": "Bearer ghs_window"}
+        close_window(REPO, config=config)
+        # Revoked window -> credential gone with it.
+        assert _push_headers(guard) == {}
+
+    def test_context_manager_scopes_the_token(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        with authorized_push_window(REPO, token="ghs_window", config=config):
+            assert _push_headers(guard) == {"Authorization": "Bearer ghs_window"}
+        assert _push_headers(guard) == {}
+
+    def test_windows_without_token_inject_nothing(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        open_window(REPO, config=config)
+        assert _push_allowed(guard)
+        assert _push_headers(guard) == {}
+
+
+class TestProxyConfigured:
+    def test_false_when_unset(self) -> None:
+        assert proxy_configured(env={}) is False
+
+    def test_true_when_url_set(self) -> None:
+        assert proxy_configured(env={CONTROL_URL_ENV: "http://proxy:9099"}) is True
 
 
 class TestAuthFailures:

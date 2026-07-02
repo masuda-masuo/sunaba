@@ -15,7 +15,11 @@ from docker.errors import NotFound
 
 from code_sandbox_mcp import token_broker
 from code_sandbox_mcp.journal import get_or_create_run_id, record_boundary_crossing
-from code_sandbox_mcp.proxy_client import ProxyAuthError, authorized_push_window
+from code_sandbox_mcp.proxy_client import (
+    ProxyAuthError,
+    authorized_push_window,
+    proxy_configured,
+)
 from code_sandbox_mcp.token import generate_token, verify_and_consume
 from code_sandbox_mcp.tools.common import (
     CLONE_NO_TOKEN_WARNING,
@@ -987,7 +991,19 @@ Returns:
     # token is available, ``push_env`` is ``None`` and the credential helper
     # falls back to whatever the container already carries (a
     # startup-injected token), preserving backward compatibility.
-    push_env = _push_token_env(_resolve_push_token())
+    #
+    # With the egress proxy configured (#356), the credential goes to the
+    # proxy instead, window-scoped via ``authorized_push_window(token=...)``:
+    # the proxy injects ``Authorization`` into the authorized push itself, so
+    # neither the git-push exec nor the API-push fallback carries a token --
+    # the container stays credential-free end to end, and the Objects API
+    # fallback cannot become a proxy bypass.  The gh-pr-create exec still
+    # gets the ephemeral token because api.github.com writes are not
+    # proxy-gated yet (#360).
+    push_token = _resolve_push_token()
+    token_env = _push_token_env(push_token)
+    proxied = proxy_configured()
+    push_env = None if proxied else token_env
 
     # --- Git push (with transport fallback to API push) ---
     force_flag = " --force" if allow_force_push else ""
@@ -1003,7 +1019,7 @@ Returns:
     # failed push (either transport) still closes it.  (The gh-pr-create call
     # below hits api.github.com, a non-push write gated separately by #360.)
     try:
-        with authorized_push_window(repo):
+        with authorized_push_window(repo, token=push_token or None):
             push_ec, push_out, push_err = _run(push_cmd, env=push_env)
 
             # Get the SHA of the pushed commit
@@ -1073,7 +1089,9 @@ Returns:
         if base_branch:
             pr_cmd += f" --base {shlex.quote(base_branch)}"
 
-        pr_ec, pr_out, pr_err = _run(pr_cmd, env=push_env)
+        # api.github.com is not proxy-gated yet (#360), so PR creation still
+        # needs the ephemeral token even when the push itself did not.
+        pr_ec, pr_out, pr_err = _run(pr_cmd, env=token_env)
         if pr_ec != 0:
             # Push succeeded but PR creation failed — still record push
             record_boundary_crossing(

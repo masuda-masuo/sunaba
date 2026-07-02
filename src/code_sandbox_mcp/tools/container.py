@@ -562,21 +562,15 @@ class CloneResult(NamedTuple):
 def _editable_install_cmd(target: str) -> str:
     """Build a shell command that pip-installs *target* (e.g. ``".[dev]"``).
 
-    Prefers ``uv`` — preinstalled on every stock sandbox image and markedly
-    faster than pip — falling back to plain ``pip`` for custom images that
-    don't have it.  ``uv`` needs an explicit venv because the sandbox user
-    is non-root and cannot write to system site-packages, yet ``uv`` does not
-    support ``--user`` (Issue #368).  Resolved in a single ``exec_run`` call.
+    Deliberately plain ``pip``: stock sandbox images have no venv and run as
+    a non-root user, so ``uv pip install`` cannot persist anything there
+    (``--system`` hits root-owned site-packages, ``--user`` is unsupported,
+    and the former mktemp-venv workaround deleted the install together with
+    the venv — Issue #383).  pip falls back to the user site (``~/.local``)
+    on its own.  A user-owned persistent venv baked into the image would let
+    ``uv`` work again (Issue #380).
     """
-    quoted = shlex.quote(target)
-    return (
-        f"if command -v uv >/dev/null 2>&1; then "
-        f"VENV=$(mktemp -d) && "
-        f"uv venv --clear \"$VENV\" >/dev/null 2>&1 && "
-        f"uv pip install --python \"$VENV/bin/python\" -e {quoted} -q; "
-        f"rc=$?; rm -rf \"$VENV\"; exit $rc; "
-        f"else pip install -e {quoted} -q; fi"
-    )
+    return f"pip install -e {shlex.quote(target)} -q"
 
 
 def _run_pip_install(
@@ -764,10 +758,10 @@ def _setup_pr_branch(
         cid,
     )
 
-    # Step 4: Install dev dependencies (non-fatal). Prefer uv (preinstalled on
-    # stock sandbox images, markedly faster than pip) with a pip fallback for
-    # custom images; network is always available here since
-    # sandbox_initialize forces allow_network=True whenever pr is set.
+    # Step 4: Install dev dependencies (non-fatal) via plain pip (see
+    # _editable_install_cmd for why uv isn't used); network is always
+    # available here since sandbox_initialize forces allow_network=True
+    # whenever pr is set.
     if pip_extras is not None:
         install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}')}"
         exit_code, output = container.exec_run(

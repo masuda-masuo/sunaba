@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 
 #: Interface the proxy listens on.  Defaults to all interfaces because the
 #: sandbox container reaches the sidecar across a Docker network, not loopback.
@@ -110,7 +110,7 @@ def build_mitmdump_argv(env: Mapping[str, str]) -> list[str]:
 
 def main(
     env: Mapping[str, str] | None = None,
-    exec_fn: Callable[[str, Sequence[str]], None] = os.execvp,
+    exec_fn: Callable[[str, list[str]], None] = os.execvp,
 ) -> int:
     """Assemble the mitmdump command and ``exec`` it (the container entrypoint).
 

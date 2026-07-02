@@ -80,7 +80,9 @@ if sys.modules.get(__name__) is None:  # pragma: no cover - only under mitmdump
     sys.modules[__name__] = _self_module
 
 try:  # pragma: no cover - only importable inside the proxy sidecar image
-    from mitmproxy import http
+    # mitmproxy is intentionally NOT a package dependency (it lives only in the
+    # proxy sidecar image), so the resolver cannot see it here (#387).
+    from mitmproxy import http  # pyright: ignore[reportMissingImports]
 except ImportError:
     # The package must import without mitmproxy installed; the mitmproxy glue in
     # EgressGuard.request() only runs under mitmdump, where it is present.

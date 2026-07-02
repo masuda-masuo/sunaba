@@ -14,16 +14,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
   && rm -rf /var/lib/apt/lists/*
 
-# uv（高速インストール）
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:${PATH}"
-
-RUN uv pip install --system pytest pytest-json-report
+# uv（高速インストール、全ユーザから見える場所へ）
+# 旧: /root/.local/bin 配下だと sandbox ユーザから実行できなかった
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
 # 非 root
 RUN groupadd -r sandbox && useradd -r -g sandbox -m -d /home/sandbox sandbox
 USER sandbox
 WORKDIR /home/sandbox
-ENV PATH="/home/sandbox/.local/bin:${PATH}"
+
+# 永続 venv (#380 恒久対応): 非 root でも pip / uv がフラグなしで動く
+# （base イメージと同じ構成。--seed で venv 内に pip も入れる）
+RUN uv venv --seed /home/sandbox/.venv
+ENV VIRTUAL_ENV="/home/sandbox/.venv" \
+    PATH="/home/sandbox/.venv/bin:/home/sandbox/.local/bin:${PATH}"
+
+RUN uv pip install pytest pytest-json-report
+
+# ── ヘルスチェック (minimal が保有するツールのみ) ────────────────
+# pip --version は venv の健全性を兼ねて確認する（壊れたツールを隠さない）
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD rg --version && pip --version && pytest --version || exit 1
 
 CMD ["bash"]

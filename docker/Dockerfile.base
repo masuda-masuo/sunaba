@@ -103,8 +103,19 @@ USER sandbox
 WORKDIR /home/sandbox
 ENV PATH="/home/sandbox/.local/bin:${PATH}"
 
+# ── 永続 venv (#380 恒久対応) ─────────────────────────────────────
+# 非 root 実行のためシステム site-packages へは書けず、venv なしでは
+# `uv pip install` が成立しない（--system は権限エラー、--user は uv 非対応）。
+# sandbox ユーザ所有の venv を焼き込み VIRTUAL_ENV/PATH を通すことで、
+# 実行時の pip / uv がフラグなしで動き、インストール先も一貫する。
+# --seed で venv 内に pip も入れる（uv venv は既定では pip を含めない）。
+RUN uv venv --seed /home/sandbox/.venv
+ENV VIRTUAL_ENV="/home/sandbox/.venv" \
+    PATH="/home/sandbox/.venv/bin:${PATH}"
+
 # ── ヘルスチェック (base が保有するツールのみ) ────────────────────
+# pip --version は venv の健全性を兼ねて確認する（壊れたツールを隠さない）
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD rg --version && sg --version && node --version || exit 1
+  CMD rg --version && sg --version && node --version && pip --version || exit 1
 
 CMD ["bash"]

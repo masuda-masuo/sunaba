@@ -15,9 +15,12 @@
 ARG BASE_IMAGE=code-sandbox-mcp/sandbox:base
 FROM ${BASE_IMAGE}
 
-# ── Python 開発ツール (root でシステムワイド導入 → 全ユーザの PATH に載る) ──
-USER root
-RUN uv pip install --system \
+# ── Python 開発ツール (base の永続 venv へ sandbox ユーザで導入) ──
+# root + --system だと venv の python から見えず、root 所有になって
+# sandbox ユーザが更新もできない（#380 恒久対応）。VIRTUAL_ENV は base の
+# ENV で通っているため uv はフラグなしで venv へ入れる。
+USER sandbox
+RUN uv pip install \
     ruff \
     pyright \
     pytest \
@@ -31,7 +34,9 @@ WORKDIR /home/sandbox
 RUN pyright --version
 
 # ── ヘルスチェック (base 継承 + python 固有ツール) ──────────────
+# HEALTHCHECK は base を上書きするため、base 側の pip --version
+# （venv 健全性チェック）もここに含める必要がある
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD rg --version && sg --version && node --version && ruff --version && pyright --version && pytest --version || exit 1
+  CMD rg --version && sg --version && node --version && pip --version && ruff --version && pyright --version && pytest --version || exit 1
 
 CMD ["bash"]

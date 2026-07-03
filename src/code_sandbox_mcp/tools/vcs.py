@@ -658,6 +658,147 @@ def _consume_confirmation_token(
 
 
 # ---------------------------------------------------------------------------
+# sandbox_issue_write -- first-class, host-side issue create/comment (#414)
+# ---------------------------------------------------------------------------
+
+
+_ISSUE_WRITE_METHODS = ("create", "comment")
+
+
+def sandbox_issue_write(
+    container_id: str,
+    repo: str,
+    method: str,
+    title: str = "",
+    body: str = "",
+    issue_number: int | None = None,
+    dry_run: bool = False,
+    token: str = "",
+) -> str:
+    """Create a GitHub issue or comment on one -- host-side, no in-container gh.
+
+    First-class tool for the non-push write operations #360 identified as a
+    blind spot: under the egress proxy, in-container ``gh issue create`` /
+    ``gh issue comment`` have no credential to use (#356) and would need the
+    proxy to blanket-allow api.github.com writes, defeating the point of
+    gating push. This tool follows the same dry_run -> confirmation token ->
+    execute shape as :func:`publish` (:func:`_dry_run_response` /
+    :func:`_consume_confirmation_token`, already generic, not extracted
+    specially for this tool) and calls the GitHub REST API directly from the
+    host (:func:`_github_api_request`, the pattern established by
+    :func:`_create_pr_via_api` and :func:`issue_view`, #409/#413) -- so no
+    token ever needs to reach the container, and the call does not depend on
+    the container having network access at all.
+
+    .. rubric:: Use when
+
+    - Creating a new GitHub issue from inside a sandbox session
+    - Adding a comment to an existing issue or PR (the issue-comment API
+      covers both)
+
+    .. rubric:: Don't use when
+
+    - **Reading an issue** -- use :func:`issue_view` instead (no confirmation
+      token needed, it is read-only)
+    - **Pushing code or creating a PR** -- use :func:`publish` instead
+
+    Args:
+        container_id: 12-character container ID prefix.  Used for the
+            journal/confirmation-token trail, exactly like :func:`publish`;
+            the container's own network/token state is irrelevant since the
+            GitHub call happens host-side.
+        repo: Repository in ``"owner/repo"`` format.
+        method: ``"create"`` (new issue) or ``"comment"`` (comment on an
+            existing issue or PR number).
+        title: Issue title.  Required when *method* is ``"create"``.
+        body: Issue or comment body (optional for ``"create"``, the actual
+            content for ``"comment"``).
+        issue_number: Issue or PR number to comment on.  Required when
+            *method* is ``"comment"``, ignored for ``"create"``.
+        dry_run: When ``True``, returns a confirmation token instead of
+            executing (mirrors :func:`publish`).
+        token: Confirmation token from a previous ``dry_run`` call.
+
+    Returns:
+        JSON string with ``status``, and on success ``html_url`` (issue or
+        comment URL) plus ``number`` (for ``"create"``).  On error returns
+        an ``error`` field.
+    """
+    if method not in _ISSUE_WRITE_METHODS:
+        return json.dumps({
+            "error": f"Invalid method: {method!r} (expected 'create' or 'comment')"
+        })
+    if not _REPO_FORMAT_RE.match(repo):
+        return json.dumps({"error": f"Invalid repo format: {repo} (expected owner/repo)"})
+    if method == "create" and not title:
+        return json.dumps({"error": "title is required when method='create'"})
+    if method == "comment" and not issue_number:
+        return json.dumps({"error": "issue_number is required when method='comment'"})
+
+    client = _docker()
+    try:
+        client.containers.get(container_id)
+    except NotFound:
+        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    cid = container_id[:12]
+    run_id = get_or_create_run_id(cid)
+
+    if method == "create":
+        details = f"repo={repo} issue_create title={title[:80]}"
+        payload = {"repo": repo, "method": method, "title": title}
+    else:
+        details = f"repo={repo} issue_comment number=#{issue_number} body={body[:80]}"
+        payload = {"repo": repo, "method": method, "issue_number": issue_number}
+
+    if dry_run:
+        return _dry_run_response("issue_write", cid, run_id, details, payload)
+
+    token_result, token_error = _consume_confirmation_token(token)
+    if token_error is not None:
+        return token_error
+
+    push_token = _resolve_push_token()
+    if not push_token:
+        return json.dumps({
+            "status": "error",
+            "error": "No host-side GitHub token available (GITHUB_TOKEN / broker); "
+                     "issue write requires one regardless of container state.",
+        })
+
+    try:
+        if method == "create":
+            result = _github_api_request(
+                f"/repos/{repo}/issues",
+                push_token,
+                method="POST",
+                payload={"title": title, "body": body} if body else {"title": title},
+            )
+        else:
+            result = _github_api_request(
+                f"/repos/{repo}/issues/{issue_number}/comments",
+                push_token,
+                method="POST",
+                payload={"body": body},
+            )
+    except RuntimeError as e:
+        record_boundary_crossing(cid, "issue_write", f"{details} failed", approved=False, token=token)
+        return json.dumps({"status": "error", "error": str(e)})
+
+    record_boundary_crossing(cid, "issue_write", details, approved=True, token=token)
+
+    response: dict[str, Any] = {
+        "status": "ok",
+        "html_url": result.get("html_url", ""),
+    }
+    if method == "create":
+        response["number"] = result.get("number")
+    return json.dumps(response)
+
+
+# ---------------------------------------------------------------------------
 # publish
 # ---------------------------------------------------------------------------
 

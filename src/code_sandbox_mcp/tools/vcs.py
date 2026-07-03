@@ -494,13 +494,16 @@ def issue_view(
 ) -> str:
     """Read a GitHub issue and save its body to a file inside the container.
 
-    Uses ``gh issue view`` inside the container.  The issue body is
-    written to *save_to* and the LLM receives only a summary + handle
-    (file path and size).  Full text can be retrieved with
-    :func:`read_file_range`.
+    Fetches the issue host-side via the REST API (like :func:`publish`'s PR
+    creation, #360) and writes the body into the container.  The LLM
+    receives only a summary + handle (file path and size); full text can be
+    retrieved with :func:`read_file_range`.
 
-    Requires a container started with ``allow_network=True`` and
-    ``inject_vcs_token=True``.
+    Because the network hop happens on the host, this works on **any**
+    container -- ``allow_network`` / ``inject_vcs_token`` are not required.
+    This also fixes the tool for egress-proxied containers: the previous
+    in-container ``gh issue view`` needed a container-side token, which the
+    proxy deliberately never provides (#356), so it failed outright there.
 
     Args:
         container_id: 12-character container ID prefix.
@@ -524,41 +527,18 @@ def issue_view(
 
     cid = container_id[:12]
 
-    # Fetch issue metadata as JSON (includes number, title, body)
-    json_cmd = (
-        f"gh issue view {issue_number} --repo {shlex.quote(repo)}"
-        f" --json number,title,body"
-    )
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", json_cmd],
-        stdout=True,
-        stderr=True,
-    )
-    stdout_part, stderr_part = (
-        output if isinstance(output, tuple) else (output, b"")
-    )
-    stdout_text = (
-        stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    )
-    stderr_text = (
-        stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-    )
-
-    if exit_code != 0:
-        return json.dumps({
-            "error": f"Failed to fetch issue #{issue_number} from {repo}: {stderr_text or stdout_text}"
-        })
-
     try:
-        issue_data = json.loads(stdout_text)
-    except json.JSONDecodeError:
+        issue_data = _github_api_request(
+            f"/repos/{repo}/issues/{issue_number}", _resolve_push_token()
+        )
+    except RuntimeError as e:
         return json.dumps({
-            "error": f"Failed to parse issue JSON: {stdout_text[:200]}"
+            "error": f"Failed to fetch issue #{issue_number} from {repo}: {e}"
         })
 
     number = issue_data.get("number", issue_number)
     title = issue_data.get("title", "")
-    body = issue_data.get("body", "")
+    body = issue_data.get("body") or ""
 
     # Summary: first 100 characters of body
     summary = body[:100] if body else "(empty body)"
@@ -744,6 +724,10 @@ def _github_api_request(
     traverse the egress proxy (#360).  The REST API accepts ``Bearer``; the
     Basic-only quirk applies to git smart-HTTP endpoints only (PR #404).
 
+    *token* may be empty for an anonymous request (e.g. a public-repo read
+    such as :func:`issue_view`); no ``Authorization`` header is sent in that
+    case, rather than one carrying an empty bearer value.
+
     Raises:
         RuntimeError: On an HTTP error (carrying GitHub's ``message`` /
             ``errors`` when present) or an unreachable network.
@@ -756,7 +740,8 @@ def _github_api_request(
     request = urllib.request.Request(url, data=data, method=method)
     request.add_header("Accept", "application/vnd.github+json")
     request.add_header("User-Agent", "code-sandbox-mcp")
-    request.add_header("Authorization", f"Bearer {token}")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
     if data is not None:
         request.add_header("Content-Type", "application/json")
     try:
@@ -1596,12 +1581,17 @@ def clone_repo(
 ) -> str:
     """Clone a Git repository inside the container.
 
-    Uses ``gh repo clone`` when a VCS token is present, otherwise an
-    anonymous ``git clone`` over HTTPS — public repos clone without
-    credentials (Issue #333).
+    Uses ``gh repo clone`` when a VCS token is present in the container,
+    otherwise an anonymous ``git clone`` over HTTPS — public repos clone
+    without credentials (Issue #333).  The choice is made by probing the
+    container itself (``gh auth setup-git``), not by trusting the
+    ``inject_vcs_token`` request flag.
 
-    Requires a container started with ``allow_network=True`` and
-    ``inject_vcs_token=True`` for private repositories.
+    Requires a container started with ``allow_network=True``.  For a
+    *private* repository, ``inject_vcs_token=True`` is additionally required
+    -- but note that with the egress proxy active (#356) this flag no longer
+    puts a token in the container, so private repos cannot be cloned this
+    way under the proxy regardless of *inject_vcs_token*.
 
     .. hint::
 
@@ -1627,7 +1617,7 @@ def clone_repo(
 
     .. rubric:: Fallback
 
-    - If ``clone_repo`` fails with a private repo, ensure the container was started with ``inject_vcs_token=True``
+    - If ``clone_repo`` fails with a private repo, ensure the container was started with ``inject_vcs_token=True`` (and that the egress proxy, if enabled, is not in play -- it cannot help there)
 
     Args:
         container_id: 12-character container ID prefix.

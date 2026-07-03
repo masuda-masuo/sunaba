@@ -41,6 +41,8 @@ _CONTROL_TIMEOUT_SECONDS = 5.0
 
 _ALLOW_PATH = "/auth/allow"
 _REVOKE_PATH = "/auth/revoke"
+_ALLOW_READ_PATH = "/auth/allow-read"
+_REVOKE_READ_PATH = "/auth/revoke-read"
 
 
 class ProxyAuthError(RuntimeError):
@@ -137,6 +139,67 @@ def close_window(repo: str, *, config: ProxyControlConfig | None = None) -> None
     if cfg is None:
         return
     _post(cfg, _REVOKE_PATH, {"repo": repo})
+
+
+def open_read_window(
+    repo: str,
+    ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
+    *,
+    token: str | None = None,
+    config: ProxyControlConfig | None = None,
+) -> None:
+    """Open a clone/fetch-authorization window for *repo* (#419).
+
+    A no-op when the proxy is unset, mirroring :func:`open_window`.  Unlike a
+    push window, this never authorizes ``git push`` -- it only lets the proxy
+    inject *token* into ``git-upload-pack`` (clone/fetch) requests for *repo*
+    while the window is open.
+    """
+    cfg = config or ProxyControlConfig.from_env()
+    if cfg is None:
+        return
+    payload: dict[str, object] = {"repo": repo, "ttl_seconds": ttl_seconds}
+    if token:
+        payload["token"] = token
+    _post(cfg, _ALLOW_READ_PATH, payload)
+
+
+def close_read_window(repo: str, *, config: ProxyControlConfig | None = None) -> None:
+    """Revoke any read-authorization window for *repo* (no-op when unset)."""
+    cfg = config or ProxyControlConfig.from_env()
+    if cfg is None:
+        return
+    _post(cfg, _REVOKE_READ_PATH, {"repo": repo})
+
+
+@contextmanager
+def authorized_read_window(
+    repo: str,
+    ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
+    *,
+    token: str | None = None,
+    config: ProxyControlConfig | None = None,
+) -> Iterator[None]:
+    """Open a read window for *repo*, then always revoke it on exit (#419).
+
+    Mirrors :func:`authorized_push_window`: a no-op when the proxy is
+    unconfigured; when configured, callers such as ``clone_repo`` /
+    ``sandbox_initialize`` use this to let an authenticated clone/fetch
+    through the egress proxy without ever putting the token in the
+    container's own environment.
+    """
+    cfg = config or ProxyControlConfig.from_env()
+    if cfg is None:
+        yield
+        return
+    open_read_window(repo, ttl_seconds, token=token, config=cfg)
+    try:
+        yield
+    finally:
+        try:
+            close_read_window(repo, config=cfg)
+        except ProxyAuthError:
+            pass
 
 
 @contextmanager

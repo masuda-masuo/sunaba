@@ -381,7 +381,7 @@ class TestPublishLazyTokenInjection:
         # exec_run is called as exec_run([...], stdout=, stderr=, environment=)
         return call.kwargs.get("environment")
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
@@ -435,7 +435,7 @@ class TestPublishLazyTokenInjection:
         assert readonly_calls  # sanity
         assert all(self._env_of(c) is None for c in readonly_calls)
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
@@ -481,7 +481,7 @@ class TestPublishLazyTokenInjection:
         calls = container.exec_run.call_args_list
         assert all(self._env_of(c) is None for c in calls)
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
@@ -558,7 +558,7 @@ class TestPublishProxiedCredentialRouting:
 
     @patch("code_sandbox_mcp.tools.vcs.authorized_push_window")
     @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
@@ -608,7 +608,7 @@ class TestPublishProxiedCredentialRouting:
 
     @patch("code_sandbox_mcp.tools.vcs.authorized_push_window")
     @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
@@ -674,24 +674,24 @@ class TestResolvePushToken:
 
     @patch("code_sandbox_mcp.tools.vcs.token_broker.mint_token")
     def test_prefers_minted_broker_token(self, mock_mint: MagicMock) -> None:
-        from code_sandbox_mcp.tools.vcs import _resolve_push_token
+        from code_sandbox_mcp.tools.vcs import _resolve_vcs_token
 
         mock_mint.return_value = "ghs_minted"
         with patch.dict("os.environ", {"GITHUB_TOKEN": "ghs_static"}):
-            assert _resolve_push_token() == "ghs_minted"
+            assert _resolve_vcs_token() == "ghs_minted"
 
     @patch("code_sandbox_mcp.tools.vcs.token_broker.mint_token")
     def test_falls_back_to_static_env(self, mock_mint: MagicMock) -> None:
-        from code_sandbox_mcp.tools.vcs import _resolve_push_token
+        from code_sandbox_mcp.tools.vcs import _resolve_vcs_token
 
         mock_mint.return_value = None
         with patch.dict("os.environ", {"GITHUB_TOKEN": "ghs_static"}, clear=True):
-            assert _resolve_push_token() == "ghs_static"
+            assert _resolve_vcs_token() == "ghs_static"
 
     @patch("code_sandbox_mcp.tools.vcs.token_broker.mint_token")
     def test_empty_when_no_token_available(self, mock_mint: MagicMock) -> None:
-        from code_sandbox_mcp.tools.vcs import _resolve_push_token
+        from code_sandbox_mcp.tools.vcs import _resolve_vcs_token
 
         mock_mint.return_value = None
         with patch.dict("os.environ", {}, clear=True):
-            assert _resolve_push_token() == ""
+            assert _resolve_vcs_token() == ""

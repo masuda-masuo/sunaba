@@ -239,6 +239,11 @@ class EgressGuard:
         #: on ``/auth/allow`` and it is dropped on revoke/expiry, so the proxy
         #: never holds a credential longer than one authorized push.
         self._windows: dict[str, tuple[float, str | None]] = {}
+        #: Same shape as ``_windows`` but for **read** (clone/fetch,
+        #: ``git-upload-pack``) authorization (#419).  Deliberately a
+        #: separate table: a read window must never make :meth:`decide`
+        #: treat a repo as push-authorized, so the two are never merged.
+        self._read_windows: dict[str, tuple[float, str | None]] = {}
         self._lock = threading.Lock()
         #: static fallback push token; ``None`` disables it.  A window-scoped
         #: token, when present, takes precedence.
@@ -305,6 +310,46 @@ class EgressGuard:
                 return None
         return token
 
+    def open_read_window(
+        self,
+        repo: str,
+        ttl_seconds: float,
+        now: float | None = None,
+        token: str | None = None,
+    ) -> None:
+        """Permit an authenticated clone/fetch of *repo* for *ttl_seconds* (#419).
+
+        Unlike :meth:`open_window`, this never authorizes a push -- it only
+        controls whether :meth:`token_headers_for` injects credentials into a
+        ``git-upload-pack`` (clone/fetch) request.  Kept in a separate table
+        from the push windows so opening one can never widen push access.
+        """
+        base = time.monotonic() if now is None else now
+        with self._lock:
+            self._read_windows[repo.lower()] = (base + ttl_seconds, token)
+
+    def close_read_window(self, repo: str) -> None:
+        """Revoke any open read window for *repo* (dropping its token, if any)."""
+        with self._lock:
+            self._read_windows.pop(repo.lower(), None)
+
+    def _read_window_token(self, repo: str | None, now: float) -> str | None:
+        """Return the unexpired read-window token for *repo*, or ``None``.
+
+        Scrubs an expired entry eagerly, mirroring :meth:`_window_token`.
+        """
+        if repo is None:
+            return None
+        with self._lock:
+            entry = self._read_windows.get(repo.lower())
+            if entry is None:
+                return None
+            expiry, token = entry
+            if now >= expiry:
+                self._read_windows.pop(repo.lower(), None)
+                return None
+        return token
+
     # -- decision core (pure) --
 
     def decide(self, path: str, query_service: str | None, now: float) -> Decision:
@@ -328,20 +373,32 @@ class EgressGuard:
         is_push_request: bool,
         repo: str | None = None,
         now: float | None = None,
+        is_fetch_request: bool = False,
     ) -> dict[str, str]:
-        """Return the ``Authorization`` header to add to an authorized push.
+        """Return the ``Authorization`` header to add to an authorized request.
 
-        Empty unless the request is an *allowed* push **and** a token is held:
-        only pushes the policy permits get credentials, and with no token (the
-        inert default) nothing is injected.  A window-scoped token for *repo*
-        (handed over on ``/auth/allow``, #356) takes precedence over the
-        static ``CODE_SANDBOX_PROXY_TOKEN`` fallback.  Pure, so the injection
-        policy is unit-testable without mitmproxy.
+        Empty unless the request is *allowed* **and** a token is held for its
+        kind: only pushes/fetches the policy permits get credentials, and with
+        no token (the inert default) nothing is injected.
+
+        For a push, a window-scoped token for *repo* (handed over on
+        ``/auth/allow``, #356) takes precedence over the static
+        ``CODE_SANDBOX_PROXY_TOKEN`` fallback.  For a fetch/clone
+        (``is_fetch_request``), only an explicit read-window token
+        (``/auth/allow-read``, #419) is used -- there is no static fallback,
+        since an always-on read credential would authenticate every clone the
+        container makes, not just ones the host explicitly authorized.  Pure,
+        so the injection policy is unit-testable without mitmproxy.
         """
-        if not (decision.allow and is_push_request):
+        if not decision.allow:
             return {}
         base = time.monotonic() if now is None else now
-        token = self._window_token(repo, base) or self._token
+        if is_push_request:
+            token = self._window_token(repo, base) or self._token
+        elif is_fetch_request:
+            token = self._read_window_token(repo, base)
+        else:
+            return {}
         if token:
             return {"Authorization": basic_auth_header(token)}
         return {}
@@ -392,8 +449,12 @@ class EgressGuard:
                 {"Content-Type": "text/plain"},
             )
             return
+        service = git_service_from_request(path, query_service)
         for name, value in self.token_headers_for(
-            decision, is_push(path, query_service), repo=repo_from_path(path)
+            decision,
+            service == PUSH_SERVICE,
+            repo=repo_from_path(path),
+            is_fetch_request=service == FETCH_SERVICE,
         ).items():
             flow.request.headers[name] = value
 
@@ -419,8 +480,9 @@ def handle_control_request(
     Authenticates the caller against *secret* with a constant-time compare --
     the sandboxed container never learns the secret, so it cannot open its own
     push window -- then opens (``/auth/allow``) or closes (``/auth/revoke``) a
-    window for ``payload["repo"]``.  Kept free of socket/HTTP glue so the
-    protocol is unit-testable on its own.
+    push window, or opens (``/auth/allow-read``) or closes
+    (``/auth/revoke-read``) a read window (#419), for ``payload["repo"]``.
+    Kept free of socket/HTTP glue so the protocol is unit-testable on its own.
     """
     if secret is not None and not hmac.compare_digest(provided_secret or "", secret):
         return ControlResult(403, {"error": "invalid or missing control secret"})
@@ -443,6 +505,18 @@ def handle_control_request(
         return ControlResult(200, {"ok": True, "repo": repo.lower(), "ttl_seconds": float(ttl)})
     if path == "/auth/revoke":
         guard.close_window(repo)
+        return ControlResult(200, {"ok": True, "repo": repo.lower()})
+    if path == "/auth/allow-read":
+        ttl = payload.get("ttl_seconds", DEFAULT_WINDOW_TTL_SECONDS)
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl <= 0:
+            return ControlResult(400, {"error": "'ttl_seconds' must be a positive number"})
+        window_token = payload.get("token")
+        if window_token is not None and not isinstance(window_token, str):
+            return ControlResult(400, {"error": "'token' must be a string when present"})
+        guard.open_read_window(repo, float(ttl), now=now, token=window_token or None)
+        return ControlResult(200, {"ok": True, "repo": repo.lower(), "ttl_seconds": float(ttl)})
+    if path == "/auth/revoke-read":
+        guard.close_read_window(repo)
         return ControlResult(200, {"ok": True, "repo": repo.lower()})
     return ControlResult(404, {"error": f"unknown control endpoint: {path}"})
 

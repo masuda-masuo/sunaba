@@ -261,6 +261,66 @@ class TestTokenInjection:
         assert guard._windows == {}
 
 
+class TestReadWindowTokenInjection:
+    """Read-authorization windows for clone/fetch (#419)."""
+
+    def test_fetch_with_no_read_window_gets_no_token(self) -> None:
+        guard = EgressGuard({"o/r"}, token="ghs_push_static")
+        d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now=101.0)
+        assert d.allow is True
+        # The push-side static token must never leak into a fetch.
+        assert (
+            guard.token_headers_for(d, is_push_request=False, repo="o/r", now=101.0, is_fetch_request=True)
+            == {}
+        )
+
+    def test_fetch_with_open_read_window_gets_token(self) -> None:
+        guard = EgressGuard()  # empty allowlist -- read windows bypass it
+        guard.open_read_window("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
+        d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now=101.0)
+        assert d.allow is True
+        assert guard.token_headers_for(
+            d, is_push_request=False, repo="o/r", now=101.0, is_fetch_request=True
+        ) == {"Authorization": basic_auth_header("ghs_read")}
+
+    def test_read_window_never_authorizes_push(self) -> None:
+        # Opening a read window must not widen push access (#419 design note).
+        guard = EgressGuard({"o/r"})
+        guard.open_read_window("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
+        d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
+        assert d.allow is False
+        assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {}
+
+    def test_push_window_never_authenticates_fetch(self) -> None:
+        # And the converse: a push window's token must not leak into a fetch.
+        guard = EgressGuard({"o/r"})
+        guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_push")
+        d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now=101.0)
+        assert guard.token_headers_for(
+            d, is_push_request=False, repo="o/r", now=101.0, is_fetch_request=True
+        ) == {}
+
+    def test_expired_read_window_token_not_injected(self) -> None:
+        guard = EgressGuard()
+        guard.open_read_window("o/r", ttl_seconds=5.0, now=100.0, token="ghs_read")
+        d = Decision(True, "fabricated allow")
+        assert (
+            guard.token_headers_for(d, is_push_request=False, repo="o/r", now=106.0, is_fetch_request=True)
+            == {}
+        )
+        assert guard._read_windows == {}
+
+    def test_closed_read_window_drops_token(self) -> None:
+        guard = EgressGuard()
+        guard.open_read_window("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
+        guard.close_read_window("o/r")
+        d = Decision(True, "fabricated allow")
+        assert (
+            guard.token_headers_for(d, is_push_request=False, repo="o/r", now=101.0, is_fetch_request=True)
+            == {}
+        )
+
+
 class TestControlRequestDispatch:
     """The pure control dispatcher: auth, validation, and window open/close."""
 
@@ -383,6 +443,63 @@ class TestControlRequestDispatch:
         assert res.status == 404
 
 
+class TestReadWindowControlDispatch:
+    """``/auth/allow-read`` / ``/auth/revoke-read`` (#419)."""
+
+    def test_allow_read_opens_read_window(self) -> None:
+        guard = EgressGuard()  # no push allowlist needed for reads
+        res = handle_control_request(
+            guard,
+            None,
+            "/auth/allow-read",
+            None,
+            {"repo": "o/r", "ttl_seconds": 30, "token": "ghs_read"},
+            now=100.0,
+        )
+        assert res.status == 200
+        assert "ghs_read" not in json.dumps(res.body)
+        d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now=101.0)
+        assert guard.token_headers_for(
+            d, is_push_request=False, repo="o/r", now=101.0, is_fetch_request=True
+        ) == {"Authorization": basic_auth_header("ghs_read")}
+
+    def test_allow_read_does_not_authorize_push(self) -> None:
+        guard = EgressGuard({"o/r"})
+        handle_control_request(
+            guard, None, "/auth/allow-read", None, {"repo": "o/r"}, now=100.0
+        )
+        assert guard.decide("/o/r.git/git-receive-pack", None, now=101.0).allow is False
+
+    def test_revoke_read_closes_read_window(self) -> None:
+        guard = EgressGuard()
+        guard.open_read_window("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
+        res = handle_control_request(
+            guard, None, "/auth/revoke-read", None, {"repo": "o/r"}
+        )
+        assert res.status == 200
+        d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now=101.0)
+        assert (
+            guard.token_headers_for(
+                d, is_push_request=False, repo="o/r", now=101.0, is_fetch_request=True
+            )
+            == {}
+        )
+
+    def test_allow_read_bad_repo_rejected(self) -> None:
+        guard = EgressGuard()
+        res = handle_control_request(
+            guard, None, "/auth/allow-read", None, {"repo": "no-slash"}
+        )
+        assert res.status == 400
+
+    def test_allow_read_non_positive_ttl_rejected(self) -> None:
+        guard = EgressGuard()
+        res = handle_control_request(
+            guard, None, "/auth/allow-read", None, {"repo": "o/r", "ttl_seconds": -1}
+        )
+        assert res.status == 400
+
+
 class TestControlServerOverHttp:
     """End-to-end over a real socket, mirroring publish's HTTP control calls."""
 
@@ -419,6 +536,45 @@ class TestControlServerOverHttp:
             assert status == 200
             now = time.monotonic()
             assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now).allow is False
+        finally:
+            server.stop()
+
+    def test_allow_read_then_revoke_read_over_http(self) -> None:
+        # e2e counterpart to test_allow_then_revoke_over_http, for the #419
+        # read-window endpoints (unit coverage already exists via
+        # TestReadWindowControlDispatch; this exercises the real socket).
+        guard = EgressGuard()  # read windows need no push allowlist
+        server = AuthControlServer(guard, secret="s3cr3t")
+        server.start()
+        try:
+            base = f"http://127.0.0.1:{server.port}"
+            status, body = self._post(
+                base + "/auth/allow-read",
+                {"repo": "o/r", "ttl_seconds": 30, "token": "ghs_read"},
+                {"X-Control-Token": "s3cr3t"},
+            )
+            assert status == 200
+            assert body["ok"] is True
+            now = time.monotonic()
+            d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now)
+            assert d.allow is True
+            assert guard.token_headers_for(
+                d, is_push_request=False, repo="o/r", now=now, is_fetch_request=True
+            ) == {"Authorization": basic_auth_header("ghs_read")}
+            # Read authorization must never leak into push.
+            assert guard.decide("/o/r.git/git-receive-pack", None, now).allow is False
+
+            status, _ = self._post(
+                base + "/auth/revoke-read",
+                {"repo": "o/r"},
+                {"X-Control-Token": "s3cr3t"},
+            )
+            assert status == 200
+            now = time.monotonic()
+            d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now)
+            assert guard.token_headers_for(
+                d, is_push_request=False, repo="o/r", now=now, is_fetch_request=True
+            ) == {}
         finally:
             server.stop()
 

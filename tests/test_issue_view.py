@@ -10,7 +10,7 @@ from tests.conftest import _decode, _make_client_mock, _make_container_mock
 class TestIssueView:
     """Tests for issue_view."""
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     def test_successful_fetch(
@@ -57,7 +57,7 @@ class TestIssueView:
         assert call_args[0][1] == "issue_view"
         assert call_args[1]["approved"] is None
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="ghs_tok")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_uses_host_token_when_available(
         self,
@@ -98,7 +98,7 @@ class TestIssueView:
         assert "error" in result
         assert "not found" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_api_error_is_reported(
         self,
@@ -125,7 +125,7 @@ class TestIssueView:
         assert "error" in result
         assert "404" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     def test_custom_save_path(
@@ -153,7 +153,7 @@ class TestIssueView:
         assert result["file"] == "/home/sandbox/issue.md"
         assert result["size_bytes"] == len("Simple body".encode())
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     def test_empty_body(
@@ -180,7 +180,7 @@ class TestIssueView:
         assert result["summary"] == "(empty body)"
         assert result["size_bytes"] == 0
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     def test_write_failure_is_reported(
         self,

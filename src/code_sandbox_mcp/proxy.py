@@ -513,7 +513,7 @@ def handle_control_request(
         window_token = payload.get("token")
         if window_token is not None and not isinstance(window_token, str):
             return ControlResult(400, {"error": "'token' must be a string when present"})
-        guard.open_read_window(repo, float(ttl), token=window_token or None)
+        guard.open_read_window(repo, float(ttl), now=now, token=window_token or None)
         return ControlResult(200, {"ok": True, "repo": repo.lower(), "ttl_seconds": float(ttl)})
     if path == "/auth/revoke-read":
         guard.close_read_window(repo)

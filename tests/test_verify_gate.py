@@ -368,3 +368,81 @@ class TestRunLintTypeGate:
         _gate_lint_runner(object(), "src", "python", None)
         assert captured["extra_select"] is False
 
+    def test_lint_scope_overrides_scope_for_lint_only(self, monkeypatch):
+        """Regression for #417: lint_scope must reach the lint runner while
+        the type runner keeps using *scope* unchanged -- CI has no
+        type-check step, so only lint needs the wider src+tests scope."""
+        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        seen = {}
+
+        def _fake_lint(container, path, lang, workdir):
+            seen["lint_path"] = path
+            return self._vr("ok")
+
+        def _fake_type(container, path, lang, workdir):
+            seen["type_path"] = path
+            return self._vr("ok", tool="pyright")
+
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner", _fake_lint
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner", _fake_type
+        )
+        r = run_lint_type_gate(object(), "src", lint_scope=["src", "tests"])
+        assert seen["lint_path"] == ["src", "tests"]
+        assert seen["type_path"] == "src"
+        assert r["gate_passed"] is True
+
+    def test_lint_scope_defaults_to_scope_when_omitted(self, monkeypatch):
+        """Back-compat: callers that don't pass lint_scope (e.g. direct
+        run_lint_type_gate(container, "src") calls elsewhere in this test
+        module) still lint the same scope as the type check."""
+        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        seen = {}
+
+        def _fake_lint(container, path, lang, workdir):
+            seen["lint_path"] = path
+            return self._vr("ok")
+
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner", _fake_lint
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            lambda *a, **k: self._vr("ok", tool="pyright"),
+        )
+        run_lint_type_gate(object(), "src")
+        assert seen["lint_path"] == "src"
+
+
+class TestQuotePath:
+    """Tests for _quote_path -- single path vs multi-path shell quoting (#417)."""
+
+    def test_single_string_path_quoted_as_before(self):
+        from src.code_sandbox_mcp.edit_verify import _quote_path
+        assert _quote_path("src") == "src"
+        assert _quote_path("a b") == "'a b'"
+
+    def test_list_of_paths_quoted_as_separate_tokens(self):
+        """A list must become multiple shell-quoted tokens, not one path
+        string containing a literal space (which would name a
+        non-existent directory)."""
+        from src.code_sandbox_mcp.edit_verify import _quote_path
+        assert _quote_path(["src", "tests"]) == "src tests"
+        assert _quote_path(["a b", "c"]) == "'a b' c"
+
+
+class TestPathDisplay:
+    """Tests for _path_display -- parse-fallback label rendering (#417)."""
+
+    def test_string_passthrough(self):
+        from src.code_sandbox_mcp.edit_verify import _path_display
+        assert _path_display("src") == "src"
+
+    def test_list_joined_with_space(self):
+        from src.code_sandbox_mcp.edit_verify import _path_display
+        assert _path_display(["src", "tests"]) == "src tests"
+

@@ -4,7 +4,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from code_sandbox_mcp.tools.vcs import sandbox_issue_write
-from tests.conftest import _decode, _make_client_mock, _make_container_mock
+from tests.conftest import _decode, _make_client_mock
 
 
 class TestSandboxIssueWriteValidation:

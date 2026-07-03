@@ -37,10 +37,21 @@ the guarantee holds even before tokens are moved out of the container (#356).
 Validated by a PoC on 2026-07-01: a real ``git clone`` succeeds through the
 TLS-terminating proxy while ``git push`` is rejected.
 
-Still out of scope here (own issues): dropping the token from the container
-env now that the proxy can inject it (#356 remainder), and gating non-push
-write APIs on ``api.github.com`` -- which this addon still passes through
-(#360).  The sidecar *image* that runs this addon is built by
+Non-push write APIs on ``api.github.com`` (issue/PR create, comments, reviews,
+and the git Objects API used by ``publish``'s API-push fallback) are gated the
+same way (#420): GET/HEAD always pass through, and POST/PUT/PATCH/DELETE are
+denied by default -- allowed only inside an explicit authorization window,
+opened host-side via the control API just like a push.  The git Objects API
+under ``/repos/<owner>/<repo>/git/...`` reuses the *push* window (it already
+runs inside ``authorized_push_window`` in ``publish``, being the push
+fallback transport itself); every other write path gets its own separate
+"api write" window (``/auth/allow-api-write`` / ``/auth/revoke-api-write``),
+mirroring the read/push separation from #419 so opening one write window
+never widens another kind of access.
+
+Still out of scope here (own issue): dropping the token from the container
+env now that the proxy can inject it (#356 remainder).  The sidecar *image*
+that runs this addon is built by
 ``docker/Dockerfile.proxy`` via ``proxy_entrypoint.py``, and its container
 lifecycle -- starting the sidecar, joining sandboxes to the internal network
 (the only egress route, #355/#358), and installing this proxy's CA into the
@@ -96,6 +107,15 @@ PUSH_SERVICE = "git-receive-pack"
 FETCH_SERVICE = "git-upload-pack"
 
 _KNOWN_SERVICES = frozenset({FETCH_SERVICE, PUSH_SERVICE})
+
+#: Hostname of the GitHub REST/GraphQL API, gated separately from git
+#: smart-HTTP traffic (#420) -- ``git_service_from_request`` never matches
+#: it, since it carries no ``service`` marker of its own.
+API_HOST = "api.github.com"
+
+#: HTTP methods on ``api.github.com`` treated as writes and gated by an
+#: authorization window (#420).  GET/HEAD (and anything else) always pass.
+API_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 #: Environment variable holding a comma-separated owner/repo allowlist (#358).
 ALLOWED_REPOS_ENV = "CODE_SANDBOX_ALLOWED_REPOS"
@@ -175,6 +195,39 @@ def repo_from_path(path: str) -> str | None:
     return f"{owner}/{repo}".lower()
 
 
+def api_repo_from_path(path: str) -> str | None:
+    """Return the ``owner/repo`` targeted by a REST API path, or ``None``.
+
+    GitHub REST paths are ``/repos/<owner>/<repo>/...``; anything else (user
+    endpoints, GraphQL, etc.) has no single repo target and yields ``None``,
+    so callers such as :meth:`EgressGuard.decide_api_write` deny it rather
+    than guess.  Lower-cased like :func:`repo_from_path`, for the same
+    case-insensitive-matching reason.
+    """
+    parts = [p for p in path.split("/") if p]
+    if len(parts) < 3 or parts[0].lower() != "repos":
+        return None
+    owner, repo = parts[1], parts[2]
+    if not owner or not repo:
+        return None
+    return f"{owner}/{repo}".lower()
+
+
+def is_git_data_api_path(path: str) -> bool:
+    """Return ``True`` for a git Objects API path (``/repos/<o>/<r>/git/...``).
+
+    This is the REST transport ``publish``'s ``_try_api_push`` fallback uses
+    to create blobs/trees/commits/refs when a plain ``git push`` fails -- it
+    is push in every meaningful sense, just carried over ``api.github.com``
+    instead of the smart-HTTP endpoint, and already runs inside
+    ``authorized_push_window`` in ``publish``.  :meth:`EgressGuard.decide_api_write`
+    therefore checks the *push* window for these paths instead of the
+    separate api-write window that gates every other REST write (#420).
+    """
+    parts = [p for p in path.split("/") if p]
+    return len(parts) >= 4 and parts[0].lower() == "repos" and parts[3].lower() == "git"
+
+
 @dataclass(frozen=True)
 class Decision:
     """Outcome of evaluating one request against the egress policy."""
@@ -195,6 +248,15 @@ def basic_auth_header(token: str) -> str:
     """
     credentials = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     return f"Basic {credentials}"
+
+
+def bearer_auth_header(token: str) -> str:
+    """Build the ``Authorization`` value ``api.github.com`` REST calls accept.
+
+    Unlike git-over-HTTPS (:func:`basic_auth_header`), GitHub's REST API
+    removed HTTP Basic auth in 2021 and expects a bearer-style token (#420).
+    """
+    return f"Bearer {token}"
 
 
 def block_body(reason: str) -> bytes:
@@ -244,6 +306,15 @@ class EgressGuard:
         #: separate table: a read window must never make :meth:`decide`
         #: treat a repo as push-authorized, so the two are never merged.
         self._read_windows: dict[str, tuple[float, str | None]] = {}
+        #: Same shape again, for non-push writes on ``api.github.com`` (issue
+        #: create/comment, reviews, labels, releases -- #420).  Kept separate
+        #: from both ``_windows`` and ``_read_windows`` for the same reason:
+        #: opening this window must never widen git push or read access, and
+        #: a push window must not silently double as blanket API-write
+        #: authorization beyond the git Objects API paths (see
+        #: :func:`is_git_data_api_path`, which intentionally checks the push
+        #: window instead of this one).
+        self._api_write_windows: dict[str, tuple[float, str | None]] = {}
         self._lock = threading.Lock()
         #: static fallback push token; ``None`` disables it.  A window-scoped
         #: token, when present, takes precedence.
@@ -350,6 +421,54 @@ class EgressGuard:
                 return None
         return token
 
+    def open_api_write_window(
+        self,
+        repo: str,
+        ttl_seconds: float,
+        now: float | None = None,
+        token: str | None = None,
+    ) -> None:
+        """Permit a non-push write to *repo* on ``api.github.com`` (#420).
+
+        Covers issue/PR create, comments, reviews, labels, releases, etc.
+        -- everything except the git Objects API paths, which reuse the push
+        window instead (see :func:`is_git_data_api_path`).  Kept in its own
+        table so opening it can never authorize a push or a read.
+        """
+        base = time.monotonic() if now is None else now
+        with self._lock:
+            self._api_write_windows[repo.lower()] = (base + ttl_seconds, token)
+
+    def close_api_write_window(self, repo: str) -> None:
+        """Revoke any open api-write window for *repo* (dropping its token)."""
+        with self._lock:
+            self._api_write_windows.pop(repo.lower(), None)
+
+    def _api_write_window_open(self, repo: str, now: float) -> bool:
+        with self._lock:
+            entry = self._api_write_windows.get(repo)
+            if entry is None:
+                return False
+            expiry, _token = entry
+            if now >= expiry:
+                self._api_write_windows.pop(repo, None)
+                return False
+        return True
+
+    def _api_write_window_token(self, repo: str | None, now: float) -> str | None:
+        """Return the unexpired api-write window token for *repo*, or ``None``."""
+        if repo is None:
+            return None
+        with self._lock:
+            entry = self._api_write_windows.get(repo.lower())
+            if entry is None:
+                return None
+            expiry, token = entry
+            if now >= expiry:
+                self._api_write_windows.pop(repo.lower(), None)
+                return None
+        return token
+
     # -- decision core (pure) --
 
     def decide(self, path: str, query_service: str | None, now: float) -> Decision:
@@ -365,21 +484,50 @@ class EgressGuard:
             return Decision(False, f"no open authorization window for {repo}")
         return Decision(True, f"push authorized for {repo}")
 
+    def decide_api_write(self, method: str, path: str, now: float) -> Decision:
+        """Evaluate an ``api.github.com`` request against the write policy (#420).
+
+        GET/HEAD (and anything else outside :data:`API_WRITE_METHODS`) always
+        pass.  A write needs its target repo in the allowlist *and* an open
+        authorization window: the git Objects API paths
+        (:func:`is_git_data_api_path`) check the push window -- they are
+        publish's push fallback transport and already run inside
+        ``authorized_push_window`` -- everything else checks the separate
+        api-write window opened via ``/auth/allow-api-write``.
+        """
+        if method.upper() not in API_WRITE_METHODS:
+            return Decision(True, "read-only GitHub API request (GET/HEAD passes through)")
+        repo = api_repo_from_path(path)
+        if repo is None:
+            return Decision(False, "write target repo could not be determined")
+        if repo not in self._allowed:
+            return Decision(False, f"write to {repo} is not in the allowlist")
+        if is_git_data_api_path(path):
+            if not self._window_open(repo, now):
+                return Decision(False, f"no open push-authorization window for {repo}")
+            return Decision(True, f"git data API write authorized for {repo} (push window)")
+        if not self._api_write_window_open(repo, now):
+            return Decision(False, f"no open api-write authorization window for {repo}")
+        return Decision(True, f"api write authorized for {repo}")
+
     # -- token injection (pure) --
 
     def token_headers_for(
         self,
         decision: Decision,
-        is_push_request: bool,
+        is_push_request: bool = False,
         repo: str | None = None,
         now: float | None = None,
         is_fetch_request: bool = False,
+        is_api_write_request: bool = False,
+        use_push_window: bool = False,
     ) -> dict[str, str]:
         """Return the ``Authorization`` header to add to an authorized request.
 
         Empty unless the request is *allowed* **and** a token is held for its
-        kind: only pushes/fetches the policy permits get credentials, and with
-        no token (the inert default) nothing is injected.
+        kind: only pushes/fetches/API-writes the policy permits get
+        credentials, and with no token (the inert default) nothing is
+        injected.
 
         For a push, a window-scoped token for *repo* (handed over on
         ``/auth/allow``, #356) takes precedence over the static
@@ -387,20 +535,30 @@ class EgressGuard:
         (``is_fetch_request``), only an explicit read-window token
         (``/auth/allow-read``, #419) is used -- there is no static fallback,
         since an always-on read credential would authenticate every clone the
-        container makes, not just ones the host explicitly authorized.  Pure,
-        so the injection policy is unit-testable without mitmproxy.
+        container makes, not just ones the host explicitly authorized.  For an
+        ``api.github.com`` write (``is_api_write_request``, #420), the token
+        comes from the push window when ``use_push_window`` is set (the git
+        Objects API paths -- see :func:`is_git_data_api_path`) or otherwise
+        from the separate api-write window; either way the header uses
+        :func:`bearer_auth_header`, since the REST API does not accept Basic.
+        Pure, so the injection policy is unit-testable without mitmproxy.
         """
         if not decision.allow:
             return {}
         base = time.monotonic() if now is None else now
         if is_push_request:
             token = self._window_token(repo, base) or self._token
-        elif is_fetch_request:
+            return {"Authorization": basic_auth_header(token)} if token else {}
+        if is_fetch_request:
             token = self._read_window_token(repo, base)
-        else:
-            return {}
-        if token:
-            return {"Authorization": basic_auth_header(token)}
+            return {"Authorization": basic_auth_header(token)} if token else {}
+        if is_api_write_request:
+            token = (
+                self._window_token(repo, base)
+                if use_push_window
+                else self._api_write_window_token(repo, base)
+            )
+            return {"Authorization": bearer_auth_header(token)} if token else {}
         return {}
 
     # -- mitmproxy lifecycle: internal control API (#356 / #357) --
@@ -440,8 +598,30 @@ class EgressGuard:
                 "load it with 'mitmdump -s proxy.py'"
             )
         path = flow.request.path.split("?", 1)[0]
+        host = (flow.request.pretty_host or "").lower()
+        now = time.monotonic()
+        if host == API_HOST:
+            method = flow.request.method
+            decision = self.decide_api_write(method, path, now)
+            if not decision.allow:
+                flow.response = http.Response.make(
+                    403,
+                    block_body(decision.reason),
+                    {"Content-Type": "text/plain"},
+                )
+                return
+            if method.upper() in API_WRITE_METHODS:
+                repo = api_repo_from_path(path)
+                for name, value in self.token_headers_for(
+                    decision,
+                    repo=repo,
+                    is_api_write_request=True,
+                    use_push_window=is_git_data_api_path(path),
+                ).items():
+                    flow.request.headers[name] = value
+            return
         query_service = flow.request.query.get("service")
-        decision = self.decide(path, query_service, time.monotonic())
+        decision = self.decide(path, query_service, now)
         if not decision.allow:
             flow.response = http.Response.make(
                 403,
@@ -452,7 +632,7 @@ class EgressGuard:
         service = git_service_from_request(path, query_service)
         for name, value in self.token_headers_for(
             decision,
-            service == PUSH_SERVICE,
+            is_push_request=service == PUSH_SERVICE,
             repo=repo_from_path(path),
             is_fetch_request=service == FETCH_SERVICE,
         ).items():
@@ -479,10 +659,11 @@ def handle_control_request(
 
     Authenticates the caller against *secret* with a constant-time compare --
     the sandboxed container never learns the secret, so it cannot open its own
-    push window -- then opens (``/auth/allow``) or closes (``/auth/revoke``) a
-    push window, or opens (``/auth/allow-read``) or closes
-    (``/auth/revoke-read``) a read window (#419), for ``payload["repo"]``.
-    Kept free of socket/HTTP glue so the protocol is unit-testable on its own.
+    push window -- then opens/closes a push window (``/auth/allow`` /
+    ``/auth/revoke``), a read window (``/auth/allow-read`` / ``/auth/revoke-read``,
+    #419), or an api-write window (``/auth/allow-api-write`` /
+    ``/auth/revoke-api-write``, #420) for ``payload["repo"]``.  Kept free of
+    socket/HTTP glue so the protocol is unit-testable on its own.
     """
     if secret is not None and not hmac.compare_digest(provided_secret or "", secret):
         return ControlResult(403, {"error": "invalid or missing control secret"})
@@ -517,6 +698,18 @@ def handle_control_request(
         return ControlResult(200, {"ok": True, "repo": repo.lower(), "ttl_seconds": float(ttl)})
     if path == "/auth/revoke-read":
         guard.close_read_window(repo)
+        return ControlResult(200, {"ok": True, "repo": repo.lower()})
+    if path == "/auth/allow-api-write":
+        ttl = payload.get("ttl_seconds", DEFAULT_WINDOW_TTL_SECONDS)
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl <= 0:
+            return ControlResult(400, {"error": "'ttl_seconds' must be a positive number"})
+        window_token = payload.get("token")
+        if window_token is not None and not isinstance(window_token, str):
+            return ControlResult(400, {"error": "'token' must be a string when present"})
+        guard.open_api_write_window(repo, float(ttl), now=now, token=window_token or None)
+        return ControlResult(200, {"ok": True, "repo": repo.lower(), "ttl_seconds": float(ttl)})
+    if path == "/auth/revoke-api-write":
+        guard.close_api_write_window(repo)
         return ControlResult(200, {"ok": True, "repo": repo.lower()})
     return ControlResult(404, {"error": f"unknown control endpoint: {path}"})
 

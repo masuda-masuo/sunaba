@@ -43,6 +43,8 @@ _ALLOW_PATH = "/auth/allow"
 _REVOKE_PATH = "/auth/revoke"
 _ALLOW_READ_PATH = "/auth/allow-read"
 _REVOKE_READ_PATH = "/auth/revoke-read"
+_ALLOW_API_WRITE_PATH = "/auth/allow-api-write"
+_REVOKE_API_WRITE_PATH = "/auth/revoke-api-write"
 
 
 class ProxyAuthError(RuntimeError):
@@ -198,6 +200,70 @@ def authorized_read_window(
     finally:
         try:
             close_read_window(repo, config=cfg)
+        except ProxyAuthError:
+            pass
+
+
+def open_api_write_window(
+    repo: str,
+    ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
+    *,
+    token: str | None = None,
+    config: ProxyControlConfig | None = None,
+) -> None:
+    """Open a non-push write-authorization window for *repo* on ``api.github.com`` (#420).
+
+    A no-op when the proxy is unset, mirroring :func:`open_window`.  Covers
+    writes other than the git Objects API (issue/PR create, comments,
+    reviews, labels, releases) -- those reuse the push window instead, since
+    they run inside ``authorized_push_window`` already (see
+    ``code_sandbox_mcp.proxy.is_git_data_api_path``).
+    """
+    cfg = config or ProxyControlConfig.from_env()
+    if cfg is None:
+        return
+    payload: dict[str, object] = {"repo": repo, "ttl_seconds": ttl_seconds}
+    if token:
+        payload["token"] = token
+    _post(cfg, _ALLOW_API_WRITE_PATH, payload)
+
+
+def close_api_write_window(repo: str, *, config: ProxyControlConfig | None = None) -> None:
+    """Revoke any open api-write window for *repo* (no-op when unset)."""
+    cfg = config or ProxyControlConfig.from_env()
+    if cfg is None:
+        return
+    _post(cfg, _REVOKE_API_WRITE_PATH, {"repo": repo})
+
+
+@contextmanager
+def authorized_api_write_window(
+    repo: str,
+    ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
+    *,
+    token: str | None = None,
+    config: ProxyControlConfig | None = None,
+) -> Iterator[None]:
+    """Open an api-write window for *repo*, then always revoke it on exit (#420).
+
+    Mirrors :func:`authorized_read_window`: a no-op when the proxy is
+    unconfigured.  Not yet wired into any tool -- today's write flows
+    (``sandbox_issue_write``, ``publish``'s PR creation) resolve their token
+    and call the GitHub REST API host-side, so they never cross the egress
+    proxy in the first place.  This exists so a future in-container write
+    tool (#414 phase 2: labels/releases) has the same authorization pattern
+    to reuse without touching the proxy again.
+    """
+    cfg = config or ProxyControlConfig.from_env()
+    if cfg is None:
+        yield
+        return
+    open_api_write_window(repo, ttl_seconds, token=token, config=cfg)
+    try:
+        yield
+    finally:
+        try:
+            close_api_write_window(repo, config=cfg)
         except ProxyAuthError:
             pass
 

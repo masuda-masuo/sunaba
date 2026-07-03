@@ -731,6 +731,94 @@ def _push_token_env(token: str) -> dict[str, str] | None:
     return {"GITHUB_TOKEN": token, "GH_TOKEN": token}
 
 
+def _github_api_request(
+    path: str,
+    token: str,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Call the GitHub REST API from the host process; return the JSON body.
+
+    Runs host-side like :func:`_resolve_push_token` — never inside the
+    container — so no credential enters the sandbox and the request does not
+    traverse the egress proxy (#360).  The REST API accepts ``Bearer``; the
+    Basic-only quirk applies to git smart-HTTP endpoints only (PR #404).
+
+    Raises:
+        RuntimeError: On an HTTP error (carrying GitHub's ``message`` /
+            ``errors`` when present) or an unreachable network.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"https://api.github.com{path}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(url, data=data, method=method)
+    request.add_header("Accept", "application/vnd.github+json")
+    request.add_header("User-Agent", "code-sandbox-mcp")
+    request.add_header("Authorization", f"Bearer {token}")
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        parts: list[str] = []
+        try:
+            body = json.loads(e.read().decode("utf-8", errors="replace"))
+            if body.get("message"):
+                parts.append(str(body["message"]))
+            parts.extend(str(err.get("message", err)) for err in body.get("errors") or [])
+        except Exception:  # noqa: BLE001 - the error body is diagnostics only
+            pass
+        detail = f": {'; '.join(parts)}" if parts else ""
+        raise RuntimeError(
+            f"GitHub API {method} {path} returned HTTP {e.code}{detail}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}") from e
+
+
+def _create_pr_via_api(
+    repo: str,
+    branch: str,
+    pr_title: str,
+    pr_body: str,
+    base_branch: str,
+    token: str,
+) -> str:
+    """Create a pull request host-side via the REST API; return its URL.
+
+    Replaces the in-container ``gh pr create`` exec (#360): PR creation is a
+    non-push write on ``api.github.com``, so running it here keeps the
+    container credential-free — that exec was the last one carrying an
+    ephemeral token — and stays out of the proxy's write gate.
+
+    Also makes *base_branch* actually work: the old shell wrapper appended
+    ``--base`` after the temp-file cleanup command, so gh never saw it and a
+    stacked PR silently targeted the default branch.
+
+    Raises:
+        RuntimeError: When the base branch cannot be determined or the API
+            call fails (propagated from :func:`_github_api_request`).
+    """
+    base = base_branch or str(
+        _github_api_request(f"/repos/{repo}", token).get("default_branch") or ""
+    )
+    if not base:
+        raise RuntimeError(f"could not determine the default branch of {repo}")
+    payload: dict[str, Any] = {"title": pr_title, "head": branch, "base": base}
+    if pr_body:
+        payload["body"] = pr_body
+    created = _github_api_request(
+        f"/repos/{repo}/pulls", token, method="POST", payload=payload
+    )
+    url = str(created.get("html_url") or "")
+    if not url:
+        raise RuntimeError("GitHub API created the PR but returned no html_url")
+    return url
+
+
 def publish(
     container_id: str,
     repo: str,
@@ -770,8 +858,12 @@ Two-step flow for boundary-crossing writes:
 2. ``dry_run=False`` + *token* -- verifies the token, stages/commits/pushes
    (and creates a PR if *create_pr* is ``True``).
 
-Requires a container started with ``allow_network=True`` and
-``inject_vcs_token=True``.
+Requires a container started with ``allow_network=True``.
+``inject_vcs_token=True`` is *not* required: the push credential is
+resolved host-side at call time (Issue #347) and — with the egress proxy
+configured (#356) — injected by the proxy into the authorized push only,
+so the container never holds it.  PR creation likewise runs host-side
+(#360).
 
 .. rubric:: Use when
 
@@ -793,7 +885,7 @@ Requires a container started with ``allow_network=True`` and
 .. rubric:: Fallback
 
 - If ``git push`` fails (token permissions), the GitHub Objects API transport is tried automatically
-- If the API transport also fails, check that the container has ``inject_vcs_token=True``
+- If the API transport also fails, check that a host-side token is available (``GITHUB_TOKEN`` / broker)
 
 Args:
     container_id: 12-character container ID prefix.
@@ -997,9 +1089,8 @@ Returns:
     # the proxy injects ``Authorization`` into the authorized push itself, so
     # neither the git-push exec nor the API-push fallback carries a token --
     # the container stays credential-free end to end, and the Objects API
-    # fallback cannot become a proxy bypass.  The gh-pr-create exec still
-    # gets the ephemeral token because api.github.com writes are not
-    # proxy-gated yet (#360).
+    # fallback cannot become a proxy bypass.  PR creation runs host-side
+    # (#360), so no exec carries a token anymore when a host token exists.
     push_token = _resolve_push_token()
     token_env = _push_token_env(push_token)
     proxied = proxy_configured()
@@ -1016,8 +1107,8 @@ Returns:
     # the sidecar lets *this* push through (#356 / #357).  When no proxy is
     # configured this is a no-op, so publish behaves exactly as before.  The
     # window is revoked on exit -- including the early return below -- so a
-    # failed push (either transport) still closes it.  (The gh-pr-create call
-    # below hits api.github.com, a non-push write gated separately by #360.)
+    # failed push (either transport) still closes it.  (PR creation below is
+    # a non-push write on api.github.com and runs host-side, #360.)
     try:
         with authorized_push_window(repo, token=push_token or None):
             push_ec, push_out, push_err = _run(push_cmd, env=push_env)
@@ -1066,33 +1157,61 @@ Returns:
     # --- Optionally create PR ---
     pr_url: str | None = None
     if create_pr:
-        pr_cmd = (
-            f"gh pr create --repo {shlex.quote(repo)}"
-            f" --head {shlex.quote(branch)}"
-            f" --title {shlex.quote(pr_title)}"
-        )
-        if pr_body:
-            body_encoded = base64.b64encode(
-                pr_body.encode("utf-8")
-            ).decode("ascii")
-            pr_cmd = (
-                f"BODY_FILE=$(mktemp) &&"
-                f" echo {shlex.quote(body_encoded)} | base64 -d > \"$BODY_FILE\" &&"
-                f" gh pr create --repo {shlex.quote(repo)}"
-                f" --head {shlex.quote(branch)}"
-                f" --title {shlex.quote(pr_title)}"
-                f" --body-file \"$BODY_FILE\""
-                f'; rm -f "$BODY_FILE"'
+        pr_create_error: str | None = None
+        if push_token:
+            # Host-side REST call (#360): PR creation is a non-push write on
+            # api.github.com, so keep it out of the container entirely — this
+            # exec was the last one that carried an ephemeral token.
+            try:
+                pr_url = _create_pr_via_api(
+                    repo, branch, pr_title, pr_body, base_branch, push_token
+                )
+            except RuntimeError as exc:
+                pr_create_error = str(exc)
+        elif proxied:
+            # Under the proxy the container is credential-free (#356): with
+            # no host token there is no transport left to try, and an
+            # unauthenticated in-container gh would only fail less clearly.
+            pr_create_error = (
+                "PR creation needs a host-side token (GITHUB_TOKEN / broker); "
+                "the container holds no credential under the egress proxy"
             )
         else:
-            pr_cmd += " --body ''"
-        if base_branch:
-            pr_cmd += f" --base {shlex.quote(base_branch)}"
+            # Legacy tokenless-host setup: the container may carry a
+            # startup-injected token, so the in-container gh still works.
+            pr_cmd = (
+                f"gh pr create --repo {shlex.quote(repo)}"
+                f" --head {shlex.quote(branch)}"
+                f" --title {shlex.quote(pr_title)}"
+            )
+            if base_branch:
+                pr_cmd += f" --base {shlex.quote(base_branch)}"
+            if pr_body:
+                body_encoded = base64.b64encode(
+                    pr_body.encode("utf-8")
+                ).decode("ascii")
+                pr_cmd = (
+                    f"BODY_FILE=$(mktemp) &&"
+                    f" echo {shlex.quote(body_encoded)} | base64 -d > \"$BODY_FILE\" &&"
+                    f" {pr_cmd}"
+                    f" --body-file \"$BODY_FILE\""
+                    f'; rm -f "$BODY_FILE"'
+                )
+            else:
+                pr_cmd += " --body ''"
 
-        # api.github.com is not proxy-gated yet (#360), so PR creation still
-        # needs the ephemeral token even when the push itself did not.
-        pr_ec, pr_out, pr_err = _run(pr_cmd, env=token_env)
-        if pr_ec != 0:
+            pr_ec, pr_out, pr_err = _run(pr_cmd, env=token_env)
+            if pr_ec != 0:
+                pr_create_error = pr_err or pr_out
+            else:
+                # Extract PR URL from gh output
+                for line in (pr_out + pr_err).splitlines():
+                    line = line.strip()
+                    if line.startswith("https://github.com/"):
+                        pr_url = line
+                        break
+
+        if pr_create_error is not None:
             # Push succeeded but PR creation failed — still record push
             record_boundary_crossing(
                 cid,
@@ -1105,15 +1224,8 @@ Returns:
                 "status": "pushed",
                 "branch": branch,
                 "sha": sha,
-                "pr_create_error": pr_err or pr_out,
+                "pr_create_error": pr_create_error,
             })
-
-        # Extract PR URL from gh output
-        for line in (pr_out + pr_err).splitlines():
-            line = line.strip()
-            if line.startswith("https://github.com/"):
-                pr_url = line
-                break
 
     # --- Success ---
     details = f"repo={repo} branch={branch} sha={sha}"

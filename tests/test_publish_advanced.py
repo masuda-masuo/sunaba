@@ -613,7 +613,7 @@ class TestPublishProxiedCredentialRouting:
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_pr_create_exec_still_carries_token(
+    def test_pr_create_runs_host_side_no_exec_token(
         self,
         mock_run_id: MagicMock,
         mock_record: MagicMock,
@@ -623,6 +623,7 @@ class TestPublishProxiedCredentialRouting:
         mock_proxied: MagicMock,
         mock_window: MagicMock,
     ) -> None:
+        """PR creation is host-side (#360): no exec ever carries a token."""
         mock_run_id.return_value = "run123"
         mock_token.return_value = {
             "token": "tok_good",
@@ -634,37 +635,38 @@ class TestPublishProxiedCredentialRouting:
         mock_resolve.return_value = "ghs_lazytoken"
 
         returns = TestPublishLazyTokenInjection._simple_push_returns()
-        returns.append((0, b"https://github.com/owner/repo/pull/9", b""))  # gh pr create
         container = _make_container_mock(returns)
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix",
-            dry_run=False,
-            token="tok_good",
-            create_pr=True,
-            pr_title="Fix",
-        ))
+        with patch(
+            "code_sandbox_mcp.tools.vcs._create_pr_via_api",
+            return_value="https://github.com/owner/repo/pull/9",
+        ) as mock_create_pr:
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                dry_run=False,
+                token="tok_good",
+                create_pr=True,
+                pr_title="Fix",
+            ))
         assert result["status"] == "pushed"
         assert result["pr_url"] == "https://github.com/owner/repo/pull/9"
 
+        # The PR was created host-side with the host-resolved token...
+        mock_create_pr.assert_called_once_with(
+            "owner/repo", "fix/x", "Fix", "", "", "ghs_lazytoken"
+        )
         calls = container.exec_run.call_args_list
-        pr_calls = [c for c in calls if "gh pr create" in c.args[0][2]]
-        assert len(pr_calls) == 1
-        # api.github.com writes are not proxy-gated yet (#360), so the PR
-        # exec keeps the ephemeral credential.
-        assert self._env_of(pr_calls[0]) == {
-            "GITHUB_TOKEN": "ghs_lazytoken",
-            "GH_TOKEN": "ghs_lazytoken",
-        }
-        # But the push exec stayed token-free.
+        # ...no gh exec ran in the container, and no exec carried a token —
+        # the container stays credential-free end to end under the proxy.
+        assert not [c for c in calls if "gh pr create" in c.args[0][2]]
+        assert all(self._env_of(c) is None for c in calls)
         push_calls = [c for c in calls if "push origin" in c.args[0][2]]
         assert len(push_calls) == 1
-        assert self._env_of(push_calls[0]) is None
 
 
 class TestResolvePushToken:

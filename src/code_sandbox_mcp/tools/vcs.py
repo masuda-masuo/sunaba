@@ -530,7 +530,7 @@ def issue_view(
 
     try:
         issue_data = _github_api_request(
-            f"/repos/{repo}/issues/{issue_number}", _resolve_push_token()
+            f"/repos/{repo}/issues/{issue_number}", _resolve_vcs_token()
         )
     except RuntimeError as e:
         return json.dumps({
@@ -761,7 +761,7 @@ def sandbox_issue_write(
     if token_error is not None:
         return token_error
 
-    push_token = _resolve_push_token()
+    push_token = _resolve_vcs_token()
     if not push_token:
         return json.dumps({
             "status": "error",
@@ -804,16 +804,23 @@ def sandbox_issue_write(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_push_token() -> str:
-    """Resolve a VCS token host-side for lazy injection at push time (Issue #347).
+def _resolve_vcs_token() -> str:
+    """Resolve a VCS token host-side for lazy injection at call time (Issue #347).
 
     The token is *not* bound to container start: the host (this MCP server
-    process) can always obtain it.  Returning it here lets :func:`publish`
-    inject the credential into the single ``docker exec`` that pushes —
-    instead of requiring the token to have been baked into the container's
-    environment at ``sandbox_initialize`` time.  This removes the
+    process) can always obtain it.  Returning it here lets callers such as
+    :func:`publish` inject the credential into a single ``docker exec`` (a
+    push) — instead of requiring the token to have been baked into the
+    container's environment at ``sandbox_initialize`` time.  This removes the
     "no-token start → must re-init to push" penalty while keeping
-    least-privilege: containers that never publish never receive a token.
+    least-privilege: containers that never need a credential never receive one.
+
+    Despite the name's push-era origin, this is a general host-side token
+    resolver: it also backs authenticated host->GitHub-API GET calls
+    (``_resolve_pr_head_ref``, ``issue_write``) and, since #419, egress-proxy
+    read-authorization windows (``authorized_read_window``) for
+    ``clone_repo``/``sandbox_initialize``. There is nothing push-specific in
+    its resolution order (broker mint -> static ``GITHUB_TOKEN``/``GH_TOKEN``).
 
     Resolution order mirrors :func:`code_sandbox_mcp.tools.container._container_env`:
     a freshly minted broker token (Issue #232) takes precedence, falling
@@ -861,7 +868,7 @@ def _github_api_request(
 ) -> dict[str, Any]:
     """Call the GitHub REST API from the host process; return the JSON body.
 
-    Runs host-side like :func:`_resolve_push_token` — never inside the
+    Runs host-side like :func:`_resolve_vcs_token` — never inside the
     container — so no credential enters the sandbox and the request does not
     traverse the egress proxy (#360).  The REST API accepts ``Bearer``; the
     Basic-only quirk applies to git smart-HTTP endpoints only (PR #404).
@@ -1218,7 +1225,7 @@ Returns:
     # the container stays credential-free end to end, and the Objects API
     # fallback cannot become a proxy bypass.  PR creation runs host-side
     # (#360), so no exec carries a token anymore when a host token exists.
-    push_token = _resolve_push_token()
+    push_token = _resolve_vcs_token()
     token_env = _push_token_env(push_token)
     proxied = proxy_configured()
     push_env = None if proxied else token_env
@@ -1833,7 +1840,7 @@ def clone_repo(
     cmd = _build_clone_command(repo, clone_path, branch, authenticated)
 
     if open_read_window:
-        with authorized_read_window(repo, token=_resolve_push_token() or None):
+        with authorized_read_window(repo, token=_resolve_vcs_token() or None):
             exit_code, output = container.exec_run(
                 ["/bin/sh", "-c", cmd],
                 stdout=True,

@@ -251,7 +251,7 @@ class TestPublish:
 
         # With a host token, PR creation runs host-side (#360) — no gh exec.
         with patch(
-            "code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="ghp_test"
+            "code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghp_test"
         ), patch(
             "code_sandbox_mcp.tools.vcs._create_pr_via_api",
             return_value="https://github.com/owner/repo/pull/99",
@@ -308,7 +308,7 @@ class TestPublish:
         mock_docker.return_value = client
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="ghp_test"
+            "code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghp_test"
         ), patch(
             "code_sandbox_mcp.tools.vcs._create_pr_via_api",
             side_effect=RuntimeError("GitHub API POST /repos/owner/repo/pulls returned HTTP 422: A pull request already exists"),
@@ -363,7 +363,7 @@ class TestPublish:
         mock_docker.return_value = client
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._resolve_push_token", return_value=""
+            "code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value=""
         ), patch(
             "code_sandbox_mcp.tools.vcs.proxy_configured", return_value=False
         ):
@@ -423,7 +423,7 @@ class TestPublish:
         mock_docker.return_value = client
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._resolve_push_token", return_value=""
+            "code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value=""
         ), patch(
             "code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True
         ), patch(

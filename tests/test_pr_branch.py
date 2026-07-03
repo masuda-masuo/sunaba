@@ -155,7 +155,7 @@ class TestResolvePrHeadRef:
         cm.__enter__.return_value = resp
         return cm
 
-    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="")
+    @patch("code_sandbox_mcp.tools.container._resolve_vcs_token", return_value="")
     @patch("urllib.request.urlopen")
     def test_returns_head_ref(self, mock_urlopen, mock_token):
         mock_urlopen.return_value = self._mock_urlopen_response(
@@ -168,7 +168,7 @@ class TestResolvePrHeadRef:
         assert request.full_url == "https://api.github.com/repos/owner/repo/pulls/136"
         assert not request.has_header("Authorization")
 
-    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="ghs_tok")
+    @patch("code_sandbox_mcp.tools.container._resolve_vcs_token", return_value="ghs_tok")
     @patch("urllib.request.urlopen")
     def test_attaches_host_token_when_available(self, mock_urlopen, mock_token):
         mock_urlopen.return_value = self._mock_urlopen_response(
@@ -180,7 +180,7 @@ class TestResolvePrHeadRef:
         request = mock_urlopen.call_args.args[0]
         assert request.get_header("Authorization") == "Bearer ghs_tok"
 
-    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="")
+    @patch("code_sandbox_mcp.tools.container._resolve_vcs_token", return_value="")
     @patch("urllib.request.urlopen")
     def test_http_error_becomes_runtime_error(self, mock_urlopen, mock_token):
         import urllib.error
@@ -196,7 +196,7 @@ class TestResolvePrHeadRef:
         with pytest.raises(RuntimeError, match="HTTP 404"):
             _resolve_pr_head_ref("owner/repo", 999)
 
-    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="")
+    @patch("code_sandbox_mcp.tools.container._resolve_vcs_token", return_value="")
     @patch("urllib.request.urlopen")
     def test_403_hints_rate_limit(self, mock_urlopen, mock_token):
         import urllib.error
@@ -212,7 +212,7 @@ class TestResolvePrHeadRef:
         with pytest.raises(RuntimeError, match="rate-limited"):
             _resolve_pr_head_ref("owner/repo", 136)
 
-    @patch("code_sandbox_mcp.tools.container._resolve_push_token", return_value="")
+    @patch("code_sandbox_mcp.tools.container._resolve_vcs_token", return_value="")
     @patch("urllib.request.urlopen")
     def test_missing_head_ref_raises(self, mock_urlopen, mock_token):
         mock_urlopen.return_value = self._mock_urlopen_response({"head": {}})

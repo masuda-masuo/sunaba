@@ -136,7 +136,7 @@ class TestSandboxIssueWriteExecute:
         assert result["status"] == "error"
         assert "invalid" in result["error"].lower()
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
@@ -158,7 +158,7 @@ class TestSandboxIssueWriteExecute:
         assert result["status"] == "error"
         assert "host-side" in result["error"] or "token" in result["error"].lower()
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="ghs_tok")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
@@ -194,7 +194,7 @@ class TestSandboxIssueWriteExecute:
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["approved"] is True
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="ghs_tok")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
@@ -227,7 +227,7 @@ class TestSandboxIssueWriteExecute:
             payload={"body": "thanks!"},
         )
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_push_token", return_value="ghs_tok")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")

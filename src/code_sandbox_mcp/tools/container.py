@@ -71,7 +71,7 @@ from code_sandbox_mcp.tools.common import (
     _docker,
 )
 from code_sandbox_mcp.tools.vcs import (
-    _resolve_push_token,
+    _resolve_vcs_token,
     checkpoint_list,
     resolve_git_root,
 )
@@ -571,7 +571,7 @@ def _clone_repo_via_network(
     clone_path = clone_dest.rstrip("/") + "/" + repo_name
     cmd = _build_clone_command(clone_repo, clone_path, authenticated=inject_vcs_token)
     if open_read_window:
-        with authorized_read_window(clone_repo, token=_resolve_push_token() or None):
+        with authorized_read_window(clone_repo, token=_resolve_vcs_token() or None):
             exit_code, output = container.exec_run(["/bin/sh", "-c", cmd])
     else:
         exit_code, output = container.exec_run(["/bin/sh", "-c", cmd])
@@ -729,7 +729,7 @@ def _resolve_pr_head_ref(repo: str, pr_number: int) -> str:
         "Accept": "application/vnd.github+json",
         "User-Agent": "code-sandbox-mcp",
     }
-    token = _resolve_push_token()
+    token = _resolve_vcs_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)

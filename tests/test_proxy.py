@@ -539,6 +539,45 @@ class TestControlServerOverHttp:
         finally:
             server.stop()
 
+    def test_allow_read_then_revoke_read_over_http(self) -> None:
+        # e2e counterpart to test_allow_then_revoke_over_http, for the #419
+        # read-window endpoints (unit coverage already exists via
+        # TestReadWindowControlDispatch; this exercises the real socket).
+        guard = EgressGuard()  # read windows need no push allowlist
+        server = AuthControlServer(guard, secret="s3cr3t")
+        server.start()
+        try:
+            base = f"http://127.0.0.1:{server.port}"
+            status, body = self._post(
+                base + "/auth/allow-read",
+                {"repo": "o/r", "ttl_seconds": 30, "token": "ghs_read"},
+                {"X-Control-Token": "s3cr3t"},
+            )
+            assert status == 200
+            assert body["ok"] is True
+            now = time.monotonic()
+            d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now)
+            assert d.allow is True
+            assert guard.token_headers_for(
+                d, is_push_request=False, repo="o/r", now=now, is_fetch_request=True
+            ) == {"Authorization": basic_auth_header("ghs_read")}
+            # Read authorization must never leak into push.
+            assert guard.decide("/o/r.git/git-receive-pack", None, now).allow is False
+
+            status, _ = self._post(
+                base + "/auth/revoke-read",
+                {"repo": "o/r"},
+                {"X-Control-Token": "s3cr3t"},
+            )
+            assert status == 200
+            now = time.monotonic()
+            d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now)
+            assert guard.token_headers_for(
+                d, is_push_request=False, repo="o/r", now=now, is_fetch_request=True
+            ) == {}
+        finally:
+            server.stop()
+
     def test_oversized_body_rejected(self) -> None:
         # A body over MAX_CONTROL_BODY_BYTES is rejected 413, unread (PR #367 review).
         guard = EgressGuard({"o/r"})

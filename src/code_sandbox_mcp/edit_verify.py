@@ -1293,7 +1293,7 @@ def _parse_go_vet_output(raw: str, file_path: str) -> list[dict[str, Any]]:
 
 
 def _run_pyright_verify(
-    container: Any, path: str | Sequence[str], workdir: str | None = None
+    container: Any, path: str, workdir: str | None = None
 ) -> VerifyResult:
     """Run pyright on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
@@ -1313,7 +1313,7 @@ def _run_pyright_verify(
         return _envelope_not_available("pyright", "pyright not installed in container")
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    findings = _parse_pyright_output(stdout_text, _path_display(path))
+    findings = _parse_pyright_output(stdout_text, path)
     for r in findings:
         r["severity"] = "error"
 
@@ -1323,9 +1323,7 @@ def _run_pyright_verify(
     return _envelope_ok("pyright", findings, ec)
 
 
-def _run_tsc_verify(
-    container: Any, path: str | Sequence[str], workdir: str | None = None
-) -> VerifyResult:
+def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run tsc --noEmit on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
         [
@@ -1349,9 +1347,9 @@ def _run_tsc_verify(
     if ec not in (0, 1, 2):
         return _envelope_error("tsc", combined.strip() or f"exit code {ec}", ec)
 
-    findings = _parse_tsc_text(combined, _path_display(path))
+    findings = _parse_tsc_text(combined, path)
     if not findings:
-        findings = _parse_tsc_json(combined, _path_display(path))
+        findings = _parse_tsc_json(combined, path)
     for r in findings:
         r["severity"] = "error"
     return _envelope_ok("tsc", findings, ec)
@@ -2067,7 +2065,7 @@ def _gate_lint_runner(
 
 
 def _gate_type_runner(
-    container: Any, path: str | Sequence[str], lang: str, workdir: str | None
+    container: Any, path: str, lang: str, workdir: str | None
 ) -> VerifyResult:
     """Type-check runner for the gate."""
     if lang == "python":
@@ -2079,7 +2077,7 @@ def _gate_type_runner(
 
 def run_lint_type_gate(
     container: Any,
-    scope: str | Sequence[str],
+    scope: str,
     *,
     lint_scope: str | Sequence[str] | None = None,
     working_dir: str | None = None,

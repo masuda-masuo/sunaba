@@ -273,6 +273,7 @@ This is the full reference. You almost never touch most of it directly — the c
 | `checkpoint_list` | List unpushed local checkpoints. |
 | `checkpoint_restore` | Restore working tree to a previous checkpoint (`git reset --hard`). |
 | `publish` | Stage, commit, push, and optionally create a PR. Two-step flow: dry_run → token. |
+| `sandbox_issue_write` | Create a GitHub issue or comment on one, host-side. Two-step flow: dry_run → token (#414). |
 
 ### Sandbox management
 

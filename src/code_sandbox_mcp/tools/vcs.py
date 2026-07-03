@@ -18,6 +18,7 @@ from code_sandbox_mcp.journal import get_or_create_run_id, record_boundary_cross
 from code_sandbox_mcp.proxy_client import (
     ProxyAuthError,
     authorized_push_window,
+    authorized_read_window,
     proxy_configured,
 )
 from code_sandbox_mcp.token import generate_token, verify_and_consume
@@ -1719,20 +1720,25 @@ def clone_repo(
     repo: str,
     dest_dir: str = "/home/sandbox",
     branch: str = "",
+    inject_vcs_token: bool = False,
 ) -> str:
     """Clone a Git repository inside the container.
 
     Uses ``gh repo clone`` when a VCS token is present in the container,
-    otherwise an anonymous ``git clone`` over HTTPS — public repos clone
-    without credentials (Issue #333).  The choice is made by probing the
-    container itself (``gh auth setup-git``), not by trusting the
-    ``inject_vcs_token`` request flag.
+    otherwise an anonymous ``git clone`` over HTTPS -- public repos clone
+    without credentials (Issue #333).  The choice between those two
+    container-side transports is made by probing the container itself
+    (``gh auth setup-git``), not by trusting *inject_vcs_token*.
 
     Requires a container started with ``allow_network=True``.  For a
-    *private* repository, ``inject_vcs_token=True`` is additionally required
-    -- but note that with the egress proxy active (#356) this flag no longer
-    puts a token in the container, so private repos cannot be cloned this
-    way under the proxy regardless of *inject_vcs_token*.
+    *private* repository, ``inject_vcs_token=True`` is additionally required.
+    With the egress proxy active (#356) the container itself still never
+    receives a token regardless of this flag; instead, when
+    *inject_vcs_token* is ``True`` and the proxy is configured, a
+    host-resolved token is handed to the proxy for a short
+    read-authorization window (#419) so the clone's anonymous ``git clone``
+    is transparently authenticated at the network layer -- the container's
+    own env and any ``gh`` credential-helper state stay untouched.
 
     .. hint::
 
@@ -1758,7 +1764,7 @@ def clone_repo(
 
     .. rubric:: Fallback
 
-    - If ``clone_repo`` fails with a private repo, ensure the container was started with ``inject_vcs_token=True`` (and that the egress proxy, if enabled, is not in play -- it cannot help there)
+    - If ``clone_repo`` fails with a private repo, pass ``inject_vcs_token=True`` (works both with and without the egress proxy, #419)
 
     Args:
         container_id: 12-character container ID prefix.
@@ -1767,6 +1773,12 @@ def clone_repo(
             into ``{dest_dir}/{repo_name}`` (default parent
             ``"/home/sandbox"``).
         branch: Branch name to clone. Omit for the default branch.
+        inject_vcs_token: Whether to authenticate the clone for a private
+            repository (default ``False``).  Without the egress proxy this
+            relies on whatever VCS token the container already carries
+            (from ``sandbox_initialize(inject_vcs_token=True)``).  With the
+            egress proxy active, this instead opens a short read-window
+            (#419) so the proxy authenticates just this clone.
 
     Returns:
         JSON string with ``status``, ``repo``, ``clone_path``, and
@@ -1813,13 +1825,26 @@ def clone_repo(
     )
     authenticated = auth_ec == 0
 
+    # Under the egress proxy the container never carries a token (#356), so
+    # `authenticated` above is always False there; a read window (#419)
+    # authenticates the clone at the proxy instead, without changing the
+    # container-side (anonymous) command.
+    open_read_window = inject_vcs_token and not authenticated and proxy_configured()
     cmd = _build_clone_command(repo, clone_path, branch, authenticated)
 
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", cmd],
-        stdout=True,
-        stderr=True,
-    )
+    if open_read_window:
+        with authorized_read_window(repo, token=_resolve_push_token() or None):
+            exit_code, output = container.exec_run(
+                ["/bin/sh", "-c", cmd],
+                stdout=True,
+                stderr=True,
+            )
+    else:
+        exit_code, output = container.exec_run(
+            ["/bin/sh", "-c", cmd],
+            stdout=True,
+            stderr=True,
+        )
 
     stdout_part, stderr_part = (
         output if isinstance(output, tuple) else (output, b"")
@@ -1860,6 +1885,7 @@ def clone_repo(
         "clone_path": clone_path,
         "branch": branch or "default",
     }
-    if not authenticated:
+    if not authenticated and not open_read_window:
         result["warning"] = CLONE_NO_TOKEN_WARNING
     return json.dumps(result)
+

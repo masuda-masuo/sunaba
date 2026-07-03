@@ -17,7 +17,10 @@ from code_sandbox_mcp.proxy_client import (
     ProxyAuthError,
     ProxyControlConfig,
     authorized_push_window,
+    authorized_read_window,
+    close_read_window,
     close_window,
+    open_read_window,
     open_window,
     proxy_configured,
 )
@@ -25,6 +28,8 @@ from code_sandbox_mcp.proxy_client import (
 REPO = "owner/repo"
 _PUSH_PATH = "/owner/repo.git/git-receive-pack"
 _PUSH_SERVICE = "git-receive-pack"
+_FETCH_PATH = "/owner/repo.git/info/refs"
+_FETCH_SERVICE = "git-upload-pack"
 _SECRET = "s3cret"
 
 
@@ -38,6 +43,15 @@ def _push_headers(guard: EgressGuard) -> dict[str, str]:
     now = time.monotonic()
     decision = guard.decide(_PUSH_PATH, _PUSH_SERVICE, now)
     return guard.token_headers_for(decision, is_push_request=True, repo=REPO, now=now)
+
+
+def _fetch_headers(guard: EgressGuard) -> dict[str, str]:
+    """Headers the guard would inject into a clone/fetch of REPO right now (#419)."""
+    now = time.monotonic()
+    decision = guard.decide(_FETCH_PATH, _FETCH_SERVICE, now)
+    return guard.token_headers_for(
+        decision, is_push_request=False, repo=REPO, now=now, is_fetch_request=True
+    )
 
 
 @pytest.fixture
@@ -181,3 +195,48 @@ class TestAuthFailures:
         cfg = ProxyControlConfig(base_url=f"http://127.0.0.1:{port}", secret=_SECRET)
         with pytest.raises(ProxyAuthError):
             open_window(REPO, config=cfg)
+
+
+class TestReadWindowLifecycle:
+    """Host-side read-authorization windows for clone/fetch (#419)."""
+
+    def test_unconfigured_open_close_noop(self, guard: EgressGuard) -> None:
+        open_read_window(REPO, config=None)
+        close_read_window(REPO, config=None)
+        assert _fetch_headers(guard) == {}
+
+    def test_context_manager_noop_when_unconfigured(self, guard: EgressGuard) -> None:
+        with authorized_read_window(REPO, config=None):
+            assert _fetch_headers(guard) == {}
+
+    def test_token_rides_the_read_window(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        open_read_window(REPO, token="ghs_read", config=config)
+        assert _fetch_headers(guard) == {"Authorization": basic_auth_header("ghs_read")}
+        close_read_window(REPO, config=config)
+        assert _fetch_headers(guard) == {}
+
+    def test_context_manager_scopes_the_read_token(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        with authorized_read_window(REPO, token="ghs_read", config=config):
+            assert _fetch_headers(guard) == {"Authorization": basic_auth_header("ghs_read")}
+        assert _fetch_headers(guard) == {}
+
+    def test_context_manager_revokes_read_window_on_exception(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        with pytest.raises(RuntimeError, match="boom"):
+            with authorized_read_window(REPO, token="ghs_read", config=config):
+                assert _fetch_headers(guard) == {"Authorization": basic_auth_header("ghs_read")}
+                raise RuntimeError("boom")
+        assert _fetch_headers(guard) == {}
+
+    def test_read_window_never_unlocks_push(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        # guard's allowlist already contains REPO (fixture), so this isolates
+        # the read/push separation rather than allowlist membership.
+        with authorized_read_window(REPO, token="ghs_read", config=config):
+            assert not _push_allowed(guard)

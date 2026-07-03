@@ -28,7 +28,7 @@ This MCP routes all AI operations through **disposable Docker containers** with 
 | AI operations never touch the host | All file ops, package installs, and test runs happen inside the container. If the AI breaks something — delete the container and move on. |
 | No network by default | `allow_network=True` must be explicitly set. AI can't accidentally call external APIs, download payloads, or push to remotes. |
 | Non-root execution | Container runs as unprivileged user `sandbox`. No `sudo`, no system package modification. |
-| VCS token opt-in | `GITHUB_TOKEN` is injected only when `inject_vcs_token=True` is set. Even then, token values are masked in all output (`KEY=***`). |
+| VCS token opt-in | `GITHUB_TOKEN` is injected only when `inject_vcs_token=True` is set. Token values are masked in all output (`KEY=***`). When the [egress proxy](#vcs-token-safety) is active, it is *never* injected into the container regardless of this flag — `publish` supplies it host-side instead. |
 | Audit trail | Every operation is recorded in an append-only journal. You can trace exactly what the AI did, after the fact. |
 
 The value of this MCP is as much about **what the AI cannot do** as what it can.
@@ -338,6 +338,12 @@ Token injection into containers is **opt-in**. By default, no VCS credentials ar
 - All output is automatically sanitized: token values are masked as `KEY=***` in stdout/stderr.
 
 This follows the principle of least privilege — containers that don't need VCS access don't get tokens.
+
+**With the egress proxy enabled** (`CODE_SANDBOX_ENABLE_EGRESS_PROXY`), the model above changes: `inject_vcs_token=True` becomes a no-op for the container's own environment — no token ever lands there, even when set. Raw `git push` and in-container `gh` (issue/PR/comment/release operations) are unauthenticated and will fail. Instead:
+
+- Use `publish` for pushes and PR creation. It resolves a token host-side and hands it to the proxy for a short authorized push window (push), or calls the GitHub API directly from the host (PR creation) — the container never holds a credential of its own.
+- `sandbox_initialize(pr=N, repo=...)` still works for checking out a PR: the head ref is resolved host-side and the container does an anonymous `git fetch`. Private-repo PRs cannot be checked out this way.
+- Non-push write operations that aren't yet covered by a first-class tool (e.g. `gh issue create`, `gh issue comment`) have no in-container path when proxied — run them host-side instead.
 
 ## Observability
 

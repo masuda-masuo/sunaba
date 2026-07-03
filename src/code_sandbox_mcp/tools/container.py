@@ -1075,6 +1075,15 @@ def sandbox_initialize(
                Enable only for containers that need git/gh access to
                remote repositories.  Token injection is a boundary-crossing
                operation and should be used only when necessary.
+               **When the egress proxy is active (#356, see
+               ``CODE_SANDBOX_ENABLE_EGRESS_PROXY``), this flag is a no-op for
+               the container's own environment: no token ever lands there,
+               even when set to ``True``.**  The container's ``git``/``gh``
+               stay unauthenticated; use :func:`publish` for pushes and PR
+               creation -- it resolves the token host-side and hands it to
+               the proxy per authorized push window (#357) or calls the
+               GitHub API directly from the host (#360), so the container
+               never needs a credential of its own.
         clone_repo: Optional ``owner/name`` repository to copy from the
                Shiori pre-cloned repos on the host into the container.
                Uses the host path configured via ``--shiori-repos-path``
@@ -1094,7 +1103,12 @@ def sandbox_initialize(
                When set, implicitly enables ``allow_network=True``
                and ``inject_vcs_token=True``, clones the repository
                inside the container, checks out the PR head branch,
-               and installs dev dependencies.
+               and installs dev dependencies.  Under the egress proxy
+               (#403) this checkout is anonymous: the PR head ref is
+               resolved host-side and the container never receives a
+               token, so this still works for public repos with no
+               further setup; private-repo PRs cannot be checked out
+               this way.
         pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
                Pass ``None`` to skip pip install entirely.  Also used when
                *clone_repo* is specified, and skipped automatically (with a
@@ -1512,7 +1526,11 @@ def run_container_and_exec(
                (``GITHUB_TOKEN``, ``GITHUB_TOKEN_SOURCE``, ``GH_TOKEN``)
                as environment variables in the container (default
                ``False``).  Enable only for containers that need git/gh
-               access to remote repositories.
+               access to remote repositories.  **When the egress proxy is
+               active (#356), this flag is a no-op for the container's own
+               environment: no token ever lands there.**  Use
+               :func:`publish` for pushes and PR creation instead -- it
+               resolves the token host-side (#347/#360).
         clone_repo: Optional ``owner/name`` repository to copy from the
                Shiori pre-cloned repos on the host into the container.
                Uses the host path configured via ``--shiori-repos-path``
@@ -1532,7 +1550,12 @@ def run_container_and_exec(
                When set, implicitly enables ``allow_network=True``
                and ``inject_vcs_token=True``, clones the repository
                inside the container, checks out the PR head branch,
-               and installs dev dependencies.
+               and installs dev dependencies.  Under the egress proxy
+               (#403) this checkout is anonymous: the PR head ref is
+               resolved host-side and the container never receives a
+               token, so this still works for public repos with no
+               further setup; private-repo PRs cannot be checked out
+               this way.
         pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
                Pass ``None`` to skip pip install entirely.  Also used when
                *clone_repo* is specified, and skipped automatically (with a

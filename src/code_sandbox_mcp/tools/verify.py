@@ -307,17 +307,22 @@ def verify_in_container(
     """Run pytest with optional filter → full-suite fallback and diff summary.
 
     **Use this as the pre-publish quality gate.**  It runs lint and
-    type-checking on the project source (mirroring CI's ``ruff check``)
-    as a **precondition**, then the test suite -- a forgotten lint can no
-    longer slip through to CI (Issue #293).  When *test_filter* or
-    *pytest_args* is provided, the filtered tests run first; if they
-    pass, the full test suite runs automatically.  The gate decision is
-    always based on the full suite result.
+    type-checking on the project source (mirroring CI's
+    ``ruff check src/ tests/``) as a **precondition**, then the test
+    suite -- a forgotten lint can no longer slip through to CI (Issue
+    #293, #417).  When *test_filter* or *pytest_args* is provided, the
+    filtered tests run first; if they pass, the full test suite runs
+    automatically.  The gate decision is always based on the full suite
+    result.
 
-    The lint/type gate runs on the project ``src/`` scope (or ``.`` when
-    there is no ``src/``), independent of the test *path*, so it catches
-    project-wide issues regardless of which tests are selected.  If lint
-    or type-checking fails, the tests are **not** run and
+    The lint gate runs on ``src/`` + ``tests/`` when both exist (or
+    ``.`` when neither does), matching CI's actual scope so a lint-only
+    violation confined to ``tests/`` can no longer pass here and only
+    surface in CI (Issue #417).  The type-check gate stays scoped to
+    ``src/`` (or ``.``) since CI has no type-check step to mirror.  Both
+    are independent of the test *path*, so they catch project-wide
+    issues regardless of which tests are selected.  If lint or
+    type-checking fails, the tests are **not** run and
     ``gate_passed=false`` is returned with the findings.  Missing tools
     (e.g. the lint/type-free ``:minimal`` image) set
     ``lint_type_incomplete`` rather than failing the gate.
@@ -479,19 +484,28 @@ def verify_in_container(
         result["detection_warning"] = detected.reason
 
     # --- Pre-test lint + type gate (Issue #293) ---
-    # Lint/type run on the project source scope (mirroring CI's
-    # ``ruff check src/``), independent of the test ``path``.  This makes
-    # verify a single quality gate so a forgotten lint can no longer slip
-    # through to CI; both must pass before the test suite runs.  The
-    # skip_* flags let the edit loop get faster focused-test feedback when
-    # lint/type are known clean -- the gate is still enforced on the final
-    # pre-publish call where the flags are left at their default (False).
+    # Lint runs on src/ + tests/ when both exist, mirroring CI's actual
+    # ``ruff check src/ tests/`` (issue #417 -- a lint-only violation
+    # confined to tests/ used to slip past this gate and only surface in
+    # CI).  Type-check stays scoped to src/ since CI has no type-check
+    # step to mirror.  Both are independent of the test ``path``.  This
+    # makes verify a single quality gate so a forgotten lint can no
+    # longer slip through to CI; both must pass before the test suite
+    # runs.  The skip_* flags let the edit loop get faster focused-test
+    # feedback when lint/type are known clean -- the gate is still
+    # enforced on the final pre-publish call where the flags are left at
+    # their default (False).
     if not (skip_lint_gate and skip_type_gate):
-        src_ec, _, _ = _run("test -d src")
-        gate_scope = "src" if src_ec == 0 else "."
+        _, dirs_out, _ = _run(
+            "for d in src tests; do test -d \"$d\" && echo \"$d\"; done"
+        )
+        existing_dirs = dirs_out.split()
+        type_scope = "src" if "src" in existing_dirs else "."
+        lint_scope: str | list[str] = existing_dirs if existing_dirs else "."
         lt_gate = run_lint_type_gate(
             container,
-            gate_scope,
+            type_scope,
+            lint_scope=lint_scope,
             working_dir=working_dir,
             language=language,
             gate_on_lint=not skip_lint_gate,

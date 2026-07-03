@@ -26,6 +26,7 @@ import secrets
 import shlex
 import tarfile
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
@@ -351,9 +352,16 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
     )
 
 
-def _quote_path(path: str) -> str:
-    """Shell-escape a file path for use in a command string."""
-    return shlex.quote(path)
+def _quote_path(path: str | Sequence[str]) -> str:
+    """Shell-escape one or more file paths for use in a command string."""
+    if isinstance(path, str):
+        return shlex.quote(path)
+    return " ".join(shlex.quote(p) for p in path)
+
+
+def _path_display(path: str | Sequence[str]) -> str:
+    """Render *path* as a single string for use as a parse-fallback label."""
+    return path if isinstance(path, str) else " ".join(path)
 
 
 def _owner_for_write(
@@ -1099,7 +1107,7 @@ def _determine_scope(file_path: str) -> ScopeWorkdir:
 
 def _run_ruff_verify(
     container: Any,
-    path: str,
+    path: str | Sequence[str],
     workdir: str | None = None,
     extra_select: bool = True,
     fix: bool = False,
@@ -1150,14 +1158,14 @@ def _run_ruff_verify(
         return _envelope_error("ruff", stderr_text.strip() or f"exit code {ec}", ec)
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    findings = _parse_ruff_output(stdout_text, path)
+    findings = _parse_ruff_output(stdout_text, _path_display(path))
     for r in findings:
         r["severity"] = _determine_lint_severity(r.get("rule", ""))
     return _envelope_ok("ruff", findings, ec)
 
 
 def _run_eslint_verify(
-    container: Any, path: str, workdir: str | None = None, fix: bool = False
+    container: Any, path: str | Sequence[str], workdir: str | None = None, fix: bool = False
 ) -> VerifyResult:
     """Run eslint on *path*.  Returns VerifyResult envelope.
 
@@ -1186,13 +1194,13 @@ def _run_eslint_verify(
         return _envelope_error("eslint", stderr_text.strip() or f"exit code {ec}", ec)
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    findings = _parse_eslint_output(stdout_text, path)
+    findings = _parse_eslint_output(stdout_text, _path_display(path))
     for r in findings:
         r["severity"] = _determine_lint_severity(r.get("rule", ""))
     return _envelope_ok("eslint", findings, ec)
 
 
-def _run_golangci_lint_verify(container: Any, path: str) -> VerifyResult:
+def _run_golangci_lint_verify(container: Any, path: str | Sequence[str]) -> VerifyResult:
     """Run golangci-lint on *path*.  Falls back to go vet."""
     ec, output = container.exec_run(
         [
@@ -1214,13 +1222,13 @@ def _run_golangci_lint_verify(container: Any, path: str) -> VerifyResult:
         return _envelope_error("golangci-lint", stderr_text.strip() or f"exit code {ec}", ec)
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    findings = _parse_golangci_lint_output(stdout_text, path)
+    findings = _parse_golangci_lint_output(stdout_text, _path_display(path))
     for r in findings:
         r["severity"] = "error"
     return _envelope_ok("golangci-lint", findings, ec)
 
 
-def _run_go_vet_verify(container: Any, path: str) -> VerifyResult:
+def _run_go_vet_verify(container: Any, path: str | Sequence[str]) -> VerifyResult:
     """Run go vet on *path*."""
     ec, output = container.exec_run(
         [
@@ -1240,7 +1248,7 @@ def _run_go_vet_verify(container: Any, path: str) -> VerifyResult:
         return _envelope_error("go vet", stderr_text.strip() or f"exit code {ec}", ec)
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    findings = _parse_go_vet_output(stdout_text + "\n" + stderr_text, path)
+    findings = _parse_go_vet_output(stdout_text + "\n" + stderr_text, _path_display(path))
     for r in findings:
         r["severity"] = "error"
     return _envelope_ok("go vet", findings, ec)
@@ -1284,7 +1292,9 @@ def _parse_go_vet_output(raw: str, file_path: str) -> list[dict[str, Any]]:
     return results
 
 
-def _run_pyright_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
+def _run_pyright_verify(
+    container: Any, path: str, workdir: str | None = None
+) -> VerifyResult:
     """Run pyright on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
         [
@@ -2041,7 +2051,7 @@ _GATE_SENTINEL_RULES = ("no-linter", "no-typechecker", "error")
 
 
 def _gate_lint_runner(
-    container: Any, path: str, lang: str, workdir: str | None
+    container: Any, path: str | Sequence[str], lang: str, workdir: str | None
 ) -> VerifyResult:
     """Lint runner for the gate.  Python ruff runs WITHOUT the security
     extend-select so the gate matches CI's plain ``ruff check`` exactly."""
@@ -2069,6 +2079,7 @@ def run_lint_type_gate(
     container: Any,
     scope: str,
     *,
+    lint_scope: str | Sequence[str] | None = None,
     working_dir: str | None = None,
     language: str | None = None,
     gate_on_lint: bool = True,
@@ -2077,9 +2088,13 @@ def run_lint_type_gate(
     """Run lint + type-check as a pre-test gate over *scope* (Issue #293).
 
     Detects project languages (from the working-dir root) and runs the
-    project linter and type checker over *scope*.  The Python linter runs
-    with the project's ruff config only -- no security extend-select --
-    so a failing lint gate means CI's ``ruff check`` would also fail.
+    project type checker over *scope*, and the project linter over
+    *lint_scope* (falling back to *scope* when *lint_scope* is omitted --
+    callers that mirror CI's lint-only scope, e.g. ``src/`` + ``tests/``,
+    pass both separately since CI has no matching type-check step to
+    widen *scope* for).  The Python linter runs with the project's ruff
+    config only -- no security extend-select -- so a failing lint gate
+    means CI's ``ruff check`` would also fail.
 
     Gate decisions:
 
@@ -2104,12 +2119,15 @@ def run_lint_type_gate(
     # Detect from the project root so package markers (pyproject.toml, etc.)
     # are found; the linter/type-checker then run on the CI-aligned *scope*.
     detected = detect_languages(container, ".", language, working_dir=working_dir)
+    effective_lint_scope = scope if lint_scope is None else lint_scope
 
     lint_results: list[VerifyResult] = []
     type_results: list[VerifyResult] = []
     for lang in sorted(detected.languages):
         if gate_on_lint:
-            lint_results.append(_gate_lint_runner(container, scope, lang, working_dir))
+            lint_results.append(
+                _gate_lint_runner(container, effective_lint_scope, lang, working_dir)
+            )
         if gate_on_type:
             type_results.append(_gate_type_runner(container, scope, lang, working_dir))
 

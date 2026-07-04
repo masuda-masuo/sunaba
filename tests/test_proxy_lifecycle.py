@@ -54,6 +54,22 @@ def _running_sidecar(secret: str | None) -> MagicMock:
     return container
 
 
+@pytest.fixture(autouse=True)
+def _stub_fingerprint_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the #405 source-drift probe hermetic across this module.
+
+    ``ensure_egress_proxy`` now calls ``fetch_proxy_fingerprint`` against the
+    (fake) control URL; without this stub every lifecycle test would attempt a
+    real socket connect -- and on a host that actually runs the sidecar on the
+    published port it could hit a live proxy.  Default it to ``None`` ("cannot
+    compare", so no warning); the dedicated drift tests override it.  Also zero
+    the readiness wait so a ``None`` result returns at once instead of polling
+    for :data:`pl._FINGERPRINT_READY_WAIT_SECONDS` seconds each ensure call.
+    """
+    monkeypatch.setattr(pl, "fetch_proxy_fingerprint", lambda config: None)
+    monkeypatch.setattr(pl, "_FINGERPRINT_READY_WAIT_SECONDS", 0.0)
+
+
 class TestEgressProxyEnabled:
     """Flag parsing for CODE_SANDBOX_ENABLE_EGRESS_PROXY."""
 
@@ -295,3 +311,86 @@ class TestInstallCA:
         with pytest.raises(pl.EgressProxyError, match="put_archive"):
             pl.install_ca(container, CA_PEM)
         container.exec_run.assert_not_called()
+
+
+class TestSourceDriftWarning:
+    """_warn_on_source_drift: sidecar vs installed proxy.py fingerprint (#405)."""
+
+    def test_warns_on_mismatch(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(pl, "PROXY_SOURCE_FINGERPRINT", "a" * 64)
+        monkeypatch.setattr(pl, "fetch_proxy_fingerprint", lambda config: "b" * 64)
+        with caplog.at_level("WARNING"):
+            pl._warn_on_source_drift("http://127.0.0.1:1", "sekret")
+        assert any("does not match" in r.getMessage() for r in caplog.records)
+
+    def test_silent_when_fingerprints_agree(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(pl, "PROXY_SOURCE_FINGERPRINT", "same")
+        monkeypatch.setattr(pl, "fetch_proxy_fingerprint", lambda config: "same")
+        with caplog.at_level("WARNING"):
+            pl._warn_on_source_drift("http://x", "s")
+        assert not caplog.records
+
+    def test_silent_when_remote_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Old proxy without /version, or unreachable sidecar -> None -> no warn.
+        monkeypatch.setattr(pl, "PROXY_SOURCE_FINGERPRINT", "local")
+        monkeypatch.setattr(pl, "fetch_proxy_fingerprint", lambda config: None)
+        with caplog.at_level("WARNING"):
+            pl._warn_on_source_drift("http://x", "s")
+        assert not caplog.records
+
+    def test_polls_until_control_api_ready(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Regression for the #431 review: on first sidecar creation the control
+        # API may not accept requests the instant container.start() returns, so
+        # a single probe would miss the drift (false negative on the very deploy
+        # that caused it).  The readiness poll retries until /version answers.
+        calls = {"n": 0}
+
+        def flaky(config: object) -> str | None:
+            calls["n"] += 1
+            return "b" * 64 if calls["n"] >= 3 else None  # not ready twice, then ready
+
+        monkeypatch.setattr(pl, "PROXY_SOURCE_FINGERPRINT", "a" * 64)
+        monkeypatch.setattr(pl, "fetch_proxy_fingerprint", flaky)
+        monkeypatch.setattr(pl, "_FINGERPRINT_READY_WAIT_SECONDS", 5.0)
+        monkeypatch.setattr(pl, "_FINGERPRINT_POLL_INTERVAL_SECONDS", 0.0)
+        with caplog.at_level("WARNING"):
+            pl._warn_on_source_drift("http://x", "s")
+        assert calls["n"] == 3
+        assert any("does not match" in r.getMessage() for r in caplog.records)
+
+    def test_short_circuits_when_local_uncomputable(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Empty local fingerprint = "cannot compare": no warn, and no probe.
+        probed: list[object] = []
+        monkeypatch.setattr(pl, "PROXY_SOURCE_FINGERPRINT", "")
+        monkeypatch.setattr(
+            pl, "fetch_proxy_fingerprint", lambda config: probed.append(config)
+        )
+        with caplog.at_level("WARNING"):
+            pl._warn_on_source_drift("http://x", "s")
+        assert not caplog.records
+        assert not probed
+
+    def test_ensure_egress_proxy_swallows_probe_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A blowing-up probe must never stop a sandbox from starting.
+        client, _, _ = _fresh_client()
+
+        def boom(config: object) -> str:
+            raise RuntimeError("probe blew up")
+
+        monkeypatch.setattr(pl, "PROXY_SOURCE_FINGERPRINT", "local")
+        monkeypatch.setattr(pl, "fetch_proxy_fingerprint", boom)
+        # Must return normally despite the probe raising.
+        runtime = pl.ensure_egress_proxy(client, env={})
+        assert runtime.network_name == pl.EGRESS_NETWORK_NAME

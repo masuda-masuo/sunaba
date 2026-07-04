@@ -61,6 +61,7 @@ sandbox trust store -- is handled host-side by
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import json
 import os
@@ -152,6 +153,49 @@ DEFAULT_WINDOW_TTL_SECONDS = 30.0
 #: Cap on the control-request body; payloads are tiny JSON, so anything larger
 #: is rejected (413) unread, bounding handler memory (review of PR #367).
 MAX_CONTROL_BODY_BYTES = 4096
+
+#: Files baked into the sidecar image (``docker/Dockerfile.proxy``) whose bytes
+#: define the addon's behaviour.  Their combined hash is the "source
+#: fingerprint" compared host-side against the installed package to catch a
+#: sidecar running a different ``proxy.py`` than the server expects (#405).
+#: The #404 incident -- a venv on new Basic-auth ``proxy.py`` against a sidecar
+#: baked from the old Bearer ``proxy.py`` -- silently broke every push; a
+#: fingerprint mismatch surfaces that at sandbox start instead.
+_FINGERPRINT_FILENAMES = ("proxy.py", "proxy_entrypoint.py")
+
+
+def _compute_source_fingerprint() -> str:
+    """Hash the addon source files next to this module, order-independent.
+
+    Resolves each name in :data:`_FINGERPRINT_FILENAMES` relative to this
+    file's directory -- ``/app`` inside the sidecar, the installed package dir
+    host-side -- so the same bytes produce the same digest on both ends.  A
+    missing file hashes to a fixed ``MISSING`` marker rather than raising, so
+    the fingerprint stays deterministic (and a file present on only one side
+    still diverges).  Returns ``""`` if the source dir cannot be read at all,
+    which callers treat as "cannot compare" (skip the check).
+    """
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+    except OSError:
+        return ""
+    outer = hashlib.sha256()
+    for name in _FINGERPRINT_FILENAMES:
+        outer.update(name.encode())
+        outer.update(b"\0")
+        try:
+            with open(os.path.join(here, name), "rb") as fh:
+                outer.update(hashlib.sha256(fh.read()).hexdigest().encode())
+        except OSError:
+            outer.update(b"MISSING")
+        outer.update(b"\n")
+    return outer.hexdigest()
+
+
+#: Digest of this sidecar's baked addon source, computed once at import.  The
+#: sidecar serves it over ``POST /version`` (secret-gated) and the host
+#: compares it against its own installed copy after starting the sidecar (#405).
+PROXY_SOURCE_FINGERPRINT = _compute_source_fingerprint()
 
 
 def git_service_from_request(path: str, query_service: str | None) -> str | None:
@@ -676,11 +720,19 @@ def handle_control_request(
     push window -- then opens/closes a push window (``/auth/allow`` /
     ``/auth/revoke``), a read window (``/auth/allow-read`` / ``/auth/revoke-read``,
     #419), or an api-write window (``/auth/allow-api-write`` /
-    ``/auth/revoke-api-write``, #420) for ``payload["repo"]``.  Kept free of
-    socket/HTTP glue so the protocol is unit-testable on its own.
+    ``/auth/revoke-api-write``, #420) for ``payload["repo"]``.  Also answers
+    ``/version`` with this sidecar's baked source fingerprint (#405), which
+    takes no repo.  Kept free of socket/HTTP glue so the protocol is
+    unit-testable on its own.
     """
     if secret is not None and not hmac.compare_digest(provided_secret or "", secret):
         return ControlResult(403, {"error": "invalid or missing control secret"})
+    # Read-only source-fingerprint probe (#405): no repo/payload, so answer it
+    # before the window-oriented validation below.  Stays secret-gated -- the
+    # fingerprint is non-sensitive, but the control plane authenticates every
+    # request and there is no reason to carve out an exception.
+    if path == "/version":
+        return ControlResult(200, {"proxy_fingerprint": PROXY_SOURCE_FINGERPRINT})
     if not isinstance(payload, dict):
         return ControlResult(400, {"error": "request body must be a JSON object"})
     repo = payload.get("repo")

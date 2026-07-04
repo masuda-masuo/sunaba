@@ -22,6 +22,7 @@ from code_sandbox_mcp.proxy import (
     CONTROL_SECRET_ENV,
     DEFAULT_WINDOW_TTL_SECONDS,
     FETCH_SERVICE,
+    PROXY_SOURCE_FINGERPRINT,
     PUSH_BLOCK_HINT,
     PUSH_SERVICE,
     AuthControlServer,
@@ -447,6 +448,32 @@ class TestControlRequestDispatch:
         guard = EgressGuard()
         res = handle_control_request(guard, None, "/auth/other", None, {"repo": "o/r"})
         assert res.status == 404
+
+    def test_version_returns_source_fingerprint(self) -> None:
+        # /version takes no repo and echoes this sidecar's baked source hash
+        # so the host can detect a drifted proxy.py (#405).
+        guard = EgressGuard()
+        res = handle_control_request(guard, None, "/version", None, {})
+        assert res.status == 200
+        assert res.body["proxy_fingerprint"] == PROXY_SOURCE_FINGERPRINT
+        assert isinstance(PROXY_SOURCE_FINGERPRINT, str) and PROXY_SOURCE_FINGERPRINT
+
+    def test_version_ignores_missing_repo(self) -> None:
+        # The repo/payload validation that guards /auth/* must not apply here.
+        guard = EgressGuard()
+        res = handle_control_request(guard, None, "/version", None, {"junk": 1})
+        assert res.status == 200
+
+    def test_version_still_secret_gated(self) -> None:
+        guard = EgressGuard()
+        res = handle_control_request(
+            guard,
+            secret="s3cr3t",
+            path="/version",
+            provided_secret="wrong",
+            payload={},
+        )
+        assert res.status == 403
 
 
 class TestReadWindowControlDispatch:

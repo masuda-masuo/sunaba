@@ -11,6 +11,7 @@ import time
 import pytest
 
 from code_sandbox_mcp.proxy import (
+    PROXY_SOURCE_FINGERPRINT,
     AuthControlServer,
     EgressGuard,
     basic_auth_header,
@@ -27,6 +28,7 @@ from code_sandbox_mcp.proxy_client import (
     close_api_write_window,
     close_read_window,
     close_window,
+    fetch_proxy_fingerprint,
     open_api_write_window,
     open_read_window,
     open_window,
@@ -325,3 +327,30 @@ class TestApiWriteWindowLifecycle:
     ) -> None:
         with authorized_api_write_window(REPO, token="ghs_write", config=config):
             assert not _push_allowed(guard)
+
+
+class TestFingerprintProbe:
+    """``fetch_proxy_fingerprint`` over the real control server (#405)."""
+
+    def test_returns_running_source_fingerprint(
+        self, config: ProxyControlConfig
+    ) -> None:
+        # In-process the "sidecar" runs the same proxy.py, so the fetched
+        # fingerprint must equal our own computed one.
+        assert fetch_proxy_fingerprint(config) == PROXY_SOURCE_FINGERPRINT
+
+    def test_wrong_secret_returns_none_not_raises(
+        self, server: AuthControlServer
+    ) -> None:
+        # /version is secret-gated (403); the probe is best-effort, so a 403
+        # HTTPError degrades to None rather than raising (never fails closed).
+        bad = ProxyControlConfig(
+            base_url=f"http://127.0.0.1:{server.port}", secret="wrong"
+        )
+        assert fetch_proxy_fingerprint(bad) is None
+
+    def test_unreachable_proxy_returns_none(self) -> None:
+        # No server here: an old proxy without /version or a down sidecar must
+        # not turn a diagnostic probe into an error.
+        dead = ProxyControlConfig(base_url="http://127.0.0.1:9", secret=_SECRET)
+        assert fetch_proxy_fingerprint(dead) is None

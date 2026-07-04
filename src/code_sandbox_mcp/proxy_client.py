@@ -100,6 +100,37 @@ def _post(config: ProxyControlConfig, path: str, payload: dict[str, object]) -> 
         raise ProxyAuthError(f"control API {path} returned HTTP {status}")
 
 
+def fetch_proxy_fingerprint(config: ProxyControlConfig) -> str | None:
+    """Return the sidecar's baked source fingerprint, or ``None`` if unavailable.
+
+    Best-effort by design (#405): the caller only *warns* on a mismatch, so any
+    failure -- a proxy predating the ``/version`` endpoint (HTTP 404), an
+    unreachable sidecar, or a malformed body -- returns ``None`` ("cannot
+    compare") rather than raising.  Unlike :func:`_post` this never turns a
+    diagnostic probe into a hard error that could block a sandbox from starting.
+    """
+    headers = {"Content-Type": "application/json"}
+    if config.secret is not None:
+        headers[CONTROL_TOKEN_HEADER] = config.secret
+    request = urllib.request.Request(
+        config.base_url + "/version", data=b"{}", headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_CONTROL_TIMEOUT_SECONDS) as resp:
+            body = resp.read()
+    except (urllib.error.URLError, OSError):
+        # HTTPError (e.g. 404 from an old proxy) is a URLError subclass.
+        return None
+    try:
+        parsed = json.loads(body or b"{}")
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    fingerprint = parsed.get("proxy_fingerprint")
+    return fingerprint if isinstance(fingerprint, str) and fingerprint else None
+
+
 def proxy_configured(env: dict[str, str] | None = None) -> bool:
     """Return ``True`` when the egress-proxy control API is configured.
 

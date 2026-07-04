@@ -2,7 +2,7 @@
 
 Serves a read-mostly, auto-refreshing HTML dashboard on localhost
 that shows running containers, run history, pass/fail counts,
-resource usage, and the approval queue.
+resource usage.
 
 Uses Python's built-in ``http.server`` — no external dependencies.
 """
@@ -59,11 +59,7 @@ th.sortable:hover {{ color: #58a6ff; }}
 .pass {{ color: #7ee787; }}
 .fail {{ color: #f97583; }}
 .mono {{ font-family: monospace; font-size: 11px; }}
-.approval-pending {{ background: #382a10; border-color: #ffa657; }}
-.approval-pending h2 {{ color: #ffa657; }}
 button {{ background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }}
-button.approve {{ background: #1b3820; border-color: #7ee787; color: #7ee787; }}
-button.reject {{ background: #381620; border-color: #f97583; color: #f97583; }}
 button:hover {{ opacity: 0.8; }}
 .empty {{ color: #484f58; font-style: italic; padding: 12px 0; }}
 .bar-wrap {{ display: flex; align-items: center; gap: 6px; margin: 1px 0; font-size: 11px; }}

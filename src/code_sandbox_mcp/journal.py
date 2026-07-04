@@ -199,15 +199,11 @@ def record_boundary_crossing(
     operation: str,
     details: str,
     approved: bool | None = None,
-    token: str | None = None,
 ) -> None:
     """Record a boundary-crossing operation.
 
     *approved* is ``None`` when no approval was required (e.g. read-only
-    VCS access that only needs journal recording, not token approval).
-
-    *token* is set when the operation enters a pending-approval state
-    and is referenced by subsequent approve/reject entries.
+    VCS access that only needs journal recording).
     """
     run_id = get_or_create_run_id(container_id)
     entry: dict[str, Any] = {
@@ -219,8 +215,6 @@ def record_boundary_crossing(
         "details": details,
         "approved": approved,
     }
-    if token is not None:
-        entry["token"] = token
     _append_json(entry)
 
 

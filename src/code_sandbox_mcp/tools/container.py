@@ -581,7 +581,26 @@ def _clone_repo_via_network(
         if not inject_vcs_token:
             hint = " (if this is a private repository, retry with inject_vcs_token=True so gh can authenticate)"
         transport = "anonymous git clone" if not inject_vcs_token else "gh repo clone"
+        # Record the egress-proxy read-window's outcome (#421): this is the
+        # boundary crossing publish's push window already gets recorded for
+        # (#356/#357), applied to the read side (#419) so a denied/failed
+        # proxy-authorized clone shows up in the journal too, not just a
+        # successful one.
+        if open_read_window:
+            record_boundary_crossing(
+                container_id[:12],
+                "clone_repo",
+                f"repo={clone_repo} proxy_read_window=True",
+                approved=False,
+            )
         raise RuntimeError(f"{transport} failed (exit {exit_code}): {detail}{hint}")
+    if open_read_window:
+        record_boundary_crossing(
+            container_id[:12],
+            "clone_repo",
+            f"repo={clone_repo} proxy_read_window=True",
+            approved=True,
+        )
     _write_clone_meta(container, clone_path)
     return "Cloned {} via network into {} in container {}".format(clone_repo, clone_path, container_id[:12])
 

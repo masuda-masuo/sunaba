@@ -590,7 +590,7 @@ def _clone_repo_via_network(
             record_boundary_crossing(
                 container_id[:12],
                 "clone_repo",
-                f"repo={clone_repo} proxy_read_window=True",
+                f"repo={clone_repo} dest={clone_path} proxy_read_window=True",
                 approved=False,
             )
         raise RuntimeError(f"{transport} failed (exit {exit_code}): {detail}{hint}")
@@ -598,7 +598,7 @@ def _clone_repo_via_network(
         record_boundary_crossing(
             container_id[:12],
             "clone_repo",
-            f"repo={clone_repo} proxy_read_window=True",
+            f"repo={clone_repo} dest={clone_path} proxy_read_window=True",
             approved=True,
         )
     _write_clone_meta(container, clone_path)

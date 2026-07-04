@@ -447,7 +447,7 @@ class TestCloneRepoViaNetwork:
         mock_record.assert_called_once_with(
             "abc123def456",
             "clone_repo",
-            "repo=owner/repo proxy_read_window=True",
+            "repo=owner/repo dest=/tmp/repo/repo proxy_read_window=True",
             approved=True,
         )
 
@@ -463,7 +463,7 @@ class TestCloneRepoViaNetwork:
         mock_record.assert_called_once_with(
             "abc123def456",
             "clone_repo",
-            "repo=owner/repo proxy_read_window=True",
+            "repo=owner/repo dest=/tmp/repo/repo proxy_read_window=True",
             approved=False,
         )
 

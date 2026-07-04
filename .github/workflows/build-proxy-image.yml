@@ -108,8 +108,11 @@ jobs:
             --repo "${REPO}" \
             --digest "${PROXY_DIGEST}"
 
-          # digest が変わっていなければ PR 不要
-          if git diff --quiet; then
+          # bootstrap 初回は proxy_pin.json が untracked なので `git diff --quiet`
+          # では検知できない（新規ファイルは無視される）。stage してから
+          # `--cached` で判定すれば新規・既存どちらの差分も拾える。
+          git add "$F"
+          if git diff --cached --quiet; then
             echo "No digest change in proxy_pin.json, skipping PR."
             exit 0
           fi
@@ -118,7 +121,6 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "${BRANCH}"
-          git add "$F"
           git commit -m "chore: update egress proxy sidecar image pin (#432)
 
           proxy: ghcr.io/${REPO}/proxy@${PROXY_DIGEST}

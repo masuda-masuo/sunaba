@@ -32,6 +32,21 @@ def test_pattern_matches_digest_ref_only() -> None:
     assert not _PROXY_PIN_PATTERN.match(f"ghcr.io/x/sandbox@sha256:{'a' * 64}")
 
 
+def test_packaged_pin_round_trips_when_present() -> None:
+    # Once CI (or bootstrap) has committed proxy_pin.json, it must load through
+    # the real loader and be a digest-pinned ref -- a hand-edit that breaks the
+    # packaging or the pin format fails here.  Skipped in the pre-bootstrap state
+    # where the file legitimately does not exist (absence is tolerated).
+    from importlib import resources
+
+    resource = resources.files("code_sandbox_mcp").joinpath(image_pins._PROXY_PINS_RESOURCE)
+    if not resource.is_file():
+        pytest.skip("proxy_pin.json not present (pre-bootstrap state)")
+    ref = load_proxy_pin()
+    assert ref is not None
+    assert _PROXY_PIN_PATTERN.match(ref)
+
+
 def test_absent_file_returns_none(monkeypatch) -> None:
     # Bootstrap / egress-proxy-disabled state: no file -> None, not an error.
     _patch_resource(monkeypatch, Path("/nonexistent/proxy_pin.json"))

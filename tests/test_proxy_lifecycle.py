@@ -62,9 +62,12 @@ def _stub_fingerprint_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     (fake) control URL; without this stub every lifecycle test would attempt a
     real socket connect -- and on a host that actually runs the sidecar on the
     published port it could hit a live proxy.  Default it to ``None`` ("cannot
-    compare", so no warning); the dedicated drift tests override it.
+    compare", so no warning); the dedicated drift tests override it.  Also zero
+    the readiness wait so a ``None`` result returns at once instead of polling
+    for :data:`pl._FINGERPRINT_READY_WAIT_SECONDS` seconds each ensure call.
     """
     monkeypatch.setattr(pl, "fetch_proxy_fingerprint", lambda config: None)
+    monkeypatch.setattr(pl, "_FINGERPRINT_READY_WAIT_SECONDS", 0.0)
 
 
 class TestEgressProxyEnabled:
@@ -340,6 +343,28 @@ class TestSourceDriftWarning:
         with caplog.at_level("WARNING"):
             pl._warn_on_source_drift("http://x", "s")
         assert not caplog.records
+
+    def test_polls_until_control_api_ready(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Regression for the #431 review: on first sidecar creation the control
+        # API may not accept requests the instant container.start() returns, so
+        # a single probe would miss the drift (false negative on the very deploy
+        # that caused it).  The readiness poll retries until /version answers.
+        calls = {"n": 0}
+
+        def flaky(config: object) -> str | None:
+            calls["n"] += 1
+            return "b" * 64 if calls["n"] >= 3 else None  # not ready twice, then ready
+
+        monkeypatch.setattr(pl, "PROXY_SOURCE_FINGERPRINT", "a" * 64)
+        monkeypatch.setattr(pl, "fetch_proxy_fingerprint", flaky)
+        monkeypatch.setattr(pl, "_FINGERPRINT_READY_WAIT_SECONDS", 5.0)
+        monkeypatch.setattr(pl, "_FINGERPRINT_POLL_INTERVAL_SECONDS", 0.0)
+        with caplog.at_level("WARNING"):
+            pl._warn_on_source_drift("http://x", "s")
+        assert calls["n"] == 3
+        assert any("does not match" in r.getMessage() for r in caplog.records)
 
     def test_short_circuits_when_local_uncomputable(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture

@@ -120,6 +120,16 @@ _SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 _CA_WAIT_SECONDS = 30.0
 _CA_POLL_INTERVAL_SECONDS = 0.5
 
+#: How long the #405 source-fingerprint probe waits for a freshly-created
+#: sidecar's control API to accept requests before giving up.  Kept short: on
+#: reuse the API is already up so the first attempt succeeds; this only covers
+#: the thin window on *first* creation between ``container.start()`` and the
+#: control server binding its port -- which is exactly when a just-rebuilt
+#: image would drift, so losing detection there would defeat the feature.
+#: Exceeding it means "cannot compare" and the check is skipped (fail open).
+_FINGERPRINT_READY_WAIT_SECONDS = 3.0
+_FINGERPRINT_POLL_INTERVAL_SECONDS = 0.25
+
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
@@ -321,16 +331,33 @@ def _warn_on_source_drift(control_url: str, secret: str) -> None:
     otherwise stays invisible until the first push fails.
 
     Never raises and never fails closed: if the fingerprint cannot be fetched
-    (old proxy without ``/version``, sidecar briefly unreachable) or either
-    side's digest is empty ("cannot compare"), it silently does nothing.  The
-    fix for a real mismatch is a deploy action (rebuild the image + recreate
-    the sidecar), not aborting the sandbox.
+    or either side's digest is empty ("cannot compare"), it silently does
+    nothing.  The fix for a real mismatch is a deploy action (rebuild the image
+    + recreate the sidecar), not aborting the sandbox.
+
+    On *first* sidecar creation the control API may not be listening the instant
+    ``container.start()`` returns, so this polls ``/version`` for up to
+    :data:`_FINGERPRINT_READY_WAIT_SECONDS` before giving up -- otherwise a
+    just-rebuilt image would race past detection on the very deploy that
+    introduced the drift.  Residual limitation: if the sidecar stays
+    unreachable past that window (a genuinely wedged proxy) or predates the
+    ``/version`` endpoint (an old image, which returns 404), the check is
+    skipped for this start; a subsequent start against the now-ready, reused
+    sidecar detects it.
     """
     local = PROXY_SOURCE_FINGERPRINT
     if not local:
         return
-    remote = fetch_proxy_fingerprint(ProxyControlConfig(base_url=control_url, secret=secret))
-    if remote is None or remote == local:
+    config = ProxyControlConfig(base_url=control_url, secret=secret)
+    deadline = time.monotonic() + _FINGERPRINT_READY_WAIT_SECONDS
+    while True:
+        remote = fetch_proxy_fingerprint(config)
+        if remote is not None:
+            break
+        if time.monotonic() >= deadline:
+            return  # never became reachable in the window -- cannot compare
+        time.sleep(_FINGERPRINT_POLL_INTERVAL_SECONDS)
+    if remote == local:
         return
     logger.warning(
         "egress-proxy sidecar source fingerprint %s does not match this "

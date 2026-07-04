@@ -90,3 +90,83 @@ def load_image_pins() -> dict[str, str]:
             )
 
     return {key: data[key] for key in PIN_KEYS}
+
+
+# ---------------------------------------------------------------------------
+# Egress-proxy sidecar pin (Issue #432)
+# ---------------------------------------------------------------------------
+#
+# The egress-proxy sidecar image (``docker/Dockerfile.proxy``) is pinned the
+# same way as the sandbox variants -- as data in a JSON file that CI rewrites
+# structurally and re-reads through this loader -- so a server ``pip install``
+# picks up the current sidecar instead of leaving a locally built tag stale
+# after a redeploy (the #432 incident).  It is kept *separate* from
+# ``image_pins.json`` on purpose: :func:`load_image_pins` deliberately rejects
+# any key outside :data:`PIN_KEYS` (#331), and the proxy ref is a
+# ``.../proxy@sha256`` image, not a ``.../sandbox`` one.
+
+#: Sole role key in ``proxy_pin.json``.
+PROXY_PIN_KEY: str = "proxy"
+
+#: Data file for the proxy pin, shipped alongside this module.  Unlike
+#: ``image_pins.json`` it may be *absent*: the egress proxy is opt-in (feature
+#: flagged off by default) and the pin is bootstrapped by CI after the first
+#: GHCR push (#432), so a missing file is a valid pre-pin state that falls back
+#: to the locally built tag rather than an error.
+_PROXY_PINS_RESOURCE: str = "proxy_pin.json"
+
+#: A proxy pin must be a fully digest-pinned GHCR ``.../proxy@sha256:<64hex>``
+#: reference -- never a mutable tag.
+_PROXY_PIN_PATTERN: re.Pattern[str] = re.compile(
+    r"^ghcr\.io/[A-Za-z0-9._/-]+/proxy@sha256:[0-9a-f]{64}$"
+)
+
+
+def load_proxy_pin() -> str | None:
+    """Load the egress-proxy sidecar digest pin, or ``None`` when unset.
+
+    Returns the digest-pinned GHCR reference from ``proxy_pin.json`` when the
+    file is present and valid.  Returns ``None`` when the file is **absent** --
+    a legitimate state before CI has published the proxy image (#432) and for
+    deployments that never enable the egress proxy -- so the caller can fall
+    back to the locally built tag.
+
+    Unlike :func:`load_image_pins`, absence is tolerated but **malformation is
+    not**: a present-but-broken pin (invalid JSON, a wrong or extra key, or a
+    value that is not a ``@sha256`` digest ref) raises :class:`ImagePinError`
+    so a rotted pin fails loudly rather than silently falling back.
+    """
+    try:
+        raw = (
+            resources.files("code_sandbox_mcp")
+            .joinpath(_PROXY_PINS_RESOURCE)
+            .read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError):
+        # Absent pin: bootstrap / egress-proxy disabled -> caller uses the tag.
+        return None
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ImagePinError(f"{_PROXY_PINS_RESOURCE} is not valid JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ImagePinError(
+            f"{_PROXY_PINS_RESOURCE} must be a JSON object, got {type(data).__name__}"
+        )
+
+    keys = set(data)
+    if keys != {PROXY_PIN_KEY}:
+        raise ImagePinError(
+            f"{_PROXY_PINS_RESOURCE} keys mismatch: got {sorted(keys)}; "
+            f"expected exactly [{PROXY_PIN_KEY!r}]"
+        )
+
+    value = data[PROXY_PIN_KEY]
+    if not isinstance(value, str) or not _PROXY_PIN_PATTERN.match(value):
+        raise ImagePinError(
+            f"{_PROXY_PINS_RESOURCE}[{PROXY_PIN_KEY!r}] is not a digest-pinned "
+            f"GHCR ref (ghcr.io/.../proxy@sha256:<64hex>): {value!r}"
+        )
+    return value

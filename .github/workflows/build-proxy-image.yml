@@ -1,0 +1,146 @@
+name: Build egress proxy sidecar image
+
+# docker/Dockerfile.proxy（egress proxy sidecar、#358 / Epic #353）を CI で
+# ビルド → GHCR push → proxy_pin.json の digest pin 自動更新 PR まで自動化する（#432）。
+#
+# 背景: base / python / go は build-sandbox-variants.yml で pin 自動化済みだが、
+# proxy sidecar だけは CI 未対応で「運用者が手で docker build するまで古いまま」
+# だった。#419 のデプロイ後も sidecar が旧イメージのまま private repo PR clone が
+# 404 で失敗し続けた事故（2026-07-04）の恒久対応。デプロイを pip install だけで
+# 完結させ、sidecar の取り残しを構造的に防ぐ。
+#
+# トリガーの paths には Dockerfile.proxy に加え、イメージへ焼き込まれる
+# proxy.py / proxy_entrypoint.py も含める（これらが変わればイメージも変わる）。
+# base/python/go とは独立の資材なので専用ワークフローに分ける
+# （proxy 変更で variant を、variant 変更で proxy を無駄に再ビルドしない）。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/Dockerfile.proxy"
+      - "src/code_sandbox_mcp/proxy.py"
+      - "src/code_sandbox_mcp/proxy_entrypoint.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 1) proxy sidecar をビルドして GHCR に push、digest を確定
+      - name: Build and push proxy
+        id: proxy
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.proxy
+          push: true
+          tags: ghcr.io/${{ github.repository }}/proxy:latest
+
+      # 2) HEALTHCHECK（8080 が listen しているか）を実機で確認。
+      #    HEALTHCHECK --interval=30s のため最初のチェック完了まで最大 35 秒。
+      #    余裕をもって 90 秒（30 回 × 3s）待つ。env 無しでも addon は
+      #    自己構成し（allowlist 空・control API 無効）mitmdump は 8080 を listen する。
+      - name: Verify proxy HEALTHCHECK
+        run: |
+          IMG="ghcr.io/${{ github.repository }}/proxy@${{ steps.proxy.outputs.digest }}"
+          CID=$(docker run -d "$IMG")
+          status="starting"
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' "$CID" 2>/dev/null || echo "starting")
+            if [ "$status" = "healthy" ]; then
+              echo "[proxy] HEALTHCHECK: healthy"
+              docker rm -f "$CID" >/dev/null 2>&1
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "[proxy] HEALTHCHECK: timeout ($status)"
+          docker logs "$CID" 2>&1 | tail -n 40 || true
+          docker rm -f "$CID" >/dev/null 2>&1
+          exit 1
+
+      # 3) digest 固定参照を Job Summary に出す
+      - name: Summary
+        run: |
+          {
+            echo "## egress proxy sidecar image"
+            echo ""
+            echo "| tag | digest | health |"
+            echo "|-----|--------|--------|"
+            echo "| proxy | \`${{ steps.proxy.outputs.digest }}\` | ✅ verified |"
+            echo ""
+            echo "proxy_pin.json の pin を上の digest へ更新する PR を自動作成します（#432）。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 4) proxy_pin.json を書き戻して PR を作成（#432）。
+      #    update_proxy_pin.py は書いた値を load_proxy_pin() で読み直して検証するので、
+      #    key/path ドリフトはここで loud に落ちる（image_pins と同じ #214 対策）。
+      - name: Update proxy image pin in proxy_pin.json and open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+          PROXY_DIGEST: ${{ steps.proxy.outputs.digest }}
+        run: |
+          set -euo pipefail
+          F=src/code_sandbox_mcp/proxy_pin.json
+
+          PYTHONPATH=src python3 scripts/update_proxy_pin.py \
+            --repo "${REPO}" \
+            --digest "${PROXY_DIGEST}"
+
+          # digest が変わっていなければ PR 不要
+          if git diff --quiet; then
+            echo "No digest change in proxy_pin.json, skipping PR."
+            exit 0
+          fi
+
+          BRANCH="ci/update-proxy-image-${RUN_ID}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add "$F"
+          git commit -m "chore: update egress proxy sidecar image pin (#432)
+
+          proxy: ghcr.io/${REPO}/proxy@${PROXY_DIGEST}
+
+          Automated update triggered by docker/Dockerfile.proxy (or proxy.py /
+          proxy_entrypoint.py) build."
+          git push origin "${BRANCH}"
+
+          gh pr create \
+            --base main \
+            --head "${BRANCH}" \
+            --title "chore(#432): egress proxy sidecar イメージの digest pin を更新" \
+            --body "## 自動生成 PR（#432: proxy sidecar の digest pin 更新）
+
+          CI で \`docker/Dockerfile.proxy\` のビルドが完了したため、
+          \`proxy_pin.json\` の pin を新しい digest へ更新します。
+
+          | tag | digest |
+          |-----|--------|
+          | proxy | \`${PROXY_DIGEST}\` |
+
+          マージ後は \`pip install\` だけで最新 sidecar が参照され、手動の
+          \`docker build -f docker/Dockerfile.proxy\` は不要になります。
+
+          - Workflow run: ${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"

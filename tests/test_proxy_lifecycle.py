@@ -56,7 +56,7 @@ def _running_sidecar(secret: str | None) -> MagicMock:
 
 @pytest.fixture(autouse=True)
 def _stub_fingerprint_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the #405 source-drift probe hermetic across this module.
+    """Keep the #405 source-drift probe and #432 pin lookup hermetic here.
 
     ``ensure_egress_proxy`` now calls ``fetch_proxy_fingerprint`` against the
     (fake) control URL; without this stub every lifecycle test would attempt a
@@ -65,9 +65,15 @@ def _stub_fingerprint_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     compare", so no warning); the dedicated drift tests override it.  Also zero
     the readiness wait so a ``None`` result returns at once instead of polling
     for :data:`pl._FINGERPRINT_READY_WAIT_SECONDS` seconds each ensure call.
+
+    Likewise default ``load_proxy_pin`` (#432) to ``None`` so the sidecar image
+    resolves to the local ``:latest`` tag regardless of whether a packaged
+    ``proxy_pin.json`` happens to be present in the test environment (it will be
+    once CI's auto-PR lands one).  ``TestResolveProxyImage`` overrides this.
     """
     monkeypatch.setattr(pl, "fetch_proxy_fingerprint", lambda config: None)
     monkeypatch.setattr(pl, "_FINGERPRINT_READY_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(pl, "load_proxy_pin", lambda: None)
 
 
 class TestEgressProxyEnabled:
@@ -148,6 +154,39 @@ class TestEnsureEgressProxyFresh:
         client.containers.run.side_effect = RuntimeError("no such image")
         with pytest.raises(pl.EgressProxyError, match="no such image"):
             pl.ensure_egress_proxy(client, env={})
+
+    def test_uses_ghcr_pin_when_no_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # With a CI-published pin and no env override, the sidecar starts from
+        # the digest-pinned GHCR ref (#432), not the local :latest tag.
+        pinned = f"ghcr.io/x/proxy@sha256:{'a' * 64}"
+        monkeypatch.setattr(pl, "load_proxy_pin", lambda: pinned)
+        client, _, _ = _fresh_client()
+        pl.ensure_egress_proxy(client, env={})
+        assert client.containers.run.call_args.args[0] == pinned
+
+
+class TestResolveProxyImage:
+    """Sidecar image precedence: env override -> GHCR pin -> local tag (#432)."""
+
+    _PIN = f"ghcr.io/masuda-masuo/code-sandbox-mcp/proxy@sha256:{'b' * 64}"
+
+    def test_env_override_wins_over_pin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(pl, "load_proxy_pin", lambda: self._PIN)
+        image = pl._resolve_proxy_image({pl.PROXY_IMAGE_ENV: "custom/proxy:v1"})
+        assert image == "custom/proxy:v1"
+
+    def test_pin_used_when_no_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(pl, "load_proxy_pin", lambda: self._PIN)
+        assert pl._resolve_proxy_image({}) == self._PIN
+
+    def test_falls_back_to_local_tag_without_pin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(pl, "load_proxy_pin", lambda: None)
+        assert pl._resolve_proxy_image({}) == pl._DEFAULT_PROXY_IMAGE
+
+    def test_blank_override_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A blank/whitespace env value must not shadow the pin.
+        monkeypatch.setattr(pl, "load_proxy_pin", lambda: self._PIN)
+        assert pl._resolve_proxy_image({pl.PROXY_IMAGE_ENV: "  "}) == self._PIN
 
 
 class TestCertsVolume:

@@ -41,6 +41,7 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass
 from typing import Any
 
+from code_sandbox_mcp.image_pins import load_proxy_pin
 from code_sandbox_mcp.proxy import (
     ALLOWED_REPOS_ENV,
     CONTROL_HOST_ENV,
@@ -62,15 +63,39 @@ logger = logging.getLogger(__name__)
 #: for staged rollout.  Truthy values: ``1/true/yes/on`` (case-insensitive).
 ENABLE_EGRESS_PROXY_ENV = "CODE_SANDBOX_ENABLE_EGRESS_PROXY"
 
-#: Image reference for the sidecar.  Defaults to the locally built tag from
-#: ``docker/Dockerfile.proxy``; switch to a pinned ``ghcr.io/...@sha256:...``
-#: once registry publishing for the proxy image exists (follow-up of #358 --
-#: ``image_pins.json`` deliberately rejects unknown keys today).  Until then the
-#: ``:latest`` tag can silently drift from the installed package, so
-#: :func:`_warn_on_source_drift` compares the running sidecar's source against
-#: this server's and logs a warning on mismatch (#405).
+#: Env override for the sidecar image reference (an explicit operator escape
+#: hatch that wins over the pin below).  Resolution order lives in
+#: :func:`_resolve_proxy_image`.
 PROXY_IMAGE_ENV = "CODE_SANDBOX_PROXY_IMAGE"
+
+#: Locally built fallback tag from ``docker/Dockerfile.proxy``.  Used only when
+#: neither the env override nor a CI-published GHCR pin is available -- i.e. for
+#: local development builds and the bootstrap window before the first proxy
+#: image is pushed (#432).  This ``:latest`` tag can silently drift from the
+#: installed package, which is exactly why :func:`_warn_on_source_drift` warns
+#: on a source mismatch (#405) and why CI now pins the image by digest (#432).
 _DEFAULT_PROXY_IMAGE = "code-sandbox-mcp/proxy:latest"
+
+
+def _resolve_proxy_image(source: MutableMapping[str, str]) -> str:
+    """Resolve the sidecar image ref: env override -> GHCR pin -> local tag.
+
+    Order of precedence:
+
+    1. ``CODE_SANDBOX_PROXY_IMAGE`` -- an explicit operator override always wins.
+    2. ``proxy_pin.json`` -- the digest pin CI publishes after building and
+       pushing ``docker/Dockerfile.proxy`` (#432).  This is the default on a
+       deployed server, so a plain ``pip install`` of the package now picks up
+       the matching sidecar the same way it picks up the sandbox variant pins
+       -- closing the "sidecar left stale after a server redeploy" gap that made
+       #419's read-window auth appear broken until the image was rebuilt by hand.
+    3. :data:`_DEFAULT_PROXY_IMAGE` -- the locally built ``:latest`` tag, used
+       before CI has published a pin (bootstrap) and for local dev builds.
+    """
+    override = (source.get(PROXY_IMAGE_ENV) or "").strip()
+    if override:
+        return override
+    return load_proxy_pin() or _DEFAULT_PROXY_IMAGE
 
 #: Host loopback port the control API is published on (``127.0.0.1`` only;
 #: the server and dashboard use 8766/8767, so the sidecar takes the next one).
@@ -432,7 +457,7 @@ def _start_proxy_container(
     Docker copies the image's ``/certs`` into it -- including its
     ``egressproxy`` ownership -- so the non-root mitmproxy can write there.
     """
-    image = source.get(PROXY_IMAGE_ENV) or _DEFAULT_PROXY_IMAGE
+    image = _resolve_proxy_image(source)
     _ensure_certs_volume(client)
     proxy_env = {
         CONTROL_PORT_ENV: str(_CONTROL_PORT),

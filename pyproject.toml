@@ -23,9 +23,13 @@ where = ["src"]
 include = ["code_sandbox_mcp*"]
 
 [tool.setuptools.package-data]
-# Ship the digest pin data file inside the wheel so importlib.resources can
-# read it at runtime (Issue #331).
-code_sandbox_mcp = ["image_pins.json"]
+# Ship the digest pin data files inside the wheel so importlib.resources can
+# read them at runtime: image_pins.json (sandbox variants, #331) and
+# proxy_pin.json (egress proxy sidecar, #432).  proxy_pin.json may be absent in
+# the source tree until CI publishes the first proxy image; the glob simply
+# matches nothing then, and load_proxy_pin() treats absence as "use the local
+# tag" rather than an error.
+code_sandbox_mcp = ["image_pins.json", "proxy_pin.json"]
 
 [project.optional-dependencies]
 test = ["pytest"]

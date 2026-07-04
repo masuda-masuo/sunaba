@@ -259,12 +259,26 @@ def bearer_auth_header(token: str) -> str:
     return f"Bearer {token}"
 
 
-def block_body(reason: str) -> bytes:
-    """Build the plain-text 403 body returned to git for a denied request."""
-    return (
-        f"BLOCKED by egress proxy: {reason}. Push from the sandbox is only "
-        "allowed via the publish tool.\n"
-    ).encode()
+#: Default 403 hint: which first-class tool to use instead of a raw push.
+PUSH_BLOCK_HINT = "Push from the sandbox is only allowed via the publish tool."
+
+#: 403 hint for a denied api.github.com write (#424): the push-specific
+#: default above is misleading for e.g. an issue comment or PR review, which
+#: never went through ``publish`` in the first place.
+API_WRITE_BLOCK_HINT = (
+    "Non-push writes to api.github.com from the sandbox are only allowed via "
+    "first-class tools such as sandbox_issue_write or publish."
+)
+
+
+def block_body(reason: str, hint: str = PUSH_BLOCK_HINT) -> bytes:
+    """Build the plain-text 403 body returned to the client for a denied request.
+
+    *hint* names the sanctioned alternative; defaults to the push-tool hint
+    for backward compatibility, but callers gating a different kind of
+    request (e.g. :data:`API_WRITE_BLOCK_HINT`) should pass their own (#424).
+    """
+    return f"BLOCKED by egress proxy: {reason}. {hint}\n".encode()
 
 
 class EgressGuard:
@@ -606,7 +620,7 @@ class EgressGuard:
             if not decision.allow:
                 flow.response = http.Response.make(
                     403,
-                    block_body(decision.reason),
+                    block_body(decision.reason, hint=API_WRITE_BLOCK_HINT),
                     {"Content-Type": "text/plain"},
                 )
                 return

@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from code_sandbox_mcp.proxy_client import CONTROL_SECRET_ENV, CONTROL_URL_ENV
+from code_sandbox_mcp.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProxyError
 from code_sandbox_mcp.tools.vcs import _create_pr_via_api, publish
 from tests.conftest import _decode, _make_client_mock, _make_container_mock
 
@@ -216,6 +218,133 @@ class TestPublish:
         assert result["status"] == "pushed"
         assert result["branch"] == "fix/x"
         assert result["sha"] == "abc1234"
+
+    @patch("code_sandbox_mcp.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_execute_recovers_proxy_env_lost_after_restart(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+        mock_ensure_proxy: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#428: a server restart wipes the dynamic proxy env vars this
+
+        process exports, even though the sidecar (and the container's
+        proxied network) are still running.  ``publish`` must recover them
+        via ``ensure_egress_proxy`` before deciding whether to open a push
+        window, rather than silently treating the proxy as unconfigured.
+        """
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
+        monkeypatch.delenv(CONTROL_URL_ENV, raising=False)
+        monkeypatch.delenv(CONTROL_SECRET_ENV, raising=False)
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "publish",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+
+        def _recover(client: MagicMock, env: dict[str, str] | None = None) -> MagicMock:
+            # Mirrors what the real ensure_egress_proxy does: recover the
+            # running sidecar's secret/URL back into the process env.
+            # Via monkeypatch (not raw os.environ) so it never leaks into
+            # other tests.
+            monkeypatch.setenv(CONTROL_URL_ENV, "http://127.0.0.1:8768")
+            monkeypatch.setenv(CONTROL_SECRET_ENV, "recovered-secret")
+            return MagicMock()
+
+        mock_ensure_proxy.side_effect = _recover
+
+        container = _make_container_mock([
+            (0, b"", b""),  # git checkout -b
+            (0, b"", b""),  # git add
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
+            (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
+            (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
+            (0, b"abc1234def5678", b""),  # git rev-parse
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        with patch("code_sandbox_mcp.tools.vcs.authorized_push_window") as mock_window:
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix issue",
+                dry_run=False,
+                token="tok_good",
+                working_dir="/root/repo",
+            ))
+
+        assert result["status"] == "pushed"
+        mock_ensure_proxy.assert_called_once_with(client)
+        # A real window is opened this time (proxy recognized as configured),
+        # not silently skipped as it would be if the env stayed lost.
+        mock_window.assert_called_once()
+
+    @patch("code_sandbox_mcp.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
+    def test_execute_fails_closed_when_proxy_env_unrecoverable(
+        self,
+        mock_run_id: MagicMock,
+        mock_record: MagicMock,
+        mock_token: MagicMock,
+        mock_docker: MagicMock,
+        mock_ensure_proxy: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#428: when the sidecar truly cannot be recovered, publish must
+
+        fail closed with a clear error instead of falling through to an
+        unprotected push.
+        """
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
+        monkeypatch.delenv(CONTROL_URL_ENV, raising=False)
+        monkeypatch.delenv(CONTROL_SECRET_ENV, raising=False)
+        mock_run_id.return_value = "run123"
+        mock_token.return_value = {
+            "token": "tok_good",
+            "operation": "publish",
+            "details": "...",
+            "container_id": "abc123def456",
+            "run_id": "run123",
+        }
+        mock_ensure_proxy.side_effect = EgressProxyError("sidecar unreachable")
+
+        container = _make_container_mock([
+            (0, b"", b""),  # git checkout -b
+            (0, b"", b""),  # git add
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
+            (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix issue",
+            dry_run=False,
+            token="tok_good",
+            working_dir="/root/repo",
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "egress_proxy"
+        assert "sidecar unreachable" in result["error"]
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")

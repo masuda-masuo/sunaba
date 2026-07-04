@@ -13,7 +13,7 @@ from typing import Any
 
 from docker.errors import NotFound
 
-from code_sandbox_mcp import token_broker
+from code_sandbox_mcp import proxy_lifecycle, token_broker
 from code_sandbox_mcp.journal import get_or_create_run_id, record_boundary_crossing
 from code_sandbox_mcp.proxy_client import (
     ProxyAuthError,
@@ -953,6 +953,32 @@ def _create_pr_via_api(
     return url
 
 
+def _ensure_proxy_env_fresh(client: Any) -> str | None:
+    """Recover the egress-proxy control env vars if a server restart lost them (#428).
+
+    ``ensure_egress_proxy`` exports ``CODE_SANDBOX_PROXY_CONTROL_URL/SECRET``
+    into this process's environment, but only ``sandbox_initialize`` calls
+    it today. A restart of the MCP server process wipes those *dynamic* env
+    vars while the sidecar -- and a pre-existing container's proxied network
+    -- keep running, so ``publish``/``clone_repo`` operating on such a
+    container would otherwise see ``proxy_configured()`` as ``False`` and
+    silently skip opening an authorization window, even though the sidecar
+    still enforces one. Re-running ``ensure_egress_proxy`` is idempotent and
+    recovers the running sidecar's secret via ``docker inspect`` (no
+    recreation) whenever the sidecar is already up.
+
+    Returns an error string on failure (caller must fail closed), or
+    ``None`` when the env is already fresh or the proxy is off.
+    """
+    if not proxy_lifecycle.egress_proxy_enabled() or proxy_configured():
+        return None
+    try:
+        proxy_lifecycle.ensure_egress_proxy(client)
+    except Exception as e:
+        return f"egress proxy is enabled but unavailable (failing closed): {e}"
+    return None
+
+
 def publish(
     container_id: str,
     repo: str,
@@ -1227,6 +1253,9 @@ Returns:
     # (#360), so no exec carries a token anymore when a host token exists.
     push_token = _resolve_vcs_token()
     token_env = _push_token_env(push_token)
+    proxy_err = _ensure_proxy_env_fresh(client)
+    if proxy_err:
+        return json.dumps({"status": "error", "step": "egress_proxy", "error": proxy_err})
     proxied = proxy_configured()
     push_env = None if proxied else token_env
 
@@ -1817,6 +1846,13 @@ def clone_repo(
     # ``clone_path``.
     repo_name = repo.split("/")[-1]
     clone_path = f"{dest_dir.rstrip('/')}/{repo_name}"
+
+    # Recover the proxy control env vars before anything else touches the
+    # container, so a lost-env failure (#428) is reported without a wasted
+    # exec and fails closed as early as possible.
+    proxy_err = _ensure_proxy_env_fresh(client)
+    if proxy_err:
+        return json.dumps({"error": proxy_err})
 
     # ``gh auth setup-git`` configures gh as the git credential helper so a
     # later ``git push`` works with the injected token.  Its exit code also

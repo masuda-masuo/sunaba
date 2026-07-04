@@ -1463,7 +1463,23 @@ async def sandbox_initialize_tool(
     *ctx* is injected by FastMCP.  When it is ``None`` (e.g. direct calls in
     tests) the work runs inline with no progress notifications — identical
     behaviour to calling :func:`sandbox_initialize` directly.  All other
-    parameters are forwarded verbatim; see :func:`sandbox_initialize`.
+    parameters are forwarded verbatim; see :func:`sandbox_initialize` for the
+    full per-parameter docs (this wrapper's own docstring is what MCP
+    clients actually see, since the inner function is never registered as a
+    tool -- callers should not need to open the source to learn this).
+
+    **Private-repo note (``pr=`` and** ``clone_repo`` **on a private
+    repository):** under the egress proxy (#403), ``pr=N`` resolves the PR
+    head ref host-side and checks it out *anonymously* inside the
+    container.  This works for public repos with no further setup; for a
+    private repo, the same read-authorization window (#419) that
+    ``clone_repo`` uses is opened for the anonymous clone + checkout too,
+    so ``pr=N`` alone is enough -- the egress proxy just needs to be
+    configured with a host-resolvable token (broker / ``GITHUB_TOKEN``)
+    for the window to authenticate.  ``inject_vcs_token=True`` is a no-op
+    for the container's own environment while the egress proxy is active:
+    no token ever lands inside the container either way; pushes and PR
+    creation should go through :func:`publish` instead.
     """
     def _work() -> str:
         return sandbox_initialize(

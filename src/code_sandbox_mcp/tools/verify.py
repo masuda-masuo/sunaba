@@ -379,8 +379,12 @@ def verify_in_container(
         language: Explicit language override (``"python"``, ``"js"``,
             ``"ts"``, ``"go"``).  Skips auto-detection.
         working_dir: Working directory inside the container for test
-            execution.  When ``None``, tests run from the container's
-            default directory (``/home/sandbox``).
+            execution.  When ``None`` (default), the git repository root
+            is auto-detected via :func:`resolve_git_root` (container
+            metadata written by :func:`sandbox_initialize`, then
+            ``/home/sandbox``, then a scan of ``/tmp/repo/*/``) --
+            no need to pass this explicitly just because the repo was
+            cloned somewhere other than ``/home/sandbox``.
         skip_lint_gate: Skip the lint precondition (default ``False``).
             Use during the edit loop for faster focused-test feedback
             when lint is known clean; leave ``False`` on the final
@@ -412,6 +416,7 @@ def verify_in_container(
         detect_languages,
         run_lint_type_gate,
     )
+    from code_sandbox_mcp.tools.vcs import resolve_git_root
 
     client = _docker()
     try:
@@ -434,6 +439,12 @@ def verify_in_container(
         "verify_in_container",
         {"path": path, "test_filter": test_filter, "verbose": verbose},
     )
+
+    # Auto-detect the cloned repo root (Issue #313-style detection, see
+    # resolve_git_root) instead of silently defaulting to /home/sandbox and
+    # forcing callers to pass working_dir explicitly whenever the repo was
+    # cloned elsewhere (e.g. sandbox_initialize(clone_repo=...)'s /tmp/repo/*).
+    working_dir = resolve_git_root(container, working_dir)
 
     # --- Language detection ---
     detected = detect_languages(container, path, language, working_dir=working_dir)

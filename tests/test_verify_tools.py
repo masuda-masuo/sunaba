@@ -610,6 +610,38 @@ class TestVerifyInContainer:
             _, kwargs = mock_container.exec_run.call_args
             assert kwargs.get("workdir") == "/tmp/repo/code-sandbox-mcp"
 
+    @patch("code_sandbox_mcp.tools.vcs.resolve_git_root")
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_working_dir_none_auto_detects_git_root(
+        self, mock_docker: MagicMock, mock_resolve: MagicMock,
+    ) -> None:
+        """When working_dir is omitted, the git repo root is auto-detected
+        instead of silently defaulting to /home/sandbox (matching the
+        resolve_git_root usage already used by clone_repo/publish/etc.)."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_resolve.return_value = "/tmp/repo/code-sandbox-mcp"
+
+        result = DetectionResult(languages={"python"}, scope={"python": "/repo"}, reason=None)
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=result,
+        ):
+            verify_in_container(
+                container_id="abc123",
+                path="tests/",
+            )
+
+        mock_resolve.assert_called_once_with(mock_container, None)
+        _, kwargs = mock_container.exec_run.call_args
+        assert kwargs.get("workdir") == "/tmp/repo/code-sandbox-mcp"
+
     @patch("code_sandbox_mcp.tools.verify._docker")
     def test_skip_both_gates_bypasses_lint_type_gate(self, mock_docker: MagicMock) -> None:
         """skip_lint_gate + skip_type_gate skip the gate entirely (#294 review)."""

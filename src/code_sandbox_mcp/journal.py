@@ -380,52 +380,6 @@ def get_journal_path() -> str:
     return str(_JOURNAL_PATH)
 
 
-def get_pending_approvals() -> list[dict[str, Any]]:
-    """Return boundary-crossing entries that are awaiting approval.
-
-    An entry with ``approved=None`` is considered pending unless a later
-    entry with the same ``token`` has ``approved`` set to ``True`` or
-    ``False`` (i.e. the approval has already been resolved).
-
-    Returns:
-        List of pending boundary_crossing entries, oldest first.
-    """
-    if not _JOURNAL_PATH.exists():
-        return []
-
-    all_entries: list[dict[str, Any]] = []
-    with _lock:
-        with open(_JOURNAL_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if entry.get("operation") == "boundary_crossing":
-                    all_entries.append(entry)
-
-    resolved_tokens: set[str] = set()
-    for entry in all_entries:
-        if entry.get("approved") is not None:
-            token = entry.get("token")
-            if token:
-                resolved_tokens.add(token)
-
-    pending: list[dict[str, Any]] = []
-    for entry in all_entries:
-        if entry.get("approved") is not None:
-            continue
-        token = entry.get("token")
-        if token and token in resolved_tokens:
-            continue
-        pending.append(entry)
-
-    return pending
-
-
 def get_runs() -> list[dict[str, Any]]:
     """Return a summary of all runs found in the journal."""
     if not _JOURNAL_PATH.exists():

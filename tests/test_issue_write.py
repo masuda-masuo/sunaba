@@ -8,7 +8,7 @@ from tests.conftest import _decode, _make_client_mock
 
 
 class TestSandboxIssueWriteValidation:
-    """Input validation, before any docker/token interaction."""
+    """Input validation, before any docker interaction."""
 
     def test_invalid_method(self) -> None:
         result = _decode(sandbox_issue_write(
@@ -51,128 +51,34 @@ class TestSandboxIssueWriteValidation:
         assert "not found" in result["error"]
 
 
-class TestSandboxIssueWriteDryRun:
-    """dry_run=True returns a confirmation token, no GitHub call."""
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.generate_token")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_dry_run_create(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_gen_token: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        mock_run_id.return_value = "run123"
-        mock_gen_token.return_value = "tok_abc"
-        mock_docker.return_value = _make_client_mock(MagicMock())
-
-        with patch("code_sandbox_mcp.tools.vcs._github_api_request") as mock_api:
-            result = _decode(sandbox_issue_write(
-                container_id="abc123def456", repo="owner/repo", method="create",
-                title="Bug found", dry_run=True,
-            ))
-
-        assert result["status"] == "dry_run"
-        assert result["confirmation_token"] == "tok_abc"
-        assert result["title"] == "Bug found"
-        mock_api.assert_not_called()
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.generate_token")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_dry_run_comment(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_gen_token: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        mock_run_id.return_value = "run123"
-        mock_gen_token.return_value = "tok_xyz"
-        mock_docker.return_value = _make_client_mock(MagicMock())
-
-        result = _decode(sandbox_issue_write(
-            container_id="abc123def456", repo="owner/repo", method="comment",
-            issue_number=42, body="thanks!", dry_run=True,
-        ))
-
-        assert result["status"] == "dry_run"
-        assert result["confirmation_token"] == "tok_xyz"
-        assert result["issue_number"] == 42
-
-
 class TestSandboxIssueWriteExecute:
-    """dry_run=False executes the write via the host-side REST API."""
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    def test_missing_token_is_error(self, mock_docker: MagicMock) -> None:
-        mock_docker.return_value = _make_client_mock(MagicMock())
-
-        result = _decode(sandbox_issue_write(
-            container_id="abc123def456", repo="owner/repo", method="create",
-            title="T", dry_run=False, token="",
-        ))
-        assert result["status"] == "error"
-        assert "token" in result["error"].lower()
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_invalid_token_is_error(
-        self, mock_run_id: MagicMock, mock_verify: MagicMock, mock_docker: MagicMock,
-    ) -> None:
-        mock_run_id.return_value = "run123"
-        mock_verify.return_value = None
-        mock_docker.return_value = _make_client_mock(MagicMock())
-
-        result = _decode(sandbox_issue_write(
-            container_id="abc123def456", repo="owner/repo", method="create",
-            title="T", dry_run=False, token="bad",
-        ))
-        assert result["status"] == "error"
-        assert "invalid" in result["error"].lower()
+    """One-shot execute via the host-side REST API (no dry_run/token step)."""
 
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_no_host_token_is_error(
         self,
-        mock_run_id: MagicMock,
-        mock_verify: MagicMock,
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
     ) -> None:
-        mock_run_id.return_value = "run123"
-        mock_verify.return_value = {"operation": "issue_write"}
         mock_docker.return_value = _make_client_mock(MagicMock())
 
         result = _decode(sandbox_issue_write(
             container_id="abc123def456", repo="owner/repo", method="create",
-            title="T", dry_run=False, token="tok_good",
+            title="T",
         ))
         assert result["status"] == "error"
         assert "host-side" in result["error"] or "token" in result["error"].lower()
 
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_create_success(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify: MagicMock,
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
     ) -> None:
-        mock_run_id.return_value = "run123"
-        mock_verify.return_value = {"operation": "issue_write"}
         mock_docker.return_value = _make_client_mock(MagicMock())
 
         with patch(
@@ -181,7 +87,7 @@ class TestSandboxIssueWriteExecute:
         ) as mock_api:
             result = _decode(sandbox_issue_write(
                 container_id="abc123def456", repo="owner/repo", method="create",
-                title="Bug found", body="details here", dry_run=False, token="tok_good",
+                title="Bug found", body="details here",
             ))
 
         assert result["status"] == "ok"
@@ -196,19 +102,13 @@ class TestSandboxIssueWriteExecute:
 
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_comment_success(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify: MagicMock,
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
     ) -> None:
-        mock_run_id.return_value = "run123"
-        mock_verify.return_value = {"operation": "issue_write"}
         mock_docker.return_value = _make_client_mock(MagicMock())
 
         with patch(
@@ -217,7 +117,7 @@ class TestSandboxIssueWriteExecute:
         ) as mock_api:
             result = _decode(sandbox_issue_write(
                 container_id="abc123def456", repo="owner/repo", method="comment",
-                issue_number=42, body="thanks!", dry_run=False, token="tok_good",
+                issue_number=42, body="thanks!",
             ))
 
         assert result["status"] == "ok"
@@ -229,19 +129,13 @@ class TestSandboxIssueWriteExecute:
 
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_api_failure_records_denied_and_reports_error(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_verify: MagicMock,
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
     ) -> None:
-        mock_run_id.return_value = "run123"
-        mock_verify.return_value = {"operation": "issue_write"}
         mock_docker.return_value = _make_client_mock(MagicMock())
 
         with patch(
@@ -250,7 +144,7 @@ class TestSandboxIssueWriteExecute:
         ):
             result = _decode(sandbox_issue_write(
                 container_id="abc123def456", repo="owner/repo", method="create",
-                title="T", dry_run=False, token="tok_good",
+                title="T",
             ))
 
         assert result["status"] == "error"

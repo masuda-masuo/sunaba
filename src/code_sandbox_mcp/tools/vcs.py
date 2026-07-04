@@ -1873,6 +1873,17 @@ def clone_repo(
                 f"Hint: {repr(clone_path)} already exists. Specify a different "
                 f"dest_dir, or remove the existing directory first."
             )
+        # Record a denied/failed egress-proxy read window (#421), mirroring
+        # publish's push-window recording (#356/#357).  Scoped to the
+        # window case only -- an ordinary (non-proxied) clone failure was
+        # never journaled before and is out of scope here.
+        if open_read_window:
+            record_boundary_crossing(
+                cid,
+                "clone_repo",
+                f"repo={repo} branch={branch or 'default'} proxy_read_window=True",
+                approved=False,
+            )
         return json.dumps({
             "status": "error",
             "error": error_text,
@@ -1882,7 +1893,7 @@ def clone_repo(
     record_boundary_crossing(
         cid,
         "clone_repo",
-        f"repo={repo} branch={branch or 'default'} dest={clone_path}",
+        f"repo={repo} branch={branch or 'default'} dest={clone_path} proxy_read_window={open_read_window}",
         approved=True,
     )
 

@@ -437,6 +437,43 @@ class TestCloneRepoViaNetwork:
         cmd = c.exec_run.call_args_list[0][0][0][-1]
         assert "gh repo clone owner/repo" in cmd
 
+    @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
+    def test_read_window_success_is_journaled(self, mock_record) -> None:
+        """#421: a proxy-read-window-authorized clone records approved=True."""
+        c = self._container(0, b"")
+        _clone_repo_via_network(
+            c, "abc123def456", "owner/repo", "/tmp/repo", open_read_window=True,
+        )
+        mock_record.assert_called_once_with(
+            "abc123def456",
+            "clone_repo",
+            "repo=owner/repo dest=/tmp/repo/repo proxy_read_window=True",
+            approved=True,
+        )
+
+    @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
+    def test_read_window_failure_is_journaled(self, mock_record) -> None:
+        """#421: a denied/failed proxy read window must show up too, not just success."""
+        c = self._container(1, b"fatal: could not read Username")
+        with pytest.raises(RuntimeError):
+            _clone_repo_via_network(
+                c, "abc123def456", "owner/repo", "/tmp/repo",
+                inject_vcs_token=True, open_read_window=True,
+            )
+        mock_record.assert_called_once_with(
+            "abc123def456",
+            "clone_repo",
+            "repo=owner/repo dest=/tmp/repo/repo proxy_read_window=True",
+            approved=False,
+        )
+
+    @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
+    def test_no_read_window_is_not_journaled(self, mock_record) -> None:
+        """A plain (non-proxied) clone is unaffected -- no new journal entry."""
+        c = self._container(0, b"")
+        _clone_repo_via_network(c, "abc123def456", "owner/repo", "/tmp/repo")
+        mock_record.assert_not_called()
+
 
 class TestCloneRepoTransportSelection:
     """Issue #333: clone_repo picks gh vs anonymous git by token presence."""
@@ -477,6 +514,59 @@ class TestCloneRepoTransportSelection:
         cmd = container.exec_run.call_args[0][0][-1]
         assert "gh repo clone owner/mytool" in cmd
         assert "warning" not in result
+
+
+class TestCloneRepoToolReadWindowJournal:
+    """#421: clone_repo tool journals the proxy read-window's outcome."""
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
+    @patch("code_sandbox_mcp.tools.vcs.authorized_read_window")
+    def test_success_records_proxy_read_window_flag(
+        self, _mock_window, _mock_proxy, _mock_token, mock_record, mock_docker
+    ) -> None:
+        container = _make_container([
+            (1, b"", b"gh: not logged in\n"),  # gh auth setup-git fails -> anonymous
+            (0, b"Cloning into 'mytool'...\n", b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(clone_repo("abc123def456", "owner/mytool", inject_vcs_token=True))
+        assert result["status"] == "ok"
+        assert "warning" not in result  # the read window covers the credential gap
+        mock_record.assert_called_once_with(
+            "abc123def456",
+            "clone_repo",
+            "repo=owner/mytool branch=default dest=/home/sandbox/mytool proxy_read_window=True",
+            approved=True,
+        )
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
+    @patch("code_sandbox_mcp.tools.vcs.authorized_read_window")
+    def test_failure_is_journaled_with_approved_false(
+        self, _mock_window, _mock_proxy, _mock_token, mock_record, mock_docker
+    ) -> None:
+        container = _make_container([
+            (1, b"", b"gh: not logged in\n"),
+            (1, b"", b"fatal: could not read Username\n"),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(clone_repo("abc123def456", "owner/mytool", inject_vcs_token=True))
+        assert result["status"] == "error"
+        mock_record.assert_called_once_with(
+            "abc123def456",
+            "clone_repo",
+            "repo=owner/mytool branch=default proxy_read_window=True",
+            approved=False,
+        )
 
 
 class TestCloneWarnsWithoutToken:

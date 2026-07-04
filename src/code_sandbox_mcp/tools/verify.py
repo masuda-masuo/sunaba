@@ -449,10 +449,10 @@ def verify_in_container(
     # --- Language detection ---
     detected = detect_languages(container, path, language, working_dir=working_dir)
 
-    def _run(cmd: str) -> tuple[int, str, str]:
+    def _run(cmd: str, workdir: str | None = working_dir) -> tuple[int, str, str]:
         ec, out = container.exec_run(
             ["/bin/sh", "-c", cmd], stdout=True, stderr=True,
-            workdir=working_dir,
+            workdir=workdir,
         )
         out_stdout, out_stderr = (
             out if isinstance(out, tuple) else (out, b"")

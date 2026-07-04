@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import difflib
 import io
 import json
@@ -789,6 +790,7 @@ def _setup_pr_branch(
     pip_extras: str | None = "[dev]",
     *,
     authenticated: bool = True,
+    open_read_window: bool = False,
 ) -> str:
     """Clone repo and check out PR branch inside the container.
 
@@ -801,7 +803,9 @@ def _setup_pr_branch(
       no token per #356): the head ref is resolved host-side via
       :func:`_resolve_pr_head_ref` and everything in the container is plain
       git -- ``refs/pull/N/head`` lives on the base repo, so this covers
-      fork PRs too.  Private repositories cannot be checked out this way.
+      fork PRs too.  Pass *open_read_window* to make this work for private
+      repositories too (see below); without it, private-repo PRs cannot be
+      checked out this way.
 
     Args:
         container: Docker container object.
@@ -813,6 +817,13 @@ def _setup_pr_branch(
             Pass ``None`` to skip pip install entirely.
         authenticated: Whether the container env actually carries a VCS
             token (ground truth, not the ``inject_vcs_token`` request flag).
+        open_read_window: When ``True`` and *authenticated* is ``False``,
+            wrap the anonymous clone + fetch/checkout in a short-lived
+            egress-proxy read-authorization window (#419) with a
+            host-resolved token -- the same mechanism
+            :func:`_clone_repo_via_network` already uses for
+            ``clone_repo``, extended here so ``pr=N`` also works for
+            private repos under the proxy instead of only public ones.
 
     Returns:
         Success message string.
@@ -863,43 +874,69 @@ def _setup_pr_branch(
             f" && git checkout -B {shlex.quote(head_ref)} FETCH_HEAD"
         )
 
-    # Step 2: Clone the base repo
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", clone_cmd],
-        stdout=True,
-        stderr=True,
-        demux=True,
+    # Step 2 + 3: Clone the base repo, then checkout the PR branch.  Both
+    # are anonymous git operations against the same repo when *authenticated*
+    # is False, so a single read-authorization window (#419) covers both --
+    # opened only when the caller asked for it (open_read_window) and the
+    # container actually has no token (authenticated is False); a no-op
+    # nullcontext otherwise so the authenticated/public-repo paths are
+    # unaffected.
+    window_open = open_read_window and not authenticated
+    window = (
+        authorized_read_window(repo, token=_resolve_vcs_token() or None)
+        if window_open
+        else contextlib.nullcontext()
     )
-    stdout_part, stderr_part = output or (b"", b"")
-    clone_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-
-    if exit_code != 0:
-        hint = (
-            ""
-            if authenticated
-            else (
-                " (anonymous clone: the container holds no VCS token (#356);"
-                " private repositories cannot be checked out this way, see #403)"
+    journal_detail = f"repo={repo} pr=#{pr_number} dest={safe_dest} proxy_read_window=True"
+    try:
+        with window:
+            exit_code, output = container.exec_run(
+                ["/bin/sh", "-c", clone_cmd],
+                stdout=True,
+                stderr=True,
+                demux=True,
             )
-        )
-        raise RuntimeError(f"Failed to clone repo {repo}: {stderr_text or clone_output}{hint}")
+            stdout_part, stderr_part = output or (b"", b"")
+            clone_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+            stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
-    logger.info("Cloned %s → %s in container %s", safe_repo, safe_dest, cid)
+            if exit_code != 0:
+                hint = (
+                    ""
+                    if authenticated
+                    else (
+                        " (anonymous clone: the container holds no VCS token (#356);"
+                        " retry with a container started via clone_repo=/inject_vcs_token=True"
+                        " if this is a private repository, see #419)"
+                    )
+                )
+                raise RuntimeError(f"Failed to clone repo {repo}: {stderr_text or clone_output}{hint}")
 
-    # Step 3: Checkout PR branch
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", checkout_cmd],
-        stdout=True,
-        stderr=True,
-        demux=True,
-    )
-    stdout_part, stderr_part = output or (b"", b"")
-    co_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+            logger.info("Cloned %s → %s in container %s", safe_repo, safe_dest, cid)
 
-    if exit_code != 0:
-        raise RuntimeError(f"Failed to checkout PR #{pr_number}: {stderr_text or co_output}")
+            # Step 3: Checkout PR branch
+            exit_code, output = container.exec_run(
+                ["/bin/sh", "-c", checkout_cmd],
+                stdout=True,
+                stderr=True,
+                demux=True,
+            )
+            stdout_part, stderr_part = output or (b"", b"")
+            co_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+            stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to checkout PR #{pr_number}: {stderr_text or co_output}")
+    except Exception:
+        # Mirror _clone_repo_via_network's boundary-crossing journal entry
+        # (#421) for the read side (#419): a denied/failed proxy-authorized
+        # PR checkout must show up in the journal too, not just a successful
+        # one.
+        if window_open:
+            record_boundary_crossing(cid, "setup_pr_branch", journal_detail, approved=False)
+        raise
+    if window_open:
+        record_boundary_crossing(cid, "setup_pr_branch", journal_detail, approved=True)
 
     logger.info(
         "Checked out PR #%s (%s) → %s in container %s",
@@ -1148,9 +1185,13 @@ def sandbox_initialize(
                and installs dev dependencies.  Under the egress proxy
                (#403) this checkout is anonymous: the PR head ref is
                resolved host-side and the container never receives a
-               token, so this still works for public repos with no
-               further setup; private-repo PRs cannot be checked out
-               this way.
+               token.  This works for public repos with no further
+               setup; for a private repo, the same read-authorization
+               window (#419) that ``clone_repo`` uses is opened for the
+               anonymous clone + checkout, so no extra steps are needed
+               there either -- the egress proxy must simply be
+               configured with a host-resolvable token (broker /
+               ``GITHUB_TOKEN``) for the window to actually authenticate.
         pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
                Pass ``None`` to skip pip install entirely.  Also used when
                *clone_repo* is specified, and skipped automatically (with a
@@ -1351,7 +1392,10 @@ def sandbox_initialize(
             try:
                 # A token-free container (e.g. proxied, #356) takes the
                 # anonymous checkout path: head ref resolved host-side,
-                # plain git in the container (#403).
+                # plain git in the container (#403).  open_read_window
+                # (already computed above for the clone_repo path) lets
+                # this anonymous path work for private repos too (#419),
+                # instead of only public ones.
                 pr_msg = " " + _setup_pr_branch(
                     container,
                     cid,
@@ -1360,6 +1404,7 @@ def sandbox_initialize(
                     clone_dest,
                     pip_extras,
                     authenticated=container_has_token,
+                    open_read_window=open_read_window,
                 )
             except Exception as e:
                 # PR setup failure is non-fatal: the container is still usable.
@@ -1601,9 +1646,13 @@ def run_container_and_exec(
                and installs dev dependencies.  Under the egress proxy
                (#403) this checkout is anonymous: the PR head ref is
                resolved host-side and the container never receives a
-               token, so this still works for public repos with no
-               further setup; private-repo PRs cannot be checked out
-               this way.
+               token.  This works for public repos with no further
+               setup; for a private repo, the same read-authorization
+               window (#419) that ``clone_repo`` uses is opened for the
+               anonymous clone + checkout, so no extra steps are needed
+               there either -- the egress proxy must simply be
+               configured with a host-resolvable token (broker /
+               ``GITHUB_TOKEN``) for the window to actually authenticate.
         pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
                Pass ``None`` to skip pip install entirely.  Also used when
                *clone_repo* is specified, and skipped automatically (with a

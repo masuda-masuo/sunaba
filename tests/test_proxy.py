@@ -26,10 +26,13 @@ from code_sandbox_mcp.proxy import (
     Decision,
     EgressGuard,
     allowed_repos_from_env,
+    api_repo_from_path,
     basic_auth_header,
+    bearer_auth_header,
     control_bind_from_env,
     git_service_from_request,
     handle_control_request,
+    is_git_data_api_path,
     is_push,
     repo_from_path,
 )
@@ -578,6 +581,42 @@ class TestControlServerOverHttp:
         finally:
             server.stop()
 
+    def test_allow_api_write_then_revoke_over_http(self) -> None:
+        # e2e counterpart to test_allow_then_revoke_over_http, for the #420
+        # api-write control endpoints (unit coverage already exists via
+        # TestApiWriteControlDispatch; this exercises the real socket).
+        guard = EgressGuard({"o/r"})
+        server = AuthControlServer(guard, secret="s3cr3t")
+        server.start()
+        try:
+            base = f"http://127.0.0.1:{server.port}"
+            status, body = self._post(
+                base + "/auth/allow-api-write",
+                {"repo": "o/r", "ttl_seconds": 30, "token": "ghs_write"},
+                {"X-Control-Token": "s3cr3t"},
+            )
+            assert status == 200
+            assert body["ok"] is True
+            now = time.monotonic()
+            d = guard.decide_api_write("POST", "/repos/o/r/issues", now)
+            assert d.allow is True
+            assert guard.token_headers_for(
+                d, repo="o/r", now=now, is_api_write_request=True
+            ) == {"Authorization": bearer_auth_header("ghs_write")}
+            # An api-write window must never leak into push.
+            assert guard.decide("/o/r.git/git-receive-pack", None, now).allow is False
+
+            status, _ = self._post(
+                base + "/auth/revoke-api-write",
+                {"repo": "o/r"},
+                {"X-Control-Token": "s3cr3t"},
+            )
+            assert status == 200
+            now = time.monotonic()
+            assert guard.decide_api_write("POST", "/repos/o/r/issues", now).allow is False
+        finally:
+            server.stop()
+
     def test_oversized_body_rejected(self) -> None:
         # A body over MAX_CONTROL_BODY_BYTES is rejected 413, unread (PR #367 review).
         guard = EgressGuard({"o/r"})
@@ -679,3 +718,205 @@ class TestControlBindFromEnv:
     def test_non_integer_port_is_refused(self) -> None:
         with pytest.raises(ValueError, match="not an integer"):
             control_bind_from_env({CONTROL_PORT_ENV: "not-a-port"})
+
+
+class TestApiRepoFromPath:
+    """Extract owner/repo from a REST API path (#420)."""
+
+    def test_repos_path(self) -> None:
+        assert api_repo_from_path("/repos/octocat/hello-world/issues") == "octocat/hello-world"
+
+    def test_lowercases_owner_and_repo(self) -> None:
+        assert api_repo_from_path("/repos/Octocat/Hello-World/issues") == "octocat/hello-world"
+
+    def test_non_repos_path_is_none(self) -> None:
+        assert api_repo_from_path("/user") is None
+        assert api_repo_from_path("/orgs/octocat/repos") is None
+
+    def test_too_short_path_is_none(self) -> None:
+        assert api_repo_from_path("/repos/octocat") is None
+        assert api_repo_from_path("/") is None
+
+
+class TestIsGitDataApiPath:
+    """The git Objects API path used by publish's API-push fallback (#420)."""
+
+    def test_git_blobs_path(self) -> None:
+        assert is_git_data_api_path("/repos/o/r/git/blobs") is True
+
+    def test_git_refs_path(self) -> None:
+        assert is_git_data_api_path("/repos/o/r/git/refs/heads/main") is True
+
+    def test_non_git_write_path(self) -> None:
+        assert is_git_data_api_path("/repos/o/r/issues") is False
+        assert is_git_data_api_path("/repos/o/r/pulls/1/reviews") is False
+
+    def test_too_short_path(self) -> None:
+        assert is_git_data_api_path("/repos/o/r") is False
+
+
+class TestDecideApiWrite:
+    """The api.github.com write gate: GET/HEAD pass, writes need a window (#420)."""
+
+    def test_read_always_passes(self) -> None:
+        guard = EgressGuard()  # empty allowlist
+        assert guard.decide_api_write("GET", "/repos/o/r/issues", now=100.0).allow is True
+        assert guard.decide_api_write("HEAD", "/repos/o/r/issues", now=100.0).allow is True
+
+    def test_write_denied_by_default(self) -> None:
+        guard = EgressGuard()
+        d = guard.decide_api_write("POST", "/repos/o/r/issues", now=100.0)
+        assert d.allow is False
+        assert "allowlist" in d.reason
+
+    def test_write_to_allowed_repo_without_window_denied(self) -> None:
+        guard = EgressGuard({"o/r"})
+        d = guard.decide_api_write("POST", "/repos/o/r/issues", now=100.0)
+        assert d.allow is False
+        assert "authorization window" in d.reason
+
+    def test_write_allowed_with_open_api_write_window(self) -> None:
+        guard = EgressGuard({"o/r"})
+        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0)
+        d = guard.decide_api_write("POST", "/repos/o/r/issues", now=101.0)
+        assert d.allow is True
+
+    def test_write_target_repo_undeterminable_denied(self) -> None:
+        guard = EgressGuard()
+        d = guard.decide_api_write("POST", "/user", now=100.0)
+        assert d.allow is False
+        assert "could not be determined" in d.reason
+
+    def test_api_write_window_expires(self) -> None:
+        guard = EgressGuard({"o/r"})
+        guard.open_api_write_window("o/r", ttl_seconds=5.0, now=100.0)
+        assert guard.decide_api_write("POST", "/repos/o/r/issues", now=101.0).allow is True
+        assert guard.decide_api_write("POST", "/repos/o/r/issues", now=106.0).allow is False
+
+    def test_close_api_write_window_revokes(self) -> None:
+        guard = EgressGuard({"o/r"})
+        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0)
+        guard.close_api_write_window("o/r")
+        d = guard.decide_api_write("POST", "/repos/o/r/issues", now=101.0)
+        assert d.allow is False
+
+    def test_git_data_api_uses_push_window_not_api_write_window(self) -> None:
+        # publish's API-push fallback already runs inside authorized_push_window
+        # -- an api-write window alone must not authorize it, and vice versa.
+        guard = EgressGuard({"o/r"})
+        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0)
+        d = guard.decide_api_write("POST", "/repos/o/r/git/blobs", now=101.0)
+        assert d.allow is False
+        assert "push-authorization" in d.reason
+
+    def test_git_data_api_allowed_with_push_window(self) -> None:
+        guard = EgressGuard({"o/r"})
+        guard.open_window("o/r", ttl_seconds=30, now=100.0)
+        d = guard.decide_api_write("POST", "/repos/o/r/git/blobs", now=101.0)
+        assert d.allow is True
+
+    def test_api_write_window_does_not_authorize_git_push(self) -> None:
+        # And the converse: an api-write window must not widen git push access.
+        guard = EgressGuard({"o/r"})
+        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0)
+        assert guard.decide("/o/r.git/git-receive-pack", None, now=101.0).allow is False
+
+
+class TestApiWriteTokenInjection:
+    """Authorization header injection for gated api.github.com writes (#420)."""
+
+    def test_bearer_auth_header_format(self) -> None:
+        assert bearer_auth_header("ghs_secret") == "Bearer ghs_secret"
+
+    def test_no_window_no_token(self) -> None:
+        guard = EgressGuard({"o/r"})
+        d = guard.decide_api_write("POST", "/repos/o/r/issues", now=100.0)
+        assert d.allow is False
+        assert guard.token_headers_for(d, repo="o/r", is_api_write_request=True) == {}
+
+    def test_api_write_window_token_injected(self) -> None:
+        guard = EgressGuard({"o/r"})
+        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0, token="ghs_write")
+        d = guard.decide_api_write("POST", "/repos/o/r/issues", now=101.0)
+        assert guard.token_headers_for(
+            d, repo="o/r", now=101.0, is_api_write_request=True
+        ) == {"Authorization": bearer_auth_header("ghs_write")}
+
+    def test_git_data_api_uses_push_window_token(self) -> None:
+        guard = EgressGuard({"o/r"})
+        guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_push")
+        d = guard.decide_api_write("POST", "/repos/o/r/git/blobs", now=101.0)
+        assert guard.token_headers_for(
+            d, repo="o/r", now=101.0, is_api_write_request=True, use_push_window=True
+        ) == {"Authorization": bearer_auth_header("ghs_push")}
+
+    def test_api_write_window_token_not_used_for_git_data_api(self) -> None:
+        # An api-write-window token must not leak into the push-scoped git
+        # Objects API path, and vice versa -- they read from different tables.
+        guard = EgressGuard({"o/r"})
+        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0, token="ghs_write")
+        d = Decision(True, "fabricated allow")
+        assert guard.token_headers_for(
+            d, repo="o/r", now=101.0, is_api_write_request=True, use_push_window=True
+        ) == {}
+
+    def test_expired_api_write_token_not_injected(self) -> None:
+        guard = EgressGuard({"o/r"})
+        guard.open_api_write_window("o/r", ttl_seconds=5.0, now=100.0, token="ghs_write")
+        d = Decision(True, "fabricated allow")
+        assert (
+            guard.token_headers_for(d, repo="o/r", now=106.0, is_api_write_request=True) == {}
+        )
+        assert guard._api_write_windows == {}
+
+
+class TestApiWriteControlDispatch:
+    """``/auth/allow-api-write`` / ``/auth/revoke-api-write`` (#420)."""
+
+    def test_allow_api_write_opens_window(self) -> None:
+        guard = EgressGuard({"o/r"})
+        res = handle_control_request(
+            guard,
+            None,
+            "/auth/allow-api-write",
+            None,
+            {"repo": "o/r", "ttl_seconds": 30, "token": "ghs_write"},
+            now=100.0,
+        )
+        assert res.status == 200
+        assert "ghs_write" not in json.dumps(res.body)
+        d = guard.decide_api_write("POST", "/repos/o/r/issues", now=101.0)
+        assert d.allow is True
+        assert guard.token_headers_for(
+            d, repo="o/r", now=101.0, is_api_write_request=True
+        ) == {"Authorization": bearer_auth_header("ghs_write")}
+
+    def test_allow_api_write_does_not_authorize_push(self) -> None:
+        guard = EgressGuard({"o/r"})
+        handle_control_request(
+            guard, None, "/auth/allow-api-write", None, {"repo": "o/r"}, now=100.0
+        )
+        assert guard.decide("/o/r.git/git-receive-pack", None, now=101.0).allow is False
+
+    def test_revoke_api_write_closes_window(self) -> None:
+        guard = EgressGuard({"o/r"})
+        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0)
+        res = handle_control_request(
+            guard, None, "/auth/revoke-api-write", None, {"repo": "o/r"}
+        )
+        assert res.status == 200
+        assert guard.decide_api_write("POST", "/repos/o/r/issues", now=101.0).allow is False
+
+    def test_allow_api_write_bad_repo_rejected(self) -> None:
+        guard = EgressGuard()
+        res = handle_control_request(
+            guard, None, "/auth/allow-api-write", None, {"repo": "no-slash"}
+        )
+        assert res.status == 400
+
+    def test_allow_api_write_non_positive_ttl_rejected(self) -> None:
+        guard = EgressGuard()
+        res = handle_control_request(
+            guard, None, "/auth/allow-api-write", None, {"repo": "o/r", "ttl_seconds": 0}
+        )
+        assert res.status == 400

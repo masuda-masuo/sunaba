@@ -10,16 +10,24 @@ import time
 
 import pytest
 
-from code_sandbox_mcp.proxy import AuthControlServer, EgressGuard, basic_auth_header
+from code_sandbox_mcp.proxy import (
+    AuthControlServer,
+    EgressGuard,
+    basic_auth_header,
+    bearer_auth_header,
+)
 from code_sandbox_mcp.proxy_client import (
     CONTROL_SECRET_ENV,
     CONTROL_URL_ENV,
     ProxyAuthError,
     ProxyControlConfig,
+    authorized_api_write_window,
     authorized_push_window,
     authorized_read_window,
+    close_api_write_window,
     close_read_window,
     close_window,
+    open_api_write_window,
     open_read_window,
     open_window,
     proxy_configured,
@@ -30,6 +38,7 @@ _PUSH_PATH = "/owner/repo.git/git-receive-pack"
 _PUSH_SERVICE = "git-receive-pack"
 _FETCH_PATH = "/owner/repo.git/info/refs"
 _FETCH_SERVICE = "git-upload-pack"
+_API_WRITE_PATH = "/repos/owner/repo/issues"
 _SECRET = "s3cret"
 
 
@@ -51,6 +60,20 @@ def _fetch_headers(guard: EgressGuard) -> dict[str, str]:
     decision = guard.decide(_FETCH_PATH, _FETCH_SERVICE, now)
     return guard.token_headers_for(
         decision, is_push_request=False, repo=REPO, now=now, is_fetch_request=True
+    )
+
+
+def _api_write_allowed(guard: EgressGuard) -> bool:
+    """Whether the guard would currently let a non-push write to REPO through (#420)."""
+    return guard.decide_api_write("POST", _API_WRITE_PATH, time.monotonic()).allow
+
+
+def _api_write_headers(guard: EgressGuard) -> dict[str, str]:
+    """Headers the guard would inject into a non-push write to REPO right now (#420)."""
+    now = time.monotonic()
+    decision = guard.decide_api_write("POST", _API_WRITE_PATH, now)
+    return guard.token_headers_for(
+        decision, repo=REPO, now=now, is_api_write_request=True
     )
 
 
@@ -239,4 +262,66 @@ class TestReadWindowLifecycle:
         # guard's allowlist already contains REPO (fixture), so this isolates
         # the read/push separation rather than allowlist membership.
         with authorized_read_window(REPO, token="ghs_read", config=config):
+            assert not _push_allowed(guard)
+
+
+class TestApiWriteWindowLifecycle:
+    """Host-side api-write-authorization windows for non-push REST writes (#420)."""
+
+    def test_unconfigured_open_close_noop(self, guard: EgressGuard) -> None:
+        open_api_write_window(REPO, config=None)
+        close_api_write_window(REPO, config=None)
+        assert not _api_write_allowed(guard)
+
+    def test_context_manager_noop_when_unconfigured(self, guard: EgressGuard) -> None:
+        with authorized_api_write_window(REPO, config=None):
+            assert not _api_write_allowed(guard)
+
+    def test_open_then_close_toggles_window(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        assert not _api_write_allowed(guard)
+        open_api_write_window(REPO, config=config)
+        assert _api_write_allowed(guard)
+        close_api_write_window(REPO, config=config)
+        assert not _api_write_allowed(guard)
+
+    def test_context_manager_opens_then_revokes(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        assert not _api_write_allowed(guard)
+        with authorized_api_write_window(REPO, config=config):
+            assert _api_write_allowed(guard)
+        assert not _api_write_allowed(guard)
+
+    def test_context_manager_revokes_on_exception(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        with pytest.raises(RuntimeError, match="boom"):
+            with authorized_api_write_window(REPO, config=config):
+                assert _api_write_allowed(guard)
+                raise RuntimeError("boom")
+        assert not _api_write_allowed(guard)
+
+    def test_token_rides_the_api_write_window(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        open_api_write_window(REPO, token="ghs_write", config=config)
+        assert _api_write_headers(guard) == {"Authorization": bearer_auth_header("ghs_write")}
+        close_api_write_window(REPO, config=config)
+        assert _api_write_headers(guard) == {}
+
+    def test_context_manager_scopes_the_token(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        with authorized_api_write_window(REPO, token="ghs_write", config=config):
+            assert _api_write_headers(guard) == {
+                "Authorization": bearer_auth_header("ghs_write")
+            }
+        assert _api_write_headers(guard) == {}
+
+    def test_api_write_window_never_unlocks_push(
+        self, guard: EgressGuard, config: ProxyControlConfig
+    ) -> None:
+        with authorized_api_write_window(REPO, token="ghs_write", config=config):
             assert not _push_allowed(guard)

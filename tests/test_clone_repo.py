@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from code_sandbox_mcp.proxy_client import CONTROL_SECRET_ENV, CONTROL_URL_ENV
+from code_sandbox_mcp.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProxyError
 from code_sandbox_mcp.tools.container import (
     _clone_repo_via_network,
     _clone_shiori_repo_to_container,
@@ -567,6 +569,67 @@ class TestCloneRepoToolReadWindowJournal:
             "repo=owner/mytool branch=default proxy_read_window=True",
             approved=False,
         )
+
+
+class TestCloneRepoRecoversProxyEnv:
+    """#428: clone_repo recovers lost proxy control env vars before checking
+
+    proxy_configured(), mirroring publish's recovery (see test_publish.py).
+    """
+
+    @patch("code_sandbox_mcp.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("code_sandbox_mcp.tools.vcs.authorized_read_window")
+    def test_recovers_env_and_opens_read_window(
+        self, mock_window, _mock_token, mock_record, mock_docker, mock_ensure_proxy,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
+        monkeypatch.delenv(CONTROL_URL_ENV, raising=False)
+        monkeypatch.delenv(CONTROL_SECRET_ENV, raising=False)
+
+        def _recover(client, env=None):
+            monkeypatch.setenv(CONTROL_URL_ENV, "http://127.0.0.1:8768")
+            monkeypatch.setenv(CONTROL_SECRET_ENV, "recovered-secret")
+            return MagicMock()
+
+        mock_ensure_proxy.side_effect = _recover
+
+        container = _make_container([
+            (1, b"", b"gh: not logged in\n"),  # gh auth setup-git fails -> anonymous
+            (0, b"Cloning into 'mytool'...\n", b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(clone_repo("abc123def456", "owner/mytool", inject_vcs_token=True))
+
+        assert result["status"] == "ok"
+        mock_ensure_proxy.assert_called_once()
+        mock_window.assert_called_once()
+
+    @patch("code_sandbox_mcp.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    def test_fails_closed_when_proxy_env_unrecoverable(
+        self, mock_record, mock_docker, mock_ensure_proxy,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
+        monkeypatch.delenv(CONTROL_URL_ENV, raising=False)
+        monkeypatch.delenv(CONTROL_SECRET_ENV, raising=False)
+        mock_ensure_proxy.side_effect = EgressProxyError("sidecar unreachable")
+
+        container = _make_container([])
+        mock_docker.return_value = _make_client(container)
+
+        from code_sandbox_mcp.server import clone_repo
+        result = json.loads(clone_repo("abc123def456", "owner/mytool", inject_vcs_token=True))
+
+        assert "sidecar unreachable" in result["error"]
+        container.exec_run.assert_not_called()
 
 
 class TestCloneWarnsWithoutToken:

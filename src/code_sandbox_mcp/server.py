@@ -26,11 +26,6 @@ from code_sandbox_mcp.security import (
     validate_image_ref,
 )
 
-from .tools.approval import (
-    sandbox_approval_status,
-    sandbox_approve,
-    sandbox_reject,
-)
 from .tools.container import (
     rerun_failed,
     run_container_and_exec,
@@ -136,11 +131,6 @@ sandbox_trace = mcp.tool()(sandbox_trace)
 sandbox_list_runs = mcp.tool()(sandbox_list_runs)
 sandbox_journal_path = mcp.tool()(sandbox_journal_path)
 sandbox_trace_dir = mcp.tool()(sandbox_trace_dir)
-
-# Approval tool registrations
-sandbox_approval_status = mcp.tool()(sandbox_approval_status)
-sandbox_approve = mcp.tool()(sandbox_approve)
-sandbox_reject = mcp.tool()(sandbox_reject)
 
 
 @mcp.tool()

@@ -1,7 +1,6 @@
 """Static security guardrails for Docker sandbox containers.
 
-These are enforced at container creation time and are separate from
-HITL (Human-In-The-Loop) runtime approval mechanisms.
+These are enforced at container creation time.
 """
 from __future__ import annotations
 

@@ -63,7 +63,7 @@
 **対象（write 系・トークン必須）**
 - 永続ボリュームの削除 / 永続リソースの削除 / ホストマウント変更 / ネットワーク変更。
 - **外部VCS への書き込み**: `git push` / PR作成 / PRコメント / リモートブランチ削除。
-- 方式: 該当ツールは `dry_run` で実行予定＋確認トークンを返し、本実行はトークン無しでは無条件拒否（二段階トークン）。elicitation は対応クライアント向けの確認UI糖衣として任意で返す。
+- 方式: 該当ツールは一発実行（V1.0 で `dry_run`＋確認トークンの二段階は廃止）。人間ゲートは MCP クライアント自身のツール承認に一本化し、構造的防御は egress proxy（allowlist＋短命の認可ウィンドウ）が担う。二段階トークン／`sandbox_approve`・`sandbox_reject`・`sandbox_approval_status` は前提（HITL が唯一の防御）が egress proxy 成熟で失効したため撤去した。
 
 **対象（read 系・ネットワーク許可＋記録のみ）**
 - **外部VCS からの読み取り**: `gh issue view` / `gh pr view` 等は破壊的でないため二段階トークン不要。ただし外部ネットワークなので §8 ジャーナルに必ず記録し、ネットワーク既定 off に対する明示許可フラグ配下で実行。
@@ -277,10 +277,7 @@ else:
 | `checkpoint` | （内部で `sandbox_exec` の `git add/commit` を経由） | `exec` | — |
 | `checkpoint_list` | （なし） | — | 読取専用 |
 | `checkpoint_restore` | （内部で `sandbox_exec` の `git reset --hard` を経由） | `exec` | — |
-| `publish` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write） |
-| `sandbox_approve` | `record_boundary_crossing`（approved=True） | `boundary_crossing` | トークン解決 |
-| `sandbox_reject` | `record_boundary_crossing`（approved=False） | `boundary_crossing` | #361 で追加 |
-| `sandbox_approval_status` | （なし） | — | 読取専用 |
+| `publish` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write、一発実行） |
 | `sandbox_read_journal` | （なし） | — | 読取専用 |
 | `sandbox_trace` | （なし） | — | 読取専用 |
 | `sandbox_list_runs` | （なし） | — | 読取専用 |

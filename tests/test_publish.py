@@ -1,4 +1,4 @@
-"""Tests for publish tool (dry_run → execute → squash → force push → API fallback)."""
+"""Tests for publish tool (one-shot: commit → push → squash → force push → API fallback)."""
 from __future__ import annotations
 
 import io
@@ -13,194 +13,38 @@ from code_sandbox_mcp.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProx
 from code_sandbox_mcp.tools.vcs import _create_pr_via_api, publish
 from tests.conftest import _decode, _make_client_mock, _make_container_mock
 
+# Standard execute exec sequence shared by the one-shot push tests: git
+# checkout -b, git add, rev-parse @{u} (no upstream -> skip squash), commit,
+# push, rev-parse HEAD.  publish no longer has a dry_run/token step (retired
+# for V1.0), so every call runs this straight through.
+_PUSH_SEQUENCE = [
+    (0, b"", b""),  # git checkout -b
+    (0, b"", b""),  # git add
+    (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
+    (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
+    (0, b"pushed", b""),  # git push
+    (0, b"abc1234def5678", b""),  # git rev-parse HEAD
+]
+
 
 class TestPublish:
-    """Tests for publish."""
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.generate_token")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_dry_run_returns_token(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_gen_token: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """dry_run=True should return diff summary and confirmation token."""
-        mock_run_id.return_value = "run123"
-        mock_gen_token.return_value = "tok_abc123"
-
-        container = _make_container_mock([
-            (0, b"M modified.py\n?? new.py\n---DIFF---\n 2 files changed", b""),
-            (0, b"", b""),
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/issue-55",
-            message="Fix issue #55",
-            dry_run=True,
-        ))
-
-        assert result["status"] == "dry_run"
-        assert result["branch"] == "fix/issue-55"
-        assert "modified.py" in result["diff_summary"]
-        assert result["confirmation_token"] == "tok_abc123"
-        assert result["create_pr"] is False
-
-        mock_gen_token.assert_called_once()
-        call_kwargs = mock_gen_token.call_args[1]
-        assert call_kwargs["operation"] == "publish"
-
-        mock_record.assert_called_once()
-        record_kwargs = mock_record.call_args[1]
-        assert record_kwargs["approved"] is None
-        assert record_kwargs["token"] == "tok_abc123"
+    """Tests for publish (one-shot execute)."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_dry_run_no_changes(
+    def test_successful_push(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """dry_run=True with no changes should return warning."""
-        mock_run_id.return_value = "run123"
-
-        container = _make_container_mock([
-            (0, b"---DIFF---", b""),
-            (0, b"", b""),
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/issue-55",
-            message="Fix issue #55",
-            dry_run=True,
-        ))
-
-        assert result["status"] == "dry_run"
-        assert "no changes" in result["diff_summary"].lower()
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.generate_token")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_dry_run_with_create_pr(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_gen_token: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """dry_run=True with create_pr=True should include PR info."""
-        mock_run_id.return_value = "run123"
-        mock_gen_token.return_value = "tok_pr"
-
-        container = _make_container_mock([
-            (0, b"M file.py\n---DIFF---\n 1 file changed", b""),
-            (0, b"", b""),
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="feat/new",
-            message="Add feature",
-            create_pr=True,
-            pr_title="My PR",
-            dry_run=True,
-        ))
-
-        assert result["create_pr"] is True
-        assert result["pr_title"] == "My PR"
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    def test_execute_without_token(
-        self,
-        mock_docker: MagicMock,
-    ) -> None:
-        """dry_run=False without token should return error."""
-        mock_docker.return_value = _make_client_mock(MagicMock())
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix",
-            dry_run=False,
-            token="",
-        ))
-
-        assert result["status"] == "error"
-        assert "token" in result["error"].lower()
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_invalid_token(
-        self,
-        mock_run_id: MagicMock,
-        mock_verify: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """dry_run=False with invalid token should return error."""
-        mock_run_id.return_value = "run123"
-        mock_verify.return_value = None
-        mock_docker.return_value = _make_client_mock(MagicMock())
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix",
-            dry_run=False,
-            token="bad_token",
-        ))
-
-        assert result["status"] == "error"
-        assert "invalid" in result["error"].lower()
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_successful_push(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_token: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Successful push should return pushed status with sha."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
+        """A successful push returns pushed status with sha."""
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
             (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
-            (0, b"abc1234def5678", b""),  # git rev-parse
+            (0, b"abc1234def5678", b""),  # git rev-parse HEAD
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -210,8 +54,6 @@ class TestPublish:
             repo="owner/repo",
             branch="fix/x",
             message="Fix issue",
-            dry_run=False,
-            token="tok_good",
             working_dir="/root/repo",
         ))
 
@@ -221,14 +63,10 @@ class TestPublish:
 
     @patch("code_sandbox_mcp.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_recovers_proxy_env_lost_after_restart(
+    def test_recovers_proxy_env_lost_after_restart(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
         mock_ensure_proxy: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
@@ -243,20 +81,10 @@ class TestPublish:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
         monkeypatch.delenv(CONTROL_URL_ENV, raising=False)
         monkeypatch.delenv(CONTROL_SECRET_ENV, raising=False)
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
 
         def _recover(client: MagicMock, env: dict[str, str] | None = None) -> MagicMock:
             # Mirrors what the real ensure_egress_proxy does: recover the
             # running sidecar's secret/URL back into the process env.
-            # Via monkeypatch (not raw os.environ) so it never leaks into
-            # other tests.
             monkeypatch.setenv(CONTROL_URL_ENV, "http://127.0.0.1:8768")
             monkeypatch.setenv(CONTROL_SECRET_ENV, "recovered-secret")
             return MagicMock()
@@ -269,7 +97,7 @@ class TestPublish:
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
             (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
-            (0, b"abc1234def5678", b""),  # git rev-parse
+            (0, b"abc1234def5678", b""),  # git rev-parse HEAD
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -280,8 +108,6 @@ class TestPublish:
                 repo="owner/repo",
                 branch="fix/x",
                 message="Fix issue",
-                dry_run=False,
-                token="tok_good",
                 working_dir="/root/repo",
             ))
 
@@ -293,14 +119,10 @@ class TestPublish:
 
     @patch("code_sandbox_mcp.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_fails_closed_when_proxy_env_unrecoverable(
+    def test_fails_closed_when_proxy_env_unrecoverable(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
         mock_ensure_proxy: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
@@ -308,24 +130,14 @@ class TestPublish:
         """#428: when the sidecar truly cannot be recovered, publish must
 
         fail closed with a clear error instead of falling through to an
-        unprotected push.
+        unprotected push.  The proxy-env check runs before any git command,
+        so a fail-closed abort must not touch the container at all.
         """
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
         monkeypatch.delenv(CONTROL_URL_ENV, raising=False)
         monkeypatch.delenv(CONTROL_SECRET_ENV, raising=False)
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
         mock_ensure_proxy.side_effect = EgressProxyError("sidecar unreachable")
 
-        # No exec_run entries at all: the proxy-env check runs before token
-        # consumption and any git command, so a fail-closed abort here must
-        # not touch the container or burn the one-time confirmation token.
         container = _make_container_mock([])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -335,8 +147,6 @@ class TestPublish:
             repo="owner/repo",
             branch="fix/x",
             message="Fix issue",
-            dry_run=False,
-            token="tok_good",
             working_dir="/root/repo",
         ))
 
@@ -344,37 +154,16 @@ class TestPublish:
         assert result["step"] == "egress_proxy"
         assert "sidecar unreachable" in result["error"]
         container.exec_run.assert_not_called()
-        mock_token.assert_not_called()
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_successful_push_with_pr(
+    def test_successful_push_with_pr(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Successful push + PR creation should include pr_url."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
-        container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
-            (0, b"", b""),  # git add
-            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
-            (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
-            (0, b"pushed", b""),  # git push
-            (0, b"abc1234def5678", b""),  # git rev-parse
-        ])
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -393,8 +182,6 @@ class TestPublish:
                 create_pr=True,
                 pr_title="My PR Title",
                 pr_body="PR body here",
-                dry_run=False,
-                token="tok_good",
                 working_dir="/root/repo",
             ))
 
@@ -405,34 +192,14 @@ class TestPublish:
         )
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_pr_host_api_failure_still_reports_push(
+    def test_pr_host_api_failure_still_reports_push(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """A host-side PR-creation failure returns pushed + pr_create_error."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
-        container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
-            (0, b"", b""),  # git add
-            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
-            (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
-            (0, b"pushed", b""),  # git push
-            (0, b"abc1234def5678", b""),  # git rev-parse
-        ])
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -449,8 +216,6 @@ class TestPublish:
                 message="Fix",
                 create_pr=True,
                 pr_title="My PR Title",
-                dry_run=False,
-                token="tok_good",
                 working_dir="/root/repo",
             ))
 
@@ -459,33 +224,20 @@ class TestPublish:
         assert "already exists" in result["pr_create_error"]
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_pr_legacy_container_token_uses_gh_exec(
+    def test_pr_legacy_container_token_uses_gh_exec(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """No host token + no proxy → the in-container gh path still works."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
             (0, b"pushed", b""),  # git push
-            (0, b"abc1234def5678", b""),  # git rev-parse
+            (0, b"abc1234def5678", b""),  # git rev-parse HEAD
             (0, b"https://github.com/owner/repo/pull/99", b""),  # gh pr create
         ])
         client = _make_client_mock(container)
@@ -505,8 +257,6 @@ class TestPublish:
                 pr_title="My PR Title",
                 pr_body="PR body here",
                 base_branch="dev",
-                dry_run=False,
-                token="tok_good",
                 working_dir="/root/repo",
             ))
 
@@ -520,34 +270,14 @@ class TestPublish:
         assert gh_cmd.index("--base dev") < gh_cmd.index("; rm -f")
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_pr_proxied_without_host_token_errors(
+    def test_pr_proxied_without_host_token_errors(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Proxied + no host token → clear pr_create_error, no gh exec attempt."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
-        container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
-            (0, b"", b""),  # git add
-            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
-            (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
-            (0, b"pushed", b""),  # git push
-            (0, b"abc1234def5678", b""),  # git rev-parse
-        ])
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -565,8 +295,6 @@ class TestPublish:
                 message="Fix",
                 create_pr=True,
                 pr_title="My PR Title",
-                dry_run=False,
-                token="tok_good",
                 working_dir="/root/repo",
             ))
 
@@ -574,33 +302,20 @@ class TestPublish:
         assert "host-side token" in result["pr_create_error"]
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_commit_nothing_to_commit_is_ok(
+    def test_commit_nothing_to_commit_is_ok(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """git commit with 'nothing to commit' should proceed to push."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"nothing to commit, working tree clean", b""),  # git commit
             (0, b"Everything up-to-date", b""),  # git push
-            (0, b"abc1234def5678", b""),  # git rev-parse
+            (0, b"abc1234def5678", b""),  # git rev-parse HEAD
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -610,41 +325,26 @@ class TestPublish:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
             working_dir="/root/repo",
         ))
 
         assert result["status"] == "pushed"
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_push_failure(
+    def test_push_failure(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Push failure should return error status."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
+        """Push failure (both transports) should return error status."""
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),  # git commit
             (1, b"", b"remote rejected: permission denied"),  # git push
-            (0, b"abc1234def5678", b""),  # git rev-parse
+            (0, b"abc1234def5678", b""),  # git rev-parse HEAD
             (0, b"", b""),  # write API push script
             (1, b"", b"push failed"),  # API push also fails
         ])
@@ -656,8 +356,6 @@ class TestPublish:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
             working_dir="/root/repo",
         ))
 
@@ -666,110 +364,14 @@ class TestPublish:
         assert "permission denied" in result["error"]
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.generate_token")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_dry_run_default_working_dir(
+    def test_default_working_dir(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_gen_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Default working_dir (None) auto-resolves, falling back to /home/sandbox."""
-        mock_run_id.return_value = "run123"
-        mock_gen_token.return_value = "tok_abc123"
-
-        container = _make_container_mock([
-            (0, b"M modified.py\n?? new.py\n---DIFF---\n 2 files changed", b""),
-            (0, b"", b""),
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/issue-55",
-            message="Fix issue #55",
-            dry_run=True,
-        ))
-
-        assert result["status"] == "dry_run"
-        call_args = container.exec_run.call_args[0][0]
-        assert "cd /home/sandbox" in call_args[2]
-
-    @patch("code_sandbox_mcp.tools.vcs.resolve_git_root")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.generate_token")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_dry_run_auto_resolves_from_meta(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_gen_token: MagicMock,
-        mock_docker: MagicMock,
-        mock_resolve: MagicMock,
-    ) -> None:
-        """Default working_dir auto-resolves from .sandbox-meta.json."""
-        mock_resolve.return_value = "/tmp/repo/code-sandbox-mcp"
-        mock_run_id.return_value = "run123"
-        mock_gen_token.return_value = "tok_abc123"
-
-        container = _make_container_mock([
-            (0, b"M modified.py\n---DIFF---\n 1 file changed", b""),
-            (0, b"", b""),
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/issue-55",
-            message="Fix issue #55",
-            dry_run=True,
-        ))
-
-        assert result["status"] == "dry_run"
-        mock_resolve.assert_called_once()
-        for call in container.exec_run.call_args_list:
-            args, kwargs = call
-            cmd = args[0][2]
-            if "cd " not in cmd:
-                continue
-            assert "/tmp/repo/code-sandbox-mcp" in cmd, f"Expected resolved path in: {cmd}"
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_uses_default_identity(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_token: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Default identity should be used when author_name/email are None."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
-        container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
-            (0, b"", b""),  # git add
-            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
-            (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
-            (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
-            (0, b"abc1234def5678", b""),  # git rev-parse
-        ])
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -778,8 +380,61 @@ class TestPublish:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
+        ))
+
+        assert result["status"] == "pushed"
+        first_cmd = container.exec_run.call_args_list[0][0][0][2]
+        assert "cd /home/sandbox" in first_cmd
+
+    @patch("code_sandbox_mcp.tools.vcs.resolve_git_root")
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    def test_auto_resolves_working_dir_from_meta(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+    ) -> None:
+        """Default working_dir auto-resolves from .sandbox-meta.json."""
+        mock_resolve.return_value = "/tmp/repo/code-sandbox-mcp"
+
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+        ))
+
+        assert result["status"] == "pushed"
+        mock_resolve.assert_called_once()
+        for call in container.exec_run.call_args_list:
+            args, _kwargs = call
+            cmd = args[0][2]
+            if "cd " not in cmd:
+                continue
+            assert "/tmp/repo/code-sandbox-mcp" in cmd, f"Expected resolved path in: {cmd}"
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    def test_uses_default_identity(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Default identity should be used when author_name/email are None."""
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
         ))
 
         assert result["status"] == "pushed"
@@ -792,34 +447,14 @@ class TestPublish:
         assert "'code-sandbox-mcp[bot]'" in commit_cmd
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_execute_with_custom_identity(
+    def test_with_custom_identity(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """Custom author_name/email should override the defaults."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
-        container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
-            (0, b"", b""),  # git add
-            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
-            (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
-            (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
-            (0, b"abc1234def5678", b""),  # git rev-parse
-        ])
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -828,8 +463,6 @@ class TestPublish:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
             author_name="Custom User",
             author_email="custom@example.com",
         ))

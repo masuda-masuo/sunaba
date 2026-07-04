@@ -336,10 +336,8 @@ def verify_in_container(
     .. note::
 
        This diff summary includes **test outcomes** (gate_passed,
-       test counts).  :func:`publish`'s ``dry_run`` also returns a
-       diff summary but as a **push plan** (branch, message, PR info)
-       without test results — they are complementary views of the
-       same pending change.
+       test counts), so the LLM can review what will be pushed before
+       calling :func:`publish` (which executes in a single step).
 
     .. rubric:: Use when
 

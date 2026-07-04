@@ -1,4 +1,4 @@
-"""Tests for publish advanced features: token flow, squash, force push, API fallback."""
+"""Tests for publish advanced features: squash, force push, API fallback, token routing."""
 from __future__ import annotations
 
 import json
@@ -8,65 +8,17 @@ from code_sandbox_mcp.tools.vcs import publish
 from tests.conftest import _decode, _make_client_mock, _make_container_mock
 
 
-class TestPublishTokenFlow:
-    """Integration tests for the dry_run → approve → execute flow."""
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    def test_dry_run_generates_usable_token(
-        self,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Token from dry_run should be usable for execute."""
-        container = _make_container_mock([
-            (0, b"M file.py\n---DIFF---\n 1 file changed", b""),
-            (0, b"", b""),
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        dry_result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix",
-            dry_run=True,
-        ))
-        assert dry_result["status"] == "dry_run"
-        token = dry_result["confirmation_token"]
-        assert len(token) > 0
-
-        from code_sandbox_mcp.token import verify_and_consume
-        approval = verify_and_consume(token)
-        assert approval is not None
-
-        second_consume = verify_and_consume(token)
-        assert second_consume is None
-
-
 class TestPublishSquashCheckpoints:
     """Tests for publish with automatic checkpoint squash."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_squash_checkpoints(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Submit should squash unpushed checkpoints with reset --soft."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
+        """Publish should squash unpushed checkpoints with reset --soft."""
         container = _make_container_mock([
             (0, b"", b""),
             (0, b"", b""),
@@ -86,8 +38,6 @@ class TestPublishSquashCheckpoints:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
         ))
 
         assert result["status"] == "pushed"
@@ -98,26 +48,13 @@ class TestPublishSquashCheckpoints:
         assert len(reset_calls) == 1
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_squash_checkpoints_no_tracking(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Submit with no tracking branch should skip squash."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
+        """Publish with no tracking branch should skip squash."""
         container = _make_container_mock([
             (0, b"", b""),
             (0, b"", b""),
@@ -134,8 +71,6 @@ class TestPublishSquashCheckpoints:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
         ))
 
         assert result["status"] == "pushed"
@@ -145,26 +80,13 @@ class TestPublishAllowForcePush:
     """Tests for publish with allow_force_push=True."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_allow_force_push(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """allow_force_push=True should include --force in push command."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
         container = _make_container_mock([
             (0, b"", b""),
             (0, b"", b""),
@@ -181,8 +103,6 @@ class TestPublishAllowForcePush:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
             allow_force_push=True,
         ))
 
@@ -194,124 +114,18 @@ class TestPublishAllowForcePush:
         assert len(push_calls) == 1
         assert "--force" in push_calls[0]
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    def test_dry_run_force_push_diverged_target_issues_token(
-        self,
-        mock_docker: MagicMock,
-    ) -> None:
-        """#272: force-push dry_run must issue a token when HEAD diverges from
-        origin/<branch>, even though there are no uncommitted changes and the
-        --not --remotes check finds nothing (commits reachable from another
-        remote branch)."""
-        container = _make_container_mock([
-            (0, b"---DIFF---\n", b""),   # git status/diff: clean working tree
-            (0, b"", b""),               # unpushed vs --remotes: false-negative
-            (0, b"1" * 40 + b"\n", b""),  # git rev-parse HEAD
-            (0, b"2" * 40 + b"\n", b""),  # git rev-parse origin/fix/x (differs)
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix",
-            dry_run=True,
-            allow_force_push=True,
-        ))
-
-        assert result["status"] == "dry_run"
-        assert result["confirmation_token"]
-        assert "force push" in result["diff_summary"].lower()
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    def test_dry_run_force_push_target_equal_reports_no_changes(
-        self,
-        mock_docker: MagicMock,
-    ) -> None:
-        """When origin/<branch> already equals HEAD there is nothing to force,
-        so the dry_run stays a no-op (no token)."""
-        container = _make_container_mock([
-            (0, b"---DIFF---\n", b""),   # clean working tree
-            (0, b"", b""),               # nothing unpushed
-            (0, b"1" * 40 + b"\n", b""),  # git rev-parse HEAD
-            (0, b"1" * 40 + b"\n", b""),  # origin/fix/x identical to HEAD
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix",
-            dry_run=True,
-            allow_force_push=True,
-        ))
-
-        assert result["status"] == "dry_run"
-        assert result["diff_summary"] == "(no changes detected)"
-        assert "confirmation_token" not in result
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    def test_dry_run_without_force_flag_keeps_no_change_shortcut(
-        self,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Without allow_force_push the target-divergence probe is skipped, so
-        the same false-negative inputs still report no changes (the force flag
-        is what unlocks the token) -- and the extra rev-parse calls are not
-        made."""
-        container = _make_container_mock([
-            (0, b"---DIFF---\n", b""),   # clean working tree
-            (0, b"", b""),               # nothing unpushed
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix",
-            dry_run=True,
-        ))
-
-        assert result["status"] == "dry_run"
-        assert result["diff_summary"] == "(no changes detected)"
-        assert "confirmation_token" not in result
-        rev_parse_calls = [
-            c[0][0][2] for c in container.exec_run.call_args_list
-            if "rev-parse" in c[0][0][2]
-        ]
-        assert rev_parse_calls == []
-
 
 class TestPublishApiPushFallback:
     """Tests for publish when git push fails and falls back to _try_api_push."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_api_push_fallback_succeeds(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """When git push fails, _try_api_push should be used as fallback."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
         push_json = json.dumps({"sha": "b" * 40}).encode()
         container = _make_container_mock([
             (0, b"", b""),
@@ -331,34 +145,19 @@ class TestPublishApiPushFallback:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
         ))
 
         assert result["status"] == "pushed"
         assert result["sha"] == "bbbbbbb"
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_execute_api_push_fallback_fails(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
         """When both git push and API push fail, return error."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
-
         container = _make_container_mock([
             (0, b"", b""),
             (0, b"", b""),
@@ -377,76 +176,10 @@ class TestPublishApiPushFallback:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
         ))
 
         assert result["status"] == "error"
         assert result["step"] == "git_push"
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
-    def test_dry_run_with_squash_and_force(
-        self,
-        mock_run_id: MagicMock,
-        mock_record: MagicMock,
-        mock_consume: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Dry run should show checkpoint info when unpushed commits exist."""
-        mock_run_id.return_value = "run123"
-        mock_consume.return_value = {"token": "tok_good"}
-
-        container = _make_container_mock([
-            (0, b"M file.py\n---DIFF---\n 1 file changed", b""),
-            (0, b"abc1234 First checkpoint\ndef5678 Second checkpoint\n", b""),
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix",
-            dry_run=True,
-            allow_force_push=True,
-        ))
-
-        assert result["status"] == "dry_run"
-        assert "Checkpoints to squash" in result["diff_summary"]
-        assert "2 commit(s)" in result["diff_summary"]
-
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
-    def test_dry_run_only_checkpoints(
-        self,
-        mock_consume: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Dry run should work with no working tree changes but unpushed commits."""
-        mock_consume.return_value = {"token": "tok_good"}
-
-        container = _make_container_mock([
-            (0, b"---DIFF---", b""),
-            (0, b"abc1234 Only checkpoint\n", b""),
-        ])
-        client = _make_client_mock(container)
-        mock_docker.return_value = client
-
-        result = _decode(publish(
-            container_id="abc123def456",
-            repo="owner/repo",
-            branch="fix/x",
-            message="Fix",
-            dry_run=True,
-        ))
-
-        assert result["status"] == "dry_run"
-        assert "unpushed checkpoints" in result["diff_summary"]
-        assert "Checkpoints to squash: 1 commit(s)" in result["diff_summary"]
 
 
 class TestPublishLazyTokenInjection:
@@ -476,26 +209,14 @@ class TestPublishLazyTokenInjection:
 
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_token_injected_into_push_exec_only(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
     ) -> None:
         """A host-resolved token reaches the push exec but not read-only execs."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
         mock_resolve.return_value = "ghs_lazytoken"
 
         container = _make_container_mock(self._simple_push_returns())
@@ -507,8 +228,6 @@ class TestPublishLazyTokenInjection:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
         ))
         assert result["status"] == "pushed"
 
@@ -530,14 +249,10 @@ class TestPublishLazyTokenInjection:
 
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_no_host_token_leaves_push_env_unset(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
     ) -> None:
@@ -547,14 +262,6 @@ class TestPublishLazyTokenInjection:
         (e.g. a startup-injected token), so behaviour is unchanged for
         containers started with ``inject_vcs_token=True``.
         """
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
         mock_resolve.return_value = ""
 
         container = _make_container_mock(self._simple_push_returns())
@@ -566,8 +273,6 @@ class TestPublishLazyTokenInjection:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
         ))
         assert result["status"] == "pushed"
 
@@ -576,26 +281,14 @@ class TestPublishLazyTokenInjection:
 
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_token_injected_into_api_push_fallback(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
     ) -> None:
         """When git push fails, the API-push script exec carries the token."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
         mock_resolve.return_value = "ghs_lazytoken"
 
         push_json = json.dumps({"sha": "b" * 40}).encode()
@@ -617,8 +310,6 @@ class TestPublishLazyTokenInjection:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
         ))
         assert result["status"] == "pushed"
         assert result["sha"] == "bbbbbbb"
@@ -653,27 +344,15 @@ class TestPublishProxiedCredentialRouting:
     @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_push_exec_token_free_and_window_carries_credential(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
         mock_proxied: MagicMock,
         mock_window: MagicMock,
     ) -> None:
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
         mock_resolve.return_value = "ghs_lazytoken"
 
         container = _make_container_mock(
@@ -687,8 +366,6 @@ class TestPublishProxiedCredentialRouting:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
-            dry_run=False,
-            token="tok_good",
         ))
         assert result["status"] == "pushed"
 
@@ -703,28 +380,16 @@ class TestPublishProxiedCredentialRouting:
     @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs.get_or_create_run_id")
     def test_pr_create_runs_host_side_no_exec_token(
         self,
-        mock_run_id: MagicMock,
         mock_record: MagicMock,
-        mock_token: MagicMock,
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
         mock_proxied: MagicMock,
         mock_window: MagicMock,
     ) -> None:
         """PR creation is host-side (#360): no exec ever carries a token."""
-        mock_run_id.return_value = "run123"
-        mock_token.return_value = {
-            "token": "tok_good",
-            "operation": "publish",
-            "details": "...",
-            "container_id": "abc123def456",
-            "run_id": "run123",
-        }
         mock_resolve.return_value = "ghs_lazytoken"
 
         returns = TestPublishLazyTokenInjection._simple_push_returns()
@@ -741,8 +406,6 @@ class TestPublishProxiedCredentialRouting:
                 repo="owner/repo",
                 branch="fix/x",
                 message="Fix",
-                dry_run=False,
-                token="tok_good",
                 create_pr=True,
                 pr_title="Fix",
             ))

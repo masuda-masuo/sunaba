@@ -2,7 +2,7 @@
 
 Serves a read-mostly, auto-refreshing HTML dashboard on localhost
 that shows running containers, run history, pass/fail counts,
-resource usage, and the approval queue.
+resource usage.
 
 Uses Python's built-in ``http.server`` — no external dependencies.
 """
@@ -18,17 +18,11 @@ from urllib.parse import parse_qs, unquote, urlparse
 from code_sandbox_mcp.journal import (
     get_active_environments,
     get_journal_path,
-    get_pending_approvals,
     get_runs,
     get_tool_usage,
     read_journal,
-    record_boundary_crossing,
 )
 from code_sandbox_mcp.result_cache import get_cache_stats
-from code_sandbox_mcp.token import (
-    reject_token,
-    verify_token,
-)
 
 # ---------------------------------------------------------------------------
 # HTML template pages
@@ -65,11 +59,7 @@ th.sortable:hover {{ color: #58a6ff; }}
 .pass {{ color: #7ee787; }}
 .fail {{ color: #f97583; }}
 .mono {{ font-family: monospace; font-size: 11px; }}
-.approval-pending {{ background: #382a10; border-color: #ffa657; }}
-.approval-pending h2 {{ color: #ffa657; }}
 button {{ background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }}
-button.approve {{ background: #1b3820; border-color: #7ee787; color: #7ee787; }}
-button.reject {{ background: #381620; border-color: #f97583; color: #f97583; }}
 button:hover {{ opacity: 0.8; }}
 .empty {{ color: #484f58; font-style: italic; padding: 12px 0; }}
 .bar-wrap {{ display: flex; align-items: center; gap: 6px; margin: 1px 0; font-size: 11px; }}
@@ -121,10 +111,6 @@ details {{ font-size: 10px; color: #484f58; margin-top: 8px; }}
     <div class="val">{journal_entries}</div>
   </div>
 
-  <div class="card" style="grid-column: span 2;">
-    <h2>Approval Queue</h2>
-    {approval_section}
-  </div>
 </div>
 
 {active_environments}
@@ -379,46 +365,6 @@ def _render_tool_usage_panel(
     )
 
 
-def _render_approval_queue() -> str:
-    """Render the approval queue section of the dashboard.
-
-    CSRF 対策は意図的に行っていない。このダッシュボードは localhost
-    限定で動作し、改竄リスクは実質ゼロのため。
-    """
-    pending = get_pending_approvals()
-    if not pending:
-        return '<div class="empty">No pending approvals</div>'
-
-    cards: list[str] = []
-    for entry in pending:
-        token = entry.get("token", "")
-        sub_op = _escape(entry.get("sub_operation", "unknown"))
-        details = _escape(entry.get("details", ""))
-        container_id = _escape(entry.get("container_id", ""))
-        run_id = _escape(entry.get("run_id", ""))
-        ts = _escape(entry.get("ts", ""))
-
-        cards.append(f"""<div class="card approval-pending" style="margin-bottom:12px">
-    <h2>Pending: {sub_op}</h2>
-    <div class="meta">Container: <span class="mono">{container_id}</span></div>
-    <div class="meta">Run: <span class="mono">{run_id}</span></div>
-    <div class="meta">Time: {ts}</div>
-    <div class="meta">Details: {details}</div>
-    <div class="meta" style="margin-top:8px">
-        <form method="post" action="/approve" style="display:inline">
-            <input type="hidden" name="token" value="{_escape(token)}">
-            <button type="submit" class="approve">Approve</button>
-        </form>
-        <form method="post" action="/reject" style="display:inline; margin-left:8px">
-            <input type="hidden" name="token" value="{_escape(token)}">
-            <button type="submit" class="reject">Reject</button>
-        </form>
-    </div>
-</div>""")
-
-    return "\n".join(cards)
-
-
 def _render_active_environments() -> str:
     """Render active test environments section."""
     environments = get_active_environments()
@@ -484,14 +430,6 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def do_POST(self) -> None:
-        path = self.path.split("?")[0]
-
-        if path in ("/approve", "/reject"):
-            self._handle_approval(path)
-        else:
-            self.send_error(404)
-
     def _serve_api_tool_usage(self) -> None:
         qs = ""
         if "?" in self.path:
@@ -505,45 +443,6 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         to_date = params.get("to")
         usage = get_tool_usage(from_date=from_date, to_date=to_date)
         self._send_json(usage)
-
-    def _handle_approval(self, path: str) -> None:
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length).decode("utf-8")
-        params = {}
-        for pair in body.split("&"):
-            if "=" in pair:
-                key, val = pair.split("=", 1)
-                params[key] = unquote(val)
-
-        token = params.get("token", "")
-        if not token:
-            self._send_html("<p>Missing token</p>", code=400)
-            return
-
-        msg: str
-        if path == "/approve":
-            result = verify_token(token)
-            if result is None:
-                msg = "<p>Token invalid, expired, or already used.</p><p><a href='/'>← Back to Dashboard</a></p>"
-                self._send_html(msg, code=400)
-                return
-            record_boundary_crossing(
-                result["container_id"],
-                result["operation"],
-                result["details"],
-                approved=True,
-                token=token,
-            )
-            msg = f"<p>Operation <strong>{_escape(result['operation'])}</strong> approved.</p><p><a href='/'>← Back to Dashboard</a></p>"
-        else:
-            rejected = reject_token(token)
-            if not rejected:
-                msg = "<p>Token not found or already resolved.</p><p><a href='/'>← Back to Dashboard</a></p>"
-                self._send_html(msg, code=400)
-                return
-            msg = "<p>Operation rejected.</p><p><a href='/'>← Back to Dashboard</a></p>"
-
-        self._send_html(msg)
 
     def _serve_dashboard(self) -> None:
         runs = get_runs()
@@ -596,7 +495,6 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
         tool_usage_panel = _render_tool_usage_panel(tool_from, tool_to)
 
-        approval_section = _render_approval_queue()
         active_section = _render_active_environments()
 
         cache_stats = get_cache_stats()
@@ -619,7 +517,6 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             journal_path=str(get_journal_path()),
             journal_entries=journal_entries,
             run_rows="\n".join(run_rows_parts) if run_rows_parts else '<tr><td colspan="7" class="empty">No runs recorded</td></tr>',
-            approval_section=approval_section,
             active_environments=active_section,
             tool_usage_panel=tool_usage_panel,
         )

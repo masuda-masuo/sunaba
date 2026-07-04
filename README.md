@@ -70,7 +70,7 @@ The most expensive thing an AI coding loop does is re-read output. So the contra
 Most sandboxing tools try to classify each command as safe or dangerous. That depends on self-reporting and can't be structurally enforced. This MCP draws the line elsewhere: **the question is not "is this command dangerous?" but "does this operation leave the sandbox?"**
 
 - **Inside the container, nothing is gated.** It's disposable — whatever happens in there just gets deleted with the container.
-- **Boundary-crossing operations are gated structurally.** Network access, host mounts, persistent-volume deletion, and external VCS writes (`git push`, PR creation) require an explicit two-step approval token; there is no way to perform them without it.
+- **Boundary-crossing operations are gated structurally.** Network access, host mounts, persistent-volume deletion, and external VCS writes (`git push`, PR creation) go through dedicated tools; egress to GitHub is confined by an egress proxy (allowlisted repos, short-lived authorized push/read windows), so an unauthorized network write is structurally impossible — not merely discouraged. The human gate is your MCP client's own tool-approval prompt, not a bespoke in-band token.
 - **What can't be perfectly gated is caught after the fact.** An append-only journal records every operation, so the real safety net is *post-hoc auditability*, not pre-execution approval. The human's control shifts from "watch and approve everything" to "audit anything, anytime."
 
 This is the three-lock model: **network off by default · non-root enforced · VCS token opt-in.** Half the value of this MCP is the *guarantee of what the AI cannot do*.
@@ -95,7 +95,7 @@ For the full rationale and the decision principles behind each tool, see [docs/d
         │  ──────────────────────────── │
         │   • container lifecycle       │
         │   • structured outputs        │
-        │   • boundary approval gate    │
+        │   • egress proxy gate         │
         │   • append-only journal       │
         └──────────────────────────────┘
                        │
@@ -196,7 +196,7 @@ For SSE/HTTP transports, the server binds to `127.0.0.1:8765` by default.
 "--dashboard-port", "8766"
 ```
 
-Starts a local read-only web dashboard at `http://127.0.0.1:8766` showing active containers, run history, pass/fail stats, and the approval queue.
+Starts a local read-only web dashboard at `http://127.0.0.1:8766` showing active containers, run history, and pass/fail stats.
 
 ### Optional: push notifications
 
@@ -272,16 +272,13 @@ This is the full reference. You almost never touch most of it directly — the c
 | `checkpoint` | Local Git checkpoint (commit only, no push). Use frequently during edit loops. |
 | `checkpoint_list` | List unpushed local checkpoints. |
 | `checkpoint_restore` | Restore working tree to a previous checkpoint (`git reset --hard`). |
-| `publish` | Stage, commit, push, and optionally create a PR. Two-step flow: dry_run → token. |
-| `sandbox_issue_write` | Create a GitHub issue or comment on one, host-side. Two-step flow: dry_run → token (#414). |
+| `publish` | Stage, commit, push, and optionally create a PR (one-shot). |
+| `sandbox_issue_write` | Create a GitHub issue or comment on one, host-side (one-shot, #414). |
 
 ### Sandbox management
 
 | Tool | Description |
 |------|-------------|
-| `sandbox_approval_status` | List all pending approval tokens for boundary-crossing operations. |
-| `sandbox_approve` | Approve a pending boundary-crossing operation. |
-| `sandbox_reject` | Reject a pending boundary-crossing operation. |
 | `sandbox_cache_invalidate` | Invalidate result cache entries. |
 | `sandbox_cache_stats` | Return result cache statistics. |
 
@@ -401,7 +398,7 @@ code-sandbox-mcp shifts the human from **active watching** to **passive monitori
 | "Why did it fail?" | Re-run to see | Click a run → HTML/JSON trace with full context |
 | Cross-run comparison | Manual, by memory | Side-by-side in dashboard |
 | Audit trail | None (session-scoped) | Append-only journal, survives restarts |
-| Boundary crossing ops | Invisible | Explicitly tracked, approval queue |
+| Boundary crossing ops | Invisible | Explicitly tracked in the journal |
 | Human attention model | Must watch terminal | Check dashboard anytime, catch up in seconds |
 
 The dashboard (`--dashboard-port 8766`) runs on localhost, auto-refreshes every 10 seconds, and requires no external services. When a test fails, the trace shows exactly which assertion broke, on which line — no re-run needed.

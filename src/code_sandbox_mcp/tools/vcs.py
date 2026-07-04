@@ -1,4 +1,4 @@
-"""VCS tools: issue_view, publish, sandbox_create_pr, clone_repo."""
+"""VCS tools: issue_view, publish, sandbox_issue_write, clone_repo."""
 
 from __future__ import annotations
 
@@ -14,14 +14,13 @@ from typing import Any
 from docker.errors import NotFound
 
 from code_sandbox_mcp import proxy_lifecycle, token_broker
-from code_sandbox_mcp.journal import get_or_create_run_id, record_boundary_crossing
+from code_sandbox_mcp.journal import record_boundary_crossing
 from code_sandbox_mcp.proxy_client import (
     ProxyAuthError,
     authorized_push_window,
     authorized_read_window,
     proxy_configured,
 )
-from code_sandbox_mcp.token import generate_token, verify_and_consume
 from code_sandbox_mcp.tools.common import (
     CLONE_NO_TOKEN_WARNING,
     _build_clone_command,
@@ -130,7 +129,8 @@ def resolve_git_root(
 
 
 # ---------------------------------------------------------------------------
-# Inline Python script for GitHub API-based push (sandbox_create_pr)
+# Inline Python script for GitHub API-based push (publish's Objects API
+# fallback transport, run in-container by _try_api_push)
 # ---------------------------------------------------------------------------
 
 _SANDBOX_CREATE_PR_SCRIPT = '''
@@ -582,83 +582,6 @@ def issue_view(
 
 
 # ---------------------------------------------------------------------------
-# Shared dry_run / confirmation-token flow for boundary-crossing writes
-# (Issue #169).  Both ``publish`` and ``sandbox_create_pr`` route their
-# dry_run -> token -> execute flow through these helpers so the logic has a
-# single implementation and cannot drift between the two tools.
-# ---------------------------------------------------------------------------
-
-
-def _dry_run_response(
-    operation: str,
-    cid: str,
-    run_id: str,
-    details: str,
-    payload: dict[str, Any],
-) -> str:
-    """Generate a confirmation token and return the ``dry_run`` response.
-
-    Generates a one-time confirmation token, records a pending
-    (``approved=None``) boundary crossing in the journal, and returns the
-    standard ``dry_run`` JSON envelope merged with *payload*.
-
-    Args:
-        operation: Operation type recorded on the token and journal
-            (e.g. ``"publish"``, ``"sandbox_create_pr"``).
-        cid: 12-character container ID prefix.
-        run_id: Run identifier from the journal.
-        details: Human-readable summary of what execution will do.
-        payload: Extra fields merged into the response (e.g.
-            ``diff_summary``, ``branch``, ``pr_title``).
-
-    Returns:
-        JSON string with ``status="dry_run"``, ``confirmation_token``,
-        and the *payload* fields.
-    """
-    conf_token = generate_token(
-        operation=operation,
-        details=details,
-        container_id=cid,
-        run_id=run_id,
-    )
-    record_boundary_crossing(
-        cid,
-        operation,
-        details,
-        approved=None,
-        token=conf_token,
-    )
-    return json.dumps({
-        "status": "dry_run",
-        "confirmation_token": conf_token,
-        **payload,
-    })
-
-
-def _consume_confirmation_token(
-    token: str,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Validate and consume a confirmation token for execution.
-
-    Returns ``(token_meta, None)`` when the token is valid (and now
-    consumed), or ``(None, error_json)`` with a ready-to-return error
-    response when the token is missing, invalid, expired, or already used.
-    """
-    if not token:
-        return None, json.dumps({
-            "status": "error",
-            "error": "Token required for execution.  Run with dry_run=True first.",
-        })
-    result = verify_and_consume(token)
-    if result is None:
-        return None, json.dumps({
-            "status": "error",
-            "error": "Token invalid, expired, or already used",
-        })
-    return result, None
-
-
-# ---------------------------------------------------------------------------
 # sandbox_issue_write -- first-class, host-side issue create/comment (#414)
 # ---------------------------------------------------------------------------
 
@@ -673,8 +596,6 @@ def sandbox_issue_write(
     title: str = "",
     body: str = "",
     issue_number: int | None = None,
-    dry_run: bool = False,
-    token: str = "",
 ) -> str:
     """Create a GitHub issue or comment on one -- host-side, no in-container gh.
 
@@ -682,10 +603,9 @@ def sandbox_issue_write(
     blind spot: under the egress proxy, in-container ``gh issue create`` /
     ``gh issue comment`` have no credential to use (#356) and would need the
     proxy to blanket-allow api.github.com writes, defeating the point of
-    gating push. This tool follows the same dry_run -> confirmation token ->
-    execute shape as :func:`publish` (:func:`_dry_run_response` /
-    :func:`_consume_confirmation_token`, already generic, not extracted
-    specially for this tool) and calls the GitHub REST API directly from the
+    gating push. Executes in a single call (the dry_run/confirmation-token
+    two-step was retired for V1.0, matching :func:`publish`) and calls the
+    GitHub REST API directly from the
     host (:func:`_github_api_request`, the pattern established by
     :func:`_create_pr_via_api` and :func:`issue_view`, #409/#413) -- so no
     token ever needs to reach the container, and the call does not depend on
@@ -699,15 +619,14 @@ def sandbox_issue_write(
 
     .. rubric:: Don't use when
 
-    - **Reading an issue** -- use :func:`issue_view` instead (no confirmation
-      token needed, it is read-only)
+    - **Reading an issue** -- use :func:`issue_view` instead (it is read-only)
     - **Pushing code or creating a PR** -- use :func:`publish` instead
 
     Args:
         container_id: 12-character container ID prefix.  Used for the
-            journal/confirmation-token trail, exactly like :func:`publish`;
-            the container's own network/token state is irrelevant since the
-            GitHub call happens host-side.
+            journal trail, exactly like :func:`publish`; the container's own
+            network/token state is irrelevant since the GitHub call happens
+            host-side.
         repo: Repository in ``"owner/repo"`` format.
         method: ``"create"`` (new issue) or ``"comment"`` (comment on an
             existing issue or PR number).
@@ -716,9 +635,6 @@ def sandbox_issue_write(
             content for ``"comment"``).
         issue_number: Issue or PR number to comment on.  Required when
             *method* is ``"comment"``, ignored for ``"create"``.
-        dry_run: When ``True``, returns a confirmation token instead of
-            executing (mirrors :func:`publish`).
-        token: Confirmation token from a previous ``dry_run`` call.
 
     Returns:
         JSON string with ``status``, and on success ``html_url`` (issue or
@@ -745,21 +661,11 @@ def sandbox_issue_write(
         return json.dumps({"error": str(e)})
 
     cid = container_id[:12]
-    run_id = get_or_create_run_id(cid)
 
     if method == "create":
         details = f"repo={repo} issue_create title={title[:80]}"
-        payload = {"repo": repo, "method": method, "title": title}
     else:
         details = f"repo={repo} issue_comment number=#{issue_number} body={body[:80]}"
-        payload = {"repo": repo, "method": method, "issue_number": issue_number}
-
-    if dry_run:
-        return _dry_run_response("issue_write", cid, run_id, details, payload)
-
-    token_result, token_error = _consume_confirmation_token(token)
-    if token_error is not None:
-        return token_error
 
     push_token = _resolve_vcs_token()
     if not push_token:
@@ -785,10 +691,10 @@ def sandbox_issue_write(
                 payload={"body": body},
             )
     except RuntimeError as e:
-        record_boundary_crossing(cid, "issue_write", f"{details} failed", approved=False, token=token)
+        record_boundary_crossing(cid, "issue_write", f"{details} failed", approved=False)
         return json.dumps({"status": "error", "error": str(e)})
 
-    record_boundary_crossing(cid, "issue_write", details, approved=True, token=token)
+    record_boundary_crossing(cid, "issue_write", details, approved=True)
 
     response: dict[str, Any] = {
         "status": "ok",
@@ -989,8 +895,6 @@ def publish(
     pr_title: str = "",
     pr_body: str = "",
     base_branch: str = "",
-    dry_run: bool = False,
-    token: str = "",
     allow_force_push: bool = False,
     author_name: str | None = None,
     author_email: str | None = None,
@@ -1009,14 +913,11 @@ caller.
    LLM calls :func:`verify_in_container` before ``publish`` as part of
    the **edit → verify → publish** workflow (see ``AGENTS.md``).
 
-Two-step flow for boundary-crossing writes:
-
-1. ``dry_run=True`` -- returns a diff summary and a confirmation
-   token that must be approved before execution.  (The dry-run diff
-   summary shows the push plan; :func:`verify_in_container`'s diff
-   summary includes test results.)
-2. ``dry_run=False`` + *token* -- verifies the token, stages/commits/pushes
-   (and creates a PR if *create_pr* is ``True``).
+Executes in a single call: stages, commits, pushes, and (when
+*create_pr* is ``True``) opens the PR.  There is no dry-run /
+confirmation-token step -- the human gate is the MCP client's own
+tool-approval prompt and the egress proxy is the structural guard, so
+an in-band token would only add ceremony (V1.0 API cleanup).
 
 Requires a container started with ``allow_network=True``.
 ``inject_vcs_token=True`` is *not* required: the push credential is
@@ -1034,13 +935,11 @@ so the container never holds it.  PR creation likewise runs host-side
 .. rubric:: Don't use when
 
 - **Running verification** — use :func:`verify_in_container` first; ``publish`` does not verify
-- **Local-only save points** — use :func:`checkpoint` instead (no network, no token)
-- **Pushing via GitHub Objects API only** — use :func:`sandbox_create_pr` (deprecated fallback)
+- **Local-only save points** — use :func:`checkpoint` instead (no network, no push)
 
 .. rubric:: Prefer over
 
-- Prefer over :func:`sandbox_create_pr` for the standard push+PR flow (two transports, no force-push by default)
-- Prefer over manual ``git push`` in ``sandbox_exec`` (the token credential helper is pre-configured)
+- Prefer over manual ``git push`` in ``sandbox_exec`` (the push credential helper is pre-configured)
 
 .. rubric:: Fallback
 
@@ -1059,9 +958,6 @@ Args:
     pr_body: PR body (optional).
     base_branch: Base branch for the PR (default: repository
         default branch).
-    dry_run: When ``True``, returns a diff summary and
-        confirmation token instead of executing.
-    token: Confirmation token from a previous ``dry_run`` call.
     allow_force_push: When ``True`` and needed, permits
         ``git push --force`` (opt-in; default ``False``).
     author_name: Git commit author name.  When set, takes precedence
@@ -1086,7 +982,6 @@ Returns:
         return json.dumps({"error": str(e)})
 
     cid = container_id[:12]
-    run_id = get_or_create_run_id(cid)
     working_dir = resolve_git_root(container, working_dir)
 
     # Helper: run a shell command in the container in working_dir.
@@ -1115,134 +1010,18 @@ Returns:
         return ec, stdout_text, stderr_text
 
     # ------------------------------------------------------------------
-    # DRY RUN — show plan and generate token
+    # Push (one-shot).  The boundary-crossing confirmation two-step
+    # (dry_run -> token -> execute) was retired for V1.0: the human gate
+    # is the MCP client's own tool-approval prompt and the egress proxy
+    # is the structural guard, so an in-band confirmation token only added
+    # ceremony without a real guarantee once tools are auto-approved.
     # ------------------------------------------------------------------
-    if dry_run:
-        # Gather diff summary (uncommitted changes)
-        status_ec, status_out, status_err = _run(
-            "git status --porcelain && echo '---DIFF---' && git diff HEAD --stat"
-        )
-        diff_summary = (status_out + "\n" + status_err).strip()
-
-        # Check for unpushed checkpoints
-        unpushed_ec, unpushed_out, _ = _run(
-            "git log --oneline HEAD --not --remotes 2>/dev/null"
-        )
-        has_unpushed = unpushed_ec == 0 and unpushed_out.strip() != ""
-
-        no_standard_changes = (
-            not diff_summary or diff_summary == "---DIFF---"
-        ) and not has_unpushed
-
-        # A force push overwrites the *target* branch, so for one the notion of
-        # "changes" is: does HEAD diverge from origin/<branch> specifically?
-        # The --not --remotes check above is a false negative here (#272) --
-        # when the local commits are also reachable from *another* remote
-        # branch it treats them as already-pushed and reports "no changes",
-        # so the dry_run returns no token and the caller cannot reach execute
-        # (the documented workaround was a manual ``git push --force``).  Only
-        # probe when the standard checks found nothing: if there are already
-        # uncommitted/unpushed changes the token is issued anyway, so the extra
-        # rev-parse calls would be wasted.
-        has_force_target_divergence = False
-        if no_standard_changes and allow_force_push:
-            head_ec, head_sha, _ = _run("git rev-parse HEAD")
-            tgt_ec, tgt_sha, _ = _run(
-                f"git rev-parse --verify --quiet {shlex.quote('origin/' + branch)}"
-            )
-            # Only meaningful when the target exists as a remote-tracking ref;
-            # if it is absent a force push degenerates to a normal push, so
-            # leave the standard detection above to decide (no regression).
-            #
-            # This reads the *local* remote-tracking ref (as of the last
-            # clone/fetch), so a stale ref can make the token be issued for a
-            # push that is really a no-op (or, rarely, skipped).  That is
-            # deliberately tolerated rather than fetched here: the real
-            # ``git push --force`` at execute time is authoritative against the
-            # live remote and is itself gated by allow_force_push + a human
-            # confirmation token, so no unwanted write can happen.  A fetch
-            # would break dry_run's cheap, offline, local-only contract for a
-            # negligible gain on a disposable container -- do not add one.
-            if (
-                head_ec == 0
-                and tgt_ec == 0
-                and tgt_sha.strip()
-                and head_sha.strip() != tgt_sha.strip()
-            ):
-                has_force_target_divergence = True
-
-        if no_standard_changes and not has_force_target_divergence:
-            return json.dumps({
-                "status": "dry_run",
-                "diff_summary": "(no changes detected)",
-                "branch": branch,
-                "message": message,
-                "warning": "No changes to commit.  Publish will succeed as a no-op.",
-            })
-
-        # Build diff_summary with checkpoint info if present
-        if has_unpushed:
-            checkpoint_lines = unpushed_out.strip().splitlines()
-            checkpoint_info = f"\n---\nCheckpoints to squash: {len(checkpoint_lines)} commit(s)"
-            if not diff_summary or diff_summary == "---DIFF---":
-                diff_summary = f"(unpushed checkpoints){checkpoint_info}"
-            else:
-                diff_summary += checkpoint_info
-
-        # Surface why a force push has work even when the checks above found
-        # no uncommitted/unpushed changes (#272), so the plan is not silent.
-        if has_force_target_divergence:
-            force_info = (
-                f"\n---\nForce push: HEAD overwrites origin/{branch} (tips differ)"
-            )
-            if not diff_summary or diff_summary == "---DIFF---":
-                diff_summary = f"(force push){force_info}"
-            else:
-                diff_summary += force_info
-
-        details = (
-            f"repo={repo} branch={branch} message={message[:80]}"
-        )
-        if create_pr:
-            details += f" pr_title={pr_title[:60]}"
-
-        return _dry_run_response(
-            "publish",
-            cid,
-            run_id,
-            details,
-            {
-                "diff_summary": diff_summary,
-                "branch": branch,
-                "message": message,
-                "create_pr": create_pr,
-                "pr_title": pr_title if create_pr else None,
-            },
-        )
-
-    # ------------------------------------------------------------------
-    # EXECUTE — require token
-    # ------------------------------------------------------------------
-    if not token:
-        return json.dumps({
-            "status": "error",
-            "error": "Token required for execution.  Run with dry_run=True first.",
-        })
-
-    # Recover the proxy control env before consuming the (single-use)
-    # confirmation token or touching the container's git state (#428).
-    # Checking this later -- e.g. after checkout/commit -- doesn't corrupt
-    # anything (checkout falls back to a plain ``git checkout`` and a
-    # repeat commit is a no-op), but it would burn the one-time token for
-    # nothing, forcing a fresh dry_run before the caller can retry.
+    # Recover the proxy control env before touching the container's git
+    # state (#428): a stale/missing control env would make the push fail
+    # closed, so surface it up front rather than mid-operation.
     proxy_err = _ensure_proxy_env_fresh(client)
     if proxy_err:
         return json.dumps({"status": "error", "step": "egress_proxy", "error": proxy_err})
-
-    # --- Consume token ---
-    token_result, token_error = _consume_confirmation_token(token)
-    if token_error is not None:
-        return token_error
 
     # --- Git branch check/create ---
     _run(f"git checkout -b {shlex.quote(branch)} 2>/dev/null || git checkout {shlex.quote(branch)}")
@@ -1355,7 +1134,6 @@ Returns:
                         "publish",
                         f"repo={repo} branch={branch} push_failed transport=both",
                         approved=False,
-                        token=token,
                     )
                     return json.dumps({
                         "status": "error",
@@ -1369,7 +1147,6 @@ Returns:
             "publish",
             f"repo={repo} branch={branch} proxy_auth_failed",
             approved=False,
-            token=token,
         )
         return json.dumps({
             "status": "error",
@@ -1440,7 +1217,6 @@ Returns:
                 "publish",
                 f"repo={repo} branch={branch} sha={sha} pr_create_failed",
                 approved=True,
-                token=token,
             )
             return json.dumps({
                 "status": "pushed",
@@ -1459,7 +1235,6 @@ Returns:
         "publish",
         details,
         approved=True,
-        token=token,
     )
 
     result: dict[str, Any] = {
@@ -1536,273 +1311,6 @@ def _try_api_push(
         return {"status": "error", "error": push_result["error"]}
 
     return {"status": "ok", "sha": push_result.get("sha", "unknown")[:7]}
-
-
-
-
-# ---------------------------------------------------------------------------
-# sandbox_create_pr
-# ---------------------------------------------------------------------------
-
-
-def sandbox_create_pr(
-    container_id: str,
-    repo: str,
-    branch: str,
-    pr_title: str,
-    pr_body: str = "",
-    base_branch: str = "",
-    working_dir: str | None = None,
-    dry_run: bool = False,
-    token: str = "",
-) -> str:
-    """[DEPRECATED] Push the current branch via GitHub API and create a PR.
-
-    .. deprecated::
-       This function is **no longer registered as an MCP tool** (see
-       issue #256).  It remains as an internal fallback for the
-       GitHub Objects API push path within :func:`publish`.  Use
-       :func:`publish` instead.
-
-    Unlike :func:`publish`, this tool uses the GitHub Objects API
-    (blob → tree → commit → ref) to push the branch, which works when
-    the injected token cannot push via HTTPS git (e.g. GitHub App
-    installation tokens).
-
-    Typical flow:
-
-    1. ``sandbox_initialize(allow_network=True, inject_vcs_token=True)``
-    2. ``clone_repo`` / ``gh repo clone`` inside the container
-    3. Make changes, run ``git add -A && git commit``
-    4. ``sandbox_create_pr(dry_run=True)`` — preview + confirmation token
-    5. ``sandbox_create_pr(token=...)`` — pushes via API + opens PR
-
-    Like :func:`publish`, execution is a two-step flow: call once with
-    ``dry_run=True`` to get a preview of the HEAD commit and a
-    confirmation token, then call again with that ``token`` to push and
-    open the PR.
-
-    Requires a container started with ``allow_network=True`` and
-    ``inject_vcs_token=True``.
-
-    .. note::
-
-       Only the most recent committed state (HEAD) is pushed.  Multiple
-       local commits are represented as a single commit on GitHub whose
-       tree matches the HEAD tree and whose parent is the current tip of
-       *branch* (or the default branch if *branch* is new).
-
-    .. warning::
-
-       Unlike :func:`publish`, this tool has **no verify gate** (no
-       lint/type-check/test run before push).  Ensure the sandbox passes
-       all checks before calling this tool.
-
-    .. warning::
-
-       This tool uses ``PATCH`` with ``force: true`` when updating an
-       existing branch, which will **force-push** and overwrite any
-       commits on *branch* that are not reflected in the container's HEAD
-       tree.  Do not use this tool on shared branches where others may
-       have pushed commits.
-
-    Args:
-        container_id: 12-character container ID prefix.
-        repo: Repository in ``'owner/repo'`` format.
-        branch: Branch name to create or update on GitHub.
-        pr_title: Title for the pull request.
-        pr_body: Body text for the pull request (optional).
-        base_branch: Base branch for the PR (default: repository default
-            branch).
-        working_dir: Directory in the container containing the git
-            repository (default ``None`` = auto-detect).
-        dry_run: When ``True``, returns a preview of the HEAD commit that
-            would be pushed plus a confirmation token, without pushing or
-            creating a PR.
-        token: Confirmation token from a previous ``dry_run`` call.
-            Required for execution (``dry_run=False``).
-
-    Returns:
-        JSON with ``status``, ``pr_url``, ``branch``, and ``sha``.
-        On error returns ``status='error'`` with an ``error`` field.
-    """
-    client = _docker()
-    try:
-        container = client.containers.get(container_id)
-    except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-    cid = container_id[:12]
-    working_dir = resolve_git_root(container, working_dir)
-
-    if not _REPO_FORMAT_RE.match(repo):
-        return json.dumps({
-            "status": "error",
-            "error": "repo must be in owner/repo format",
-        })
-
-    if not _BRANCH_RE.match(branch):
-        return json.dumps({
-            "status": "error",
-            "error": "branch contains invalid characters",
-        })
-
-    if base_branch and not _BRANCH_RE.match(base_branch):
-        return json.dumps({
-            "status": "error",
-            "error": "base_branch contains invalid characters",
-        })
-
-    def _run(cmd: str) -> tuple[int, str, str]:
-        exit_code, output = container.exec_run(
-            ["sh", "-c", cmd],
-            stdout=True,
-            stderr=True,
-            demux=True,
-            workdir=working_dir,
-        )
-        stdout_b, stderr_b = output or (b"", b"")
-        out = stdout_b.decode("utf-8", errors="replace").strip() if stdout_b else ""
-        err = stderr_b.decode("utf-8", errors="replace").strip() if stderr_b else ""
-        return exit_code, out, err
-
-    run_id = get_or_create_run_id(cid)
-
-    # ------------------------------------------------------------------
-    # DRY RUN — preview push plan and generate confirmation token
-    # ------------------------------------------------------------------
-    if dry_run:
-        # HEAD is what gets pushed (see note above): preview that commit.
-        _ec, log_out, _ = _run("git log -1 --pretty='%h %s' HEAD")
-        _ec2, stat_out, _ = _run("git show --stat --pretty='' HEAD")
-        diff_summary = (log_out + "\n" + stat_out).strip()
-        if not diff_summary:
-            diff_summary = "(no committed HEAD to push)"
-
-        details = (
-            f"repo={repo} branch={branch} pr_title={pr_title[:60]}"
-            f" base={base_branch or 'default'}"
-        )
-        return _dry_run_response(
-            "sandbox_create_pr",
-            cid,
-            run_id,
-            details,
-            {
-                "diff_summary": diff_summary,
-                "branch": branch,
-                "pr_title": pr_title,
-                "base_branch": base_branch or None,
-            },
-        )
-
-    # ------------------------------------------------------------------
-    # EXECUTE — require confirmation token from a prior dry_run
-    # ------------------------------------------------------------------
-    _token_meta, token_error = _consume_confirmation_token(token)
-    if token_error is not None:
-        return token_error
-
-    # Write the API-push script into the container
-    script_b64 = base64.b64encode(
-        _SANDBOX_CREATE_PR_SCRIPT.encode("utf-8")
-    ).decode("ascii")
-    _run(f"echo {shlex.quote(script_b64)} | base64 -d > /tmp/_sandbox_create_pr.py")
-
-    # Execute: push via GitHub API
-    ec, out, err = _run(
-        f"trap 'rm -f /tmp/_sandbox_create_pr.py' EXIT"
-        f" && python3 /tmp/_sandbox_create_pr.py {shlex.quote(repo)} {shlex.quote(branch)} {shlex.quote(working_dir)}"
-    )
-    if ec != 0:
-        record_boundary_crossing(
-            cid, "sandbox_create_pr",
-            f"repo={repo} branch={branch} step=api_push error={(err or out)[:200]}",
-            approved=False, token=token,
-        )
-        # err or out — script crashed (ec ≠ 0), stderr has traceback
-        return json.dumps({"status": "error", "step": "api_push", "error": err or out})
-
-    try:
-        push_result = json.loads(out)
-    except json.JSONDecodeError:
-        # json_parse_error: out or err — script exited 0 but stdout isn't JSON.
-        # stdout is the diagnostic (what the script printed instead of JSON)
-        record_boundary_crossing(
-            cid, "sandbox_create_pr",
-            f"repo={repo} branch={branch} step=api_push json_parse_error",
-            approved=False, token=token,
-        )
-        return json.dumps({"status": "error", "step": "api_push", "error": out or err})
-
-    if "error" in push_result:
-        record_boundary_crossing(
-            cid, "sandbox_create_pr",
-            f"repo={repo} branch={branch} step=api_push error={push_result.get('error', ''):.200}",
-            approved=False, token=token,
-        )
-        return json.dumps({"status": "error", "step": "api_push", **push_result})
-
-    new_sha = push_result["sha"]
-
-    # Create PR
-    pr_cmd = (
-        f"gh pr create --repo {shlex.quote(repo)}"
-        f" --head {shlex.quote(branch)}"
-        f" --title {shlex.quote(pr_title)}"
-    )
-    if base_branch:
-        pr_cmd += f" --base {shlex.quote(base_branch)}"
-    if pr_body:
-        body_b64 = base64.b64encode(pr_body.encode("utf-8")).decode("ascii")
-        # Wrap pr_cmd: write body to a temp file, run pr_cmd with --body-file, then clean up
-        base_cmd = pr_cmd
-        pr_cmd = (
-            f"BODY_FILE=$(mktemp) &&"
-            f" trap 'rm -f \"$BODY_FILE\"' EXIT &&"
-            f" echo {shlex.quote(body_b64)} | base64 -d > \"$BODY_FILE\" &&"
-            f" {base_cmd} --body-file \"$BODY_FILE\""
-        )
-
-    pr_ec, pr_out, pr_err = _run(pr_cmd)
-    if pr_ec != 0:
-        record_boundary_crossing(
-            cid, "sandbox_create_pr",
-            f"repo={repo} branch={branch} sha={new_sha[:7]} step=pr_create error={(pr_err or pr_out)[:200]}",
-            approved=True, token=token,
-        )
-        return json.dumps({
-            "status": "pushed_no_pr",
-            "branch": branch,
-            "sha": new_sha[:7],
-            # pr_err or pr_out — gh writes errors to stderr
-            "pr_create_error": pr_err or pr_out,
-        })
-
-    pr_url = ""
-    _pr_url_marker = f"github.com/{repo}/pull/"
-    for line in pr_out.splitlines():
-        line = line.strip()
-        if _pr_url_marker in line and line.startswith("https://"):
-            pr_url = line
-            break
-
-    record_boundary_crossing(
-        cid,
-        "sandbox_create_pr",
-        f"repo={repo} branch={branch} sha={new_sha[:7]} pr_url={pr_url}",
-        approved=True,
-        token="",
-    )
-
-    return json.dumps({
-        "status": "ok",
-        "branch": branch,
-        "sha": new_sha[:7],
-        "pr_url": pr_url,
-    })
 
 
 # ---------------------------------------------------------------------------
@@ -2001,4 +1509,3 @@ def clone_repo(
     if not authenticated and not open_read_window:
         result["warning"] = CLONE_NO_TOKEN_WARNING
     return json.dumps(result)
-

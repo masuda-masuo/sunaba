@@ -239,7 +239,9 @@ class TestSetupPrBranchAnonymous:
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
             return_value="feature-branch",
-        ) as mock_resolve, patch("code_sandbox_mcp.tools.container.logger"):
+        ) as mock_resolve, patch(
+            "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
+        ), patch("code_sandbox_mcp.tools.container.logger"):
             result = _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
                 authenticated=False,
@@ -247,7 +249,7 @@ class TestSetupPrBranchAnonymous:
 
         assert "PR #136" in result
         assert "feature-branch" in result
-        mock_resolve.assert_called_once_with("owner/repo", 136)
+        mock_resolve.assert_called_once_with("owner/repo", 136, token=None)
 
         executed = " ;; ".join(
             call.args[0][2] for call in container.exec_run.call_args_list
@@ -265,6 +267,8 @@ class TestSetupPrBranchAnonymous:
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
             return_value="feature-branch",
+        ), patch(
+            "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
             with pytest.raises(RuntimeError, match="private repository"):
                 _setup_pr_branch(
@@ -281,6 +285,8 @@ class TestSetupPrBranchAnonymous:
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
             return_value="feature-branch",
+        ), patch(
+            "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
             with pytest.raises(RuntimeError, match="Failed to checkout PR #136"):
                 _setup_pr_branch(
@@ -294,7 +300,7 @@ class TestSetupPrBranchAnonymous:
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
             side_effect=RuntimeError("GitHub API returned HTTP 404"),
-        ):
+        ), patch("code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""):
             with pytest.raises(RuntimeError, match="HTTP 404"):
                 _setup_pr_branch(
                     container, "abc123def456", "owner/repo", 136, "/tmp/repo",
@@ -321,6 +327,8 @@ class TestSetupPrBranchReadWindow:
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
             return_value="feature-branch",
+        ), patch(
+            "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
             result = _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
@@ -344,6 +352,8 @@ class TestSetupPrBranchReadWindow:
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
             return_value="feature-branch",
+        ), patch(
+            "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
             with pytest.raises(RuntimeError, match="private repository"):
                 _setup_pr_branch(
@@ -391,6 +401,8 @@ class TestSetupPrBranchReadWindow:
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
             return_value="feature-branch",
+        ), patch(
+            "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
             _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
@@ -398,6 +410,39 @@ class TestSetupPrBranchReadWindow:
             )
 
         mock_record.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.container._resolve_vcs_token")
+    @patch("urllib.request.urlopen")
+    def test_token_resolved_once_and_reused(self, mock_urlopen, mock_resolve_token):
+        """#436 review: a broker-backed _resolve_vcs_token() spawns a
+        subprocess per call (no caching, up to a 30s timeout). The anonymous
+        path must resolve it once and pass the same value to both
+        _resolve_pr_head_ref (host GitHub API call) and the read window, not
+        call it again for each."""
+        mock_resolve_token.return_value = "ghs_minted"
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(
+            {"head": {"ref": "feature-branch"}}
+        ).encode()
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        container = _make_container_mock([
+            (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
+            (0, (b"Switched to branch 'feature-branch'\n", b"")),
+            (0, (b"Installed\n", b"")),
+            (0, (b"", b"")),
+        ])
+
+        with patch("code_sandbox_mcp.tools.container.logger"):
+            _setup_pr_branch(
+                container, "abc123def456", "owner/repo", 136, "/tmp/repo",
+                authenticated=False, open_read_window=True,
+            )
+
+        assert mock_resolve_token.call_count == 1
+        # Same token reaches the GitHub API request (head-ref resolution).
+        request = mock_urlopen.call_args.args[0]
+        assert request.get_header("Authorization") == "Bearer ghs_minted"
 
 
 class TestSandboxInitializePrParam:

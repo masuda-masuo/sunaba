@@ -723,7 +723,7 @@ def _try_clone_into_container(
         return CloneResult(None, str(e))
 
 
-def _resolve_pr_head_ref(repo: str, pr_number: int) -> str:
+def _resolve_pr_head_ref(repo: str, pr_number: int, *, token: str | None = None) -> str:
     """Resolve a PR's head branch name host-side via the GitHub REST API.
 
     A proxied container deliberately holds no VCS token (#356), so it cannot
@@ -738,6 +738,13 @@ def _resolve_pr_head_ref(repo: str, pr_number: int) -> str:
     requests still work for public repos.  The REST API accepts ``Bearer`` --
     the Basic-only quirk is specific to GitHub's git smart-HTTP endpoints
     (see ``proxy.basic_auth_header``).
+
+    *token*, when given, is used as-is instead of calling
+    :func:`_resolve_vcs_token` again.  A broker-backed resolution spawns a
+    subprocess per call (no caching, up to a 30s timeout) -- callers that
+    already resolved a token for this same operation (e.g.
+    :func:`_setup_pr_branch`, which also needs one for the egress-proxy read
+    window) should pass it through here instead of paying for a second mint.
     """
     import urllib.error
     import urllib.request
@@ -749,7 +756,8 @@ def _resolve_pr_head_ref(repo: str, pr_number: int) -> str:
         "Accept": "application/vnd.github+json",
         "User-Agent": "code-sandbox-mcp",
     }
-    token = _resolve_vcs_token()
+    if token is None:
+        token = _resolve_vcs_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
@@ -833,6 +841,7 @@ def _setup_pr_branch(
     safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
     safe_repo = shlex.quote(repo)
 
+    anon_token: str | None = None
     if authenticated:
         # Step 1: Get PR head branch info via in-container gh
         gh_info_cmd = f"gh pr view {pr_number} --repo {safe_repo} --json headRefName"
@@ -867,7 +876,14 @@ def _setup_pr_branch(
         # container-side commands below are token-free git.  The clone
         # command's quoting is delegated to _build_clone_command; safe_repo /
         # safe_dest above still serve the shared logging and checkout below.
-        head_ref = _resolve_pr_head_ref(repo, pr_number)
+        # Resolved once and reused for the read window below: a broker-backed
+        # _resolve_vcs_token() spawns a subprocess per call (no caching, up
+        # to a 30s timeout), so calling it twice per checkout would double
+        # that cost -- and, if the broker mints a fresh token each time,
+        # hand the head-ref lookup and the read window two different tokens
+        # for no benefit (#436 review).
+        anon_token = _resolve_vcs_token()
+        head_ref = _resolve_pr_head_ref(repo, pr_number, token=anon_token or None)
         clone_cmd = _build_clone_command(repo, f"{clone_dest}/{repo_name}")
         checkout_cmd = (
             f"cd {safe_dest} && git fetch origin pull/{pr_number}/head"
@@ -883,7 +899,7 @@ def _setup_pr_branch(
     # unaffected.
     window_open = open_read_window and not authenticated
     window = (
-        authorized_read_window(repo, token=_resolve_vcs_token() or None)
+        authorized_read_window(repo, token=anon_token or None)
         if window_open
         else contextlib.nullcontext()
     )

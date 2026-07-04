@@ -1177,6 +1177,16 @@ Returns:
             "error": "Token required for execution.  Run with dry_run=True first.",
         })
 
+    # Recover the proxy control env before consuming the (single-use)
+    # confirmation token or touching the container's git state (#428).
+    # Checking this later -- e.g. after checkout/commit -- doesn't corrupt
+    # anything (checkout falls back to a plain ``git checkout`` and a
+    # repeat commit is a no-op), but it would burn the one-time token for
+    # nothing, forcing a fresh dry_run before the caller can retry.
+    proxy_err = _ensure_proxy_env_fresh(client)
+    if proxy_err:
+        return json.dumps({"status": "error", "step": "egress_proxy", "error": proxy_err})
+
     # --- Consume token ---
     token_result, token_error = _consume_confirmation_token(token)
     if token_error is not None:
@@ -1253,9 +1263,6 @@ Returns:
     # (#360), so no exec carries a token anymore when a host token exists.
     push_token = _resolve_vcs_token()
     token_env = _push_token_env(push_token)
-    proxy_err = _ensure_proxy_env_fresh(client)
-    if proxy_err:
-        return json.dumps({"status": "error", "step": "egress_proxy", "error": proxy_err})
     proxied = proxy_configured()
     push_env = None if proxied else token_env
 

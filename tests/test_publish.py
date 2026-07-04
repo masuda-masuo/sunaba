@@ -323,12 +323,10 @@ class TestPublish:
         }
         mock_ensure_proxy.side_effect = EgressProxyError("sidecar unreachable")
 
-        container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
-            (0, b"", b""),  # git add
-            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
-            (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
-        ])
+        # No exec_run entries at all: the proxy-env check runs before token
+        # consumption and any git command, so a fail-closed abort here must
+        # not touch the container or burn the one-time confirmation token.
+        container = _make_container_mock([])
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -345,6 +343,8 @@ class TestPublish:
         assert result["status"] == "error"
         assert result["step"] == "egress_proxy"
         assert "sidecar unreachable" in result["error"]
+        container.exec_run.assert_not_called()
+        mock_token.assert_not_called()
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.verify_and_consume")

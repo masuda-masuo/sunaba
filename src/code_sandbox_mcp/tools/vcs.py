@@ -1130,7 +1130,48 @@ Returns:
         )
         has_unpushed = unpushed_ec == 0 and unpushed_out.strip() != ""
 
-        if (not diff_summary or diff_summary == "---DIFF---") and not has_unpushed:
+        no_standard_changes = (
+            not diff_summary or diff_summary == "---DIFF---"
+        ) and not has_unpushed
+
+        # A force push overwrites the *target* branch, so for one the notion of
+        # "changes" is: does HEAD diverge from origin/<branch> specifically?
+        # The --not --remotes check above is a false negative here (#272) --
+        # when the local commits are also reachable from *another* remote
+        # branch it treats them as already-pushed and reports "no changes",
+        # so the dry_run returns no token and the caller cannot reach execute
+        # (the documented workaround was a manual ``git push --force``).  Only
+        # probe when the standard checks found nothing: if there are already
+        # uncommitted/unpushed changes the token is issued anyway, so the extra
+        # rev-parse calls would be wasted.
+        has_force_target_divergence = False
+        if no_standard_changes and allow_force_push:
+            head_ec, head_sha, _ = _run("git rev-parse HEAD")
+            tgt_ec, tgt_sha, _ = _run(
+                f"git rev-parse --verify --quiet {shlex.quote('origin/' + branch)}"
+            )
+            # Only meaningful when the target exists as a remote-tracking ref;
+            # if it is absent a force push degenerates to a normal push, so
+            # leave the standard detection above to decide (no regression).
+            #
+            # This reads the *local* remote-tracking ref (as of the last
+            # clone/fetch), so a stale ref can make the token be issued for a
+            # push that is really a no-op (or, rarely, skipped).  That is
+            # deliberately tolerated rather than fetched here: the real
+            # ``git push --force`` at execute time is authoritative against the
+            # live remote and is itself gated by allow_force_push + a human
+            # confirmation token, so no unwanted write can happen.  A fetch
+            # would break dry_run's cheap, offline, local-only contract for a
+            # negligible gain on a disposable container -- do not add one.
+            if (
+                head_ec == 0
+                and tgt_ec == 0
+                and tgt_sha.strip()
+                and head_sha.strip() != tgt_sha.strip()
+            ):
+                has_force_target_divergence = True
+
+        if no_standard_changes and not has_force_target_divergence:
             return json.dumps({
                 "status": "dry_run",
                 "diff_summary": "(no changes detected)",
@@ -1147,6 +1188,17 @@ Returns:
                 diff_summary = f"(unpushed checkpoints){checkpoint_info}"
             else:
                 diff_summary += checkpoint_info
+
+        # Surface why a force push has work even when the checks above found
+        # no uncommitted/unpushed changes (#272), so the plan is not silent.
+        if has_force_target_divergence:
+            force_info = (
+                f"\n---\nForce push: HEAD overwrites origin/{branch} (tips differ)"
+            )
+            if not diff_summary or diff_summary == "---DIFF---":
+                diff_summary = f"(force push){force_info}"
+            else:
+                diff_summary += force_info
 
         details = (
             f"repo={repo} branch={branch} message={message[:80]}"

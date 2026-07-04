@@ -194,6 +194,99 @@ class TestPublishAllowForcePush:
         assert len(push_calls) == 1
         assert "--force" in push_calls[0]
 
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_dry_run_force_push_diverged_target_issues_token(
+        self,
+        mock_docker: MagicMock,
+    ) -> None:
+        """#272: force-push dry_run must issue a token when HEAD diverges from
+        origin/<branch>, even though there are no uncommitted changes and the
+        --not --remotes check finds nothing (commits reachable from another
+        remote branch)."""
+        container = _make_container_mock([
+            (0, b"---DIFF---\n", b""),   # git status/diff: clean working tree
+            (0, b"", b""),               # unpushed vs --remotes: false-negative
+            (0, b"1" * 40 + b"\n", b""),  # git rev-parse HEAD
+            (0, b"2" * 40 + b"\n", b""),  # git rev-parse origin/fix/x (differs)
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=True,
+            allow_force_push=True,
+        ))
+
+        assert result["status"] == "dry_run"
+        assert result["confirmation_token"]
+        assert "force push" in result["diff_summary"].lower()
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_dry_run_force_push_target_equal_reports_no_changes(
+        self,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When origin/<branch> already equals HEAD there is nothing to force,
+        so the dry_run stays a no-op (no token)."""
+        container = _make_container_mock([
+            (0, b"---DIFF---\n", b""),   # clean working tree
+            (0, b"", b""),               # nothing unpushed
+            (0, b"1" * 40 + b"\n", b""),  # git rev-parse HEAD
+            (0, b"1" * 40 + b"\n", b""),  # origin/fix/x identical to HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=True,
+            allow_force_push=True,
+        ))
+
+        assert result["status"] == "dry_run"
+        assert result["diff_summary"] == "(no changes detected)"
+        assert "confirmation_token" not in result
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_dry_run_without_force_flag_keeps_no_change_shortcut(
+        self,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Without allow_force_push the target-divergence probe is skipped, so
+        the same false-negative inputs still report no changes (the force flag
+        is what unlocks the token) -- and the extra rev-parse calls are not
+        made."""
+        container = _make_container_mock([
+            (0, b"---DIFF---\n", b""),   # clean working tree
+            (0, b"", b""),               # nothing unpushed
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            dry_run=True,
+        ))
+
+        assert result["status"] == "dry_run"
+        assert result["diff_summary"] == "(no changes detected)"
+        assert "confirmation_token" not in result
+        rev_parse_calls = [
+            c[0][0][2] for c in container.exec_run.call_args_list
+            if "rev-parse" in c[0][0][2]
+        ]
+        assert rev_parse_calls == []
+
 
 class TestPublishApiPushFallback:
     """Tests for publish when git push fails and falls back to _try_api_push."""

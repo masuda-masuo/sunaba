@@ -46,9 +46,14 @@ from code_sandbox_mcp.proxy import (
     CONTROL_HOST_ENV,
     CONTROL_PORT_ENV,
     CONTROL_SECRET_ENV,
+    PROXY_SOURCE_FINGERPRINT,
     PROXY_TOKEN_ENV,
 )
-from code_sandbox_mcp.proxy_client import CONTROL_URL_ENV
+from code_sandbox_mcp.proxy_client import (
+    CONTROL_URL_ENV,
+    ProxyControlConfig,
+    fetch_proxy_fingerprint,
+)
 from code_sandbox_mcp.security import MANAGED_LABEL
 
 logger = logging.getLogger(__name__)
@@ -60,7 +65,10 @@ ENABLE_EGRESS_PROXY_ENV = "CODE_SANDBOX_ENABLE_EGRESS_PROXY"
 #: Image reference for the sidecar.  Defaults to the locally built tag from
 #: ``docker/Dockerfile.proxy``; switch to a pinned ``ghcr.io/...@sha256:...``
 #: once registry publishing for the proxy image exists (follow-up of #358 --
-#: ``image_pins.json`` deliberately rejects unknown keys today).
+#: ``image_pins.json`` deliberately rejects unknown keys today).  Until then the
+#: ``:latest`` tag can silently drift from the installed package, so
+#: :func:`_warn_on_source_drift` compares the running sidecar's source against
+#: this server's and logs a warning on mismatch (#405).
 PROXY_IMAGE_ENV = "CODE_SANDBOX_PROXY_IMAGE"
 _DEFAULT_PROXY_IMAGE = "code-sandbox-mcp/proxy:latest"
 
@@ -201,6 +209,13 @@ def ensure_egress_proxy(
     # time, so exporting here is all it takes to arm the push window.
     source[CONTROL_URL_ENV] = control_url
     source[CONTROL_SECRET_ENV] = secret
+    # Purely diagnostic (#405): a mismatch means the running sidecar was built
+    # from a different proxy.py than this server -- warn, but never let the
+    # probe itself keep a sandbox from starting.
+    try:
+        _warn_on_source_drift(control_url, secret)
+    except Exception:  # pragma: no cover - defensive; diagnostics must not fail closed
+        logger.debug("egress-proxy source fingerprint check errored", exc_info=True)
     return EgressProxyRuntime(
         network_name=EGRESS_NETWORK_NAME,
         proxy_url=f"http://{PROXY_NETWORK_ALIAS}:{_PROXY_LISTEN_PORT}",
@@ -293,6 +308,40 @@ def install_ca(container: Any, ca_pem: bytes) -> None:
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+def _warn_on_source_drift(control_url: str, secret: str) -> None:
+    """Log a warning when the sidecar's addon source differs from ours (#405).
+
+    Fetches the running sidecar's baked source fingerprint over the control
+    API's ``/version`` endpoint and compares it against
+    :data:`PROXY_SOURCE_FINGERPRINT` -- the digest this process computed from
+    its *own* installed ``proxy.py`` at import.  A mismatch is the #404 failure
+    mode (venv on new ``proxy.py``, sidecar baked from old ``proxy.py``), which
+    otherwise stays invisible until the first push fails.
+
+    Never raises and never fails closed: if the fingerprint cannot be fetched
+    (old proxy without ``/version``, sidecar briefly unreachable) or either
+    side's digest is empty ("cannot compare"), it silently does nothing.  The
+    fix for a real mismatch is a deploy action (rebuild the image + recreate
+    the sidecar), not aborting the sandbox.
+    """
+    local = PROXY_SOURCE_FINGERPRINT
+    if not local:
+        return
+    remote = fetch_proxy_fingerprint(ProxyControlConfig(base_url=control_url, secret=secret))
+    if remote is None or remote == local:
+        return
+    logger.warning(
+        "egress-proxy sidecar source fingerprint %s does not match this "
+        "server's installed proxy.py %s: the running sidecar was built from a "
+        "different proxy.py than the deployed package (see #405). Rebuild the "
+        "proxy image (docker/Dockerfile.proxy) and recreate the sidecar "
+        "(remove %s) to resync.",
+        remote[:12],
+        local[:12],
+        PROXY_CONTAINER_NAME,
+    )
 
 
 def _ensure_network(client: Any) -> Any:

@@ -15,6 +15,13 @@
 #   CA 配線は #358 の後続 / #355 で行う。ここではイメージ本体のみ。
 #
 # 運用ではイメージはダイジェスト固定で参照すること (image@sha256:...)。
+#
+# デプロイ時の同期 (#405): このイメージは proxy.py / proxy_entrypoint.py を焼き込む。
+# venv (サーバコード) を更新したらこのイメージも再ビルドし、sidecar
+# (code-sandbox-egress-proxy) を再作成して同期させること。ズレたまま起動すると
+# proxy_lifecycle が /version 経由で sidecar の指紋を照合し警告ログを出す
+# (fail はしない)。#404 は venv=新 proxy.py / sidecar=旧 proxy.py のズレで
+# publish が全滅した実例。
 
 # base イメージと同じ Python ベースをダイジェスト固定で共有する。
 FROM python:3.12-slim-bookworm@sha256:93ab4b7fa528b25124c97bcc755415e60eb671a86b4dbe0328df2fe2d1c1193d

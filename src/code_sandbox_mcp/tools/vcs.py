@@ -1153,6 +1153,16 @@ Returns:
             # Only meaningful when the target exists as a remote-tracking ref;
             # if it is absent a force push degenerates to a normal push, so
             # leave the standard detection above to decide (no regression).
+            #
+            # This reads the *local* remote-tracking ref (as of the last
+            # clone/fetch), so a stale ref can make the token be issued for a
+            # push that is really a no-op (or, rarely, skipped).  That is
+            # deliberately tolerated rather than fetched here: the real
+            # ``git push --force`` at execute time is authoritative against the
+            # live remote and is itself gated by allow_force_push + a human
+            # confirmation token, so no unwanted write can happen.  A fetch
+            # would break dry_run's cheap, offline, local-only contract for a
+            # negligible gain on a disposable container -- do not add one.
             if (
                 head_ec == 0
                 and tgt_ec == 0

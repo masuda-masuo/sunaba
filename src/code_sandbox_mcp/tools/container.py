@@ -1407,21 +1407,17 @@ async def sandbox_initialize_tool(
     clients actually see, since the inner function is never registered as a
     tool -- callers should not need to open the source to learn this).
 
-    **Private-repo caveat (read this before using** ``pr=`` **or**
-    ``clone_repo`` **on a private repository):** under the egress proxy
-    (#403), ``pr=N`` resolves the PR head ref host-side and checks it out
-    *anonymously* inside the container -- this works for public repos with
-    no further setup, but **private-repo PRs cannot be checked out this
-    way**.  For a private-repo PR, skip ``pr=`` and instead call this tool
-    with ``clone_repo=<owner/name>``, ``inject_vcs_token=True``, and then
-    immediately follow up with :func:`clone_repo` passing
-    ``branch=<PR head branch name>`` and ``inject_vcs_token=True`` in the
-    *same* turn -- the read-authorization window (#419) that lets the
-    container's anonymous clone succeed closes quickly, so a later
-    ``git fetch``/``git checkout`` in a separate :func:`sandbox_exec` call
-    will 401.  ``inject_vcs_token=True`` is also a no-op for the
-    container's own environment while the egress proxy is active: no
-    token ever lands inside the container either way; pushes and PR
+    **Private-repo note (``pr=`` and** ``clone_repo`` **on a private
+    repository):** under the egress proxy (#403), ``pr=N`` resolves the PR
+    head ref host-side and checks it out *anonymously* inside the
+    container.  This works for public repos with no further setup; for a
+    private repo, the same read-authorization window (#419) that
+    ``clone_repo`` uses is opened for the anonymous clone + checkout too,
+    so ``pr=N`` alone is enough -- the egress proxy just needs to be
+    configured with a host-resolvable token (broker / ``GITHUB_TOKEN``)
+    for the window to authenticate.  ``inject_vcs_token=True`` is a no-op
+    for the container's own environment while the egress proxy is active:
+    no token ever lands inside the container either way; pushes and PR
     creation should go through :func:`publish` instead.
     """
     def _work() -> str:

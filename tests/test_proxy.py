@@ -16,11 +16,13 @@ import urllib.request
 import pytest
 
 from code_sandbox_mcp.proxy import (
+    API_WRITE_BLOCK_HINT,
     CONTROL_HOST_ENV,
     CONTROL_PORT_ENV,
     CONTROL_SECRET_ENV,
     DEFAULT_WINDOW_TTL_SECONDS,
     FETCH_SERVICE,
+    PUSH_BLOCK_HINT,
     PUSH_SERVICE,
     AuthControlServer,
     Decision,
@@ -29,6 +31,7 @@ from code_sandbox_mcp.proxy import (
     api_repo_from_path,
     basic_auth_header,
     bearer_auth_header,
+    block_body,
     control_bind_from_env,
     git_service_from_request,
     handle_control_request,
@@ -920,3 +923,34 @@ class TestApiWriteControlDispatch:
             guard, None, "/auth/allow-api-write", None, {"repo": "o/r", "ttl_seconds": 0}
         )
         assert res.status == 400
+
+
+class TestBlockBodyHint:
+    """403 body hint must match the kind of request denied (#424).
+
+    #420's api-write gate originally reused the push-only hint text for
+    every denial, so an issue-comment/PR-review rejection told the caller
+    to use ``publish`` -- a tool that has nothing to do with the request.
+    """
+
+    def test_default_hint_is_push(self) -> None:
+        assert block_body("no open authorization window for o/r") == (
+            b"BLOCKED by egress proxy: no open authorization window for o/r. "
+            + PUSH_BLOCK_HINT.encode()
+            + b"\n"
+        )
+
+    def test_api_write_hint_mentions_first_class_tools(self) -> None:
+        body = block_body("no open api-write authorization window for o/r", hint=API_WRITE_BLOCK_HINT)
+        assert b"publish tool" not in body or b"sandbox_issue_write" in body
+        assert API_WRITE_BLOCK_HINT.encode() in body
+
+    def test_api_write_denial_uses_api_write_hint_not_push_hint(self) -> None:
+        # The exact bug from #424: a denied api.github.com write must not
+        # claim push is the only sanctioned path.
+        guard = EgressGuard({"o/r"})
+        d = guard.decide_api_write("POST", "/repos/o/r/issues/1/comments", now=100.0)
+        assert d.allow is False
+        body = block_body(d.reason, hint=API_WRITE_BLOCK_HINT)
+        assert b"sandbox_issue_write" in body
+        assert b"only allowed via the publish tool" not in body

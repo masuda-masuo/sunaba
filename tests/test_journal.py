@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import patch
 
 from code_sandbox_mcp.journal import (
@@ -10,12 +13,14 @@ from code_sandbox_mcp.journal import (
     get_journal_path,
     get_or_create_run_id,
     get_runs,
+    read_container_states,
     read_journal,
     record_boundary_crossing,
     record_copy,
     record_exec,
     record_file_write,
     record_initialize,
+    record_initialize_complete,
     record_stop,
     remove_run_id,
 )
@@ -451,3 +456,90 @@ class TestRecordToolUse:
             assert usage["total_ops"] >= 4
             # verify_in_container is NOT in this fixture, so it should not appear
             assert "verify_in_container" not in usage["structured_ops"]
+
+
+class TestContainerStateSidecar:
+    """Container state sidecar for O(1) status lookup (Issue #305)."""
+
+    @contextmanager
+    def _journal_at(self, tmp_path: Path) -> Iterator[Path]:
+        journal_dir = tmp_path / "journal"
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", journal_dir / "journal.log"), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir), \
+             patch("code_sandbox_mcp.journal._state_synced", False):
+            yield journal_dir
+
+    def test_lifecycle_reflected_in_states(self, tmp_path: Path) -> None:
+        with self._journal_at(tmp_path):
+            record_initialize("aaa111", image="python:3.12")
+            states = read_container_states()
+            assert states["aaa111"]["complete"] is False
+            assert states["aaa111"]["init_ts"]
+
+            record_initialize_complete("aaa111")
+            record_exec("aaa111", ["echo hi"], exit_code=0)
+            # Second read takes the sidecar fast path (_state_synced armed).
+            states = read_container_states()
+            assert states["aaa111"]["complete"] is True
+            assert states["aaa111"]["used"] is True
+
+    def test_stop_prunes_entry(self, tmp_path: Path) -> None:
+        with self._journal_at(tmp_path) as journal_dir:
+            record_initialize("aaa111", image="python:3.12")
+            record_initialize_complete("aaa111")
+            record_stop("aaa111")
+            assert "aaa111" not in read_container_states()
+            # The sidecar file itself is pruned too, keeping it bounded by
+            # active containers rather than all-time history.
+            sidecar = json.loads((journal_dir / "container_state.json").read_text())
+            assert "aaa111" not in sidecar
+
+    def test_rebuild_from_journal_prunes_stopped(self, tmp_path: Path) -> None:
+        with self._journal_at(tmp_path) as journal_dir:
+            record_initialize("aaa111", image="python:3.12")
+            record_stop("aaa111")
+            record_initialize("bbb222", image="python:3.12")
+            (journal_dir / "container_state.json").unlink()
+
+            states = read_container_states()
+            assert "aaa111" not in states
+            assert states["bbb222"]["init_ts"]
+
+    def test_sidecar_vanished_recovers_from_journal(self, tmp_path: Path) -> None:
+        with self._journal_at(tmp_path) as journal_dir:
+            record_initialize("aaa111", image="python:3.12")
+            read_container_states()  # arm the fast path
+            (journal_dir / "container_state.json").unlink()
+
+            states = read_container_states()
+            assert states["aaa111"]["init_ts"]
+            assert (journal_dir / "container_state.json").exists()
+
+    def test_first_read_rebuilds_despite_fresher_sidecar(self, tmp_path: Path) -> None:
+        """A crash between journal append and sidecar update must not be masked.
+
+        A later ``record_*`` makes the sidecar mtime fresher than the journal,
+        so the mtime comparison alone would trust the stale sidecar forever.
+        A crash implies a process restart, and the first read in each process
+        re-syncs unconditionally from the journal.
+        """
+        with self._journal_at(tmp_path) as journal_dir:
+            record_initialize("aaa111", image="python:3.12")
+            record_initialize_complete("aaa111")
+            read_container_states()  # arm the fast path
+
+            # Simulate the lost update: complete=True reached the journal but
+            # not the sidecar, and the sidecar mtime ended up fresher.
+            sidecar = journal_dir / "container_state.json"
+            sidecar.write_text(json.dumps({
+                "aaa111": {"complete": False, "used": False,
+                           "stopped": False, "init_ts": None},
+            }))
+            bump = (journal_dir / "journal.log").stat().st_mtime_ns + 10**9
+            os.utime(sidecar, ns=(bump, bump))
+
+            # Within the same process the fast path trusts the fresher sidecar…
+            assert read_container_states()["aaa111"]["complete"] is False
+            # …but a new process (crash implies restart) re-syncs from the journal.
+            with patch("code_sandbox_mcp.journal._state_synced", False):
+                assert read_container_states()["aaa111"]["complete"] is True

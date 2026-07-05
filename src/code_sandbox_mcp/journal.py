@@ -24,6 +24,11 @@ from typing import Any
 _JOURNAL_DIR: Path = Path.home() / ".code-sandbox-mcp"
 _JOURNAL_PATH: Path = _JOURNAL_DIR / "journal.log"
 
+
+def _get_state_path() -> Path:
+    """Return the sidecar state file path (derived from _JOURNAL_DIR)."""
+    return _JOURNAL_DIR / "container_state.json"
+
 #: Module-level lock for thread-safe journal writes.
 _lock: threading.Lock = threading.Lock()
 
@@ -86,6 +91,128 @@ def _append_json(entry: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Container state sidecar (Issue #305)
+# ---------------------------------------------------------------------------
+
+
+#: Whether this process has re-synced the sidecar from the journal.  A crash
+#: between the journal append and the sidecar update in ``record_*`` loses the
+#: sidecar update, and a later ``record_*`` makes the sidecar look newer than
+#: the journal, permanently masking the loss.  The journal is always written
+#: first (a superset of the sidecar), so one unconditional rebuild per process
+#: closes that window — a crash implies a process restart.
+_state_synced: bool = False
+
+
+def _load_states_unlocked() -> dict[str, dict[str, Any]]:
+    """Load the sidecar states (caller must hold ``_lock``).
+
+    Raises :class:`FileNotFoundError` when the sidecar does not exist;
+    callers decide whether that means "empty" or "rebuild".
+    """
+    with open(_get_state_path(), "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_states_unlocked(states: dict[str, dict[str, Any]]) -> None:
+    """Atomically write the sidecar states (caller must hold ``_lock``)."""
+    _ensure_dir()
+    tmp = _get_state_path().with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(states, f, ensure_ascii=False)
+    tmp.replace(_get_state_path())
+
+
+def _update_container_state(container_id: str, **updates: Any) -> None:
+    """Update a single container's state entry (thread-safe, atomic).
+
+    A ``stopped=True`` update removes the entry instead of flagging it: the
+    sidecar only tracks containers that may still be alive, so it stays
+    bounded by the number of active containers instead of growing with
+    history.
+    """
+    with _lock:
+        try:
+            states = _load_states_unlocked()
+        except FileNotFoundError:
+            states = {}
+        s = states.setdefault(
+            container_id,
+            {"complete": False, "used": False, "stopped": False, "init_ts": None},
+        )
+        for k, v in updates.items():
+            if v is not None:
+                s[k] = v
+        if s.get("stopped"):
+            states.pop(container_id, None)
+        _save_states_unlocked(states)
+
+
+def _rebuild_states_unlocked() -> dict[str, dict[str, Any]]:
+    """Rebuild container states from the journal (caller must hold ``_lock``).
+
+    Stopped containers are dropped, mirroring the pruning in
+    :func:`_update_container_state`.
+    """
+    states: dict[str, dict[str, Any]] = {}
+    for entry in _read_journal_unlocked():
+        cid = entry.get("container_id")
+        if not cid:
+            continue
+        op = entry.get("operation")
+        if op == "stop":
+            states.pop(cid, None)
+            continue
+        if op not in ("initialize", "initialize_complete", "exec"):
+            continue
+        s = states.setdefault(
+            cid,
+            {"complete": False, "used": False, "stopped": False, "init_ts": None},
+        )
+        if op == "initialize":
+            s["init_ts"] = entry.get("ts")
+        elif op == "initialize_complete":
+            s["complete"] = True
+        else:
+            s["used"] = True
+    return states
+
+
+def read_container_states() -> dict[str, dict[str, Any]]:
+    """Return per-container lifecycle state summary (sidecar fast path).
+
+    Normally reads the sidecar, which is bounded by the number of active
+    containers.  Falls back to a full journal scan (rewriting the sidecar)
+    whenever the sidecar cannot be trusted: on the first read in each
+    process (see ``_state_synced``), when the journal is newer than the
+    sidecar (crash between journal append and sidecar update), or when the
+    sidecar vanished between the stat and the read.
+
+    Containers with a recorded ``stop`` have no entry; ``stopped`` is kept
+    in the value shape for interface stability but is never ``True``.
+    """
+    global _state_synced
+    with _lock:
+        if _state_synced:
+            state_path = _get_state_path()
+            journal_mtime = (
+                _JOURNAL_PATH.stat().st_mtime_ns if _JOURNAL_PATH.exists() else 0
+            )
+            state_mtime = (
+                state_path.stat().st_mtime_ns if state_path.exists() else 0
+            )
+            if journal_mtime <= state_mtime:
+                try:
+                    return _load_states_unlocked()
+                except FileNotFoundError:
+                    pass  # vanished after the stat — rebuild below
+        states = _rebuild_states_unlocked()
+        _save_states_unlocked(states)
+        _state_synced = True
+        return states
+
+
+# ---------------------------------------------------------------------------
 # Convenience recorders
 # ---------------------------------------------------------------------------
 
@@ -120,6 +247,7 @@ def record_initialize(
     if cpus is not None:
         entry["cpus"] = cpus
     _append_json(entry)
+    _update_container_state(container_id, init_ts=entry["ts"])
 
 
 def record_initialize_complete(container_id: str) -> None:
@@ -138,6 +266,7 @@ def record_initialize_complete(container_id: str) -> None:
         "container_id": container_id,
         "operation": "initialize_complete",
     })
+    _update_container_state(container_id, complete=True)
 
 
 def record_exec(
@@ -176,6 +305,7 @@ def record_exec(
     if input_hash:
         entry["input_hash"] = input_hash
     _append_json(entry)
+    _update_container_state(container_id, used=True)
 
 
 def record_stop(container_id: str) -> None:
@@ -187,6 +317,7 @@ def record_stop(container_id: str) -> None:
         "container_id": container_id,
         "operation": "stop",
     })
+    _update_container_state(container_id, stopped=True)
     remove_run_id(container_id)
 
 
@@ -318,6 +449,23 @@ def record_test_environment(
 # ---------------------------------------------------------------------------
 
 
+def _read_journal_unlocked() -> list[dict[str, Any]]:
+    """Parse every journal line into dicts (caller must hold ``_lock``)."""
+    if not _JOURNAL_PATH.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    with open(_JOURNAL_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
 def read_journal(
     run_id: str | None = None,
     max_entries: int | None = None,
@@ -336,28 +484,19 @@ def read_journal(
     Returns:
         List of journal entry dicts, oldest first.
     """
-    if not _JOURNAL_PATH.exists():
-        return []
+    with _lock:
+        raw = _read_journal_unlocked()
 
     entries: list[dict[str, Any]] = []
-    with _lock:
-        with open(_JOURNAL_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if run_id is not None and entry.get("run_id") != run_id:
-                    continue
-                ts = entry.get("ts", "")
-                if from_ts is not None and ts < from_ts:
-                    continue
-                if to_ts is not None and ts >= to_ts:
-                    continue
-                entries.append(entry)
+    for entry in raw:
+        if run_id is not None and entry.get("run_id") != run_id:
+            continue
+        ts = entry.get("ts", "")
+        if from_ts is not None and ts < from_ts:
+            continue
+        if to_ts is not None and ts >= to_ts:
+            continue
+        entries.append(entry)
 
     if max_entries is not None and len(entries) > max_entries:
         entries = entries[-max_entries:]

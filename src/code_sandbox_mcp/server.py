@@ -6,7 +6,6 @@ This module defines the FastMCP server and all tool handlers.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import threading
@@ -15,11 +14,6 @@ import time
 from fastmcp import FastMCP
 
 from code_sandbox_mcp.github_auth import setup_github_app_token
-from code_sandbox_mcp.journal import record_tool_use
-from code_sandbox_mcp.result_cache import (
-    get_cache_stats,
-    invalidate_cache,
-)
 from code_sandbox_mcp.security import (
     compute_default_limits,
     set_default_profile,
@@ -121,41 +115,6 @@ sandbox_trace = mcp.tool()(sandbox_trace)
 sandbox_list_runs = mcp.tool()(sandbox_list_runs)
 sandbox_journal_path = mcp.tool()(sandbox_journal_path)
 sandbox_trace_dir = mcp.tool()(sandbox_trace_dir)
-
-
-@mcp.tool()
-def sandbox_cache_stats() -> str:
-    """Return result cache statistics.
-
-    Returns:
-        JSON string with cache stats (total_entries, total_size_bytes,
-        oldest/newest entry timestamps).
-    """
-    stats = get_cache_stats()
-    return json.dumps(stats, ensure_ascii=False)
-
-
-@mcp.tool()
-def sandbox_cache_invalidate(key: str | None = None) -> str:
-    """Invalidate result cache entries.
-
-    Args:
-        key: Optional specific cache key to invalidate.
-             If omitted, all cache entries are invalidated.
-
-    Returns:
-        JSON string with ``invalidated`` count.
-    """
-    # "system" is a sentinel container_id for tools without a container
-    # context.  Downstream consumers (dashboard, trace) must handle it as
-    # a valid container-less entry.
-    record_tool_use(
-        "system",
-        "sandbox_cache_invalidate",
-        {"key": key},
-    )
-    count = invalidate_cache(key=key)
-    return json.dumps({"invalidated": count})
 
 
 # ---------------------------------------------------------------------------

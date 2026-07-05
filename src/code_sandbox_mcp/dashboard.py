@@ -22,7 +22,6 @@ from code_sandbox_mcp.journal import (
     get_tool_usage,
     read_journal,
 )
-from code_sandbox_mcp.result_cache import get_cache_stats
 
 # ---------------------------------------------------------------------------
 # HTML template pages
@@ -93,10 +92,6 @@ details {{ font-size: 10px; color: #484f58; margin-top: 8px; }}
     <div class="val">{boundary_count}</div>
     <div class="meta" style="margin-top:8px">VCS Operations</div>
     <div class="val">{vcs_ops}</div>
-    <div class="meta" style="margin-top:8px">Cache Hit Rate</div>
-    <div class="val">{cache_hit_rate}</div>
-    <div class="meta" style="margin-top:8px">Cache Entries</div>
-    <div class="val">{cache_entries}</div>
     <div class="meta" style="margin-top:8px">Running Services</div>
     <div class="val">{running_services}</div>
   </div>
@@ -497,22 +492,11 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
         active_section = _render_active_environments()
 
-        cache_stats = get_cache_stats()
-        cache_hit_rate = "N/A"
-        if total_ops > 0:
-            cached_count = sum(
-                1 for _ in read_journal()
-                if _.get("cached") is True
-            )
-            cache_hit_rate = f"{cached_count / total_ops * 100:.1f}%"
-
         html_content = _DASHBOARD_HTML.format(
             total_runs=len(runs),
             total_ops=total_ops,
             boundary_count=boundary_count,
             vcs_ops=vcs_ops,
-            cache_hit_rate=cache_hit_rate,
-            cache_entries=cache_stats.get("total_entries", 0),
             running_services=running_services,
             journal_path=str(get_journal_path()),
             journal_entries=journal_entries,

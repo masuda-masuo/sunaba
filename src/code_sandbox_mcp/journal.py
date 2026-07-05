@@ -275,15 +275,13 @@ def record_exec(
     exit_code: int,
     verbose: str = "summary",
     allow_network: bool = False,
-    cached: bool = False,
     output_size: int = 0,
     max_output_tokens: int | None = None,
-    input_hash: str = "",
 ) -> None:
     """Append an ``exec`` operation entry to the run journal.
 
-    Records the executed commands, exit code, and metadata (cache hit,
-    output size, boundary crossing) under the run id resolved from
+    Records the executed commands, exit code, and metadata (output
+    size, boundary crossing) under the run id resolved from
     *container_id*.
     """
     run_id = get_or_create_run_id(container_id)
@@ -297,13 +295,10 @@ def record_exec(
         "exit_code": exit_code,
         "verbose": verbose,
         "boundary_crossing": boundary,
-        "cached": cached,
         "output_size": output_size,
     }
     if max_output_tokens is not None:
         entry["max_output_tokens"] = max_output_tokens
-    if input_hash:
-        entry["input_hash"] = input_hash
     _append_json(entry)
     _update_container_state(container_id, used=True)
 

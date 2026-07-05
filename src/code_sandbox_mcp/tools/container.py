@@ -45,11 +45,6 @@ from code_sandbox_mcp.output_control import (
     truncate_output,
 )
 from code_sandbox_mcp.proxy_client import authorized_read_grant
-from code_sandbox_mcp.result_cache import (
-    compute_cache_key,
-    is_cacheable,
-    set_cached_result,
-)
 from code_sandbox_mcp.security import (
     CREATED_AT_LABEL,
     MANAGED_LABEL,
@@ -1516,7 +1511,6 @@ def run_container_and_exec(
     pip_args: str | None = None,
     timeout: int = 0,
     max_output_tokens: int = 0,
-    input_hash: str = "",
 ) -> str:
     """Start a container, execute commands, then remove it (one-shot).
 
@@ -1850,7 +1844,6 @@ def run_container_and_exec(
         "truncated": meta.truncated,
         "next_offset": page.next_offset,
         "has_more": page.has_more,
-        "cached": False,
     }
 
     if exit_code != 0:
@@ -1862,17 +1855,11 @@ def run_container_and_exec(
     if pr_error:
         result["pr_warning"] = pr_error
 
-    # Cache the result (skip for volatile commands)
-    if is_cacheable(commands):
-        cache_key = compute_cache_key(resolved, commands, input_hash=input_hash, container_id=container_id[:12])
-        set_cached_result(cache_key, result)
-
     journal_record_exec(
         container_id,
         commands,
         exit_code,
         verbose=verbose,
-        cached=False,
         output_size=raw_size,
         max_output_tokens=max_output_tokens if max_output_tokens > 0 else None,
     )

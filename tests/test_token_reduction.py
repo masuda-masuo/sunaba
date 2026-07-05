@@ -5,8 +5,7 @@ Tests cover:
 - ``truncate_by_tokens`` — token-budget-based truncation
 - ``compute_failure_fingerprint`` — failure pattern detection
 - ``compress_failures`` — isomorphic failure compression
-- ``record_exec`` with cached/output_size fields
-- ``sandbox_cache_stats`` tool
+- ``record_exec`` with output_size field
 """
 from __future__ import annotations
 
@@ -20,10 +19,6 @@ from code_sandbox_mcp.output_control import (
     compute_failure_fingerprint,
     estimate_tokens,
     truncate_by_tokens,
-)
-from code_sandbox_mcp.server import (
-    sandbox_cache_invalidate,
-    sandbox_cache_stats,
 )
 
 # =======================================================================
@@ -155,7 +150,7 @@ class TestCompressFailures:
 
 
 # =======================================================================
-# record_exec with cached/output_size
+# record_exec with output_size
 # =======================================================================
 
 
@@ -184,10 +179,10 @@ class TestCompressFailures:
         assert fp1 == fp2, "File paths should be normalized"
 
 
-class TestRecordExecCacheFields:
-    """Tests for journal record_exec with cached/output_size fields."""
+class TestRecordExecOutputFields:
+    """Tests for journal record_exec output_size/max_output_tokens fields."""
 
-    def test_record_exec_default_cached_false(self, tmp_path: Path) -> None:
+    def test_record_exec_default_output_size(self, tmp_path: Path) -> None:
         journal_dir = tmp_path / "journal"
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
@@ -197,20 +192,7 @@ class TestRecordExecCacheFields:
             record_exec("abc123", ["echo hello"], exit_code=0)
 
         entries = _read_log(log_path)
-        assert entries[0].get("cached") is False
         assert entries[0].get("output_size") == 0
-
-    def test_record_exec_with_cached_true(self, tmp_path: Path) -> None:
-        journal_dir = tmp_path / "journal"
-        journal_dir.mkdir()
-        log_path = journal_dir / "journal.log"
-
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
-            record_exec("abc123", ["echo hello"], exit_code=0, cached=True)
-
-        entries = _read_log(log_path)
-        assert entries[0].get("cached") is True
 
     def test_record_exec_with_output_size(self, tmp_path: Path) -> None:
         journal_dir = tmp_path / "journal"
@@ -236,46 +218,18 @@ class TestRecordExecCacheFields:
         entries = _read_log(log_path)
         assert entries[0].get("max_output_tokens") == 500
 
-    def test_record_exec_cached_false_no_max_tokens(self, tmp_path: Path) -> None:
+    def test_record_exec_no_max_tokens(self, tmp_path: Path) -> None:
         journal_dir = tmp_path / "journal"
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
         with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
              patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
-            record_exec("abc123", ["echo hello"], exit_code=0, cached=False, output_size=100)
+            record_exec("abc123", ["echo hello"], exit_code=0, output_size=100)
 
         entries = _read_log(log_path)
-        assert entries[0].get("cached") is False
         assert entries[0].get("output_size") == 100
         assert entries[0].get("max_output_tokens") is None
-
-
-# =======================================================================
-# sandbox_cache_stats / sandbox_cache_invalidate
-# =======================================================================
-
-
-class TestSandboxCacheTools:
-    """Tests for cache management tools."""
-
-    def test_cache_stats_returns_json(self) -> None:
-        with patch("code_sandbox_mcp.server.get_cache_stats") as mock_stats:
-            mock_stats.return_value = {"total_entries": 0, "total_size_bytes": 0}
-            result = json.loads(sandbox_cache_stats())
-            assert result["total_entries"] == 0
-
-    def test_cache_invalidate_returns_count(self) -> None:
-        with patch("code_sandbox_mcp.server.invalidate_cache") as mock_inv:
-            mock_inv.return_value = 3
-            result = json.loads(sandbox_cache_invalidate())
-            assert result["invalidated"] == 3
-
-    def test_cache_invalidate_specific_key(self) -> None:
-        with patch("code_sandbox_mcp.server.invalidate_cache") as mock_inv:
-            mock_inv.return_value = 1
-            result = json.loads(sandbox_cache_invalidate(key="abc123"))
-            assert result["invalidated"] == 1
 
 
 def _read_log(path: Path) -> list[dict]:

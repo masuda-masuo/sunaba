@@ -85,8 +85,7 @@
 
 ### 3.2 全文ではなく「差分」を返す（反復ループの本命）
 - [x] **失敗のフィンガープリント＋重複圧縮**: 同型失敗は `×N` に畳む（`compress_failures`）。
-- [x] **コンテンツアドレスな結果キャッシュ**: image＋コマンド＋入力ハッシュが不変なら `cached: true`（`result_cache.py`）。
-  - **キャッシュ管理ツール**: `sandbox_cache_stats`（ヒット率・エントリ数の統計）/ `sandbox_cache_invalidate`（`key` 指定 or 全件無効化）。キャッシュが古い結果を返すときの手動リセット経路。
+- ~~コンテンツアドレスな結果キャッシュ~~: V1.0 の棚卸し（#457 / #459）で削除。default-deny 運用下ではヒット率が低く、鮮度バグの温床だった（#329 / #382）。再導入するなら `package_install` 内部などツール局所で。
 - **`publish` の差分も非通過**: diff はコンテナ内で完結し、LLM には差分サマリ＋ハンドルのみ返す。
 
 ### 3.3 返す前にデノイズ
@@ -279,8 +278,6 @@ else:
 | `sandbox_list_runs` | （なし） | — | 読取専用 |
 | `sandbox_journal_path` | （なし） | — | 読取専用 |
 | `sandbox_trace_dir` | （なし） | — | 読取専用 |
-| `sandbox_cache_invalidate` | `record_tool_use` | `tool_use` | #359 Tier 4 |
-| `sandbox_cache_stats` | （なし） | — | 読取専用 |
 | `package_install` | `record_exec` | `exec` | #361 で追加 |
 
 テストファイル: `tests/test_journal.py` に対応する単体テストを追加済み（#359 用の

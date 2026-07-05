@@ -253,6 +253,8 @@ This is the full reference. You almost never touch most of it directly — the c
 
 ### Observability
 
+These journal/trace **read** tools are opt-in: set `CSB_OBSERVABILITY_TOOLS=1` in the server environment to register them. Telemetry recording itself is always on; for aggregation, reading `~/.code-sandbox-mcp/journal.log` directly on the host works without any of these tools.
+
 | Tool | Description |
 |------|-------------|
 | `sandbox_read_journal` | Read the append-only execution journal. Filter by `run_id`, limit by `max_entries`. |

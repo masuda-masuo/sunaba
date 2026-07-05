@@ -22,12 +22,6 @@ from code_sandbox_mcp.output_control import (
     truncate_by_tokens,
     truncate_output,
 )
-from code_sandbox_mcp.result_cache import (
-    compute_cache_key,
-    get_cached_result,
-    is_cacheable,
-    set_cached_result,
-)
 from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _coerce_list_arg, _docker
 
 
@@ -41,7 +35,6 @@ def sandbox_exec(
     limit: int = 50,
     timeout: int = 0,
     max_output_tokens: int = 0,
-    input_hash: str = "",
     argv: Annotated[list[str], BeforeValidator(_coerce_list_arg)] | None = None,
 ) -> str:
     """Execute commands inside a running sandbox container.
@@ -161,41 +154,11 @@ def sandbox_exec(
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
-    # --- Result cache lookup ---
-    try:
-        raw = container.image.tags[0] if container.image.tags else container.image.id
-        image_ref = str(raw) if not isinstance(raw, str) else raw
-    except Exception:
-        image_ref = container_id[:12]
-    # Namespace argv-mode separately so it never collides with a
-    # shell-mode call that happens to share an identical token list.
     if argv is not None:
-        cache_subject = ["\x00argv\x00", *argv]
+        journal_subject = list(argv)
     else:
         assert commands is not None  # guaranteed by validation above
-        cache_subject = commands
-    # Volatile commands (git diff/status/add, mutable file ops) must never
-    # be cached — their output depends on the current working-tree / index
-    # state (issue #329 P1/P2/P4).
-    cacheable = is_cacheable(cache_subject)
-    cache_key = compute_cache_key(image_ref, cache_subject, input_hash=input_hash, container_id=container_id[:12])
-
-    if cacheable:
-        cached = get_cached_result(cache_key)
-    else:
-        cached = None
-    if cached is not None:
-        # Journal the cache hit
-        journal_record_exec(
-            container_id[:12],
-            cache_subject,
-            cached.get("exit_code", 0),
-            verbose=verbose,
-            cached=True,
-            output_size=0,
-        )
-        cached["cached"] = True
-        return json.dumps(cached)
+        journal_subject = commands
 
     # --- Execute ---
     if use_argv:
@@ -286,26 +249,19 @@ def sandbox_exec(
         "truncated": meta.truncated,
         "next_offset": page.next_offset,
         "has_more": page.has_more,
-        "cached": False,
     }
     if exit_code != 0:
         result["exit_code"] = exit_code
     if stderr_text and verbose != "error_only":
         result["stderr"] = stderr_text
 
-    # Store in result cache (skip for volatile commands and failures)
-    if cacheable and exit_code == 0:
-        set_cached_result(cache_key, result)
-
     journal_record_exec(
         container_id[:12],
-        cache_subject,
+        journal_subject,
         exit_code,
         verbose=verbose,
-        cached=False,
         output_size=raw_size,
         max_output_tokens=max_output_tokens if max_output_tokens > 0 else None,
-        input_hash=input_hash,
     )
 
     return json.dumps(result)

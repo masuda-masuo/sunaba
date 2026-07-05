@@ -60,7 +60,7 @@ The most expensive thing an AI coding loop does is re-read output. So the contra
 
 - **Structured results, not 5000-line logs.** A passing test run is a one-liner: `{status: ok, passed: 120, duration: 4.2s}`. A failure is `{test, error, file, line}` — the exact assertion and location, no scrollback.
 - **State lives on the server; the LLM holds a handle.** Every result is keyed by a `run_id`. "Show me the rest of the log" or "re-run only what failed" cost a handle, not a giant re-submission. Large artifacts (coverage, generated files) come back as sized resource handles, never inlined.
-- **Diffs, not full text.** Across an iteration loop the tools fold duplicate failures into `×N` and serve cached results when inputs are unchanged.
+- **Diffs, not full text.** Edits return a unified diff of what changed (`transform_file`), verification returns a `git diff --stat` summary, and duplicate failures fold into `×N`.
 - **Denoise before returning.** ANSI color, timestamps, progress bars, and library/framework stack frames are stripped so only the user's code remains.
 
 > The escape hatch is always present: defaults are diffs and summaries, but the full output is *always* retrievable by handle via `offset`/`limit`.
@@ -272,13 +272,6 @@ This is the full reference. You almost never touch most of it directly — the c
 | `checkpoint_restore` | Restore working tree to a previous checkpoint (`git reset --hard`). |
 | `publish` | Stage, commit, push, and optionally create a PR (one-shot). |
 | `sandbox_issue_write` | Create a GitHub issue or comment on one, host-side (one-shot, #414). |
-
-### Sandbox management
-
-| Tool | Description |
-|------|-------------|
-| `sandbox_cache_invalidate` | Invalidate result cache entries. |
-| `sandbox_cache_stats` | Return result cache statistics. |
 
 ## Sandbox image
 

@@ -574,7 +574,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             details = ""
 
             if op == "initialize":
-                details = f'image={_escape(e.get("image", ""))} net={e.get("allow_network","")} vcs={e.get("inject_vcs_token","")}'
+                details = f'image={_escape(e.get("image", ""))} net={e.get("allow_network","")}'
             elif op == "exec":
                 cmds = " && ".join(e.get("commands", []))
                 ec = e.get("exit_code", 0)

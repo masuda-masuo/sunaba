@@ -103,8 +103,8 @@ def _build_clone_command(
     (``_REPO_FORMAT_RE`` / ``_validate_clone_repo``), so interpolating it
     into the HTTPS URL is injection-safe.
 
-    - **authenticated** (a VCS token is present, e.g. ``inject_vcs_token``
-      or ``gh auth setup-git`` succeeded): use ``gh repo clone``, which
+    - **authenticated** (a VCS token is present, e.g. ``gh auth setup-git``
+      succeeded): use ``gh repo clone``, which
       authenticates via ``GH_TOKEN`` and so handles private *and* public
       repositories.
     - **anonymous** (no token): use a plain ``git clone`` over HTTPS.

@@ -559,7 +559,7 @@ class CloneResult(NamedTuple):
     error: str | None
 
 
-def _editable_install_cmd(target: str) -> str:
+def _editable_install_cmd(target: str, pip_args: str = "") -> str:
     """Build a shell command that pip-installs *target* (e.g. ``".[dev]"``).
 
     The installer is chosen at runtime inside the container (#390): images
@@ -569,12 +569,20 @@ def _editable_install_cmd(target: str) -> str:
     (``~/.local``) fallback is the only working path for a non-root user —
     uv has no ``--user``, ``--system`` hits root-owned site-packages, and
     the former mktemp-venv workaround discarded the install (#380 / #383).
+
+    Args:
+        target: Package target string (e.g. ``".[dev]"``).
+        pip_args: Additional pip arguments (e.g. ``"--index-url https://..."``).
     """
     quoted = shlex.quote(target)
+    args_part = ""
+    if pip_args:
+        tokens = shlex.split(pip_args)
+        args_part = " " + " ".join(shlex.quote(t) for t in tokens)
     return (
         'if [ -n "$VIRTUAL_ENV" ] && command -v uv >/dev/null 2>&1; '
-        f"then uv pip install -q -e {quoted}; "
-        f"else pip install -e {quoted} -q; fi"
+        f"then uv pip install -q -e {quoted}{args_part}; "
+        f"else pip install -e {quoted} -q{args_part}; fi"
     )
 
 
@@ -584,6 +592,7 @@ def _run_pip_install(
     clone_dest: str,
     pip_extras: str,
     allow_network: bool = True,
+    pip_args: str | None = None,
 ) -> None:
     """Run pip install inside the container after a successful clone.
 
@@ -595,6 +604,8 @@ def _run_pip_install(
         allow_network: Whether the container has network access.  PyPI is
             unreachable without it, so the install would just hang until pip's
             own connect timeout fires; skip it instead.
+        pip_args: Additional pip arguments (e.g. ``"--index-url https://..."``).
+            Ignored when the caller passes ``pip_extras=None`` (pip install skipped).
     """
     if not allow_network:
         logger.info(
@@ -604,7 +615,8 @@ def _run_pip_install(
         return
     repo_name = clone_repo.split("/")[-1]
     safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
-    install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}')}"
+    local_pip_args = pip_args or ""
+    install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", install_cmd],
         stdout=True,
@@ -745,6 +757,7 @@ def _setup_pr_branch(
     *,
     authenticated: bool = True,
     open_read_window: bool = False,
+    pip_args: str | None = None,
 ) -> str:
     """Clone repo and check out PR branch inside the container.
 
@@ -771,6 +784,8 @@ def _setup_pr_branch(
             Pass ``None`` to skip pip install entirely.
         authenticated: Whether the container env actually carries a VCS
             token (ground truth: the env actually built, #356).
+        pip_args: Additional pip arguments (e.g. ``"--index-url https://..."``).
+            Ignored when *pip_extras* is ``None`` since pip install is skipped entirely.
         open_read_window: When ``True`` and *authenticated* is ``False``,
             wrap the anonymous clone + fetch/checkout in a short-lived
             egress-proxy read-authorization window (#419) with a
@@ -912,8 +927,9 @@ def _setup_pr_branch(
     # chosen at runtime by _editable_install_cmd (#390); network is always
     # available here since sandbox_initialize forces allow_network=True
     # whenever pr is set.
+    local_pip_args = pip_args or ""
     if pip_extras is not None:
-        install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}')}"
+        install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
         exit_code, output = container.exec_run(
             ["/bin/sh", "-c", install_cmd],
             stdout=True,
@@ -1057,6 +1073,7 @@ def sandbox_initialize(
     repo: str | None = None,
     pr: int | None = None,
     pip_extras: str | None = "[dev]",
+    pip_args: str | None = None,
     mem_limit: str | None = None,
     cpus: float | None = None,
 ) -> str:
@@ -1136,6 +1153,8 @@ def sandbox_initialize(
                *clone_repo* is specified, and skipped automatically (with a
                log message) when the container has no network access, since
                PyPI would be unreachable.
+        pip_args: Additional pip arguments (e.g. ``"--index-url https://download.pytorch.org/whl/cpu"``).
+            Ignored when *pip_extras* is ``None`` since pip install is skipped entirely.
         mem_limit: Optional memory-limit override (e.g. ``"2g"``).
                The default profile caps containers at 512MB with swap
                disabled, which OOM-thrashes heavy installs (e.g. torch)
@@ -1308,7 +1327,7 @@ def sandbox_initialize(
             clone_msg = " " + (msg or "")
         if pip_extras is not None and err is None:
             _run_pip_install(
-                container, clone_repo, clone_dest, pip_extras, allow_network
+                container, clone_repo, clone_dest, pip_extras, allow_network, pip_args
             )
     elif clone_repo and pr is not None:
         logger.info(
@@ -1340,6 +1359,7 @@ def sandbox_initialize(
                     pip_extras,
                     authenticated=container_has_token,
                     open_read_window=open_read_window,
+                    pip_args=pip_args,
                 )
             except Exception as e:
                 # PR setup failure is non-fatal: the container is still usable.
@@ -1364,6 +1384,7 @@ async def sandbox_initialize_tool(
     repo: str | None = None,
     pr: int | None = None,
     pip_extras: str | None = "[dev]",
+    pip_args: str | None = None,
     mem_limit: str | None = None,
     cpus: float | None = None,
     ctx: Context | None = None,
@@ -1407,6 +1428,7 @@ async def sandbox_initialize_tool(
             repo=repo,
             pr=pr,
             pip_extras=pip_extras,
+            pip_args=pip_args,
             mem_limit=mem_limit,
             cpus=cpus,
         )
@@ -1511,6 +1533,7 @@ def run_container_and_exec(
     repo: str | None = None,
     pr: int | None = None,
     pip_extras: str | None = "[dev]",
+    pip_args: str | None = None,
     timeout: int = 0,
     max_output_tokens: int = 0,
     input_hash: str = "",
@@ -1595,6 +1618,9 @@ def run_container_and_exec(
                *clone_repo* is specified, and skipped automatically (with a
                log message) when the container has no network access, since
                PyPI would be unreachable.
+        pip_args: Additional pip arguments (e.g. ``"--index-url https://download.pytorch.org/whl/cpu"``)
+               passed through to the pip install command.
+               Ignored when *pip_extras* is ``None`` since pip install is skipped entirely.
         timeout: Maximum seconds to let the command run (``0`` = no
                limit, the default).  When the timeout expires the process
                is killed and the tool returns ``status="timeout"`` with
@@ -1721,7 +1747,7 @@ def run_container_and_exec(
         )
         if pip_extras is not None and clone_error is None:
             _run_pip_install(
-                container, clone_repo, clone_dest, pip_extras, allow_network
+                container, clone_repo, clone_dest, pip_extras, allow_network, pip_args
             )
     elif clone_repo and pr is not None:
         logger.info(
@@ -1748,6 +1774,7 @@ def run_container_and_exec(
                     clone_dest,
                     pip_extras,
                     authenticated=container_has_token,
+                    pip_args=pip_args,
                 )
             except Exception as e:
                 logger.warning("PR branch setup failed: %s", e)

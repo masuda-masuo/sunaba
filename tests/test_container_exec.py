@@ -464,3 +464,78 @@ class TestRunContainerAndExecTimeout:
 
         assert result["status"] == "error"
         assert "timeout" in result["error"]
+
+
+class TestPipArgs:
+    """Tests for pip_args propagation through _run_pip_install."""
+
+    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
+    @patch("code_sandbox_mcp.tools.container._try_clone_into_container", return_value=("cloned", None))
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_pip_args_passed_to_exec_run(
+        self,
+        mock_validate: MagicMock,
+        mock_docker: MagicMock,
+        mock_clone: MagicMock,
+        mock_preclone_exists: MagicMock,
+    ) -> None:
+        container = MagicMock()
+        container.id = "abc123def456"
+        container.exec_run.return_value = (0, (b"output", b""))
+        client = MagicMock()
+        client.containers.run.return_value = container
+        mock_docker.return_value = client
+
+        run_container_and_exec(
+            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            commands=["echo hello"],
+            clone_repo="owner/repo",
+            allow_network=True,
+            pip_args="--index-url https://example.com",
+        )
+
+        # Find the exec_run call that contains the pip install command
+        pip_calls = [
+            call for call in container.exec_run.call_args_list
+            if "pip install" in str(call)
+        ]
+        assert pip_calls, "pip install should be called via exec_run"
+        call_str = str(pip_calls[0])
+        assert "--index-url" in call_str
+        assert "https://example.com" in call_str
+
+    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
+    @patch("code_sandbox_mcp.tools.container._try_clone_into_container", return_value=("cloned", None))
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    def test_pip_args_none_omitted(
+        self,
+        mock_validate: MagicMock,
+        mock_docker: MagicMock,
+        mock_clone: MagicMock,
+        mock_preclone_exists: MagicMock,
+    ) -> None:
+        container = MagicMock()
+        container.id = "abc123def456"
+        container.exec_run.return_value = (0, (b"output", b""))
+        client = MagicMock()
+        client.containers.run.return_value = container
+        mock_docker.return_value = client
+
+        run_container_and_exec(
+            image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            commands=["echo hello"],
+            clone_repo="owner/repo",
+            allow_network=True,
+        )
+
+        pip_calls = [
+            call for call in container.exec_run.call_args_list
+            if "pip install" in str(call)
+        ]
+        assert pip_calls, "pip install should be called via exec_run"
+        call_str = str(pip_calls[0])
+        # No extra --index-url or double-space artifacts
+        assert "--index-url" not in call_str
+        assert "  -q" not in call_str

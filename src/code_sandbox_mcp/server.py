@@ -109,12 +109,24 @@ lint_in_container = mcp.tool()(lint_in_container)
 type_check_in_container = mcp.tool()(type_check_in_container)
 verify_in_container = mcp.tool()(verify_in_container)
 
-# Journal / trace tool registrations
-sandbox_read_journal = mcp.tool()(sandbox_read_journal)
-sandbox_trace = mcp.tool()(sandbox_trace)
-sandbox_list_runs = mcp.tool()(sandbox_list_runs)
-sandbox_journal_path = mcp.tool()(sandbox_journal_path)
-sandbox_trace_dir = mcp.tool()(sandbox_trace_dir)
+# Journal / trace read tools are opt-in (#460): telemetry *writes* are
+# unconditional infrastructure, but the LLM-facing read surface stays off
+# the default tool list.  Aggregation workflows read the journal file
+# directly on the host instead.
+OBSERVABILITY_TOOLS_ENV = "CSB_OBSERVABILITY_TOOLS"
+
+
+def observability_tools_enabled() -> bool:
+    """True when the journal/trace read tools should be registered."""
+    return os.environ.get(OBSERVABILITY_TOOLS_ENV, "") not in ("", "0")
+
+
+if observability_tools_enabled():
+    sandbox_read_journal = mcp.tool()(sandbox_read_journal)
+    sandbox_trace = mcp.tool()(sandbox_trace)
+    sandbox_list_runs = mcp.tool()(sandbox_list_runs)
+    sandbox_journal_path = mcp.tool()(sandbox_journal_path)
+    sandbox_trace_dir = mcp.tool()(sandbox_trace_dir)
 
 
 # ---------------------------------------------------------------------------

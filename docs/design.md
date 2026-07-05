@@ -273,12 +273,14 @@ else:
 | `checkpoint_list` | （なし） | — | 読取専用 |
 | `checkpoint_restore` | （内部で `sandbox_exec` の `git reset --hard` を経由） | `exec` | — |
 | `publish` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write、一発実行） |
-| `sandbox_read_journal` | （なし） | — | 読取専用 |
-| `sandbox_trace` | （なし） | — | 読取専用 |
-| `sandbox_list_runs` | （なし） | — | 読取専用 |
-| `sandbox_journal_path` | （なし） | — | 読取専用 |
-| `sandbox_trace_dir` | （なし） | — | 読取専用 |
+| `sandbox_read_journal` | （なし） | — | 読取専用・opt-in（#460） |
+| `sandbox_trace` | （なし） | — | 読取専用・opt-in（#460） |
+| `sandbox_list_runs` | （なし） | — | 読取専用・opt-in（#460） |
+| `sandbox_journal_path` | （なし） | — | 読取専用・opt-in（#460） |
+| `sandbox_trace_dir` | （なし） | — | 読取専用・opt-in（#460） |
 | `package_install` | `record_exec` | `exec` | #361 で追加 |
+
+読取専用の journal/trace 5ツールは `CSB_OBSERVABILITY_TOOLS=1` のときだけ登録される（#460）。記録側（`record_*`）は無条件で動く基盤であり、集計はホスト側で journal.log を直読みすれば足りる。
 
 テストファイル: `tests/test_journal.py` に対応する単体テストを追加済み（#359 用の
 `TestRecordToolUse` クラス）。新しいツールを追加するときは必ずテストも追加すること。

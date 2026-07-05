@@ -909,6 +909,11 @@ def transform_file(
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
+    record_tool_use(
+        container_id[:12],
+        "transform_file",
+        {"file_path": file_path},
+    )
     result = transform_file_in_container(client, container_id, file_path, code)
 
     if result.get("status") == "ok" and result.get("changed"):

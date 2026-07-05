@@ -13,6 +13,7 @@ from docker.errors import NotFound
 from pydantic import BeforeValidator
 
 from code_sandbox_mcp.journal import record_exec as journal_record_exec
+from code_sandbox_mcp.journal import record_tool_use
 from code_sandbox_mcp.output_control import (
     OutputMetadata,
     compress_failures,
@@ -376,6 +377,8 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
         return json.dumps({"status": "error", "error": f"container {container_id[:12]} not found"})
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
+
+    record_tool_use(container_id[:12], "sandbox_exec_check", {"job_id": job_id})
 
     # --- Single exec: gather timing, staleness, and exit status ---
     status_result = container.exec_run(

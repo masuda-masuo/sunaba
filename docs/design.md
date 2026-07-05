@@ -84,9 +84,7 @@
 - **`issue_view` もハンドル方式**: issue 本文をコンテナ内ファイルへ落とし、LLM には要約＋ハンドルのみ返す。全文は `read_file_range` で必要時に。
 
 ### 3.2 全文ではなく「差分」を返す（反復ループの本命）
-- [x] **run間diff**: 前回比で変化点だけ返す（`sandbox_exec_diff`）。
 - [x] **失敗のフィンガープリント＋重複圧縮**: 同型失敗は `×N` に畳む（`compress_failures`）。
-- [x] **`rerun_failed(run_id)` / 影響範囲の絞り込み再実行**: 失敗分・変更ファイルが影響するテストだけ実行。
 - [x] **コンテンツアドレスな結果キャッシュ**: image＋コマンド＋入力ハッシュが不変なら `cached: true`（`result_cache.py`）。
   - **キャッシュ管理ツール**: `sandbox_cache_stats`（ヒット率・エントリ数の統計）/ `sandbox_cache_invalidate`（`key` 指定 or 全件無効化）。キャッシュが古い結果を返すときの手動リセット経路。
 - **`publish` の差分も非通過**: diff はコンテナ内で完結し、LLM には差分サマリ＋ハンドルのみ返す。
@@ -257,8 +255,6 @@ else:
 | `sandbox_exec` | `record_exec` | `exec` | — |
 | `sandbox_exec_background` | `record_exec` (exit_code=-1) | `exec` | #361 で追加 |
 | `sandbox_exec_check` | （なし） | — | ポーリング。内部で `exec` しない |
-| `sandbox_exec_diff` | `record_exec`（内部で `sandbox_exec` 利用） | `exec` | — |
-| `rerun_failed` | （内部で `sandbox_exec` 利用） | `exec` | — |
 | `run_container_and_exec` | `record_initialize` + （内部で `sandbox_exec` 利用）+ `record_stop` | initialize/exec/stop | — |
 | `sandbox_stop` | `record_stop` | `stop` | — |
 | `write_file_sandbox` | `record_file_write`（内部で `record_file_write` 呼び出し）| `write_file` | — |
@@ -285,9 +281,6 @@ else:
 | `sandbox_trace_dir` | （なし） | — | 読取専用 |
 | `sandbox_cache_invalidate` | `record_tool_use` | `tool_use` | #359 Tier 4 |
 | `sandbox_cache_stats` | （なし） | — | 読取専用 |
-| `run_test_environment` | `record_test_environment`（status="starting"） | `test_environment` | — |
-| `stop_test_environment` | `record_test_environment`（status="stopped"） | `test_environment` | — |
-| `wait_for_condition` | （なし） | — | ポーリング |
 | `package_install` | `record_exec` | `exec` | #361 で追加 |
 
 テストファイル: `tests/test_journal.py` に対応する単体テストを追加済み（#359 用の
@@ -297,8 +290,7 @@ else:
 
 ## 10. テスト環境クイックパス
 
-- `run_test_environment`: Compose相当の環境を一括起動。ネットワーク作成・ヘルスチェック待機・後片付けを自動化し、各サービスのアクセス先を返す。
-- `wait_for_condition`: TCPポート開放 / ログ内文字列 / healthy を条件に待機（タイムアウト付き）。AIによる `sleep 30` 乱用を排除。
+V1.0 の棚卸し（#457 / #458）で削除。`run_test_environment` / `stop_test_environment` / `wait_for_condition` は実利用が無いまま休眠していたため、互換シム無しで撤去した（#438 と同方針）。多サービス環境が必要な場合は `sandbox_exec` から docker compose を直接使う。
 
 ---
 
@@ -407,8 +399,6 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 - `run_container_and_exec`: 起動＋実行のワンショット。
 - `sandbox_exec`: 稼働コンテナでコマンド実行（`commands` / `argv` の2モード）。
 - `sandbox_exec_background` / `sandbox_exec_check`: 長時間コマンドの非同期実行と完了確認。
-- `sandbox_exec_diff` / `rerun_failed`: 前 run 比の差分、失敗・影響範囲の絞り込み再実行（§3.2）。
-- `run_test_environment` / `stop_test_environment` / `wait_for_condition`: Compose 相当環境の起動・停止・条件待機（§10）。
 - `sandbox_stop`: コンテナ停止・削除（未 push の checkpoint があれば警告）。
 
 **Dockerfile 管理**: `docker/Dockerfile.{base,python,go}` （§12 参照）。CI でダイジェスト固定タグをビルド・管理。

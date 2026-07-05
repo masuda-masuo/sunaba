@@ -5,7 +5,7 @@ disposable sandbox containers (not the real repository).  These tools
 form the core of the minimal edit loop:
 
     search_in_container -> read_file_range -> apply_patch
-    -> lint/type_check -> rerun_failed
+    -> lint/type_check -> verify_in_container
 
 By sending only diffs and reading only the needed lines, each iteration
 consumes only hundreds of tokens instead of thousands.

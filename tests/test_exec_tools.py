@@ -763,39 +763,6 @@ class TestCoerceListArg:
         result = ta.validate_python('["echo", "hello"]')
         assert result == ["echo", "hello"]
 
-    def test_rerun_failed_commands_coercion(self) -> None:
-        """rerun_failed commands: JSON-stringified list is coerced."""
-        from typing import Annotated
-
-        from pydantic import BeforeValidator, TypeAdapter
-
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
-        ta = TypeAdapter(Annotated[list[str], BeforeValidator(_coerce_list_arg)] | None)
-        result = ta.validate_python('["cmd1", "cmd2"]')
-        assert result == ["cmd1", "cmd2"]
-
-    def test_sandbox_exec_diff_commands_coercion(self) -> None:
-        """sandbox_exec_diff commands: JSON-stringified list is coerced."""
-        from typing import Annotated
-
-        from pydantic import BeforeValidator, TypeAdapter
-
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
-        ta = TypeAdapter(Annotated[list[str], BeforeValidator(_coerce_list_arg)])
-        result = ta.validate_python('["diff cmd1", "diff cmd2"]')
-        assert result == ["diff cmd1", "diff cmd2"]
-
-    def test_run_test_environment_services_coercion(self) -> None:
-        """run_test_environment services: JSON-stringified list[dict] is coerced."""
-        from typing import Annotated, Any
-
-        from pydantic import BeforeValidator, TypeAdapter
-
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
-        ta = TypeAdapter(Annotated[list[dict[str, Any]], BeforeValidator(_coerce_list_arg)])
-        result = ta.validate_python('[{"name": "svc1", "image": "alpine"}]')
-        assert result == [{"name": "svc1", "image": "alpine"}]
-
     def test_package_install_packages_coercion(self) -> None:
         """package_install packages: JSON-stringified list is coerced, single string passes through."""
         from typing import Annotated

@@ -421,29 +421,6 @@ def record_tool_use(
     _append_json(entry)
 
 
-def record_test_environment(
-    container_id: str,
-    services: list[dict[str, str]],
-    status: str,  # "starting" | "ready" | "stopped"
-) -> None:
-    """Record a test environment lifecycle event.
-
-    *services* is a list of dicts with keys ``name``, ``image``,
-    ``access_url`` (if available).
-
-    *status* is one of ``"starting"``, ``"ready"``, or ``"stopped"``.
-    """
-    run_id = get_or_create_run_id(container_id)
-    _append_json({
-        "ts": _utcnow_iso(),
-        "run_id": run_id,
-        "container_id": container_id,
-        "operation": "test_environment",
-        "services": services,
-        "environment_status": status,
-    })
-
-
 # ---------------------------------------------------------------------------
 # Journal reading
 # ---------------------------------------------------------------------------

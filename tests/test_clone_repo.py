@@ -702,3 +702,46 @@ class TestEditableInstallCmd:
         cmd = _editable_install_cmd("foo[bar]")
 
         assert "'foo[bar]'" in cmd, "shlex.quote should wrap target in single quotes"
+
+    def test_pip_args_appended(self) -> None:
+        from code_sandbox_mcp.tools.container import _editable_install_cmd
+
+        cmd = _editable_install_cmd('".[dev]"', pip_args="--index-url https://example.com")
+
+        assert "--index-url" in cmd
+        assert "https://example.com" in cmd
+        assert cmd.count("--index-url") == 2, "both uv and pip branches should have the arg"
+
+    def test_pip_args_empty_string(self) -> None:
+        from code_sandbox_mcp.tools.container import _editable_install_cmd
+
+        cmd_with_empty = _editable_install_cmd('".[dev]"', pip_args="")
+        cmd_with_none = _editable_install_cmd('".[dev]"')
+
+        # Verify no extra whitespace when pip_args is empty/missing
+        assert "  -q" not in cmd_with_empty
+        assert "  -q" not in cmd_with_none
+        assert cmd_with_empty == cmd_with_none
+
+    def test_pip_args_multiword(self) -> None:
+        from code_sandbox_mcp.tools.container import _editable_install_cmd
+
+        cmd = _editable_install_cmd(
+            '".[dev]"',
+            pip_args="--extra-index-url https://example.com --no-build-isolation",
+        )
+
+        assert "--extra-index-url" in cmd
+        assert "https://example.com" in cmd
+        assert "--no-build-isolation" in cmd
+
+    def test_pip_args_shell_injection_prevented(self) -> None:
+        from code_sandbox_mcp.tools.container import _editable_install_cmd
+
+        cmd = _editable_install_cmd('".[dev]"', pip_args='; rm -rf /')
+
+        # The semicolon must be quoted so the shell treats it as a literal
+        # pip argument rather than a command separator.
+        assert "\\';\\'" in cmd or "';'" in cmd
+        # The raw injection string should NOT appear unquoted as-is.
+        assert "'; rm -rf /'" not in cmd

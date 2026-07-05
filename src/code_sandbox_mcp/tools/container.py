@@ -575,7 +575,10 @@ def _editable_install_cmd(target: str, pip_args: str = "") -> str:
         pip_args: Additional pip arguments (e.g. ``"--index-url https://..."``).
     """
     quoted = shlex.quote(target)
-    args_part = f" {pip_args}" if pip_args else ""
+    args_part = ""
+    if pip_args:
+        tokens = shlex.split(pip_args)
+        args_part = " " + " ".join(shlex.quote(t) for t in tokens)
     return (
         'if [ -n "$VIRTUAL_ENV" ] && command -v uv >/dev/null 2>&1; '
         f"then uv pip install -q -e {quoted}{args_part}; "
@@ -602,6 +605,7 @@ def _run_pip_install(
             unreachable without it, so the install would just hang until pip's
             own connect timeout fires; skip it instead.
         pip_args: Additional pip arguments (e.g. ``"--index-url https://..."``).
+            Ignored when the caller passes ``pip_extras=None`` (pip install skipped).
     """
     if not allow_network:
         logger.info(
@@ -611,7 +615,8 @@ def _run_pip_install(
         return
     repo_name = clone_repo.split("/")[-1]
     safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
-    install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', pip_args or '')}"
+    local_pip_args = pip_args or ""
+    install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
     exit_code, output = container.exec_run(
         ["/bin/sh", "-c", install_cmd],
         stdout=True,
@@ -780,6 +785,7 @@ def _setup_pr_branch(
         authenticated: Whether the container env actually carries a VCS
             token (ground truth: the env actually built, #356).
         pip_args: Additional pip arguments (e.g. ``"--index-url https://..."``).
+            Ignored when *pip_extras* is ``None`` since pip install is skipped entirely.
         open_read_window: When ``True`` and *authenticated* is ``False``,
             wrap the anonymous clone + fetch/checkout in a short-lived
             egress-proxy read-authorization window (#419) with a
@@ -921,8 +927,9 @@ def _setup_pr_branch(
     # chosen at runtime by _editable_install_cmd (#390); network is always
     # available here since sandbox_initialize forces allow_network=True
     # whenever pr is set.
+    local_pip_args = pip_args or ""
     if pip_extras is not None:
-        install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', pip_args or '')}"
+        install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
         exit_code, output = container.exec_run(
             ["/bin/sh", "-c", install_cmd],
             stdout=True,
@@ -1147,6 +1154,7 @@ def sandbox_initialize(
                log message) when the container has no network access, since
                PyPI would be unreachable.
         pip_args: Additional pip arguments (e.g. ``"--index-url https://download.pytorch.org/whl/cpu"``).
+            Ignored when *pip_extras* is ``None`` since pip install is skipped entirely.
         mem_limit: Optional memory-limit override (e.g. ``"2g"``).
                The default profile caps containers at 512MB with swap
                disabled, which OOM-thrashes heavy installs (e.g. torch)
@@ -1612,6 +1620,7 @@ def run_container_and_exec(
                PyPI would be unreachable.
         pip_args: Additional pip arguments (e.g. ``"--index-url https://download.pytorch.org/whl/cpu"``)
                passed through to the pip install command.
+               Ignored when *pip_extras* is ``None`` since pip install is skipped entirely.
         timeout: Maximum seconds to let the command run (``0`` = no
                limit, the default).  When the timeout expires the process
                is killed and the tool returns ``status="timeout"`` with

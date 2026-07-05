@@ -587,7 +587,7 @@ class TestRunContainerAndExecPrParam:
         # PR checkout takes the anonymous (authenticated=False) path (#439).
         mock_setup.assert_called_once_with(
             mock_container, "abc123def456", "owner/repo", 136, "/tmp/repo", "[dev]",
-            authenticated=False,
+            authenticated=False, pip_args=None,
         )
 
     @patch("code_sandbox_mcp.tools.container._docker")

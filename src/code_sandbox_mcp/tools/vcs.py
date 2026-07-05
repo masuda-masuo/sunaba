@@ -1119,6 +1119,31 @@ Returns:
 
             # Transport fallback: git push failed -> try GitHub API push
             if push_ec != 0:
+                # Issue #401: when the egress proxy blocks the push, do NOT
+                # fall back to the Objects API -- that would bypass the
+                # proxy and silently hide a configuration error so that the
+                # admin never notices the allowlist is misconfigured.
+                push_error_text = (push_err or push_out or "").lower()
+                if "blocked by egress proxy" in push_error_text:
+                    record_boundary_crossing(
+                        cid,
+                        "publish",
+                        f"repo={repo} branch={branch} push_blocked_by_egress_proxy",
+                        approved=False,
+                    )
+                    return json.dumps({
+                        "status": "error",
+                        "step": "git_push",
+                        "error": push_err or push_out,
+                        "sha": sha,
+                        "hint": (
+                            "The egress proxy blocked this push. "
+                            "When CODE_SANDBOX_ENABLE_EGRESS_PROXY=true, "
+                            "set CODE_SANDBOX_ALLOWED_REPOS to allow "
+                            "pushes to specific repositories."
+                        ),
+                    })
+
                 push_result = _try_api_push(
                     container, cid, repo, branch, working_dir, env=push_env
                 )

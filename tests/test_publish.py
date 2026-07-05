@@ -365,6 +365,50 @@ class TestPublish:
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    def test_push_blocked_by_egress_proxy_skips_api_fallback(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """#401: egress proxy block must NOT fall back to Objects API."""
+        # The git push error contains "BLOCKED by egress proxy" -- exactly
+        # what the real proxy.py::block_body() emits.  There are only 6
+        # exec calls: the 5 pre-push steps + the failed git push.  No
+        # _try_api_push exec happens after that.
+        proxy_error = (
+            "remote: BLOCKED by egress proxy: "
+            "push to owner/repo is not in the allowlist. "
+            "Push from the sandbox is only allowed via the publish tool."
+        )
+        container = _make_container_mock([
+            (0, b"", b""),  # git checkout -b
+            (0, b"", b""),  # git add
+            (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
+            (0, b"[fix/x abc1234] Fix", b""),  # git commit
+            (1, b"", proxy_error.encode()),  # git push BLOCKED by proxy
+            (0, b"abc1234def5678", b""),  # git rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            working_dir="/root/repo",
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "git_push"
+        assert "BLOCKED by egress proxy" in result["error"]
+        assert "hint" in result
+        assert "CODE_SANDBOX_ALLOWED_REPOS" in result["hint"]
+        # Exactly 6 exec calls -- no _try_api_push was triggered
+        assert container.exec_run.call_count == 6
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     def test_default_working_dir(
         self,
         mock_record: MagicMock,

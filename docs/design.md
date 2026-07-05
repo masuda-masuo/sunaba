@@ -312,6 +312,8 @@ else:
 - **`clone_repo`**（read / 入口）: 対象リポジトリをコンテナ内へ匿名 `git clone`（`repo` / `dest_dir` / `branch`；private は proxy の read 認可ウィンドウで認証、#419）。issue_view と並ぶ作業の起点。`sandbox_initialize(clone_repo=…)` / `run_container_and_exec(clone_repo=…)` でも起動と同時にクローンできる。§2.2 read 扱い（ネットワーク明示許可・ジャーナル記録）。
 - **`publish`**（write / 境界越え）: コミット済みの状態を push し、任意で PR を作成する唯一の出口。verify は内蔵せず、LLM が `verify_in_container` で事前に行う。人間ゲートは MCP クライアントのツール承認、構造ガードは egress proxy（§2.2、二段階トークンは #438 で廃止）。§8 ジャーナルに結果を記録。
 
+  **egress proxy 遮断時は Objects API にフォールバックしない（#401）**: git push のエラー出力に `"BLOCKED by egress proxy"` が含まれている場合、`publish` は Objects API（blob→tree→commit→ref）による代替 push を行わず、そのままエラーを返す。これは意図的な設計判断である。API フォールバックはホスト側から api.github.com を直接叩くため proxy をバイパスする — もし proxy 遮断時にフォールバックが発動すると、allowlist 未設定などの構成ミスが隠蔽され、「なぜか API 経由でのみ push される」状態で運用が続くリスクがある。エラーメッセージには `CODE_SANDBOX_ALLOWED_REPOS` の設定が必要である旨のヒントを含める。
+
 **認証（トークンはホスト側に留まる）**
 
 VCS トークンはコンテナに一切注入されない（#439）。read（clone / PR チェックアウト）は egress proxy の read 認可ウィンドウ（#419）でネットワーク層認証し、write（push / PR / issue）は `publish` / `sandbox_issue_write` がホスト側でトークンを解決する。コンテナ自身の `git`/`gh` は常に無認証。

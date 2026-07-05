@@ -310,8 +310,8 @@ class TestSetupPrBranchAnonymous:
         container.exec_run.assert_not_called()
 
 
-class TestSetupPrBranchReadWindow:
-    """open_read_window lets the anonymous pr= checkout work for private
+class TestSetupPrBranchReadGrant:
+    """open_read_grant lets the anonymous pr= checkout work for private
     repos too (#419), the same mechanism _clone_repo_via_network already
     uses for clone_repo."""
 
@@ -332,14 +332,14 @@ class TestSetupPrBranchReadWindow:
         ), patch("code_sandbox_mcp.tools.container.logger"):
             result = _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
-                authenticated=False, open_read_window=True,
+                authenticated=False, open_read_grant=True,
             )
 
         assert "PR #136" in result
         mock_record.assert_called_once_with(
             "abc123def456",
             "setup_pr_branch",
-            "repo=owner/repo pr=#136 dest=/tmp/repo/repo proxy_read_window=True",
+            "repo=owner/repo pr=#136 dest=/tmp/repo/repo proxy_read_grant=True",
             approved=True,
         )
 
@@ -358,20 +358,20 @@ class TestSetupPrBranchReadWindow:
             with pytest.raises(RuntimeError, match="private repository"):
                 _setup_pr_branch(
                     container, "abc123def456", "owner/repo", 136, "/tmp/repo",
-                    authenticated=False, open_read_window=True,
+                    authenticated=False, open_read_grant=True,
                 )
 
         mock_record.assert_called_once_with(
             "abc123def456",
             "setup_pr_branch",
-            "repo=owner/repo pr=#136 dest=/tmp/repo/repo proxy_read_window=True",
+            "repo=owner/repo pr=#136 dest=/tmp/repo/repo proxy_read_grant=True",
             approved=False,
         )
 
     @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
-    def test_authenticated_path_ignores_open_read_window(self, mock_record):
+    def test_authenticated_path_ignores_open_read_grant(self, mock_record):
         """authenticated=True (in-container gh token) never needs the proxy
-        read window, even if the caller passes open_read_window=True."""
+        read grant, even if the caller passes open_read_grant=True."""
         container = _make_container_mock([
             (0, (b'{"headRefName": "feature-branch"}', b"")),
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
@@ -382,14 +382,14 @@ class TestSetupPrBranchReadWindow:
         with patch("code_sandbox_mcp.tools.container.logger"):
             _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
-                authenticated=True, open_read_window=True,
+                authenticated=True, open_read_grant=True,
             )
 
         mock_record.assert_not_called()
 
     @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
-    def test_no_read_window_is_not_journaled(self, mock_record):
-        """Default (open_read_window=False) anonymous checkout is unaffected
+    def test_no_read_grant_is_not_journaled(self, mock_record):
+        """Default (open_read_grant=False) anonymous checkout is unaffected
         -- no new journal entry, matching pre-existing behaviour."""
         container = _make_container_mock([
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
@@ -417,7 +417,7 @@ class TestSetupPrBranchReadWindow:
         """#436 review: a broker-backed _resolve_vcs_token() spawns a
         subprocess per call (no caching, up to a 30s timeout). The anonymous
         path must resolve it once and pass the same value to both
-        _resolve_pr_head_ref (host GitHub API call) and the read window, not
+        _resolve_pr_head_ref (host GitHub API call) and the read grant, not
         call it again for each."""
         mock_resolve_token.return_value = "ghs_minted"
         mock_response = MagicMock()
@@ -436,7 +436,7 @@ class TestSetupPrBranchReadWindow:
         with patch("code_sandbox_mcp.tools.container.logger"):
             _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
-                authenticated=False, open_read_window=True,
+                authenticated=False, open_read_grant=True,
             )
 
         assert mock_resolve_token.call_count == 1

@@ -47,7 +47,7 @@ from code_sandbox_mcp.output_control import (
     truncate_by_tokens,
     truncate_output,
 )
-from code_sandbox_mcp.proxy_client import authorized_read_window
+from code_sandbox_mcp.proxy_client import authorized_read_grant
 from code_sandbox_mcp.result_cache import (
     compute_cache_key,
     get_cached_result,
@@ -486,7 +486,7 @@ def _clone_repo_via_network(
     clone_dest: str,
     authenticated: bool = False,
     *,
-    open_read_window: bool = False,
+    open_read_grant: bool = False,
 ) -> str:
     """Fallback: clone via ``gh repo clone`` when Shiori is unavailable (Issue #146).
 
@@ -499,11 +499,11 @@ def _clone_repo_via_network(
         unconditionally would expose it to in-container code for no
         benefit, violating the host-permission-minimization principle.
         Private repos are authenticated at the network layer by the
-        egress proxy's read-authorization window (#419,
-        *open_read_window*), so no token ever enters the container.
+        egress proxy's read-authorization grant (#419,
+        *open_read_grant*), so no token ever enters the container.
 
-    *open_read_window*, when ``True``, wraps the clone exec in a
-    short-lived egress-proxy read-authorization window (#419) with a
+    *open_read_grant*, when ``True``, wraps the clone exec in a
+    short-lived egress-proxy read-authorization grant (#419) with a
     host-resolved token, so the proxy authenticates this anonymous
     ``git clone`` transparently.  Used under the egress proxy, where the
     container itself never receives a token (#356).
@@ -517,8 +517,8 @@ def _clone_repo_via_network(
     repo_name = clone_repo.split("/")[-1]
     clone_path = clone_dest.rstrip("/") + "/" + repo_name
     cmd = _build_clone_command(clone_repo, clone_path, authenticated=authenticated)
-    if open_read_window:
-        with authorized_read_window(clone_repo, token=_resolve_vcs_token() or None):
+    if open_read_grant:
+        with authorized_read_grant(clone_repo, token=_resolve_vcs_token() or None):
             exit_code, output = container.exec_run(["/bin/sh", "-c", cmd])
     else:
         exit_code, output = container.exec_run(["/bin/sh", "-c", cmd])
@@ -526,26 +526,26 @@ def _clone_repo_via_network(
         detail = output.decode("utf-8", errors="replace").strip()
         hint = ""
         if not authenticated:
-            hint = " (private repo? the egress proxy needs a host-resolvable token to authenticate the read window)"
+            hint = " (private repo? the egress proxy needs a host-resolvable token to authenticate the read grant)"
         transport = "anonymous git clone" if not authenticated else "gh repo clone"
-        # Record the egress-proxy read-window's outcome (#421): this is the
-        # boundary crossing publish's push window already gets recorded for
+        # Record the egress-proxy read-grant's outcome (#421): this is the
+        # boundary crossing publish's push grant already gets recorded for
         # (#356/#357), applied to the read side (#419) so a denied/failed
         # proxy-authorized clone shows up in the journal too, not just a
         # successful one.
-        if open_read_window:
+        if open_read_grant:
             record_boundary_crossing(
                 container_id[:12],
                 "clone_repo",
-                f"repo={clone_repo} dest={clone_path} proxy_read_window=True",
+                f"repo={clone_repo} dest={clone_path} proxy_read_grant=True",
                 approved=False,
             )
         raise RuntimeError(f"{transport} failed (exit {exit_code}): {detail}{hint}")
-    if open_read_window:
+    if open_read_grant:
         record_boundary_crossing(
             container_id[:12],
             "clone_repo",
-            f"repo={clone_repo} dest={clone_path} proxy_read_window=True",
+            f"repo={clone_repo} dest={clone_path} proxy_read_grant=True",
             approved=True,
         )
     _write_clone_meta(container, clone_path)
@@ -642,7 +642,7 @@ def _try_clone_into_container(
     clone_dest: str,
     authenticated: bool = False,
     *,
-    open_read_window: bool = False,
+    open_read_grant: bool = False,
 ) -> CloneResult:
     """Attempt to clone a repo into the container; return (msg, error).
 
@@ -661,7 +661,7 @@ def _try_clone_into_container(
                 clone_repo,
                 clone_dest,
                 authenticated,
-                open_read_window=open_read_window,
+                open_read_grant=open_read_grant,
             )
         else:
             msg = _clone_shiori_repo_to_container(
@@ -670,8 +670,8 @@ def _try_clone_into_container(
                 clone_repo,
                 clone_dest,
             )
-        if not authenticated and not open_read_window:
-            # Anonymous clone with no proxy read window (only reachable
+        if not authenticated and not open_read_grant:
+            # Anonymous clone with no proxy read grant (only reachable
             # proxy-off): warn that a private repo would have failed and
             # that this checkout is read-only (Issue #333).
             msg = f"{msg} — WARNING: {CLONE_NO_TOKEN_WARNING}"
@@ -702,7 +702,7 @@ def _resolve_pr_head_ref(repo: str, pr_number: int, *, token: str | None = None)
     subprocess per call (no caching, up to a 30s timeout) -- callers that
     already resolved a token for this same operation (e.g.
     :func:`_setup_pr_branch`, which also needs one for the egress-proxy read
-    window) should pass it through here instead of paying for a second mint.
+    grant) should pass it through here instead of paying for a second mint.
     """
     import urllib.error
     import urllib.request
@@ -756,7 +756,7 @@ def _setup_pr_branch(
     pip_extras: str | None = "[dev]",
     *,
     authenticated: bool = True,
-    open_read_window: bool = False,
+    open_read_grant: bool = False,
     pip_args: str | None = None,
 ) -> str:
     """Clone repo and check out PR branch inside the container.
@@ -770,7 +770,7 @@ def _setup_pr_branch(
       no token per #356): the head ref is resolved host-side via
       :func:`_resolve_pr_head_ref` and everything in the container is plain
       git -- ``refs/pull/N/head`` lives on the base repo, so this covers
-      fork PRs too.  Pass *open_read_window* to make this work for private
+      fork PRs too.  Pass *open_read_grant* to make this work for private
       repositories too (see below); without it, private-repo PRs cannot be
       checked out this way.
 
@@ -786,9 +786,9 @@ def _setup_pr_branch(
             token (ground truth: the env actually built, #356).
         pip_args: Additional pip arguments (e.g. ``"--index-url https://..."``).
             Ignored when *pip_extras* is ``None`` since pip install is skipped entirely.
-        open_read_window: When ``True`` and *authenticated* is ``False``,
+        open_read_grant: When ``True`` and *authenticated* is ``False``,
             wrap the anonymous clone + fetch/checkout in a short-lived
-            egress-proxy read-authorization window (#419) with a
+            egress-proxy read-authorization grant (#419) with a
             host-resolved token -- the same mechanism
             :func:`_clone_repo_via_network` already uses for
             ``clone_repo``, extended here so ``pr=N`` also works for
@@ -837,11 +837,11 @@ def _setup_pr_branch(
         # container-side commands below are token-free git.  The clone
         # command's quoting is delegated to _build_clone_command; safe_repo /
         # safe_dest above still serve the shared logging and checkout below.
-        # Resolved once and reused for the read window below: a broker-backed
+        # Resolved once and reused for the read grant below: a broker-backed
         # _resolve_vcs_token() spawns a subprocess per call (no caching, up
         # to a 30s timeout), so calling it twice per checkout would double
         # that cost -- and, if the broker mints a fresh token each time,
-        # hand the head-ref lookup and the read window two different tokens
+        # hand the head-ref lookup and the read grant two different tokens
         # for no benefit (#436 review).
         anon_token = _resolve_vcs_token()
         head_ref = _resolve_pr_head_ref(repo, pr_number, token=anon_token or None)
@@ -853,20 +853,20 @@ def _setup_pr_branch(
 
     # Step 2 + 3: Clone the base repo, then checkout the PR branch.  Both
     # are anonymous git operations against the same repo when *authenticated*
-    # is False, so a single read-authorization window (#419) covers both --
-    # opened only when the caller asked for it (open_read_window) and the
+    # is False, so a single read-authorization grant (#419) covers both --
+    # opened only when the caller asked for it (open_read_grant) and the
     # container actually has no token (authenticated is False); a no-op
     # nullcontext otherwise so the authenticated/public-repo paths are
     # unaffected.
-    window_open = open_read_window and not authenticated
-    window = (
-        authorized_read_window(repo, token=anon_token or None)
-        if window_open
+    grant_open = open_read_grant and not authenticated
+    grant = (
+        authorized_read_grant(repo, token=anon_token or None)
+        if grant_open
         else contextlib.nullcontext()
     )
-    journal_detail = f"repo={repo} pr=#{pr_number} dest={safe_dest} proxy_read_window=True"
+    journal_detail = f"repo={repo} pr=#{pr_number} dest={safe_dest} proxy_read_grant=True"
     try:
-        with window:
+        with grant:
             exit_code, output = container.exec_run(
                 ["/bin/sh", "-c", clone_cmd],
                 stdout=True,
@@ -884,7 +884,7 @@ def _setup_pr_branch(
                     else (
                         " (anonymous clone: the container holds no VCS token (#356);"
                         " if this is a private repository, ensure the egress proxy has a"
-                        " host-resolvable token for the read-authorization window, see #419)"
+                        " host-resolvable token for the read-authorization grant, see #419)"
                     )
                 )
                 raise RuntimeError(f"Failed to clone repo {repo}: {stderr_text or clone_output}{hint}")
@@ -909,10 +909,10 @@ def _setup_pr_branch(
         # (#421) for the read side (#419): a denied/failed proxy-authorized
         # PR checkout must show up in the journal too, not just a successful
         # one.
-        if window_open:
+        if grant_open:
             record_boundary_crossing(cid, "setup_pr_branch", journal_detail, approved=False)
         raise
-    if window_open:
+    if grant_open:
         record_boundary_crossing(cid, "setup_pr_branch", journal_detail, approved=True)
 
     logger.info(
@@ -1046,7 +1046,7 @@ def _reap_orphaned_init_containers(client: Any = None) -> list[str]:
             continue
         age = _age_seconds(s.get("init_ts") or created_label, now)
         if age is None or age < _ORPHAN_GRACE_SECONDS:
-            # Unknown age or still within the grace window (in-progress init).
+            # Unknown age or still within the grace grant (in-progress init).
             continue
         try:
             container.kill()
@@ -1127,7 +1127,7 @@ def sandbox_initialize(
                configured, falls back to ``gh repo clone`` over the
                network (``allow_network`` is auto-enabled).  A *private*
                repo clones transparently too: the egress proxy opens a
-               read-authorization window (#419) authenticated with a
+               read-authorization grant (#419) authenticated with a
                host-resolved token, so no credential enters the container.
         clone_dest: Destination directory in the container for the
                cloned repository (default: ``/tmp/repo``).
@@ -1143,11 +1143,11 @@ def sandbox_initialize(
                resolved host-side and the container never receives a
                token.  This works for public repos with no further
                setup; for a private repo, the same read-authorization
-               window (#419) that ``clone_repo`` uses is opened for the
+               grant (#419) that ``clone_repo`` uses is opened for the
                anonymous clone + checkout, so no extra steps are needed
                there either -- the egress proxy must simply be
                configured with a host-resolvable token (broker /
-               ``GITHUB_TOKEN``) for the window to actually authenticate.
+               ``GITHUB_TOKEN``) for the grant to actually authenticate.
         pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
                Pass ``None`` to skip pip install entirely.  Also used when
                *clone_repo* is specified, and skipped automatically (with a
@@ -1207,7 +1207,7 @@ def sandbox_initialize(
     )
     # -- Egress proxy sidecar (#358, Epic #353): opt-in, fail closed --
     # A proxied container gets no VCS token in its env (#356); publish
-    # hands the credential to the proxy per push window instead.
+    # hands the credential to the proxy per push grant instead.
     proxied = allow_network and proxy_lifecycle.egress_proxy_enabled()
     env: dict[str, str] = {}
     proxy_runtime = None
@@ -1309,9 +1309,9 @@ def sandbox_initialize(
     # git-clone path (#403).
     container_has_token = "GITHUB_TOKEN" in env or "GH_TOKEN" in env
     # Authenticate private reads at the proxy via a read-authorization
-    # window (#419) whenever the container is networked; public reads are
+    # grant (#419) whenever the container is networked; public reads are
     # unaffected.
-    open_read_window = proxied and not container_has_token
+    open_read_grant = proxied and not container_has_token
     if clone_repo and pr is None:
         msg, err = _try_clone_into_container(
             container,
@@ -1319,7 +1319,7 @@ def sandbox_initialize(
             clone_repo,
             clone_dest,
             container_has_token,
-            open_read_window=open_read_window,
+            open_read_grant=open_read_grant,
         )
         if err is not None:
             clone_msg = f" (clone_repo failed: {err})"
@@ -1346,7 +1346,7 @@ def sandbox_initialize(
             try:
                 # A token-free container (e.g. proxied, #356) takes the
                 # anonymous checkout path: head ref resolved host-side,
-                # plain git in the container (#403).  open_read_window
+                # plain git in the container (#403).  open_read_grant
                 # (already computed above for the clone_repo path) lets
                 # this anonymous path work for private repos too (#419),
                 # instead of only public ones.
@@ -1358,7 +1358,7 @@ def sandbox_initialize(
                     clone_dest,
                     pip_extras,
                     authenticated=container_has_token,
-                    open_read_window=open_read_window,
+                    open_read_grant=open_read_grant,
                     pip_args=pip_args,
                 )
             except Exception as e:
@@ -1411,11 +1411,11 @@ async def sandbox_initialize_tool(
     repository):** under the egress proxy (#403), ``pr=N`` resolves the PR
     head ref host-side and checks it out *anonymously* inside the
     container.  This works for public repos with no further setup; for a
-    private repo, the same read-authorization window (#419) that
+    private repo, the same read-authorization grant (#419) that
     ``clone_repo`` uses is opened for the anonymous clone + checkout too,
     so ``pr=N`` alone is enough -- the egress proxy just needs to be
     configured with a host-resolvable token (broker / ``GITHUB_TOKEN``)
-    for the window to authenticate; pushes and PR creation go through
+    for the grant to authenticate; pushes and PR creation go through
     :func:`publish`, which resolves the token host-side, so the container
     never needs a credential of its own.
     """
@@ -1592,7 +1592,7 @@ def run_container_and_exec(
                configured, falls back to ``gh repo clone`` over the
                network (``allow_network`` is auto-enabled).  A *private*
                repo clones transparently too: the egress proxy opens a
-               read-authorization window (#419) authenticated with a
+               read-authorization grant (#419) authenticated with a
                host-resolved token, so no credential enters the container.
         clone_dest: Destination directory in the container for the
                cloned repository (default: ``/tmp/repo``).
@@ -1608,11 +1608,11 @@ def run_container_and_exec(
                resolved host-side and the container never receives a
                token.  This works for public repos with no further
                setup; for a private repo, the same read-authorization
-               window (#419) that ``clone_repo`` uses is opened for the
+               grant (#419) that ``clone_repo`` uses is opened for the
                anonymous clone + checkout, so no extra steps are needed
                there either -- the egress proxy must simply be
                configured with a host-resolvable token (broker /
-               ``GITHUB_TOKEN``) for the window to actually authenticate.
+               ``GITHUB_TOKEN``) for the grant to actually authenticate.
         pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
                Pass ``None`` to skip pip install entirely.  Also used when
                *clone_repo* is specified, and skipped automatically (with a
@@ -1669,7 +1669,7 @@ def run_container_and_exec(
     client = _docker()
     # -- Egress proxy sidecar (#358, Epic #353): opt-in, fail closed --
     # A proxied container gets no VCS token in its env (#356); publish
-    # hands the credential to the proxy per push window instead.
+    # hands the credential to the proxy per push grant instead.
     proxied = allow_network and proxy_lifecycle.egress_proxy_enabled()
     env: dict[str, str] = {}
     proxy_runtime = None

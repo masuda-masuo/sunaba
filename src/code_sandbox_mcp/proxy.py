@@ -26,7 +26,7 @@ Policy
 * ``git-upload-pack`` (clone/fetch) and any non-git request pass through.
 * ``git-receive-pack`` (push) is **denied by default** and only allowed when
   *both* hold: the target ``owner/repo`` is in the allowlist, *and* a
-  short-lived authorization window is currently open for it.  The window is
+  short-lived authorization grant is currently open for it.  The grant is
   opened/closed via the internal control API (:class:`AuthControlServer`,
   ``POST /auth/allow`` / ``/auth/revoke``) that ``publish`` drives host-side
   (#356 / #357), authenticated by a shared secret the container never learns.
@@ -40,13 +40,13 @@ TLS-terminating proxy while ``git push`` is rejected.
 Non-push write APIs on ``api.github.com`` (issue/PR create, comments, reviews,
 and the git Objects API used by ``publish``'s API-push fallback) are gated the
 same way (#420): GET/HEAD always pass through, and POST/PUT/PATCH/DELETE are
-denied by default -- allowed only inside an explicit authorization window,
+denied by default -- allowed only inside an explicit authorization grant,
 opened host-side via the control API just like a push.  The git Objects API
-under ``/repos/<owner>/<repo>/git/...`` reuses the *push* window (it already
-runs inside ``authorized_push_window`` in ``publish``, being the push
+under ``/repos/<owner>/<repo>/git/...`` reuses the *push* grant (it already
+runs inside ``authorized_push_grant`` in ``publish``, being the push
 fallback transport itself); every other write path gets its own separate
-"api write" window (``/auth/allow-api-write`` / ``/auth/revoke-api-write``),
-mirroring the read/push separation from #419 so opening one write window
+"api write" grant (``/auth/allow-api-write`` / ``/auth/revoke-api-write``),
+mirroring the read/push separation from #419 so opening one write grant
 never widens another kind of access.
 
 Still out of scope here (own issue): dropping the token from the container
@@ -115,40 +115,40 @@ _KNOWN_SERVICES = frozenset({FETCH_SERVICE, PUSH_SERVICE})
 API_HOST = "api.github.com"
 
 #: HTTP methods on ``api.github.com`` treated as writes and gated by an
-#: authorization window (#420).  GET/HEAD (and anything else) always pass.
+#: authorization grant (#420).  GET/HEAD (and anything else) always pass.
 API_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 #: Environment variable holding a comma-separated owner/repo allowlist (#358).
 ALLOWED_REPOS_ENV = "CODE_SANDBOX_ALLOWED_REPOS"
 
 #: Static fallback push token injected into authorized pushes.  The primary
-#: path is the window-scoped token ``publish`` hands over on ``/auth/allow``
-#: (#356), which needs no sidecar configuration and never outlives its window;
+#: path is the grant-scoped token ``publish`` hands over on ``/auth/allow``
+#: (#356), which needs no sidecar configuration and never outlives its grant;
 #: this env var remains for operators who prefer a sidecar-held credential.
 #: Unset = no static injection.
 PROXY_TOKEN_ENV = "CODE_SANDBOX_PROXY_TOKEN"
 
 #: TCP port for the internal authorization control API; unset = decision-only
-#: proxy (no window can be opened, matching today's inert behaviour).
+#: proxy (no grant can be opened, matching today's inert behaviour).
 CONTROL_PORT_ENV = "CODE_SANDBOX_PROXY_CONTROL_PORT"
 
 #: Bind address for the control API (default ``127.0.0.1``).  The sidecar
 #: (#358) sets ``0.0.0.0`` so the host can reach the port Docker publishes;
 #: a non-loopback bind **requires** the shared secret, because inside the
 #: sidecar the control port is reachable from the sandbox-facing Docker
-#: network and must never accept unauthenticated window requests.
+#: network and must never accept unauthenticated grant requests.
 CONTROL_HOST_ENV = "CODE_SANDBOX_PROXY_CONTROL_HOST"
 
 #: Shared secret authenticating control-API callers (#356 / #357).  ``publish``
 #: sends it in the ``X-Control-Token`` header; the sandbox container never sees
-#: it, so it cannot open its own push window.
+#: it, so it cannot open its own push grant.
 CONTROL_SECRET_ENV = "CODE_SANDBOX_PROXY_CONTROL_SECRET"
 
 #: Request header carrying the control secret on ``/auth/*`` calls.
 CONTROL_TOKEN_HEADER = "X-Control-Token"
 
-#: Authorization-window lifetime used when a caller omits ``ttl_seconds``.
-DEFAULT_WINDOW_TTL_SECONDS = 30.0
+#: Authorization-grant lifetime used when a caller omits ``ttl_seconds``.
+DEFAULT_GRANT_TTL_SECONDS = 30.0
 
 #: Cap on the control-request body; payloads are tiny JSON, so anything larger
 #: is rejected (413) unread, bounding handler memory (review of PR #367).
@@ -264,9 +264,9 @@ def is_git_data_api_path(path: str) -> bool:
     to create blobs/trees/commits/refs when a plain ``git push`` fails -- it
     is push in every meaningful sense, just carried over ``api.github.com``
     instead of the smart-HTTP endpoint, and already runs inside
-    ``authorized_push_window`` in ``publish``.  :meth:`EgressGuard.decide_api_write`
-    therefore checks the *push* window for these paths instead of the
-    separate api-write window that gates every other REST write (#420).
+    ``authorized_push_grant`` in ``publish``.  :meth:`EgressGuard.decide_api_write`
+    therefore checks the *push* grant for these paths instead of the
+    separate api-write grant that gates every other REST write (#420).
     """
     parts = [p for p in path.split("/") if p]
     return len(parts) >= 4 and parts[0].lower() == "repos" and parts[3].lower() == "git"
@@ -326,18 +326,18 @@ def block_body(reason: str, hint: str = PUSH_BLOCK_HINT) -> bytes:
 
 
 class EgressGuard:
-    """mitmproxy addon holding the allowlist + authorization-window state.
+    """mitmproxy addon holding the allowlist + authorization-grant state.
 
     The decision logic (:meth:`decide`) is pure and takes an explicit *now*, so
     it can be unit-tested without mitmproxy or a real clock.  :meth:`request` is
     the thin mitmproxy hook that maps a denied :class:`Decision` to a 403.
 
     Repo names are matched case-insensitively (GitHub treats them so): the
-    allowlist, the window keys, and :func:`repo_from_path` are all lower-cased.
+    allowlist, the grant keys, and :func:`repo_from_path` are all lower-cased.
 
-    Thread safety: the control plane (#356 / #357) will open/close windows from
+    Thread safety: the control plane (#356 / #357) will open/close grants from
     a different thread than mitmproxy's event loop, which reads them in
-    :meth:`request`.  Window state is therefore guarded by ``self._lock``.
+    :meth:`request`.  Grant state is therefore guarded by ``self._lock``.
     """
 
     def __init__(
@@ -349,38 +349,38 @@ class EgressGuard:
 
         *allowed_repos* is the set of ``owner/repo`` strings that may ever be
         pushed to (matched case-insensitively); anything outside it is denied
-        regardless of windows.  *token*, when given, is the push token the
+        regardless of grants.  *token*, when given, is the push token the
         proxy injects into authorized pushes so the container need not hold
         GitHub credentials (#356).
         """
         self._allowed: set[str] = {r.lower() for r in (allowed_repos or ())}
-        #: repo -> (monotonic expiry, window-scoped push token or ``None``).
-        #: The token travels with the window (#356): ``publish`` hands it over
+        #: repo -> (monotonic expiry, grant-scoped push token or ``None``).
+        #: The token travels with the grant (#356): ``publish`` hands it over
         #: on ``/auth/allow`` and it is dropped on revoke/expiry, so the proxy
         #: never holds a credential longer than one authorized push.
-        self._windows: dict[str, tuple[float, str | None]] = {}
-        #: Same shape as ``_windows`` but for **read** (clone/fetch,
+        self._grants: dict[str, tuple[float, str | None]] = {}
+        #: Same shape as ``_grants`` but for **read** (clone/fetch,
         #: ``git-upload-pack``) authorization (#419).  Deliberately a
-        #: separate table: a read window must never make :meth:`decide`
+        #: separate table: a read grant must never make :meth:`decide`
         #: treat a repo as push-authorized, so the two are never merged.
-        self._read_windows: dict[str, tuple[float, str | None]] = {}
+        self._read_grants: dict[str, tuple[float, str | None]] = {}
         #: Same shape again, for non-push writes on ``api.github.com`` (issue
         #: create/comment, reviews, labels, releases -- #420).  Kept separate
-        #: from both ``_windows`` and ``_read_windows`` for the same reason:
-        #: opening this window must never widen git push or read access, and
-        #: a push window must not silently double as blanket API-write
+        #: from both ``_grants`` and ``_read_grants`` for the same reason:
+        #: opening this grant must never widen git push or read access, and
+        #: a push grant must not silently double as blanket API-write
         #: authorization beyond the git Objects API paths (see
         #: :func:`is_git_data_api_path`, which intentionally checks the push
-        #: window instead of this one).
-        self._api_write_windows: dict[str, tuple[float, str | None]] = {}
+        #: grant instead of this one).
+        self._api_write_grants: dict[str, tuple[float, str | None]] = {}
         self._lock = threading.Lock()
-        #: static fallback push token; ``None`` disables it.  A window-scoped
+        #: static fallback push token; ``None`` disables it.  A grant-scoped
         #: token, when present, takes precedence.
         self._token = token
 
-    # -- authorization window control (to be driven by publish; #356 / #357) --
+    # -- authorization grant control (to be driven by publish; #356 / #357) --
 
-    def open_window(
+    def open_grant(
         self,
         repo: str,
         ttl_seconds: float,
@@ -391,55 +391,55 @@ class EgressGuard:
 
         *now* defaults to ``time.monotonic()``; pass it explicitly to keep the
         expiry deterministic in tests, mirroring :meth:`decide`.  Opening a
-        window for a repo outside the allowlist is harmless -- :meth:`decide`
+        grant for a repo outside the allowlist is harmless -- :meth:`decide`
         still denies the push -- so callers need not pre-check membership.
 
-        *token*, when given, is a window-scoped push credential injected
-        into the authorized push (#356).  It lives and dies with the window:
+        *token*, when given, is a grant-scoped push credential injected
+        into the authorized push (#356).  It lives and dies with the grant:
         revoke or expiry discards it, so the proxy holds no long-lived token.
         """
         base = time.monotonic() if now is None else now
         with self._lock:
-            self._windows[repo.lower()] = (base + ttl_seconds, token)
+            self._grants[repo.lower()] = (base + ttl_seconds, token)
 
-    def close_window(self, repo: str) -> None:
-        """Revoke any open push window for *repo* (dropping its token, if any)."""
+    def close_grant(self, repo: str) -> None:
+        """Revoke any open push grant for *repo* (dropping its token, if any)."""
         with self._lock:
-            self._windows.pop(repo.lower(), None)
+            self._grants.pop(repo.lower(), None)
 
-    def _window_open(self, repo: str, now: float) -> bool:
+    def _grant_open(self, repo: str, now: float) -> bool:
         with self._lock:
-            entry = self._windows.get(repo)
+            entry = self._grants.get(repo)
             if entry is None:
                 return False
             expiry, _token = entry
             if now >= expiry:
-                # Scrub eagerly: a window-scoped token must not sit in memory
+                # Scrub eagerly: a grant-scoped token must not sit in memory
                 # past its authorization (#356).
-                self._windows.pop(repo, None)
+                self._grants.pop(repo, None)
                 return False
         return True
 
-    def _window_token(self, repo: str | None, now: float) -> str | None:
-        """Return the unexpired window-scoped token for *repo*, or ``None``.
+    def _grant_token(self, repo: str | None, now: float) -> str | None:
+        """Return the unexpired grant-scoped token for *repo*, or ``None``.
 
-        Scrubs an expired entry just like :meth:`_window_open` (PR #402
+        Scrubs an expired entry just like :meth:`_grant_open` (PR #402
         review): callers such as :meth:`token_headers_for` are usable on
         their own, so neither read path may leave an expired token behind.
         """
         if repo is None:
             return None
         with self._lock:
-            entry = self._windows.get(repo.lower())
+            entry = self._grants.get(repo.lower())
             if entry is None:
                 return None
             expiry, token = entry
             if now >= expiry:
-                self._windows.pop(repo.lower(), None)
+                self._grants.pop(repo.lower(), None)
                 return None
         return token
 
-    def open_read_window(
+    def open_read_grant(
         self,
         repo: str,
         ttl_seconds: float,
@@ -448,38 +448,38 @@ class EgressGuard:
     ) -> None:
         """Permit an authenticated clone/fetch of *repo* for *ttl_seconds* (#419).
 
-        Unlike :meth:`open_window`, this never authorizes a push -- it only
+        Unlike :meth:`open_grant`, this never authorizes a push -- it only
         controls whether :meth:`token_headers_for` injects credentials into a
         ``git-upload-pack`` (clone/fetch) request.  Kept in a separate table
-        from the push windows so opening one can never widen push access.
+        from the push grants so opening one can never widen push access.
         """
         base = time.monotonic() if now is None else now
         with self._lock:
-            self._read_windows[repo.lower()] = (base + ttl_seconds, token)
+            self._read_grants[repo.lower()] = (base + ttl_seconds, token)
 
-    def close_read_window(self, repo: str) -> None:
-        """Revoke any open read window for *repo* (dropping its token, if any)."""
+    def close_read_grant(self, repo: str) -> None:
+        """Revoke any open read grant for *repo* (dropping its token, if any)."""
         with self._lock:
-            self._read_windows.pop(repo.lower(), None)
+            self._read_grants.pop(repo.lower(), None)
 
-    def _read_window_token(self, repo: str | None, now: float) -> str | None:
-        """Return the unexpired read-window token for *repo*, or ``None``.
+    def _read_grant_token(self, repo: str | None, now: float) -> str | None:
+        """Return the unexpired read-grant token for *repo*, or ``None``.
 
-        Scrubs an expired entry eagerly, mirroring :meth:`_window_token`.
+        Scrubs an expired entry eagerly, mirroring :meth:`_grant_token`.
         """
         if repo is None:
             return None
         with self._lock:
-            entry = self._read_windows.get(repo.lower())
+            entry = self._read_grants.get(repo.lower())
             if entry is None:
                 return None
             expiry, token = entry
             if now >= expiry:
-                self._read_windows.pop(repo.lower(), None)
+                self._read_grants.pop(repo.lower(), None)
                 return None
         return token
 
-    def open_api_write_window(
+    def open_api_write_grant(
         self,
         repo: str,
         ttl_seconds: float,
@@ -490,40 +490,40 @@ class EgressGuard:
 
         Covers issue/PR create, comments, reviews, labels, releases, etc.
         -- everything except the git Objects API paths, which reuse the push
-        window instead (see :func:`is_git_data_api_path`).  Kept in its own
+        grant instead (see :func:`is_git_data_api_path`).  Kept in its own
         table so opening it can never authorize a push or a read.
         """
         base = time.monotonic() if now is None else now
         with self._lock:
-            self._api_write_windows[repo.lower()] = (base + ttl_seconds, token)
+            self._api_write_grants[repo.lower()] = (base + ttl_seconds, token)
 
-    def close_api_write_window(self, repo: str) -> None:
-        """Revoke any open api-write window for *repo* (dropping its token)."""
+    def close_api_write_grant(self, repo: str) -> None:
+        """Revoke any open api-write grant for *repo* (dropping its token)."""
         with self._lock:
-            self._api_write_windows.pop(repo.lower(), None)
+            self._api_write_grants.pop(repo.lower(), None)
 
-    def _api_write_window_open(self, repo: str, now: float) -> bool:
+    def _api_write_grant_open(self, repo: str, now: float) -> bool:
         with self._lock:
-            entry = self._api_write_windows.get(repo)
+            entry = self._api_write_grants.get(repo)
             if entry is None:
                 return False
             expiry, _token = entry
             if now >= expiry:
-                self._api_write_windows.pop(repo, None)
+                self._api_write_grants.pop(repo, None)
                 return False
         return True
 
-    def _api_write_window_token(self, repo: str | None, now: float) -> str | None:
-        """Return the unexpired api-write window token for *repo*, or ``None``."""
+    def _api_write_grant_token(self, repo: str | None, now: float) -> str | None:
+        """Return the unexpired api-write grant token for *repo*, or ``None``."""
         if repo is None:
             return None
         with self._lock:
-            entry = self._api_write_windows.get(repo.lower())
+            entry = self._api_write_grants.get(repo.lower())
             if entry is None:
                 return None
             expiry, token = entry
             if now >= expiry:
-                self._api_write_windows.pop(repo.lower(), None)
+                self._api_write_grants.pop(repo.lower(), None)
                 return None
         return token
 
@@ -538,8 +538,8 @@ class EgressGuard:
             return Decision(False, "push target repo could not be determined")
         if repo not in self._allowed:
             return Decision(False, f"push to {repo} is not in the allowlist")
-        if not self._window_open(repo, now):
-            return Decision(False, f"no open authorization window for {repo}")
+        if not self._grant_open(repo, now):
+            return Decision(False, f"no open authorization grant for {repo}")
         return Decision(True, f"push authorized for {repo}")
 
     def decide_api_write(self, method: str, path: str, now: float) -> Decision:
@@ -547,11 +547,11 @@ class EgressGuard:
 
         GET/HEAD (and anything else outside :data:`API_WRITE_METHODS`) always
         pass.  A write needs its target repo in the allowlist *and* an open
-        authorization window: the git Objects API paths
-        (:func:`is_git_data_api_path`) check the push window -- they are
+        authorization grant: the git Objects API paths
+        (:func:`is_git_data_api_path`) check the push grant -- they are
         publish's push fallback transport and already run inside
-        ``authorized_push_window`` -- everything else checks the separate
-        api-write window opened via ``/auth/allow-api-write``.
+        ``authorized_push_grant`` -- everything else checks the separate
+        api-write grant opened via ``/auth/allow-api-write``.
         """
         if method.upper() not in API_WRITE_METHODS:
             return Decision(True, "read-only GitHub API request (GET/HEAD passes through)")
@@ -561,11 +561,11 @@ class EgressGuard:
         if repo not in self._allowed:
             return Decision(False, f"write to {repo} is not in the allowlist")
         if is_git_data_api_path(path):
-            if not self._window_open(repo, now):
-                return Decision(False, f"no open push-authorization window for {repo}")
-            return Decision(True, f"git data API write authorized for {repo} (push window)")
-        if not self._api_write_window_open(repo, now):
-            return Decision(False, f"no open api-write authorization window for {repo}")
+            if not self._grant_open(repo, now):
+                return Decision(False, f"no open push-authorization grant for {repo}")
+            return Decision(True, f"git data API write authorized for {repo} (push grant)")
+        if not self._api_write_grant_open(repo, now):
+            return Decision(False, f"no open api-write authorization grant for {repo}")
         return Decision(True, f"api write authorized for {repo}")
 
     # -- token injection (pure) --
@@ -578,7 +578,7 @@ class EgressGuard:
         now: float | None = None,
         is_fetch_request: bool = False,
         is_api_write_request: bool = False,
-        use_push_window: bool = False,
+        use_push_grant: bool = False,
     ) -> dict[str, str]:
         """Return the ``Authorization`` header to add to an authorized request.
 
@@ -587,17 +587,17 @@ class EgressGuard:
         credentials, and with no token (the inert default) nothing is
         injected.
 
-        For a push, a window-scoped token for *repo* (handed over on
+        For a push, a grant-scoped token for *repo* (handed over on
         ``/auth/allow``, #356) takes precedence over the static
         ``CODE_SANDBOX_PROXY_TOKEN`` fallback.  For a fetch/clone
-        (``is_fetch_request``), only an explicit read-window token
+        (``is_fetch_request``), only an explicit read-grant token
         (``/auth/allow-read``, #419) is used -- there is no static fallback,
         since an always-on read credential would authenticate every clone the
         container makes, not just ones the host explicitly authorized.  For an
         ``api.github.com`` write (``is_api_write_request``, #420), the token
-        comes from the push window when ``use_push_window`` is set (the git
+        comes from the push grant when ``use_push_grant`` is set (the git
         Objects API paths -- see :func:`is_git_data_api_path`) or otherwise
-        from the separate api-write window; either way the header uses
+        from the separate api-write grant; either way the header uses
         :func:`bearer_auth_header`, since the REST API does not accept Basic.
         Pure, so the injection policy is unit-testable without mitmproxy.
         """
@@ -605,16 +605,16 @@ class EgressGuard:
             return {}
         base = time.monotonic() if now is None else now
         if is_push_request:
-            token = self._window_token(repo, base) or self._token
+            token = self._grant_token(repo, base) or self._token
             return {"Authorization": basic_auth_header(token)} if token else {}
         if is_fetch_request:
-            token = self._read_window_token(repo, base)
+            token = self._read_grant_token(repo, base)
             return {"Authorization": basic_auth_header(token)} if token else {}
         if is_api_write_request:
             token = (
-                self._window_token(repo, base)
-                if use_push_window
-                else self._api_write_window_token(repo, base)
+                self._grant_token(repo, base)
+                if use_push_grant
+                else self._api_write_grant_token(repo, base)
             )
             return {"Authorization": bearer_auth_header(token)} if token else {}
         return {}
@@ -630,7 +630,7 @@ class EgressGuard:
         try:
             bind = control_bind_from_env(dict(os.environ))
         except ValueError as e:
-            # Fail closed: with no control server no window can ever open, so
+            # Fail closed: with no control server no grant can ever open, so
             # every push stays denied -- but say why instead of dying silently.
             print(f"egress proxy control API not started: {e}", file=sys.stderr)
             return
@@ -674,7 +674,7 @@ class EgressGuard:
                     decision,
                     repo=repo,
                     is_api_write_request=True,
-                    use_push_window=is_git_data_api_path(path),
+                    use_push_grant=is_git_data_api_path(path),
                 ).items():
                     flow.request.headers[name] = value
             return
@@ -717,9 +717,9 @@ def handle_control_request(
 
     Authenticates the caller against *secret* with a constant-time compare --
     the sandboxed container never learns the secret, so it cannot open its own
-    push window -- then opens/closes a push window (``/auth/allow`` /
-    ``/auth/revoke``), a read window (``/auth/allow-read`` / ``/auth/revoke-read``,
-    #419), or an api-write window (``/auth/allow-api-write`` /
+    push grant -- then opens/closes a push grant (``/auth/allow`` /
+    ``/auth/revoke``), a read grant (``/auth/allow-read`` / ``/auth/revoke-read``,
+    #419), or an api-write grant (``/auth/allow-api-write`` /
     ``/auth/revoke-api-write``, #420) for ``payload["repo"]``.  Also answers
     ``/version`` with this sidecar's baked source fingerprint (#405), which
     takes no repo.  Kept free of socket/HTTP glue so the protocol is
@@ -728,7 +728,7 @@ def handle_control_request(
     if secret is not None and not hmac.compare_digest(provided_secret or "", secret):
         return ControlResult(403, {"error": "invalid or missing control secret"})
     # Read-only source-fingerprint probe (#405): no repo/payload, so answer it
-    # before the window-oriented validation below.  Stays secret-gated -- the
+    # before the grant-oriented validation below.  Stays secret-gated -- the
     # fingerprint is non-sensitive, but the control plane authenticates every
     # request and there is no reason to carve out an exception.
     if path == "/version":
@@ -739,43 +739,43 @@ def handle_control_request(
     if not isinstance(repo, str) or "/" not in repo:
         return ControlResult(400, {"error": "'repo' must be an 'owner/name' string"})
     if path == "/auth/allow":
-        ttl = payload.get("ttl_seconds", DEFAULT_WINDOW_TTL_SECONDS)
+        ttl = payload.get("ttl_seconds", DEFAULT_GRANT_TTL_SECONDS)
         # bool is an int subclass; reject it so True/False is not read as a TTL.
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl <= 0:
             return ControlResult(400, {"error": "'ttl_seconds' must be a positive number"})
-        # Optional window-scoped push credential (#356).  Never echoed back:
+        # Optional grant-scoped push credential (#356).  Never echoed back:
         # the response must stay safe to log.
-        window_token = payload.get("token")
-        if window_token is not None and not isinstance(window_token, str):
+        grant_token = payload.get("token")
+        if grant_token is not None and not isinstance(grant_token, str):
             return ControlResult(400, {"error": "'token' must be a string when present"})
-        guard.open_window(repo, float(ttl), now=now, token=window_token or None)
+        guard.open_grant(repo, float(ttl), now=now, token=grant_token or None)
         return ControlResult(200, {"ok": True, "repo": repo.lower(), "ttl_seconds": float(ttl)})
     if path == "/auth/revoke":
-        guard.close_window(repo)
+        guard.close_grant(repo)
         return ControlResult(200, {"ok": True, "repo": repo.lower()})
     if path == "/auth/allow-read":
-        ttl = payload.get("ttl_seconds", DEFAULT_WINDOW_TTL_SECONDS)
+        ttl = payload.get("ttl_seconds", DEFAULT_GRANT_TTL_SECONDS)
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl <= 0:
             return ControlResult(400, {"error": "'ttl_seconds' must be a positive number"})
-        window_token = payload.get("token")
-        if window_token is not None and not isinstance(window_token, str):
+        grant_token = payload.get("token")
+        if grant_token is not None and not isinstance(grant_token, str):
             return ControlResult(400, {"error": "'token' must be a string when present"})
-        guard.open_read_window(repo, float(ttl), now=now, token=window_token or None)
+        guard.open_read_grant(repo, float(ttl), now=now, token=grant_token or None)
         return ControlResult(200, {"ok": True, "repo": repo.lower(), "ttl_seconds": float(ttl)})
     if path == "/auth/revoke-read":
-        guard.close_read_window(repo)
+        guard.close_read_grant(repo)
         return ControlResult(200, {"ok": True, "repo": repo.lower()})
     if path == "/auth/allow-api-write":
-        ttl = payload.get("ttl_seconds", DEFAULT_WINDOW_TTL_SECONDS)
+        ttl = payload.get("ttl_seconds", DEFAULT_GRANT_TTL_SECONDS)
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl <= 0:
             return ControlResult(400, {"error": "'ttl_seconds' must be a positive number"})
-        window_token = payload.get("token")
-        if window_token is not None and not isinstance(window_token, str):
+        grant_token = payload.get("token")
+        if grant_token is not None and not isinstance(grant_token, str):
             return ControlResult(400, {"error": "'token' must be a string when present"})
-        guard.open_api_write_window(repo, float(ttl), now=now, token=window_token or None)
+        guard.open_api_write_grant(repo, float(ttl), now=now, token=grant_token or None)
         return ControlResult(200, {"ok": True, "repo": repo.lower(), "ttl_seconds": float(ttl)})
     if path == "/auth/revoke-api-write":
-        guard.close_api_write_window(repo)
+        guard.close_api_write_grant(repo)
         return ControlResult(200, {"ok": True, "repo": repo.lower()})
     return ControlResult(404, {"error": f"unknown control endpoint: {path}"})
 
@@ -832,7 +832,7 @@ def _make_control_handler(
 
 
 class AuthControlServer:
-    """Internal HTTP control plane opening/closing push windows on a guard.
+    """Internal HTTP control plane opening/closing push grants on a guard.
 
     ``publish`` (host-side, #357) POSTs ``/auth/allow`` before a push and
     ``/auth/revoke`` afterwards, authenticated by a shared secret the sandboxed
@@ -893,7 +893,7 @@ def control_bind_from_env(env: dict[str, str]) -> tuple[str, int, str | None] | 
     A non-loopback bind without a shared secret is refused (``ValueError``):
     inside the sidecar the control port is reachable from the sandbox-facing
     Docker network, so exposing it unauthenticated would let sandboxed code
-    open its own push window.
+    open its own push grant.
     """
     raw_port = (env.get(CONTROL_PORT_ENV) or "").strip()
     if not raw_port:

@@ -339,18 +339,18 @@ class TestPublishProxiedCredentialRouting:
     def _env_of(call) -> dict | None:
         return call.kwargs.get("environment")
 
-    @patch("code_sandbox_mcp.tools.vcs.authorized_push_window")
+    @patch("code_sandbox_mcp.tools.vcs.authorized_push_grant")
     @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    def test_push_exec_token_free_and_window_carries_credential(
+    def test_push_exec_token_free_and_grant_carries_credential(
         self,
         mock_record: MagicMock,
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
         mock_proxied: MagicMock,
-        mock_window: MagicMock,
+        mock_grant: MagicMock,
     ) -> None:
         mock_resolve.return_value = "ghs_lazytoken"
 
@@ -368,14 +368,14 @@ class TestPublishProxiedCredentialRouting:
         ))
         assert result["status"] == "pushed"
 
-        # The credential rode the authorization window to the proxy...
-        mock_window.assert_called_once_with("owner/repo", token="ghs_lazytoken")
+        # The credential rode the authorization grant to the proxy...
+        mock_grant.assert_called_once_with("owner/repo", token="ghs_lazytoken")
         # ...and no exec in the container ever saw it.
         calls = container.exec_run.call_args_list
         assert calls  # sanity
         assert all(self._env_of(c) is None for c in calls)
 
-    @patch("code_sandbox_mcp.tools.vcs.authorized_push_window")
+    @patch("code_sandbox_mcp.tools.vcs.authorized_push_grant")
     @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
     @patch("code_sandbox_mcp.tools.vcs._docker")
@@ -386,7 +386,7 @@ class TestPublishProxiedCredentialRouting:
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
         mock_proxied: MagicMock,
-        mock_window: MagicMock,
+        mock_grant: MagicMock,
     ) -> None:
         """PR creation is host-side (#360): no exec ever carries a token."""
         mock_resolve.return_value = "ghs_lazytoken"

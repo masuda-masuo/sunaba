@@ -320,7 +320,7 @@ VCS トークンはコンテナに一切注入されない（#439）。read（cl
 
 - 最小権限: コンテナにトークンが存在しないので、はぐれた in-container `git push` が漏らす credential がない。
 - 漏洩低減: 実行ログは `sanitize_output` の `mask_tokens` で `KEY=***` に自動マスクされる。
-- 構造ガード: read / push の認可はホストが proxy に per-window でトークンを渡す。コンテナは credential を保持しない。
+- 構造ガード: read / push の認可はホストが proxy に per-grant でトークンを渡す。コンテナは credential を保持しない。
 
 **payload 非通過フロー**
 

@@ -404,11 +404,11 @@ class TestCloneRepoViaNetwork:
         assert "owner/repo" in msg
         assert "/tmp/repo/repo" in msg
 
-    def test_failure_without_token_hints_read_window(self) -> None:
+    def test_failure_without_token_hints_read_grant(self) -> None:
         c = self._container(1, b"gh: Could not resolve to a Repository")
         with pytest.raises(RuntimeError) as exc:
             _clone_repo_via_network(c, "abc123def456", "owner/private", "/tmp/repo")
-        assert "read window" in str(exc.value)
+        assert "read grant" in str(exc.value)
 
     def test_failure_with_token_omits_hint(self) -> None:
         c = self._container(1, b"some other gh error")
@@ -417,7 +417,7 @@ class TestCloneRepoViaNetwork:
                 c, "abc123def456", "owner/private", "/tmp/repo",
                 authenticated=True,
             )
-        assert "read window" not in str(exc.value)
+        assert "read grant" not in str(exc.value)
 
     def test_anonymous_git_clone_without_token(self) -> None:
         """Issue #333: no token -> anonymous git clone (public works)."""
@@ -440,37 +440,37 @@ class TestCloneRepoViaNetwork:
         assert "gh repo clone owner/repo" in cmd
 
     @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
-    def test_read_window_success_is_journaled(self, mock_record) -> None:
-        """#421: a proxy-read-window-authorized clone records approved=True."""
+    def test_read_grant_success_is_journaled(self, mock_record) -> None:
+        """#421: a proxy-read-grant-authorized clone records approved=True."""
         c = self._container(0, b"")
         _clone_repo_via_network(
-            c, "abc123def456", "owner/repo", "/tmp/repo", open_read_window=True,
+            c, "abc123def456", "owner/repo", "/tmp/repo", open_read_grant=True,
         )
         mock_record.assert_called_once_with(
             "abc123def456",
             "clone_repo",
-            "repo=owner/repo dest=/tmp/repo/repo proxy_read_window=True",
+            "repo=owner/repo dest=/tmp/repo/repo proxy_read_grant=True",
             approved=True,
         )
 
     @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
-    def test_read_window_failure_is_journaled(self, mock_record) -> None:
-        """#421: a denied/failed proxy read window must show up too, not just success."""
+    def test_read_grant_failure_is_journaled(self, mock_record) -> None:
+        """#421: a denied/failed proxy read grant must show up too, not just success."""
         c = self._container(1, b"fatal: could not read Username")
         with pytest.raises(RuntimeError):
             _clone_repo_via_network(
                 c, "abc123def456", "owner/repo", "/tmp/repo",
-                open_read_window=True,
+                open_read_grant=True,
             )
         mock_record.assert_called_once_with(
             "abc123def456",
             "clone_repo",
-            "repo=owner/repo dest=/tmp/repo/repo proxy_read_window=True",
+            "repo=owner/repo dest=/tmp/repo/repo proxy_read_grant=True",
             approved=False,
         )
 
     @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
-    def test_no_read_window_is_not_journaled(self, mock_record) -> None:
+    def test_no_read_grant_is_not_journaled(self, mock_record) -> None:
         """A plain (non-proxied) clone is unaffected -- no new journal entry."""
         c = self._container(0, b"")
         _clone_repo_via_network(c, "abc123def456", "owner/repo", "/tmp/repo")
@@ -518,16 +518,16 @@ class TestCloneRepoTransportSelection:
         assert "warning" not in result
 
 
-class TestCloneRepoToolReadWindowJournal:
-    """#421: clone_repo tool journals the proxy read-window's outcome."""
+class TestCloneRepoToolReadGrantJournal:
+    """#421: clone_repo tool journals the proxy read-grant's outcome."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
     @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
-    @patch("code_sandbox_mcp.tools.vcs.authorized_read_window")
-    def test_success_records_proxy_read_window_flag(
-        self, _mock_window, _mock_proxy, _mock_token, mock_record, mock_docker
+    @patch("code_sandbox_mcp.tools.vcs.authorized_read_grant")
+    def test_success_records_proxy_read_grant_flag(
+        self, _mock_grant, _mock_proxy, _mock_token, mock_record, mock_docker
     ) -> None:
         container = _make_container([
             (1, b"", b"gh: not logged in\n"),  # gh auth setup-git fails -> anonymous
@@ -538,11 +538,11 @@ class TestCloneRepoToolReadWindowJournal:
         from code_sandbox_mcp.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
-        assert "warning" not in result  # the read window covers the credential gap
+        assert "warning" not in result  # the read grant covers the credential gap
         mock_record.assert_called_once_with(
             "abc123def456",
             "clone_repo",
-            "repo=owner/mytool branch=default dest=/home/sandbox/mytool proxy_read_window=True",
+            "repo=owner/mytool branch=default dest=/home/sandbox/mytool proxy_read_grant=True",
             approved=True,
         )
 
@@ -550,9 +550,9 @@ class TestCloneRepoToolReadWindowJournal:
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
     @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
-    @patch("code_sandbox_mcp.tools.vcs.authorized_read_window")
+    @patch("code_sandbox_mcp.tools.vcs.authorized_read_grant")
     def test_failure_is_journaled_with_approved_false(
-        self, _mock_window, _mock_proxy, _mock_token, mock_record, mock_docker
+        self, _mock_grant, _mock_proxy, _mock_token, mock_record, mock_docker
     ) -> None:
         container = _make_container([
             (1, b"", b"gh: not logged in\n"),
@@ -566,7 +566,7 @@ class TestCloneRepoToolReadWindowJournal:
         mock_record.assert_called_once_with(
             "abc123def456",
             "clone_repo",
-            "repo=owner/mytool branch=default proxy_read_window=True",
+            "repo=owner/mytool branch=default proxy_read_grant=True",
             approved=False,
         )
 
@@ -581,9 +581,9 @@ class TestCloneRepoRecoversProxyEnv:
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs.authorized_read_window")
-    def test_recovers_env_and_opens_read_window(
-        self, mock_window, _mock_token, mock_record, mock_docker, mock_ensure_proxy,
+    @patch("code_sandbox_mcp.tools.vcs.authorized_read_grant")
+    def test_recovers_env_and_opens_read_grant(
+        self, mock_grant, _mock_token, mock_record, mock_docker, mock_ensure_proxy,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
@@ -608,7 +608,7 @@ class TestCloneRepoRecoversProxyEnv:
 
         assert result["status"] == "ok"
         mock_ensure_proxy.assert_called_once()
-        mock_window.assert_called_once()
+        mock_grant.assert_called_once()
 
     @patch("code_sandbox_mcp.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
     @patch("code_sandbox_mcp.tools.vcs._docker")

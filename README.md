@@ -190,13 +190,16 @@ stdio has a ~60 second client timeout. Long operations (`docker pull`, `pip inst
 
 For SSE/HTTP transports, the server binds to `127.0.0.1:8765` by default.
 
-### Optional: observability dashboard
+### Observability dashboard
 
-```json
-"--dashboard-port", "8766"
-```
+Starts a local read-only web dashboard showing active containers, run history, and pass/fail stats on port **8766** by default.
 
-Starts a local read-only web dashboard at `http://127.0.0.1:8766` showing active containers, run history, and pass/fail stats.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dashboard-port` | `8766` | Dashboard port. Set to `0` to disable. |
+| `--dashboard-host` | `127.0.0.1` | Bind address. Use `0.0.0.0` for WSL host access. |
+
+> **WSL tip**: If your MCP server binds to `--port 8766`, use `--dashboard-port 8767` to avoid conflict, and `--dashboard-host 0.0.0.0` to reach the dashboard from Windows at `http://localhost:8767`.
 
 ### Optional: push notifications
 

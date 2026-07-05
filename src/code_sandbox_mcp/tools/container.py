@@ -978,8 +978,11 @@ def _journal_container_status() -> dict[str, dict[str, Any]]:
     """Summarise per-container lifecycle status from the journal.
 
     Returns a mapping ``container_id -> {complete, used, stopped, init_ts}``
-    where *complete* means an ``initialize_complete`` event was seen, *used*
-    means at least one ``exec``, and *stopped* an explicit ``stop``.
+    where *complete* means an ``initialize_complete`` event was seen and
+    *used* means at least one ``exec``.  Containers with an explicit
+    ``stop`` are pruned from the mapping entirely (absence = no lifecycle
+    info), so ``stopped`` is never ``True`` — the key survives only for
+    interface stability.
     """
     return read_container_states()
 

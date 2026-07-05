@@ -17,8 +17,8 @@ from code_sandbox_mcp import proxy_lifecycle, token_broker
 from code_sandbox_mcp.journal import record_boundary_crossing
 from code_sandbox_mcp.proxy_client import (
     ProxyAuthError,
-    authorized_push_window,
-    authorized_read_window,
+    authorized_push_grant,
+    authorized_read_grant,
     proxy_configured,
 )
 from code_sandbox_mcp.tools.common import (
@@ -724,7 +724,7 @@ def _resolve_vcs_token() -> str:
     Despite the name's push-era origin, this is a general host-side token
     resolver: it also backs authenticated host->GitHub-API GET calls
     (``_resolve_pr_head_ref``, ``issue_write``) and, since #419, egress-proxy
-    read-authorization windows (``authorized_read_window``) for
+    read-authorization grants (``authorized_read_grant``) for
     ``clone_repo``/``sandbox_initialize``. There is nothing push-specific in
     its resolution order (broker mint -> static ``GITHUB_TOKEN``/``GH_TOKEN``).
 
@@ -867,7 +867,7 @@ def _ensure_proxy_env_fresh(client: Any) -> str | None:
     vars while the sidecar -- and a pre-existing container's proxied network
     -- keep running, so ``publish``/``clone_repo`` operating on such a
     container would otherwise see ``proxy_configured()`` as ``False`` and
-    silently skip opening an authorization window, even though the sidecar
+    silently skip opening an authorization grant, even though the sidecar
     still enforces one. Re-running ``ensure_egress_proxy`` is idempotent and
     recovers the running sidecar's secret via ``docker inspect`` (no
     recreation) whenever the sidecar is already up.
@@ -1083,7 +1083,7 @@ Returns:
     # on (it fails cleanly rather than silently pushing unauthenticated).
     #
     # With the egress proxy configured (#356), the credential goes to the
-    # proxy instead, window-scoped via ``authorized_push_window(token=...)``:
+    # proxy instead, grant-scoped via ``authorized_push_grant(token=...)``:
     # the proxy injects ``Authorization`` into the authorized push itself, so
     # neither the git-push exec nor the API-push fallback carries a token --
     # the container stays credential-free end to end, and the Objects API
@@ -1101,14 +1101,14 @@ Returns:
         f"-c credential.helper='!f() {{ echo username=x-access-token; echo password=$GITHUB_TOKEN; }}; f' "
         f"push origin {shlex.quote(branch)}{force_flag}"
     )
-    # Open a short-lived push-authorization window on the egress proxy so
+    # Open a short-lived push-authorization grant on the egress proxy so
     # the sidecar lets *this* push through (#356 / #357).  When no proxy is
     # configured this is a no-op, so publish behaves exactly as before.  The
-    # window is revoked on exit -- including the early return below -- so a
+    # grant is revoked on exit -- including the early return below -- so a
     # failed push (either transport) still closes it.  (PR creation below is
     # a non-push write on api.github.com and runs host-side, #360.)
     try:
-        with authorized_push_window(repo, token=push_token or None):
+        with authorized_push_grant(repo, token=push_token or None):
             push_ec, push_out, push_err = _run(push_cmd, env=push_env)
 
             # Get the SHA of the pushed commit
@@ -1357,7 +1357,7 @@ def clone_repo(
     Requires a container started with ``allow_network=True``.  A
     *private* repository needs no extra flag: under the egress proxy
     (#356) the container never receives a token, so a host-resolved
-    token is handed to the proxy for a short read-authorization window
+    token is handed to the proxy for a short read-authorization grant
     (#419) that authenticates the clone's anonymous ``git clone`` at the
     network layer -- the container's own env and any ``gh``
     credential-helper state stay untouched.
@@ -1381,12 +1381,12 @@ def clone_repo(
 
     .. rubric:: Prefer over
 
-    - Prefer over ``sandbox_exec`` + ``gh repo clone`` (the proxy read-authorization window handles private-repo auth, #419)
+    - Prefer over ``sandbox_exec`` + ``gh repo clone`` (the proxy read-authorization grant handles private-repo auth, #419)
     - Prefer over ``clone_repo`` when starting a new container — use ``sandbox_initialize(clone_repo=...)`` instead
 
     .. rubric:: Fallback
 
-    - If a private clone fails, ensure the egress proxy has a host-resolvable token (broker / ``GITHUB_TOKEN``) for the read-authorization window (#419)
+    - If a private clone fails, ensure the egress proxy has a host-resolvable token (broker / ``GITHUB_TOKEN``) for the read-authorization grant (#419)
 
     Args:
         container_id: 12-character container ID prefix.
@@ -1449,14 +1449,14 @@ def clone_repo(
     authenticated = auth_ec == 0
 
     # Under the egress proxy the container never carries a token (#356), so
-    # `authenticated` above is always False there; a read window (#419)
+    # `authenticated` above is always False there; a read grant (#419)
     # authenticates the clone at the proxy instead, without changing the
     # container-side (anonymous) command.
-    open_read_window = not authenticated and proxy_configured()
+    open_read_grant = not authenticated and proxy_configured()
     cmd = _build_clone_command(repo, clone_path, branch, authenticated)
 
-    if open_read_window:
-        with authorized_read_window(repo, token=_resolve_vcs_token() or None):
+    if open_read_grant:
+        with authorized_read_grant(repo, token=_resolve_vcs_token() or None):
             exit_code, output = container.exec_run(
                 ["/bin/sh", "-c", cmd],
                 stdout=True,
@@ -1489,15 +1489,15 @@ def clone_repo(
                 f"Hint: {repr(clone_path)} already exists. Specify a different "
                 f"dest_dir, or remove the existing directory first."
             )
-        # Record a denied/failed egress-proxy read window (#421), mirroring
-        # publish's push-window recording (#356/#357).  Scoped to the
-        # window case only -- an ordinary (non-proxied) clone failure was
+        # Record a denied/failed egress-proxy read grant (#421), mirroring
+        # publish's push-grant recording (#356/#357).  Scoped to the
+        # grant case only -- an ordinary (non-proxied) clone failure was
         # never journaled before and is out of scope here.
-        if open_read_window:
+        if open_read_grant:
             record_boundary_crossing(
                 cid,
                 "clone_repo",
-                f"repo={repo} branch={branch or 'default'} proxy_read_window=True",
+                f"repo={repo} branch={branch or 'default'} proxy_read_grant=True",
                 approved=False,
             )
         return json.dumps({
@@ -1509,7 +1509,7 @@ def clone_repo(
     record_boundary_crossing(
         cid,
         "clone_repo",
-        f"repo={repo} branch={branch or 'default'} dest={clone_path} proxy_read_window={open_read_window}",
+        f"repo={repo} branch={branch or 'default'} dest={clone_path} proxy_read_grant={open_read_grant}",
         approved=True,
     )
 
@@ -1519,6 +1519,6 @@ def clone_repo(
         "clone_path": clone_path,
         "branch": branch or "default",
     }
-    if not authenticated and not open_read_window:
+    if not authenticated and not open_read_grant:
         result["warning"] = CLONE_NO_TOKEN_WARNING
     return json.dumps(result)

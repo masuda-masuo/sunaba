@@ -1,13 +1,13 @@
 """Host-side client for the egress-proxy authorization control API (#357).
 
 Counterpart to the control server in :mod:`code_sandbox_mcp.proxy` (#356).
-``publish`` opens a short-lived push window before pushing and closes it after,
+``publish`` opens a short-lived push grant before pushing and closes it after,
 so the egress-proxy sidecar lets *that* push through while still rejecting a raw
 ``git push`` from ``sandbox_exec``.
 
 Runs **host-side** (in the MCP server process), never inside the sandbox
 container, so the shared control secret it sends never reaches sandboxed code --
-the container therefore cannot open its own push window.
+the container therefore cannot open its own push grant.
 
 Inert until configured: when ``CODE_SANDBOX_PROXY_CONTROL_URL`` is unset the
 context manager is a no-op and ``publish`` behaves exactly as before the egress
@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from code_sandbox_mcp.proxy import (
     CONTROL_SECRET_ENV,
     CONTROL_TOKEN_HEADER,
-    DEFAULT_WINDOW_TTL_SECONDS,
+    DEFAULT_GRANT_TTL_SECONDS,
 )
 
 #: Host-facing base URL of the proxy's control API (e.g. ``http://127.0.0.1:9099``
@@ -51,7 +51,7 @@ class ProxyAuthError(RuntimeError):
     """A configured proxy's control API could not be reached or refused the call.
 
     Raised only when the proxy *is* configured (``CODE_SANDBOX_PROXY_CONTROL_URL``
-    set) but opening the window failed, so ``publish`` fails closed rather than
+    set) but opening the grant failed, so ``publish`` fails closed rather than
     pushing unprotected.  Never raised on the unconfigured (inert) path.
     """
 
@@ -135,22 +135,22 @@ def proxy_configured(env: dict[str, str] | None = None) -> bool:
     """Return ``True`` when the egress-proxy control API is configured.
 
     ``publish`` uses this to decide whether the push credential should stay
-    host-side (handed to the proxy per window, #356) instead of entering the
+    host-side (handed to the proxy per grant, #356) instead of entering the
     container's exec environment.
     """
     return ProxyControlConfig.from_env(env) is not None
 
 
-def open_window(
+def open_grant(
     repo: str,
-    ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
+    ttl_seconds: float = DEFAULT_GRANT_TTL_SECONDS,
     *,
     token: str | None = None,
     config: ProxyControlConfig | None = None,
 ) -> None:
-    """Open a push-authorization window for *repo* (no-op when the proxy is unset).
+    """Open a push-authorization grant for *repo* (no-op when the proxy is unset).
 
-    *token*, when given, is handed to the proxy as the window-scoped push
+    *token*, when given, is handed to the proxy as the grant-scoped push
     credential (#356): the proxy injects it into the authorized push and
     discards it on revoke/expiry, so the sandbox container never holds it.
 
@@ -166,27 +166,27 @@ def open_window(
     _post(cfg, _ALLOW_PATH, payload)
 
 
-def close_window(repo: str, *, config: ProxyControlConfig | None = None) -> None:
-    """Revoke any push-authorization window for *repo* (no-op when unset)."""
+def close_grant(repo: str, *, config: ProxyControlConfig | None = None) -> None:
+    """Revoke any push-authorization grant for *repo* (no-op when unset)."""
     cfg = config or ProxyControlConfig.from_env()
     if cfg is None:
         return
     _post(cfg, _REVOKE_PATH, {"repo": repo})
 
 
-def open_read_window(
+def open_read_grant(
     repo: str,
-    ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
+    ttl_seconds: float = DEFAULT_GRANT_TTL_SECONDS,
     *,
     token: str | None = None,
     config: ProxyControlConfig | None = None,
 ) -> None:
-    """Open a clone/fetch-authorization window for *repo* (#419).
+    """Open a clone/fetch-authorization grant for *repo* (#419).
 
-    A no-op when the proxy is unset, mirroring :func:`open_window`.  Unlike a
-    push window, this never authorizes ``git push`` -- it only lets the proxy
+    A no-op when the proxy is unset, mirroring :func:`open_grant`.  Unlike a
+    push grant, this never authorizes ``git push`` -- it only lets the proxy
     inject *token* into ``git-upload-pack`` (clone/fetch) requests for *repo*
-    while the window is open.
+    while the grant is open.
     """
     cfg = config or ProxyControlConfig.from_env()
     if cfg is None:
@@ -197,8 +197,8 @@ def open_read_window(
     _post(cfg, _ALLOW_READ_PATH, payload)
 
 
-def close_read_window(repo: str, *, config: ProxyControlConfig | None = None) -> None:
-    """Revoke any read-authorization window for *repo* (no-op when unset)."""
+def close_read_grant(repo: str, *, config: ProxyControlConfig | None = None) -> None:
+    """Revoke any read-authorization grant for *repo* (no-op when unset)."""
     cfg = config or ProxyControlConfig.from_env()
     if cfg is None:
         return
@@ -206,16 +206,16 @@ def close_read_window(repo: str, *, config: ProxyControlConfig | None = None) ->
 
 
 @contextmanager
-def authorized_read_window(
+def authorized_read_grant(
     repo: str,
-    ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
+    ttl_seconds: float = DEFAULT_GRANT_TTL_SECONDS,
     *,
     token: str | None = None,
     config: ProxyControlConfig | None = None,
 ) -> Iterator[None]:
-    """Open a read window for *repo*, then always revoke it on exit (#419).
+    """Open a read grant for *repo*, then always revoke it on exit (#419).
 
-    Mirrors :func:`authorized_push_window`: a no-op when the proxy is
+    Mirrors :func:`authorized_push_grant`: a no-op when the proxy is
     unconfigured; when configured, callers such as ``clone_repo`` /
     ``sandbox_initialize`` use this to let an authenticated clone/fetch
     through the egress proxy without ever putting the token in the
@@ -225,29 +225,29 @@ def authorized_read_window(
     if cfg is None:
         yield
         return
-    open_read_window(repo, ttl_seconds, token=token, config=cfg)
+    open_read_grant(repo, ttl_seconds, token=token, config=cfg)
     try:
         yield
     finally:
         try:
-            close_read_window(repo, config=cfg)
+            close_read_grant(repo, config=cfg)
         except ProxyAuthError:
             pass
 
 
-def open_api_write_window(
+def open_api_write_grant(
     repo: str,
-    ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
+    ttl_seconds: float = DEFAULT_GRANT_TTL_SECONDS,
     *,
     token: str | None = None,
     config: ProxyControlConfig | None = None,
 ) -> None:
-    """Open a non-push write-authorization window for *repo* on ``api.github.com`` (#420).
+    """Open a non-push write-authorization grant for *repo* on ``api.github.com`` (#420).
 
-    A no-op when the proxy is unset, mirroring :func:`open_window`.  Covers
+    A no-op when the proxy is unset, mirroring :func:`open_grant`.  Covers
     writes other than the git Objects API (issue/PR create, comments,
-    reviews, labels, releases) -- those reuse the push window instead, since
-    they run inside ``authorized_push_window`` already (see
+    reviews, labels, releases) -- those reuse the push grant instead, since
+    they run inside ``authorized_push_grant`` already (see
     ``code_sandbox_mcp.proxy.is_git_data_api_path``).
     """
     cfg = config or ProxyControlConfig.from_env()
@@ -259,8 +259,8 @@ def open_api_write_window(
     _post(cfg, _ALLOW_API_WRITE_PATH, payload)
 
 
-def close_api_write_window(repo: str, *, config: ProxyControlConfig | None = None) -> None:
-    """Revoke any open api-write window for *repo* (no-op when unset)."""
+def close_api_write_grant(repo: str, *, config: ProxyControlConfig | None = None) -> None:
+    """Revoke any open api-write grant for *repo* (no-op when unset)."""
     cfg = config or ProxyControlConfig.from_env()
     if cfg is None:
         return
@@ -268,16 +268,16 @@ def close_api_write_window(repo: str, *, config: ProxyControlConfig | None = Non
 
 
 @contextmanager
-def authorized_api_write_window(
+def authorized_api_write_grant(
     repo: str,
-    ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
+    ttl_seconds: float = DEFAULT_GRANT_TTL_SECONDS,
     *,
     token: str | None = None,
     config: ProxyControlConfig | None = None,
 ) -> Iterator[None]:
-    """Open an api-write window for *repo*, then always revoke it on exit (#420).
+    """Open an api-write grant for *repo*, then always revoke it on exit (#420).
 
-    Mirrors :func:`authorized_read_window`: a no-op when the proxy is
+    Mirrors :func:`authorized_read_grant`: a no-op when the proxy is
     unconfigured.  Not yet wired into any tool -- today's write flows
     (``sandbox_issue_write``, ``publish``'s PR creation) resolve their token
     and call the GitHub REST API host-side, so they never cross the egress
@@ -289,31 +289,31 @@ def authorized_api_write_window(
     if cfg is None:
         yield
         return
-    open_api_write_window(repo, ttl_seconds, token=token, config=cfg)
+    open_api_write_grant(repo, ttl_seconds, token=token, config=cfg)
     try:
         yield
     finally:
         try:
-            close_api_write_window(repo, config=cfg)
+            close_api_write_grant(repo, config=cfg)
         except ProxyAuthError:
             pass
 
 
 @contextmanager
-def authorized_push_window(
+def authorized_push_grant(
     repo: str,
-    ttl_seconds: float = DEFAULT_WINDOW_TTL_SECONDS,
+    ttl_seconds: float = DEFAULT_GRANT_TTL_SECONDS,
     *,
     token: str | None = None,
     config: ProxyControlConfig | None = None,
 ) -> Iterator[None]:
-    """Open a push window for *repo*, then always revoke it on exit.
+    """Open a push grant for *repo*, then always revoke it on exit.
 
     A no-op when the proxy is unconfigured.  When configured, an ``open`` that
     fails raises :class:`ProxyAuthError` (fail closed).  *token* is forwarded
-    to :func:`open_window` as the window-scoped push credential (#356).  The
+    to :func:`open_grant` as the grant-scoped push credential (#356).  The
     ``close`` in the ``finally`` is best-effort: a revoke failure is swallowed
-    because the window's TTL guarantees it lapses anyway, and the push has
+    because the grant's TTL guarantees it lapses anyway, and the push has
     already run -- so a proxy hiccup on teardown must not mask the push's real
     outcome.
     """
@@ -321,11 +321,11 @@ def authorized_push_window(
     if cfg is None:
         yield
         return
-    open_window(repo, ttl_seconds, token=token, config=cfg)
+    open_grant(repo, ttl_seconds, token=token, config=cfg)
     try:
         yield
     finally:
         try:
-            close_window(repo, config=cfg)
+            close_grant(repo, config=cfg)
         except ProxyAuthError:
             pass

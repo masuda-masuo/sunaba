@@ -22,16 +22,16 @@ from code_sandbox_mcp.proxy_client import (
     CONTROL_URL_ENV,
     ProxyAuthError,
     ProxyControlConfig,
-    authorized_api_write_window,
-    authorized_push_window,
-    authorized_read_window,
-    close_api_write_window,
-    close_read_window,
-    close_window,
+    authorized_api_write_grant,
+    authorized_push_grant,
+    authorized_read_grant,
+    close_api_write_grant,
+    close_grant,
+    close_read_grant,
     fetch_proxy_fingerprint,
-    open_api_write_window,
-    open_read_window,
-    open_window,
+    open_api_write_grant,
+    open_grant,
+    open_read_grant,
     proxy_configured,
 )
 
@@ -125,31 +125,31 @@ class TestFromEnv:
 class TestUnconfiguredIsNoop:
     def test_open_close_noop(self, guard: EgressGuard) -> None:
         # No config resolvable -> both calls are no-ops and never touch a socket.
-        open_window(REPO, config=None)
-        close_window(REPO, config=None)
+        open_grant(REPO, config=None)
+        close_grant(REPO, config=None)
         assert not _push_allowed(guard)
 
     def test_context_manager_noop(self, guard: EgressGuard) -> None:
-        with authorized_push_window(REPO, config=None):
+        with authorized_push_grant(REPO, config=None):
             assert not _push_allowed(guard)
         assert not _push_allowed(guard)
 
 
-class TestWindowLifecycle:
-    def test_open_then_close_toggles_window(
+class TestGrantLifecycle:
+    def test_open_then_close_toggles_grant(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
         assert not _push_allowed(guard)
-        open_window(REPO, config=config)
+        open_grant(REPO, config=config)
         assert _push_allowed(guard)
-        close_window(REPO, config=config)
+        close_grant(REPO, config=config)
         assert not _push_allowed(guard)
 
     def test_context_manager_opens_then_revokes(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
         assert not _push_allowed(guard)
-        with authorized_push_window(REPO, config=config):
+        with authorized_push_grant(REPO, config=config):
             assert _push_allowed(guard)
         assert not _push_allowed(guard)
 
@@ -157,36 +157,36 @@ class TestWindowLifecycle:
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
         with pytest.raises(RuntimeError, match="boom"):
-            with authorized_push_window(REPO, config=config):
+            with authorized_push_grant(REPO, config=config):
                 assert _push_allowed(guard)
                 raise RuntimeError("boom")
-        # Window revoked despite the push raising.
+        # Grant revoked despite the push raising.
         assert not _push_allowed(guard)
 
 
-class TestWindowScopedToken:
-    """The push credential travels with the window over the control API (#356)."""
+class TestGrantScopedToken:
+    """The push credential travels with the grant over the control API (#356)."""
 
-    def test_token_rides_the_window(
+    def test_token_rides_the_grant(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
-        open_window(REPO, token="ghs_window", config=config)
-        assert _push_headers(guard) == {"Authorization": basic_auth_header("ghs_window")}
-        close_window(REPO, config=config)
-        # Revoked window -> credential gone with it.
+        open_grant(REPO, token="ghs_grant", config=config)
+        assert _push_headers(guard) == {"Authorization": basic_auth_header("ghs_grant")}
+        close_grant(REPO, config=config)
+        # Revoked grant -> credential gone with it.
         assert _push_headers(guard) == {}
 
     def test_context_manager_scopes_the_token(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
-        with authorized_push_window(REPO, token="ghs_window", config=config):
-            assert _push_headers(guard) == {"Authorization": basic_auth_header("ghs_window")}
+        with authorized_push_grant(REPO, token="ghs_grant", config=config):
+            assert _push_headers(guard) == {"Authorization": basic_auth_header("ghs_grant")}
         assert _push_headers(guard) == {}
 
-    def test_windows_without_token_inject_nothing(
+    def test_grants_without_token_inject_nothing(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
-        open_window(REPO, config=config)
+        open_grant(REPO, config=config)
         assert _push_allowed(guard)
         assert _push_headers(guard) == {}
 
@@ -200,14 +200,14 @@ class TestProxyConfigured:
 
 
 class TestAuthFailures:
-    def test_wrong_secret_raises_and_leaves_window_shut(
+    def test_wrong_secret_raises_and_leaves_grant_shut(
         self, guard: EgressGuard, server: AuthControlServer
     ) -> None:
         bad = ProxyControlConfig(
             base_url=f"http://127.0.0.1:{server.port}", secret="wrong"
         )
         with pytest.raises(ProxyAuthError):
-            open_window(REPO, config=bad)
+            open_grant(REPO, config=bad)
         assert not _push_allowed(guard)
 
     def test_unreachable_proxy_raises(self, guard: EgressGuard) -> None:
@@ -219,80 +219,80 @@ class TestAuthFailures:
         dead.stop()
         cfg = ProxyControlConfig(base_url=f"http://127.0.0.1:{port}", secret=_SECRET)
         with pytest.raises(ProxyAuthError):
-            open_window(REPO, config=cfg)
+            open_grant(REPO, config=cfg)
 
 
-class TestReadWindowLifecycle:
-    """Host-side read-authorization windows for clone/fetch (#419)."""
+class TestReadGrantLifecycle:
+    """Host-side read-authorization grants for clone/fetch (#419)."""
 
     def test_unconfigured_open_close_noop(self, guard: EgressGuard) -> None:
-        open_read_window(REPO, config=None)
-        close_read_window(REPO, config=None)
+        open_read_grant(REPO, config=None)
+        close_read_grant(REPO, config=None)
         assert _fetch_headers(guard) == {}
 
     def test_context_manager_noop_when_unconfigured(self, guard: EgressGuard) -> None:
-        with authorized_read_window(REPO, config=None):
+        with authorized_read_grant(REPO, config=None):
             assert _fetch_headers(guard) == {}
 
-    def test_token_rides_the_read_window(
+    def test_token_rides_the_read_grant(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
-        open_read_window(REPO, token="ghs_read", config=config)
+        open_read_grant(REPO, token="ghs_read", config=config)
         assert _fetch_headers(guard) == {"Authorization": basic_auth_header("ghs_read")}
-        close_read_window(REPO, config=config)
+        close_read_grant(REPO, config=config)
         assert _fetch_headers(guard) == {}
 
     def test_context_manager_scopes_the_read_token(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
-        with authorized_read_window(REPO, token="ghs_read", config=config):
+        with authorized_read_grant(REPO, token="ghs_read", config=config):
             assert _fetch_headers(guard) == {"Authorization": basic_auth_header("ghs_read")}
         assert _fetch_headers(guard) == {}
 
-    def test_context_manager_revokes_read_window_on_exception(
+    def test_context_manager_revokes_read_grant_on_exception(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
         with pytest.raises(RuntimeError, match="boom"):
-            with authorized_read_window(REPO, token="ghs_read", config=config):
+            with authorized_read_grant(REPO, token="ghs_read", config=config):
                 assert _fetch_headers(guard) == {"Authorization": basic_auth_header("ghs_read")}
                 raise RuntimeError("boom")
         assert _fetch_headers(guard) == {}
 
-    def test_read_window_never_unlocks_push(
+    def test_read_grant_never_unlocks_push(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
         # guard's allowlist already contains REPO (fixture), so this isolates
         # the read/push separation rather than allowlist membership.
-        with authorized_read_window(REPO, token="ghs_read", config=config):
+        with authorized_read_grant(REPO, token="ghs_read", config=config):
             assert not _push_allowed(guard)
 
 
-class TestApiWriteWindowLifecycle:
-    """Host-side api-write-authorization windows for non-push REST writes (#420)."""
+class TestApiWriteGrantLifecycle:
+    """Host-side api-write-authorization grants for non-push REST writes (#420)."""
 
     def test_unconfigured_open_close_noop(self, guard: EgressGuard) -> None:
-        open_api_write_window(REPO, config=None)
-        close_api_write_window(REPO, config=None)
+        open_api_write_grant(REPO, config=None)
+        close_api_write_grant(REPO, config=None)
         assert not _api_write_allowed(guard)
 
     def test_context_manager_noop_when_unconfigured(self, guard: EgressGuard) -> None:
-        with authorized_api_write_window(REPO, config=None):
+        with authorized_api_write_grant(REPO, config=None):
             assert not _api_write_allowed(guard)
 
-    def test_open_then_close_toggles_window(
+    def test_open_then_close_toggles_grant(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
         assert not _api_write_allowed(guard)
-        open_api_write_window(REPO, config=config)
+        open_api_write_grant(REPO, config=config)
         assert _api_write_allowed(guard)
-        close_api_write_window(REPO, config=config)
+        close_api_write_grant(REPO, config=config)
         assert not _api_write_allowed(guard)
 
     def test_context_manager_opens_then_revokes(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
         assert not _api_write_allowed(guard)
-        with authorized_api_write_window(REPO, config=config):
+        with authorized_api_write_grant(REPO, config=config):
             assert _api_write_allowed(guard)
         assert not _api_write_allowed(guard)
 
@@ -300,32 +300,32 @@ class TestApiWriteWindowLifecycle:
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
         with pytest.raises(RuntimeError, match="boom"):
-            with authorized_api_write_window(REPO, config=config):
+            with authorized_api_write_grant(REPO, config=config):
                 assert _api_write_allowed(guard)
                 raise RuntimeError("boom")
         assert not _api_write_allowed(guard)
 
-    def test_token_rides_the_api_write_window(
+    def test_token_rides_the_api_write_grant(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
-        open_api_write_window(REPO, token="ghs_write", config=config)
+        open_api_write_grant(REPO, token="ghs_write", config=config)
         assert _api_write_headers(guard) == {"Authorization": bearer_auth_header("ghs_write")}
-        close_api_write_window(REPO, config=config)
+        close_api_write_grant(REPO, config=config)
         assert _api_write_headers(guard) == {}
 
     def test_context_manager_scopes_the_token(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
-        with authorized_api_write_window(REPO, token="ghs_write", config=config):
+        with authorized_api_write_grant(REPO, token="ghs_write", config=config):
             assert _api_write_headers(guard) == {
                 "Authorization": bearer_auth_header("ghs_write")
             }
         assert _api_write_headers(guard) == {}
 
-    def test_api_write_window_never_unlocks_push(
+    def test_api_write_grant_never_unlocks_push(
         self, guard: EgressGuard, config: ProxyControlConfig
     ) -> None:
-        with authorized_api_write_window(REPO, token="ghs_write", config=config):
+        with authorized_api_write_grant(REPO, token="ghs_write", config=config):
             assert not _push_allowed(guard)
 
 

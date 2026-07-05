@@ -20,7 +20,7 @@ from code_sandbox_mcp.proxy import (
     CONTROL_HOST_ENV,
     CONTROL_PORT_ENV,
     CONTROL_SECRET_ENV,
-    DEFAULT_WINDOW_TTL_SECONDS,
+    DEFAULT_GRANT_TTL_SECONDS,
     FETCH_SERVICE,
     PROXY_SOURCE_FINGERPRINT,
     PUSH_BLOCK_HINT,
@@ -99,7 +99,7 @@ class TestRepoFromPath:
 
 
 class TestEgressGuardDecision:
-    """The decision core: only push is gated, deny-by-default + allowlist + window."""
+    """The decision core: only push is gated, deny-by-default + allowlist + grant."""
 
     def test_clone_always_passes(self) -> None:
         guard = EgressGuard()  # empty allowlist
@@ -117,47 +117,47 @@ class TestEgressGuardDecision:
         assert d.allow is False
         assert "allowlist" in d.reason
 
-    def test_push_to_allowed_repo_without_window_denied(self) -> None:
+    def test_push_to_allowed_repo_without_grant_denied(self) -> None:
         guard = EgressGuard({"o/r"})
         d = guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now=100.0)
         assert d.allow is False
-        assert "authorization window" in d.reason
+        assert "authorization grant" in d.reason
 
-    def test_push_allowed_repo_with_open_window(self) -> None:
+    def test_push_allowed_repo_with_open_grant(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_window("o/r", ttl_seconds=30)
-        # Both requests of a single push must pass while the window is open.
+        guard.open_grant("o/r", ttl_seconds=30)
+        # Both requests of a single push must pass while the grant is open.
         now = time.monotonic()
         assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now).allow is True
         assert guard.decide("/o/r.git/git-receive-pack", None, now).allow is True
 
-    def test_push_to_non_allowlisted_repo_with_window_denied(self) -> None:
+    def test_push_to_non_allowlisted_repo_with_grant_denied(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_window("other/repo", ttl_seconds=30)
+        guard.open_grant("other/repo", ttl_seconds=30)
         d = guard.decide("/other/repo.git/info/refs", PUSH_SERVICE, now=time.monotonic())
-        # Window open but repo not in allowlist -> still denied.
+        # Grant open but repo not in allowlist -> still denied.
         assert d.allow is False
         assert "allowlist" in d.reason
 
-    def test_window_expires(self) -> None:
+    def test_grant_expires(self) -> None:
         guard = EgressGuard({"o/r"})
-        # Drive the clock explicitly (open_window takes now, like decide).
+        # Drive the clock explicitly (open_grant takes now, like decide).
         base = time.monotonic()
-        guard.open_window("o/r", ttl_seconds=5.0, now=base)
+        guard.open_grant("o/r", ttl_seconds=5.0, now=base)
         assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, base + 1.0).allow is True
         assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, base + 6.0).allow is False
 
     def test_push_match_is_case_insensitive(self) -> None:
-        # Allowlist entry, window key, and URL path differ only in case.
+        # Allowlist entry, grant key, and URL path differ only in case.
         guard = EgressGuard({"Octocat/Hello-World"})
-        guard.open_window("octocat/HELLO-world", ttl_seconds=30, now=100.0)
+        guard.open_grant("octocat/HELLO-world", ttl_seconds=30, now=100.0)
         d = guard.decide("/octocat/hello-world.git/info/refs", PUSH_SERVICE, now=101.0)
         assert d.allow is True
 
-    def test_close_window_revokes(self) -> None:
+    def test_close_grant_revokes(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_window("o/r", ttl_seconds=30)
-        guard.close_window("o/r")
+        guard.open_grant("o/r", ttl_seconds=30)
+        guard.close_grant("o/r")
         d = guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now=time.monotonic())
         assert d.allow is False
 
@@ -187,14 +187,14 @@ class TestTokenInjection:
 
     def test_no_token_injects_nothing(self) -> None:
         guard = EgressGuard({"o/r"})  # no token configured
-        guard.open_window("o/r", ttl_seconds=30, now=100.0)
+        guard.open_grant("o/r", ttl_seconds=30, now=100.0)
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert d.allow is True
         assert guard.token_headers_for(d, is_push_request=True) == {}
 
     def test_authorized_push_gets_bearer(self) -> None:
         guard = EgressGuard({"o/r"}, token="ghs_secret")
-        guard.open_window("o/r", ttl_seconds=30, now=100.0)
+        guard.open_grant("o/r", ttl_seconds=30, now=100.0)
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert d.allow is True
         assert guard.token_headers_for(d, is_push_request=True) == {
@@ -202,7 +202,7 @@ class TestTokenInjection:
         }
 
     def test_denied_push_gets_no_token(self) -> None:
-        guard = EgressGuard({"o/r"}, token="ghs_secret")  # allowlisted but no window
+        guard = EgressGuard({"o/r"}, token="ghs_secret")  # allowlisted but no grant
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert d.allow is False
         assert guard.token_headers_for(d, is_push_request=True) == {}
@@ -214,64 +214,64 @@ class TestTokenInjection:
         assert d.allow is True
         assert guard.token_headers_for(d, is_push_request=False) == {}
 
-    def test_window_scoped_token_injected(self) -> None:
-        # No static token: the credential travels with the window (#356).
+    def test_grant_scoped_token_injected(self) -> None:
+        # No static token: the credential travels with the grant (#356).
         guard = EgressGuard({"o/r"})
-        guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_window")
+        guard.open_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_grant")
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert d.allow is True
         assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {
-            "Authorization": basic_auth_header("ghs_window")
+            "Authorization": basic_auth_header("ghs_grant")
         }
 
-    def test_window_token_beats_static_token(self) -> None:
+    def test_grant_token_beats_static_token(self) -> None:
         guard = EgressGuard({"o/r"}, token="ghs_static")
-        guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_window")
+        guard.open_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_grant")
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {
-            "Authorization": basic_auth_header("ghs_window")
+            "Authorization": basic_auth_header("ghs_grant")
         }
 
     def test_no_repo_falls_back_to_static_token(self) -> None:
         guard = EgressGuard({"o/r"}, token="ghs_static")
-        guard.open_window("o/r", ttl_seconds=30, now=100.0)
+        guard.open_grant("o/r", ttl_seconds=30, now=100.0)
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert guard.token_headers_for(d, is_push_request=True, now=101.0) == {
             "Authorization": basic_auth_header("ghs_static")
         }
 
-    def test_expired_window_token_not_injected(self) -> None:
-        # Even against a (fabricated) allow decision, an expired window's
+    def test_expired_grant_token_not_injected(self) -> None:
+        # Even against a (fabricated) allow decision, an expired grant's
         # token must never leave the guard.
         guard = EgressGuard({"o/r"})
-        guard.open_window("o/r", ttl_seconds=5.0, now=100.0, token="ghs_window")
+        guard.open_grant("o/r", ttl_seconds=5.0, now=100.0, token="ghs_grant")
         d = Decision(True, "fabricated allow")
         assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=106.0) == {}
-        # This read path bypasses decide()/_window_open(), so it must scrub
+        # This read path bypasses decide()/_grant_open(), so it must scrub
         # the expired entry itself (PR #402 review).
-        assert guard._windows == {}
+        assert guard._grants == {}
 
-    def test_closed_window_drops_token(self) -> None:
+    def test_closed_grant_drops_token(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_window")
-        guard.close_window("o/r")
+        guard.open_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_grant")
+        guard.close_grant("o/r")
         d = Decision(True, "fabricated allow")
         assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {}
 
-    def test_expired_window_entry_is_scrubbed(self) -> None:
-        # decide() on an expired window must also evict the entry so the
-        # window-scoped token does not linger in memory past expiry (#356).
+    def test_expired_grant_entry_is_scrubbed(self) -> None:
+        # decide() on an expired grant must also evict the entry so the
+        # grant-scoped token does not linger in memory past expiry (#356).
         guard = EgressGuard({"o/r"})
-        guard.open_window("o/r", ttl_seconds=5.0, now=100.0, token="ghs_window")
+        guard.open_grant("o/r", ttl_seconds=5.0, now=100.0, token="ghs_grant")
         d = guard.decide("/o/r.git/git-receive-pack", None, now=106.0)
         assert d.allow is False
-        assert guard._windows == {}
+        assert guard._grants == {}
 
 
-class TestReadWindowTokenInjection:
-    """Read-authorization windows for clone/fetch (#419)."""
+class TestReadGrantTokenInjection:
+    """Read-authorization grants for clone/fetch (#419)."""
 
-    def test_fetch_with_no_read_window_gets_no_token(self) -> None:
+    def test_fetch_with_no_read_grant_gets_no_token(self) -> None:
         guard = EgressGuard({"o/r"}, token="ghs_push_static")
         d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now=101.0)
         assert d.allow is True
@@ -281,46 +281,46 @@ class TestReadWindowTokenInjection:
             == {}
         )
 
-    def test_fetch_with_open_read_window_gets_token(self) -> None:
-        guard = EgressGuard()  # empty allowlist -- read windows bypass it
-        guard.open_read_window("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
+    def test_fetch_with_open_read_grant_gets_token(self) -> None:
+        guard = EgressGuard()  # empty allowlist -- read grants bypass it
+        guard.open_read_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
         d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now=101.0)
         assert d.allow is True
         assert guard.token_headers_for(
             d, is_push_request=False, repo="o/r", now=101.0, is_fetch_request=True
         ) == {"Authorization": basic_auth_header("ghs_read")}
 
-    def test_read_window_never_authorizes_push(self) -> None:
-        # Opening a read window must not widen push access (#419 design note).
+    def test_read_grant_never_authorizes_push(self) -> None:
+        # Opening a read grant must not widen push access (#419 design note).
         guard = EgressGuard({"o/r"})
-        guard.open_read_window("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
+        guard.open_read_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert d.allow is False
         assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {}
 
-    def test_push_window_never_authenticates_fetch(self) -> None:
-        # And the converse: a push window's token must not leak into a fetch.
+    def test_push_grant_never_authenticates_fetch(self) -> None:
+        # And the converse: a push grant's token must not leak into a fetch.
         guard = EgressGuard({"o/r"})
-        guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_push")
+        guard.open_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_push")
         d = guard.decide("/o/r.git/info/refs", FETCH_SERVICE, now=101.0)
         assert guard.token_headers_for(
             d, is_push_request=False, repo="o/r", now=101.0, is_fetch_request=True
         ) == {}
 
-    def test_expired_read_window_token_not_injected(self) -> None:
+    def test_expired_read_grant_token_not_injected(self) -> None:
         guard = EgressGuard()
-        guard.open_read_window("o/r", ttl_seconds=5.0, now=100.0, token="ghs_read")
+        guard.open_read_grant("o/r", ttl_seconds=5.0, now=100.0, token="ghs_read")
         d = Decision(True, "fabricated allow")
         assert (
             guard.token_headers_for(d, is_push_request=False, repo="o/r", now=106.0, is_fetch_request=True)
             == {}
         )
-        assert guard._read_windows == {}
+        assert guard._read_grants == {}
 
-    def test_closed_read_window_drops_token(self) -> None:
+    def test_closed_read_grant_drops_token(self) -> None:
         guard = EgressGuard()
-        guard.open_read_window("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
-        guard.close_read_window("o/r")
+        guard.open_read_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
+        guard.close_read_grant("o/r")
         d = Decision(True, "fabricated allow")
         assert (
             guard.token_headers_for(d, is_push_request=False, repo="o/r", now=101.0, is_fetch_request=True)
@@ -329,9 +329,9 @@ class TestReadWindowTokenInjection:
 
 
 class TestControlRequestDispatch:
-    """The pure control dispatcher: auth, validation, and window open/close."""
+    """The pure control dispatcher: auth, validation, and grant open/close."""
 
-    def test_allow_opens_window(self) -> None:
+    def test_allow_opens_grant(self) -> None:
         guard = EgressGuard({"o/r"})
         res = handle_control_request(
             guard,
@@ -351,10 +351,10 @@ class TestControlRequestDispatch:
             guard, None, "/auth/allow", None, {"repo": "o/r"}, now=100.0
         )
         assert res.status == 200
-        assert res.body["ttl_seconds"] == DEFAULT_WINDOW_TTL_SECONDS
+        assert res.body["ttl_seconds"] == DEFAULT_GRANT_TTL_SECONDS
 
-    def test_allow_with_token_arms_window_scoped_injection(self) -> None:
-        # publish hands the push credential over with the window (#356); the
+    def test_allow_with_token_arms_grant_scoped_injection(self) -> None:
+        # publish hands the push credential over with the grant (#356); the
         # authorized push must then carry it as the Authorization header.
         guard = EgressGuard({"o/r"})
         res = handle_control_request(
@@ -362,15 +362,15 @@ class TestControlRequestDispatch:
             None,
             "/auth/allow",
             None,
-            {"repo": "o/r", "ttl_seconds": 30, "token": "ghs_window"},
+            {"repo": "o/r", "ttl_seconds": 30, "token": "ghs_grant"},
             now=100.0,
         )
         assert res.status == 200
         # The credential must never be echoed back (the response is loggable).
-        assert "ghs_window" not in json.dumps(res.body)
+        assert "ghs_grant" not in json.dumps(res.body)
         d = guard.decide("/o/r.git/git-receive-pack", None, now=101.0)
         assert guard.token_headers_for(d, is_push_request=True, repo="o/r", now=101.0) == {
-            "Authorization": basic_auth_header("ghs_window")
+            "Authorization": basic_auth_header("ghs_grant")
         }
 
     def test_allow_with_non_string_token_rejected(self) -> None:
@@ -380,14 +380,14 @@ class TestControlRequestDispatch:
         )
         assert res.status == 400
 
-    def test_revoke_closes_window(self) -> None:
+    def test_revoke_closes_grant(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_window("o/r", ttl_seconds=30, now=100.0)
+        guard.open_grant("o/r", ttl_seconds=30, now=100.0)
         res = handle_control_request(guard, None, "/auth/revoke", None, {"repo": "o/r"})
         assert res.status == 200
         assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now=101.0).allow is False
 
-    def test_wrong_secret_rejected_and_window_untouched(self) -> None:
+    def test_wrong_secret_rejected_and_grant_untouched(self) -> None:
         guard = EgressGuard({"o/r"})
         res = handle_control_request(
             guard,
@@ -398,7 +398,7 @@ class TestControlRequestDispatch:
             now=100.0,
         )
         assert res.status == 403
-        # Auth failure must not have opened a window.
+        # Auth failure must not have opened a grant.
         assert guard.decide("/o/r.git/info/refs", PUSH_SERVICE, now=101.0).allow is False
 
     def test_correct_secret_accepted(self) -> None:
@@ -476,10 +476,10 @@ class TestControlRequestDispatch:
         assert res.status == 403
 
 
-class TestReadWindowControlDispatch:
+class TestReadGrantControlDispatch:
     """``/auth/allow-read`` / ``/auth/revoke-read`` (#419)."""
 
-    def test_allow_read_opens_read_window(self) -> None:
+    def test_allow_read_opens_read_grant(self) -> None:
         guard = EgressGuard()  # no push allowlist needed for reads
         res = handle_control_request(
             guard,
@@ -503,9 +503,9 @@ class TestReadWindowControlDispatch:
         )
         assert guard.decide("/o/r.git/git-receive-pack", None, now=101.0).allow is False
 
-    def test_revoke_read_closes_read_window(self) -> None:
+    def test_revoke_read_closes_read_grant(self) -> None:
         guard = EgressGuard()
-        guard.open_read_window("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
+        guard.open_read_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_read")
         res = handle_control_request(
             guard, None, "/auth/revoke-read", None, {"repo": "o/r"}
         )
@@ -574,9 +574,9 @@ class TestControlServerOverHttp:
 
     def test_allow_read_then_revoke_read_over_http(self) -> None:
         # e2e counterpart to test_allow_then_revoke_over_http, for the #419
-        # read-window endpoints (unit coverage already exists via
-        # TestReadWindowControlDispatch; this exercises the real socket).
-        guard = EgressGuard()  # read windows need no push allowlist
+        # read-grant endpoints (unit coverage already exists via
+        # TestReadGrantControlDispatch; this exercises the real socket).
+        guard = EgressGuard()  # read grants need no push allowlist
         server = AuthControlServer(guard, secret="s3cr3t")
         server.start()
         try:
@@ -633,7 +633,7 @@ class TestControlServerOverHttp:
             assert guard.token_headers_for(
                 d, repo="o/r", now=now, is_api_write_request=True
             ) == {"Authorization": bearer_auth_header("ghs_write")}
-            # An api-write window must never leak into push.
+            # An api-write grant must never leak into push.
             assert guard.decide("/o/r.git/git-receive-pack", None, now).allow is False
 
             status, _ = self._post(
@@ -786,7 +786,7 @@ class TestIsGitDataApiPath:
 
 
 class TestDecideApiWrite:
-    """The api.github.com write gate: GET/HEAD pass, writes need a window (#420)."""
+    """The api.github.com write gate: GET/HEAD pass, writes need a grant (#420)."""
 
     def test_read_always_passes(self) -> None:
         guard = EgressGuard()  # empty allowlist
@@ -799,15 +799,15 @@ class TestDecideApiWrite:
         assert d.allow is False
         assert "allowlist" in d.reason
 
-    def test_write_to_allowed_repo_without_window_denied(self) -> None:
+    def test_write_to_allowed_repo_without_grant_denied(self) -> None:
         guard = EgressGuard({"o/r"})
         d = guard.decide_api_write("POST", "/repos/o/r/issues", now=100.0)
         assert d.allow is False
-        assert "authorization window" in d.reason
+        assert "authorization grant" in d.reason
 
-    def test_write_allowed_with_open_api_write_window(self) -> None:
+    def test_write_allowed_with_open_api_write_grant(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0)
+        guard.open_api_write_grant("o/r", ttl_seconds=30, now=100.0)
         d = guard.decide_api_write("POST", "/repos/o/r/issues", now=101.0)
         assert d.allow is True
 
@@ -817,38 +817,38 @@ class TestDecideApiWrite:
         assert d.allow is False
         assert "could not be determined" in d.reason
 
-    def test_api_write_window_expires(self) -> None:
+    def test_api_write_grant_expires(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_api_write_window("o/r", ttl_seconds=5.0, now=100.0)
+        guard.open_api_write_grant("o/r", ttl_seconds=5.0, now=100.0)
         assert guard.decide_api_write("POST", "/repos/o/r/issues", now=101.0).allow is True
         assert guard.decide_api_write("POST", "/repos/o/r/issues", now=106.0).allow is False
 
-    def test_close_api_write_window_revokes(self) -> None:
+    def test_close_api_write_grant_revokes(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0)
-        guard.close_api_write_window("o/r")
+        guard.open_api_write_grant("o/r", ttl_seconds=30, now=100.0)
+        guard.close_api_write_grant("o/r")
         d = guard.decide_api_write("POST", "/repos/o/r/issues", now=101.0)
         assert d.allow is False
 
-    def test_git_data_api_uses_push_window_not_api_write_window(self) -> None:
-        # publish's API-push fallback already runs inside authorized_push_window
-        # -- an api-write window alone must not authorize it, and vice versa.
+    def test_git_data_api_uses_push_grant_not_api_write_grant(self) -> None:
+        # publish's API-push fallback already runs inside authorized_push_grant
+        # -- an api-write grant alone must not authorize it, and vice versa.
         guard = EgressGuard({"o/r"})
-        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0)
+        guard.open_api_write_grant("o/r", ttl_seconds=30, now=100.0)
         d = guard.decide_api_write("POST", "/repos/o/r/git/blobs", now=101.0)
         assert d.allow is False
         assert "push-authorization" in d.reason
 
-    def test_git_data_api_allowed_with_push_window(self) -> None:
+    def test_git_data_api_allowed_with_push_grant(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_window("o/r", ttl_seconds=30, now=100.0)
+        guard.open_grant("o/r", ttl_seconds=30, now=100.0)
         d = guard.decide_api_write("POST", "/repos/o/r/git/blobs", now=101.0)
         assert d.allow is True
 
-    def test_api_write_window_does_not_authorize_git_push(self) -> None:
-        # And the converse: an api-write window must not widen git push access.
+    def test_api_write_grant_does_not_authorize_git_push(self) -> None:
+        # And the converse: an api-write grant must not widen git push access.
         guard = EgressGuard({"o/r"})
-        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0)
+        guard.open_api_write_grant("o/r", ttl_seconds=30, now=100.0)
         assert guard.decide("/o/r.git/git-receive-pack", None, now=101.0).allow is False
 
 
@@ -858,52 +858,52 @@ class TestApiWriteTokenInjection:
     def test_bearer_auth_header_format(self) -> None:
         assert bearer_auth_header("ghs_secret") == "Bearer ghs_secret"
 
-    def test_no_window_no_token(self) -> None:
+    def test_no_grant_no_token(self) -> None:
         guard = EgressGuard({"o/r"})
         d = guard.decide_api_write("POST", "/repos/o/r/issues", now=100.0)
         assert d.allow is False
         assert guard.token_headers_for(d, repo="o/r", is_api_write_request=True) == {}
 
-    def test_api_write_window_token_injected(self) -> None:
+    def test_api_write_grant_token_injected(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0, token="ghs_write")
+        guard.open_api_write_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_write")
         d = guard.decide_api_write("POST", "/repos/o/r/issues", now=101.0)
         assert guard.token_headers_for(
             d, repo="o/r", now=101.0, is_api_write_request=True
         ) == {"Authorization": bearer_auth_header("ghs_write")}
 
-    def test_git_data_api_uses_push_window_token(self) -> None:
+    def test_git_data_api_uses_push_grant_token(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_window("o/r", ttl_seconds=30, now=100.0, token="ghs_push")
+        guard.open_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_push")
         d = guard.decide_api_write("POST", "/repos/o/r/git/blobs", now=101.0)
         assert guard.token_headers_for(
-            d, repo="o/r", now=101.0, is_api_write_request=True, use_push_window=True
+            d, repo="o/r", now=101.0, is_api_write_request=True, use_push_grant=True
         ) == {"Authorization": bearer_auth_header("ghs_push")}
 
-    def test_api_write_window_token_not_used_for_git_data_api(self) -> None:
-        # An api-write-window token must not leak into the push-scoped git
+    def test_api_write_grant_token_not_used_for_git_data_api(self) -> None:
+        # An api-write-grant token must not leak into the push-scoped git
         # Objects API path, and vice versa -- they read from different tables.
         guard = EgressGuard({"o/r"})
-        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0, token="ghs_write")
+        guard.open_api_write_grant("o/r", ttl_seconds=30, now=100.0, token="ghs_write")
         d = Decision(True, "fabricated allow")
         assert guard.token_headers_for(
-            d, repo="o/r", now=101.0, is_api_write_request=True, use_push_window=True
+            d, repo="o/r", now=101.0, is_api_write_request=True, use_push_grant=True
         ) == {}
 
     def test_expired_api_write_token_not_injected(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_api_write_window("o/r", ttl_seconds=5.0, now=100.0, token="ghs_write")
+        guard.open_api_write_grant("o/r", ttl_seconds=5.0, now=100.0, token="ghs_write")
         d = Decision(True, "fabricated allow")
         assert (
             guard.token_headers_for(d, repo="o/r", now=106.0, is_api_write_request=True) == {}
         )
-        assert guard._api_write_windows == {}
+        assert guard._api_write_grants == {}
 
 
 class TestApiWriteControlDispatch:
     """``/auth/allow-api-write`` / ``/auth/revoke-api-write`` (#420)."""
 
-    def test_allow_api_write_opens_window(self) -> None:
+    def test_allow_api_write_opens_grant(self) -> None:
         guard = EgressGuard({"o/r"})
         res = handle_control_request(
             guard,
@@ -928,9 +928,9 @@ class TestApiWriteControlDispatch:
         )
         assert guard.decide("/o/r.git/git-receive-pack", None, now=101.0).allow is False
 
-    def test_revoke_api_write_closes_window(self) -> None:
+    def test_revoke_api_write_closes_grant(self) -> None:
         guard = EgressGuard({"o/r"})
-        guard.open_api_write_window("o/r", ttl_seconds=30, now=100.0)
+        guard.open_api_write_grant("o/r", ttl_seconds=30, now=100.0)
         res = handle_control_request(
             guard, None, "/auth/revoke-api-write", None, {"repo": "o/r"}
         )
@@ -961,14 +961,14 @@ class TestBlockBodyHint:
     """
 
     def test_default_hint_is_push(self) -> None:
-        assert block_body("no open authorization window for o/r") == (
-            b"BLOCKED by egress proxy: no open authorization window for o/r. "
+        assert block_body("no open authorization grant for o/r") == (
+            b"BLOCKED by egress proxy: no open authorization grant for o/r. "
             + PUSH_BLOCK_HINT.encode()
             + b"\n"
         )
 
     def test_api_write_hint_mentions_first_class_tools(self) -> None:
-        body = block_body("no open api-write authorization window for o/r", hint=API_WRITE_BLOCK_HINT)
+        body = block_body("no open api-write authorization grant for o/r", hint=API_WRITE_BLOCK_HINT)
         assert b"publish tool" not in body or b"sandbox_issue_write" in body
         assert API_WRITE_BLOCK_HINT.encode() in body
 

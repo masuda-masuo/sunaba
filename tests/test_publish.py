@@ -76,7 +76,7 @@ class TestPublish:
         process exports, even though the sidecar (and the container's
         proxied network) are still running.  ``publish`` must recover them
         via ``ensure_egress_proxy`` before deciding whether to open a push
-        window, rather than silently treating the proxy as unconfigured.
+        grant, rather than silently treating the proxy as unconfigured.
         """
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
         monkeypatch.delenv(CONTROL_URL_ENV, raising=False)
@@ -102,7 +102,7 @@ class TestPublish:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        with patch("code_sandbox_mcp.tools.vcs.authorized_push_window") as mock_window:
+        with patch("code_sandbox_mcp.tools.vcs.authorized_push_grant") as mock_grant:
             result = _decode(publish(
                 container_id="abc123def456",
                 repo="owner/repo",
@@ -113,9 +113,9 @@ class TestPublish:
 
         assert result["status"] == "pushed"
         mock_ensure_proxy.assert_called_once_with(client)
-        # A real window is opened this time (proxy recognized as configured),
+        # A real grant is opened this time (proxy recognized as configured),
         # not silently skipped as it would be if the env stayed lost.
-        mock_window.assert_called_once()
+        mock_grant.assert_called_once()
 
     @patch("code_sandbox_mcp.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
     @patch("code_sandbox_mcp.tools.vcs._docker")
@@ -286,7 +286,7 @@ class TestPublish:
         ), patch(
             "code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True
         ), patch(
-            "code_sandbox_mcp.tools.vcs.authorized_push_window"
+            "code_sandbox_mcp.tools.vcs.authorized_push_grant"
         ):
             result = _decode(publish(
                 container_id="abc123def456",

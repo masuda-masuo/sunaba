@@ -17,7 +17,7 @@ Topology (one sidecar shared by all sandboxes)::
     [internet] <-> [proxy sidecar] <-> [internal docker network] <-> [sandbox]
                         |
               control API published on host loopback only
-              (publish opens push windows through it, #357)
+              (publish opens push grants through it, #357)
 
 The sandbox-facing network is created ``internal=True`` so the *only* route
 out of a sandbox is the proxy itself -- SSH and direct IP egress have no
@@ -70,7 +70,7 @@ PROXY_IMAGE_ENV = "CODE_SANDBOX_PROXY_IMAGE"
 
 #: Locally built fallback tag from ``docker/Dockerfile.proxy``.  Used only when
 #: neither the env override nor a CI-published GHCR pin is available -- i.e. for
-#: local development builds and the bootstrap window before the first proxy
+#: local development builds and the bootstrap grant before the first proxy
 #: image is pushed (#432).  This ``:latest`` tag can silently drift from the
 #: installed package, which is exactly why :func:`_warn_on_source_drift` warns
 #: on a source mismatch (#405) and why CI now pins the image by digest (#432).
@@ -88,7 +88,7 @@ def _resolve_proxy_image(source: MutableMapping[str, str]) -> str:
        deployed server, so a plain ``pip install`` of the package now picks up
        the matching sidecar the same way it picks up the sandbox variant pins
        -- closing the "sidecar left stale after a server redeploy" gap that made
-       #419's read-window auth appear broken until the image was rebuilt by hand.
+       #419's read-grant auth appear broken until the image was rebuilt by hand.
     3. :data:`_DEFAULT_PROXY_IMAGE` -- the locally built ``:latest`` tag, used
        before CI has published a pin (bootstrap) and for local dev builds.
     """
@@ -148,7 +148,7 @@ _CA_POLL_INTERVAL_SECONDS = 0.5
 #: How long the #405 source-fingerprint probe waits for a freshly-created
 #: sidecar's control API to accept requests before giving up.  Kept short: on
 #: reuse the API is already up so the first attempt succeeds; this only covers
-#: the thin window on *first* creation between ``container.start()`` and the
+#: the thin grant on *first* creation between ``container.start()`` and the
 #: control server binding its port -- which is exactly when a just-rebuilt
 #: image would drift, so losing detection there would defeat the feature.
 #: Exceeding it means "cannot compare" and the check is skipped (fail open).
@@ -176,7 +176,7 @@ class EgressProxyRuntime:
     #: Proxy URL for ``HTTP(S)_PROXY`` inside the sandbox.
     proxy_url: str
 
-    #: Host-side control-API base URL (for ``publish``'s push window, #357).
+    #: Host-side control-API base URL (for ``publish``'s push grant, #357).
     control_url: str
 
     #: The proxy's CA certificate (PEM) to install into the sandbox.
@@ -198,7 +198,7 @@ def ensure_egress_proxy(
     Idempotent per host: one sidecar (fixed name) and one internal network are
     shared by all sandbox containers.  Also exports the control URL/secret
     into *env* (default ``os.environ``) so :mod:`proxy_client`'s
-    ``from_env`` -- and therefore ``publish``'s push window (#357) -- picks
+    ``from_env`` -- and therefore ``publish``'s push grant (#357) -- picks
     them up with no further configuration.
 
     Note: the allowlist/token env vars are baked into the sidecar at creation;
@@ -226,7 +226,7 @@ def ensure_egress_proxy(
             recovered = _recover_secret(container)
             if recovered is None:
                 # A sidecar whose secret we cannot recover is unusable for
-                # publish's push window -- recreate it with a known secret.
+                # publish's push grant -- recreate it with a known secret.
                 logger.info("Recreating egress-proxy container (secret not recoverable)")
                 container.remove(force=True)
                 secret = source.get(CONTROL_SECRET_ENV) or secrets.token_hex(32)
@@ -241,7 +241,7 @@ def ensure_egress_proxy(
 
     control_url = f"http://127.0.0.1:{_published_control_port(container, source)}"
     # publish (#357) reads proxy_client.ProxyControlConfig.from_env() at call
-    # time, so exporting here is all it takes to arm the push window.
+    # time, so exporting here is all it takes to arm the push grant.
     source[CONTROL_URL_ENV] = control_url
     source[CONTROL_SECRET_ENV] = secret
     # Purely diagnostic (#405): a mismatch means the running sidecar was built
@@ -365,7 +365,7 @@ def _warn_on_source_drift(control_url: str, secret: str) -> None:
     :data:`_FINGERPRINT_READY_WAIT_SECONDS` before giving up -- otherwise a
     just-rebuilt image would race past detection on the very deploy that
     introduced the drift.  Residual limitation: if the sidecar stays
-    unreachable past that window (a genuinely wedged proxy) or predates the
+    unreachable past that grant (a genuinely wedged proxy) or predates the
     ``/version`` endpoint (an old image, which returns 404), the check is
     skipped for this start; a subsequent start against the now-ready, reused
     sidecar detects it.
@@ -380,7 +380,7 @@ def _warn_on_source_drift(control_url: str, secret: str) -> None:
         if remote is not None:
             break
         if time.monotonic() >= deadline:
-            return  # never became reachable in the window -- cannot compare
+            return  # never became reachable in the grant -- cannot compare
         time.sleep(_FINGERPRINT_POLL_INTERVAL_SECONDS)
     if remote == local:
         return

@@ -28,7 +28,7 @@ This MCP routes all AI operations through **disposable Docker containers** with 
 | AI operations never touch the host | All file ops, package installs, and test runs happen inside the container. If the AI breaks something — delete the container and move on. |
 | No network by default | `allow_network=True` must be explicitly set. AI can't accidentally call external APIs, download payloads, or push to remotes. |
 | Non-root execution | Container runs as unprivileged user `sandbox`. No `sudo`, no system package modification. |
-| VCS tokens stay host-side | The container never receives a `GITHUB_TOKEN`. Reads authenticate through the [egress proxy](#vcs-token-safety)'s read-authorization window; `publish` / `sandbox_issue_write` resolve the token host-side. Token values are masked in all output (`KEY=***`). |
+| VCS tokens stay host-side | The container never receives a `GITHUB_TOKEN`. Reads authenticate through the [egress proxy](#vcs-token-safety)'s read-authorization grant; `publish` / `sandbox_issue_write` resolve the token host-side. Token values are masked in all output (`KEY=***`). |
 | Audit trail | Every operation is recorded in an append-only journal. You can trace exactly what the AI did, after the fact. |
 
 The value of this MCP is as much about **what the AI cannot do** as what it can.
@@ -70,7 +70,7 @@ The most expensive thing an AI coding loop does is re-read output. So the contra
 Most sandboxing tools try to classify each command as safe or dangerous. That depends on self-reporting and can't be structurally enforced. This MCP draws the line elsewhere: **the question is not "is this command dangerous?" but "does this operation leave the sandbox?"**
 
 - **Inside the container, nothing is gated.** It's disposable — whatever happens in there just gets deleted with the container.
-- **Boundary-crossing operations are gated structurally.** Network access, host mounts, persistent-volume deletion, and external VCS writes (`git push`, PR creation) go through dedicated tools; egress to GitHub is confined by an egress proxy (allowlisted repos, short-lived authorized push/read windows), so an unauthorized network write is structurally impossible — not merely discouraged. The human gate is your MCP client's own tool-approval prompt, not a bespoke in-band token.
+- **Boundary-crossing operations are gated structurally.** Network access, host mounts, persistent-volume deletion, and external VCS writes (`git push`, PR creation) go through dedicated tools; egress to GitHub is confined by an egress proxy (allowlisted repos, short-lived authorized push/read grants), so an unauthorized network write is structurally impossible — not merely discouraged. The human gate is your MCP client's own tool-approval prompt, not a bespoke in-band token.
 - **What can't be perfectly gated is caught after the fact.** An append-only journal records every operation, so the real safety net is *post-hoc auditability*, not pre-execution approval. The human's control shifts from "watch and approve everything" to "audit anything, anytime."
 
 This is the three-lock model: **network off by default · non-root enforced · VCS token opt-in.** Half the value of this MCP is the *guarantee of what the AI cannot do*.
@@ -328,7 +328,7 @@ The recommended model uses [mcp-launcher](https://github.com/masuda-masuo/mcp-la
 - **Secrets live in the OS keystore, never in config files.** The GitHub App's `APP_ID`, `PRIVATE_KEY`, and `INSTALLATION_ID` are registered once with `mcp-token register github <KEY> <value>`.
 - **Tokens are minted on demand and short-lived.** `mcp-token github` mints a fresh installation token (cached ~55 min; GitHub expiry 1 h). No long-lived token sits in a config file or environment.
 - **The private key is out of reach.** A prompt-injection attack can only touch what the model sees — MCP tool responses — never the keystore. Worst case, a leaked token expires within an hour; the key that mints tokens is never exposed.
-- **The host resolves the token; the container never holds it.** The resolved token is used host-side by the egress proxy's read/push windows and by `publish` / `sandbox_issue_write` (see [VCS token safety](#vcs-token-safety)).
+- **The host resolves the token; the container never holds it.** The resolved token is used host-side by the egress proxy's read/push grants and by `publish` / `sandbox_issue_write` (see [VCS token safety](#vcs-token-safety)).
 
 The host resolves the token from one of three orthogonal sources (`token_broker.py`, design.md §11.2):
 
@@ -417,12 +417,12 @@ Same as WSL2, but on a desktop-session Linux the keyring unlocks automatically w
 
 The sandbox container **never receives a VCS token.** There is no opt-in flag: credentials stay host-side, and the egress proxy is the structural guard that keeps them there. Use `allow_network=True` only when containers actually need network access.
 
-- **Reads** (`clone_repo`, `sandbox_initialize(clone_repo=...)`, `pr=N`) authenticate at the network layer: when a repo needs credentials, a host-resolved token is handed to the proxy for a short read-authorization window, so even a *private* clone or PR checkout works without a token ever entering the container.
-- **Pushes / PRs** go through `publish`: it resolves a token host-side and hands it to the proxy for a short authorized push window (push), or calls the GitHub API directly from the host (PR creation).
+- **Reads** (`clone_repo`, `sandbox_initialize(clone_repo=...)`, `pr=N`) authenticate at the network layer: when a repo needs credentials, a host-resolved token is handed to the proxy for a short read-authorization grant, so even a *private* clone or PR checkout works without a token ever entering the container.
+- **Pushes / PRs** go through `publish`: it resolves a token host-side and hands it to the proxy for a short authorized push grant (push), or calls the GitHub API directly from the host (PR creation).
 - **Issue / comment writes** go through `sandbox_issue_write`, which calls the GitHub REST API host-side.
 - All output is automatically sanitized: any token value is masked as `KEY=***` in stdout/stderr.
 
-This follows the principle of least privilege — the container's own `git`/`gh` stay unauthenticated, so a stray in-container `git push` has no credential to leak. The proxy must be configured with a host-resolvable token (broker / `GITHUB_TOKEN`) for the read and push windows to authenticate.
+This follows the principle of least privilege — the container's own `git`/`gh` stay unauthenticated, so a stray in-container `git push` has no credential to leak. The proxy must be configured with a host-resolvable token (broker / `GITHUB_TOKEN`) for the read and push grants to authenticate.
 
 ### Configuring the egress proxy
 

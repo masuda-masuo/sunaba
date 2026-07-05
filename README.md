@@ -315,17 +315,103 @@ sandbox_initialize(image="my-image@sha256:...")
 
 A minimal variant (`docker/Dockerfile.sandbox.minimal`) with git + python + pytest only is also available for lightweight use.
 
-## Recommended: mcp-launcher for credential management
+## Deployment & credential management
 
-For production use, run `code-sandbox-mcp` behind [mcp-launcher](https://github.com/masuda-masuo/mcp-launcher) to keep GitHub tokens in the OS keystore instead of plaintext config files:
+For production use, keep GitHub credentials in the **OS keystore** instead of plaintext config files and let the server mint short-lived tokens on demand. The security model below is the same on every platform — only the keystore backend, the unlock UX, and how the server process is launched differ.
+
+> This section covers **host-side** credential resolution (how the server authenticates to GitHub). It is complementary to [VCS token safety](#vcs-token-safety) below, which covers why the *container* never receives a token, regardless of platform.
+
+### The shared security model: short-lived GitHub App tokens
+
+The recommended model uses [mcp-launcher](https://github.com/masuda-masuo/mcp-launcher)'s `mcp-token` broker:
+
+- **Secrets live in the OS keystore, never in config files.** The GitHub App's `APP_ID`, `PRIVATE_KEY`, and `INSTALLATION_ID` are registered once with `mcp-token register github <KEY> <value>`.
+- **Tokens are minted on demand and short-lived.** `mcp-token github` mints a fresh installation token (cached ~55 min; GitHub expiry 1 h). No long-lived token sits in a config file or environment.
+- **The private key is out of reach.** A prompt-injection attack can only touch what the model sees — MCP tool responses — never the keystore. Worst case, a leaked token expires within an hour; the key that mints tokens is never exposed.
+- **The host resolves the token; the container never holds it.** The resolved token is used host-side by the egress proxy's read/push windows and by `publish` / `sandbox_issue_write` (see [VCS token safety](#vcs-token-safety)).
+
+The host resolves the token from one of three orthogonal sources (`token_broker.py`, design.md §11.2):
+
+| Source | Host env var | How it works | Role |
+|--------|-------------|--------------|------|
+| Static token | `GITHUB_TOKEN` | Used verbatim | Minimal setup |
+| Explicit command | `GITHUB_TOKEN_COMMAND` | Runs the command (e.g. an `mcp-token` binary path); stdout becomes the token. Takes priority. | Manual management |
+| Vendored broker | `GITHUB_TOKEN_BROKER_SERVICE` | Resolves/downloads the pinned `mcp-token` binary (SHA-256 verified, cached) and runs `mcp-token <service>` | Auto-managed (recommended) |
+
+> **Bootstrap note:** the broker binary lives in a private repo, so the very first download needs a token available (e.g. during setup, or a session still launched via mcp-launcher). After that the checksum-verified binary is cached and every later run reuses it. For a fully tokenless daemon, pre-provision the binary and point `GITHUB_TOKEN_BROKER_BIN` at it.
+
+### Per-platform deployment
+
+**Windows — mcp-launcher (stdio)**
+
+Run `code-sandbox-mcp` behind mcp-launcher as a child process; the launcher proxies stdio and resolves the token internally, so no `GITHUB_TOKEN_*` env var is needed.
 
 ```
 AI Tool (Claude Desktop / etc.)
-    └─ mcp-launcher  ← OS keystore, transparent MCP session restart
+    └─ mcp-launcher  ← Windows Credential Manager, transparent MCP session restart
            └─ code-sandbox-mcp  ← actual MCP server (child process)
 ```
 
-mcp-launcher eliminates PATs from `claude_desktop_config.json`, automatically rotates GitHub App installation tokens, and transparently restarts the MCP session without losing state.
+- **Keystore:** Windows Credential Manager (DPAPI).
+- **Unlock:** automatic at Windows login — no extra step.
+- mcp-launcher eliminates PATs from `claude_desktop_config.json`, rotates the GitHub App installation token, and restarts the MCP session without losing state.
+
+**WSL2 — systemd + streamable-HTTP**
+
+Useful for sharing one server across clients (e.g. opencode + Claude Desktop), dropping the Windows-only mcp-launcher dependency, and avoiding stdio's ~60 s timeout.
+
+```
+Claude Desktop ─ mcp-remote ┐
+                            ├─ code-sandbox-mcp (WSL2, streamable-http @ 127.0.0.1:8765/mcp)
+opencode ───────────────────┘
+```
+
+Run the server as a systemd **user** service and point the token resolver at the broker:
+
+```ini
+# ~/.config/systemd/user/code-sandbox-mcp.service (excerpt)
+[Service]
+ExecStart=/path/to/venv/bin/python -m code_sandbox_mcp.server \
+    --transport streamable-http --host 127.0.0.1 --port 8765
+Environment="GITHUB_TOKEN_BROKER_SERVICE=code-sandbox-mcp"
+# Required so the service can reach GNOME Keyring:
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+```
+
+Clients connect via `mcp-remote`:
+
+```json
+{ "mcpServers": { "code-sandbox-mcp": {
+  "command": "npx",
+  "args": ["-y", "mcp-remote", "http://127.0.0.1:8765/mcp"]
+}}}
+```
+
+- **Keystore:** GNOME Keyring (libsecret).
+- **Unlock:** one password prompt on first access after WSL boots; stays unlocked for the session. (An empty-password keyring auto-unlocks but is then readable by any host process — a security trade-off.)
+- **Gotchas:**
+  - `Environment=` values containing spaces (e.g. a `GITHUB_TOKEN_COMMAND` with a service argument) **must be quoted**, or the argument is truncated.
+  - Without `DBUS_SESSION_BUS_ADDRESS`, the service can't reach the keyring.
+  - `mcp-token list` may fail under WSL (Go's godbus can't reach the D-Bus secret service); use `secret-tool search --all service mcp-launcher` instead.
+
+**Linux (native) — systemd + HTTP**
+
+Same as WSL2, but on a desktop-session Linux the keyring unlocks automatically with the session — no first-access password prompt.
+
+- **Keystore:** libsecret / gnome-keyring / kwallet (needs `libsecret-1-0` + `gnome-keyring`).
+- **Token resolution:** same broker as WSL2 (`GITHUB_TOKEN_BROKER_SERVICE` → `mcp-token`).
+- **Transport:** `http` or `sse`; connect directly or via `mcp-remote`.
+
+### Platform differences at a glance
+
+| | Windows | WSL2 | Linux (native) |
+|---|---|---|---|
+| Server launch | mcp-launcher (stdio proxy, child process) | systemd user service | systemd user service |
+| Transport | stdio / SSE / HTTP | streamable-HTTP (Claude Desktop via mcp-remote) | HTTP / SSE |
+| Keystore | Windows Credential Manager (DPAPI) | GNOME Keyring (libsecret) | libsecret / gnome-keyring / kwallet |
+| Token resolution | managed by launcher | `GITHUB_TOKEN_BROKER_SERVICE` → mcp-token | `GITHUB_TOKEN_BROKER_SERVICE` → mcp-token |
+| Keyring unlock | automatic at Windows login | one prompt per WSL boot | automatic with desktop session |
+| Main gotcha | Smart App Control may block the binary | quoting · `DBUS_SESSION_BUS_ADDRESS` · `secret-tool` fallback | keyring daemon must be running |
 
 ## VCS token safety
 

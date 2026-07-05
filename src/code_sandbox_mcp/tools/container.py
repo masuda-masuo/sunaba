@@ -27,6 +27,7 @@ from pydantic import BeforeValidator
 
 from code_sandbox_mcp import image_pins, image_selection, proxy_lifecycle, token_broker
 from code_sandbox_mcp.journal import (
+    read_container_states,
     read_journal,
     record_boundary_crossing,
     record_copy,
@@ -980,25 +981,7 @@ def _journal_container_status() -> dict[str, dict[str, Any]]:
     where *complete* means an ``initialize_complete`` event was seen, *used*
     means at least one ``exec``, and *stopped* an explicit ``stop``.
     """
-    status: dict[str, dict[str, Any]] = {}
-    for entry in read_journal():
-        cid = entry.get("container_id")
-        if not cid:
-            continue
-        s = status.setdefault(
-            cid,
-            {"complete": False, "used": False, "stopped": False, "init_ts": None},
-        )
-        op = entry.get("operation")
-        if op == "initialize":
-            s["init_ts"] = entry.get("ts")
-        elif op == "initialize_complete":
-            s["complete"] = True
-        elif op == "exec":
-            s["used"] = True
-        elif op == "stop":
-            s["stopped"] = True
-    return status
+    return read_container_states()
 
 
 def _reap_orphaned_init_containers(client: Any = None) -> list[str]:

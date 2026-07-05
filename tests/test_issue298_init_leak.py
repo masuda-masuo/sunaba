@@ -119,15 +119,13 @@ class TestAgeSeconds:
 
 
 class TestJournalContainerStatus:
-    @patch("code_sandbox_mcp.tools.container.read_journal")
+    @patch("code_sandbox_mcp.tools.container.read_container_states")
     def test_aggregates_lifecycle(self, mock_journal: MagicMock) -> None:
-        mock_journal.return_value = [
-            {"container_id": "aaa", "operation": "initialize", "ts": "2026-06-29T00:00:00+00:00"},
-            {"container_id": "aaa", "operation": "exec"},
-            {"container_id": "bbb", "operation": "initialize", "ts": "2026-06-29T00:00:00+00:00"},
-            {"container_id": "bbb", "operation": "initialize_complete"},
-            {"container_id": "ccc", "operation": "initialize", "ts": "2026-06-29T00:00:00+00:00"},
-        ]
+        mock_journal.return_value = {
+            "aaa": {"complete": False, "used": True, "stopped": False, "init_ts": None},
+            "bbb": {"complete": True, "used": False, "stopped": False, "init_ts": None},
+            "ccc": {"complete": False, "used": False, "stopped": False, "init_ts": "2026-06-29T00:00:00+00:00"},
+        }
         status = _journal_container_status()
         assert status["aaa"]["used"] is True
         assert status["bbb"]["complete"] is True
@@ -142,12 +140,12 @@ class TestReaper:
         return client
 
     @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
+    @patch("code_sandbox_mcp.tools.container.read_container_states")
     def test_reaps_orphaned_init(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         # Journal has an old initialize but no completion / exec / stop.
-        mock_journal.return_value = [
-            {"container_id": "orphan123456", "operation": "initialize", "ts": _iso(_ORPHAN_GRACE_SECONDS + 60)},
-        ]
+        mock_journal.return_value = {
+            "orphan123456": {"complete": False, "used": False, "stopped": False, "init_ts": _iso(_ORPHAN_GRACE_SECONDS + 60)},
+        }
         c = _fake_container("orphan123456", {MANAGED_LABEL: "true", CREATED_AT_LABEL: _iso(_ORPHAN_GRACE_SECONDS + 60)})
         client = self._client_with(c)
 
@@ -159,65 +157,63 @@ class TestReaper:
         mock_stop.assert_called_once_with("orphan123456")
 
     @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
+    @patch("code_sandbox_mcp.tools.container.read_container_states")
     def test_skips_completed(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
-        mock_journal.return_value = [
-            {"container_id": "done12345678", "operation": "initialize", "ts": _iso(_ORPHAN_GRACE_SECONDS + 60)},
-            {"container_id": "done12345678", "operation": "initialize_complete"},
-        ]
+        mock_journal.return_value = {
+            "done12345678": {"complete": True, "used": False, "stopped": False, "init_ts": _iso(_ORPHAN_GRACE_SECONDS + 60)},
+        }
         c = _fake_container("done12345678", {MANAGED_LABEL: "true", CREATED_AT_LABEL: _iso(_ORPHAN_GRACE_SECONDS + 60)})
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == []
         c.remove.assert_not_called()
 
     @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
+    @patch("code_sandbox_mcp.tools.container.read_container_states")
     def test_skips_used(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
-        mock_journal.return_value = [
-            {"container_id": "used12345678", "operation": "initialize", "ts": _iso(_ORPHAN_GRACE_SECONDS + 60)},
-            {"container_id": "used12345678", "operation": "exec"},
-        ]
+        mock_journal.return_value = {
+            "used12345678": {"complete": False, "used": True, "stopped": False, "init_ts": _iso(_ORPHAN_GRACE_SECONDS + 60)},
+        }
         c = _fake_container("used12345678", {MANAGED_LABEL: "true", CREATED_AT_LABEL: _iso(_ORPHAN_GRACE_SECONDS + 60)})
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == []
         c.remove.assert_not_called()
 
     @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
+    @patch("code_sandbox_mcp.tools.container.read_container_states")
     def test_skips_within_grace(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         # Created just now — an in-progress init must never be reaped.
-        mock_journal.return_value = []
+        mock_journal.return_value = {}
         c = _fake_container("fresh1234567", {MANAGED_LABEL: "true", CREATED_AT_LABEL: _iso(5)})
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == []
         c.remove.assert_not_called()
 
     @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
+    @patch("code_sandbox_mcp.tools.container.read_container_states")
     def test_skips_container_without_created_at(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         # e.g. a test-environment container: managed but not from sandbox_initialize.
-        mock_journal.return_value = []
+        mock_journal.return_value = {}
         c = _fake_container("testenv12345", {MANAGED_LABEL: "true"})
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == []
         c.remove.assert_not_called()
 
     @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
+    @patch("code_sandbox_mcp.tools.container.read_container_states")
     def test_pre_record_orphan_aged_from_label(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         # The exact #298 case: timeout before any journal entry was written.
         # Age must come from the created_at label.
-        mock_journal.return_value = []
+        mock_journal.return_value = {}
         c = _fake_container("prerec123456", {MANAGED_LABEL: "true", CREATED_AT_LABEL: _iso(_ORPHAN_GRACE_SECONDS + 120)})
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == ["prerec123456"]
         mock_stop.assert_called_once_with("prerec123456")
 
     @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
+    @patch("code_sandbox_mcp.tools.container.read_container_states")
     def test_remove_failure_is_swallowed(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
-        mock_journal.return_value = []
+        mock_journal.return_value = {}
         c = _fake_container("gone12345678", {MANAGED_LABEL: "true", CREATED_AT_LABEL: _iso(_ORPHAN_GRACE_SECONDS + 60)})
         c.remove.side_effect = NotFound("already gone")
         # NotFound during remove must not raise; container is effectively gone.
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == ["gone12345678"]
 
-    @patch("code_sandbox_mcp.tools.container.read_journal")
+    @patch("code_sandbox_mcp.tools.container.read_container_states")
     def test_list_failure_returns_empty(self, mock_journal: MagicMock) -> None:
         client = MagicMock()
         client.containers.list.side_effect = RuntimeError("docker down")

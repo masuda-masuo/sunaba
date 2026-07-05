@@ -24,6 +24,11 @@ from typing import Any
 _JOURNAL_DIR: Path = Path.home() / ".code-sandbox-mcp"
 _JOURNAL_PATH: Path = _JOURNAL_DIR / "journal.log"
 
+
+def _get_state_path() -> Path:
+    """Return the sidecar state file path (derived from _JOURNAL_DIR)."""
+    return _JOURNAL_DIR / "container_state.json"
+
 #: Module-level lock for thread-safe journal writes.
 _lock: threading.Lock = threading.Lock()
 
@@ -86,6 +91,90 @@ def _append_json(entry: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Container state sidecar (Issue #305)
+# ---------------------------------------------------------------------------
+
+
+def _load_container_states() -> dict[str, dict[str, Any]]:
+    """Load per-container lifecycle states from the sidecar file."""
+    if not _get_state_path().exists():
+        return {}
+    with _lock:
+        with open(_get_state_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+
+
+def _save_container_states(states: dict[str, dict[str, Any]]) -> None:
+    """Atomically write per-container lifecycle states to the sidecar."""
+    _ensure_dir()
+    tmp = _get_state_path().with_suffix(".tmp")
+    with _lock:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(states, f, ensure_ascii=False)
+        tmp.replace(_get_state_path())
+
+
+def _update_container_state(container_id: str, **updates: Any) -> None:
+    """Update a single container's state entry (thread-safe, atomic)."""
+    _ensure_dir()
+    with _lock:
+        states: dict[str, dict[str, Any]] = {}
+        if _get_state_path().exists():
+            with open(_get_state_path(), "r", encoding="utf-8") as f:
+                states = json.load(f)
+        s = states.setdefault(
+            container_id,
+            {"complete": False, "used": False, "stopped": False, "init_ts": None},
+        )
+        for k, v in updates.items():
+            if v is not None:
+                s[k] = v
+        tmp = _get_state_path().with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(states, f, ensure_ascii=False)
+        tmp.replace(_get_state_path())
+
+
+def _rebuild_states_from_journal() -> dict[str, dict[str, Any]]:
+    """Rebuild container states by scanning the full journal (crash recovery)."""
+    states: dict[str, dict[str, Any]] = {}
+    for entry in read_journal():
+        cid = entry.get("container_id")
+        if not cid:
+            continue
+        s = states.setdefault(
+            cid,
+            {"complete": False, "used": False, "stopped": False, "init_ts": None},
+        )
+        op = entry.get("operation")
+        if op == "initialize":
+            s["init_ts"] = entry.get("ts")
+        elif op == "initialize_complete":
+            s["complete"] = True
+        elif op == "exec":
+            s["used"] = True
+        elif op == "stop":
+            s["stopped"] = True
+    return states
+
+
+def read_container_states() -> dict[str, dict[str, Any]]:
+    """Return per-container lifecycle state summary (O(1) hot path).
+
+    Reads from the sidecar state file. If the journal has been written to
+    more recently than the state file (crash recovery), falls back to a
+    full journal scan and updates the state file.
+    """
+    journal_mtime = _JOURNAL_PATH.stat().st_mtime_ns if _JOURNAL_PATH.exists() else 0
+    state_mtime = _get_state_path().stat().st_mtime_ns if _get_state_path().exists() else 0
+    if journal_mtime > state_mtime:
+        states = _rebuild_states_from_journal()
+        _save_container_states(states)
+        return states
+    return _load_container_states()
+
+
+# ---------------------------------------------------------------------------
 # Convenience recorders
 # ---------------------------------------------------------------------------
 
@@ -120,6 +209,7 @@ def record_initialize(
     if cpus is not None:
         entry["cpus"] = cpus
     _append_json(entry)
+    _update_container_state(container_id, init_ts=entry["ts"])
 
 
 def record_initialize_complete(container_id: str) -> None:
@@ -138,6 +228,7 @@ def record_initialize_complete(container_id: str) -> None:
         "container_id": container_id,
         "operation": "initialize_complete",
     })
+    _update_container_state(container_id, complete=True)
 
 
 def record_exec(
@@ -176,6 +267,7 @@ def record_exec(
     if input_hash:
         entry["input_hash"] = input_hash
     _append_json(entry)
+    _update_container_state(container_id, used=True)
 
 
 def record_stop(container_id: str) -> None:
@@ -187,6 +279,7 @@ def record_stop(container_id: str) -> None:
         "container_id": container_id,
         "operation": "stop",
     })
+    _update_container_state(container_id, stopped=True)
     remove_run_id(container_id)
 
 

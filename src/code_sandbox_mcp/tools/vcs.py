@@ -728,12 +728,11 @@ def _resolve_vcs_token() -> str:
     ``clone_repo``/``sandbox_initialize``. There is nothing push-specific in
     its resolution order (broker mint -> static ``GITHUB_TOKEN``/``GH_TOKEN``).
 
-    Resolution order mirrors :func:`code_sandbox_mcp.tools.container._container_env`:
-    a freshly minted broker token (Issue #232) takes precedence, falling
-    back to the static host ``GITHUB_TOKEN`` / ``GH_TOKEN``.  Returns an
-    empty string when no token is available, in which case the push exec
-    relies on whatever credential the container already carries (e.g. a
-    startup-injected token, for backward compatibility).
+    Resolution order: a freshly minted broker token (Issue #232) takes
+    precedence, falling back to the static host ``GITHUB_TOKEN`` /
+    ``GH_TOKEN``.  Returns an empty string when no token is available, in
+    which case the push has no credential and fails cleanly -- the
+    container carries none of its own (#356/#439).
     """
     minted = token_broker.mint_token()
     if minted:

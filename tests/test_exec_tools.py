@@ -32,7 +32,7 @@ class TestSandboxInitialize:
         mock_docker: MagicMock,
         mock_proxy_lifecycle: MagicMock,
     ) -> None:
-        """With the egress proxy on, inject_vcs_token must not reach the env (#356)."""
+        """With the egress proxy on, no VCS token reaches the container env (#356/#439)."""
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
         mock_client = MagicMock()

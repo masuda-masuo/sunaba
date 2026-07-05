@@ -309,16 +309,16 @@ else:
 **ツール**
 
 - **`issue_view`**（read）: issue 本文をコンテナ内ファイルへ落とし、LLM には**要約＋ハンドル**だけ返す（§3.1）。§2.2 read 扱い（ジャーナル記録・ネットワーク明示許可）。
-- **`clone_repo`**（read / 入口）: `gh repo clone` で対象リポジトリをコンテナ内へクローン（`repo` / `dest_dir` / `branch`）。issue_view と並ぶ作業の起点。`sandbox_initialize(clone_repo=…)` / `run_container_and_exec(clone_repo=…)` でも起動と同時にクローンできる。§2.2 read 扱い（ネットワーク明示許可・ジャーナル記録）。
-- **`publish`**（write / 境界越え）: コミット済みの状態を push し、任意で PR を作成する唯一の出口。verify は内蔵せず、LLM が `verify_in_container` で事前に行う。§2.2 の二段階トークン必須、§8 ジャーナルにプランと結果を記録。
+- **`clone_repo`**（read / 入口）: 対象リポジトリをコンテナ内へ匿名 `git clone`（`repo` / `dest_dir` / `branch`；private は proxy の read 認可ウィンドウで認証、#419）。issue_view と並ぶ作業の起点。`sandbox_initialize(clone_repo=…)` / `run_container_and_exec(clone_repo=…)` でも起動と同時にクローンできる。§2.2 read 扱い（ネットワーク明示許可・ジャーナル記録）。
+- **`publish`**（write / 境界越え）: コミット済みの状態を push し、任意で PR を作成する唯一の出口。verify は内蔵せず、LLM が `verify_in_container` で事前に行う。人間ゲートは MCP クライアントのツール承認、構造ガードは egress proxy（§2.2、二段階トークンは #438 で廃止）。§8 ジャーナルに結果を記録。
 
-**認証（opt-in トークン注入）**
+**認証（トークンはホスト側に留まる）**
 
-VCS トークンは `inject_vcs_token=True` を指定したコンテナにのみ `GITHUB_TOKEN` / `GITHUB_TOKEN_SOURCE` / `GH_TOKEN` として注入される。既定はトークン無し。
+VCS トークンはコンテナに一切注入されない（#439）。read（clone / PR チェックアウト）は egress proxy の read 認可ウィンドウ（#419）でネットワーク層認証し、write（push / PR / issue）は `publish` / `sandbox_issue_write` がホスト側でトークンを解決する。コンテナ自身の `git`/`gh` は常に無認証。
 
-- 最小権限: VCS 不要のコンテナにトークンが渡らない。
+- 最小権限: コンテナにトークンが存在しないので、はぐれた in-container `git push` が漏らす credential がない。
 - 漏洩低減: 実行ログは `sanitize_output` の `mask_tokens` で `KEY=***` に自動マスクされる。
-- read 用途と write 用途で別コンテナに分けられる。
+- 構造ガード: read / push の認可はホストが proxy に per-window でトークンを渡す。コンテナは credential を保持しない。
 
 **payload 非通過フロー**
 
@@ -338,7 +338,7 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 |---|---|---|---|---|
 | 保存 | `checkpoint` / `checkpoint_list` | 不要 | 無し | コンテナ内 |
 | 巻き戻し | `checkpoint_restore` | 不要 | 無し | コンテナ内 |
-| 出口 | `publish` | 必須 | 無し（LLM が事前に verify_in_container で担保） | GitHub への push |
+| 出口 | `publish` | 不要（ホスト側解決） | 無し（LLM が事前に verify_in_container で担保） | GitHub への push |
 
 コンテナ内は使い捨て（§0）。保存・巻き戻し層は token もゲートも要らず、edit/verify ループ中のセーブポイントと巻き戻しに使う。ゲートの対象は境界を越える push だけ（§2.2）。
 
@@ -359,9 +359,9 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 
 `publish` は常に未 push の checkpoint コミットを1コミットに畳んでから push する（`squash_checkpoints` パラメータは削除済み）。squash ベースは clone/branch 時に記録した分岐点 ref を使い、デフォルトブランチ名に依存せず push を常に fast-forward に保つ。API push 経路は HEAD ツリーを単一コミット化するため、checkpoint は元から残らない。
 
-### 11.2 トークン供給の3経路（直交）
+### 11.2 ホスト側トークン解決の3経路（直交）
 
-`inject_vcs_token=True` でコンテナに渡る `GITHUB_TOKEN` の**供給元**は3経路あり、いずれも opt-in・直交。常駐 HTTP（§7）で mcp-launcher 管理外でも認証を維持するために導入された。
+ホストがトークンを解決する**供給元**は3経路あり、いずれも直交。解決したトークンはコンテナには入らず、proxy の read / push ウィンドウと `publish` / `sandbox_issue_write` がホスト側で使う。常駐 HTTP（§7）で mcp-launcher 管理外でも認証を維持するために導入された。
 
 | 経路 | 実装 | 仕組み | 用途 |
 |---|---|---|---|
@@ -369,7 +369,7 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 | GitHub App 自己管理 | `github_auth.py` | `AppTokenProvider` が Installation Token を発行・キャッシュし、daemon スレッドで定期リフレッシュ（`setup_github_app_token()`） | 秘密鍵をホストに置き、長時間常駐でも短期トークンを切らさない（PR #223） |
 | トークンブローカー | `token_broker.py` | `GITHUB_TOKEN_COMMAND` / `GITHUB_TOKEN_BROKER_SERVICE` 指定時に pin 済み keystore-broker CLI で新鮮な短期トークンを mint（バイナリ pin＋SHA-256 検証＋platformdirs キャッシュ） | 秘密鍵をホストに置かない第3経路（PR #235） |
 
-**優先順位**: ブローカー mint 成功時は静的 `GITHUB_TOKEN` より優先し、失敗時は従来の静的トークンへ fallback する（`_container_env()`）。GitHub App env / ブローカー env のいずれも未設定なら完全 no-op で、既存の静的注入の挙動を変えない（後方互換）。
+**優先順位**: ブローカー mint 成功時は静的 `GITHUB_TOKEN` より優先し、失敗時は静的トークンへ fallback する（`token_broker.mint_token()` → `_resolve_vcs_token()`）。いずれも未設定ならトークン無しで、read は匿名クローン、push は credential 無しでクリーンに失敗する。
 
 ---
 

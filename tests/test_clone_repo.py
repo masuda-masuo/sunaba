@@ -404,20 +404,20 @@ class TestCloneRepoViaNetwork:
         assert "owner/repo" in msg
         assert "/tmp/repo/repo" in msg
 
-    def test_failure_without_token_hints_inject_vcs_token(self) -> None:
+    def test_failure_without_token_hints_read_window(self) -> None:
         c = self._container(1, b"gh: Could not resolve to a Repository")
         with pytest.raises(RuntimeError) as exc:
             _clone_repo_via_network(c, "abc123def456", "owner/private", "/tmp/repo")
-        assert "inject_vcs_token=True" in str(exc.value)
+        assert "read window" in str(exc.value)
 
     def test_failure_with_token_omits_hint(self) -> None:
         c = self._container(1, b"some other gh error")
         with pytest.raises(RuntimeError) as exc:
             _clone_repo_via_network(
                 c, "abc123def456", "owner/private", "/tmp/repo",
-                inject_vcs_token=True,
+                authenticated=True,
             )
-        assert "inject_vcs_token=True" not in str(exc.value)
+        assert "read window" not in str(exc.value)
 
     def test_anonymous_git_clone_without_token(self) -> None:
         """Issue #333: no token -> anonymous git clone (public works)."""
@@ -430,11 +430,11 @@ class TestCloneRepoViaNetwork:
         assert "gh repo clone" not in cmd
 
     def test_gh_clone_with_token(self) -> None:
-        """Issue #333: inject_vcs_token=True keeps gh repo clone (private)."""
+        """Issue #333: an authenticated container keeps gh repo clone (private)."""
         c = self._container(0, b"")
         _clone_repo_via_network(
             c, "abc123def456", "owner/repo", "/tmp/repo",
-            inject_vcs_token=True,
+            authenticated=True,
         )
         cmd = c.exec_run.call_args_list[0][0][0][-1]
         assert "gh repo clone owner/repo" in cmd
@@ -460,7 +460,7 @@ class TestCloneRepoViaNetwork:
         with pytest.raises(RuntimeError):
             _clone_repo_via_network(
                 c, "abc123def456", "owner/repo", "/tmp/repo",
-                inject_vcs_token=True, open_read_window=True,
+                open_read_window=True,
             )
         mock_record.assert_called_once_with(
             "abc123def456",
@@ -536,7 +536,7 @@ class TestCloneRepoToolReadWindowJournal:
         mock_docker.return_value = _make_client(container)
 
         from code_sandbox_mcp.server import clone_repo
-        result = json.loads(clone_repo("abc123def456", "owner/mytool", inject_vcs_token=True))
+        result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
         assert "warning" not in result  # the read window covers the credential gap
         mock_record.assert_called_once_with(
@@ -561,7 +561,7 @@ class TestCloneRepoToolReadWindowJournal:
         mock_docker.return_value = _make_client(container)
 
         from code_sandbox_mcp.server import clone_repo
-        result = json.loads(clone_repo("abc123def456", "owner/mytool", inject_vcs_token=True))
+        result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "error"
         mock_record.assert_called_once_with(
             "abc123def456",
@@ -604,7 +604,7 @@ class TestCloneRepoRecoversProxyEnv:
         mock_docker.return_value = _make_client(container)
 
         from code_sandbox_mcp.server import clone_repo
-        result = json.loads(clone_repo("abc123def456", "owner/mytool", inject_vcs_token=True))
+        result = json.loads(clone_repo("abc123def456", "owner/mytool"))
 
         assert result["status"] == "ok"
         mock_ensure_proxy.assert_called_once()
@@ -626,7 +626,7 @@ class TestCloneRepoRecoversProxyEnv:
         mock_docker.return_value = _make_client(container)
 
         from code_sandbox_mcp.server import clone_repo
-        result = json.loads(clone_repo("abc123def456", "owner/mytool", inject_vcs_token=True))
+        result = json.loads(clone_repo("abc123def456", "owner/mytool"))
 
         assert "sidecar unreachable" in result["error"]
         container.exec_run.assert_not_called()
@@ -657,7 +657,7 @@ class TestCloneWarnsWithoutToken:
         c.exec_run.return_value = (0, b"")
         res = _try_clone_into_container(
             c, "abc123def456", "owner/repo", "/tmp/repo",
-            inject_vcs_token=True,
+            authenticated=True,
         )
         assert res.error is None
         assert "WARNING" not in res.msg

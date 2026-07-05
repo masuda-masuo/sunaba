@@ -63,7 +63,7 @@ class TestGenerateHtmlTrace:
 
     def test_generate_html_trace(self, tmp_path: Path):
         entries = [
-            {"ts": "2026-01-01T00:00:00Z", "run_id": "run1", "container_id": "abc", "operation": "initialize", "image": "python@sha256:abcd", "allow_network": False, "inject_vcs_token": False},
+            {"ts": "2026-01-01T00:00:00Z", "run_id": "run1", "container_id": "abc", "operation": "initialize", "image": "python@sha256:abcd", "allow_network": False},
             {"ts": "2026-01-01T00:00:01Z", "run_id": "run1", "container_id": "abc", "operation": "exec", "commands": ["echo hello"], "exit_code": 0},
             {"ts": "2026-01-01T00:00:02Z", "run_id": "run1", "container_id": "abc", "operation": "exec", "commands": ["false"], "exit_code": 1},
         ]

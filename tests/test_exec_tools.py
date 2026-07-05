@@ -11,7 +11,6 @@ from code_sandbox_mcp.server import (
     sandbox_exec_background,
 )
 from code_sandbox_mcp.tools.container import (
-    _container_env,
     sandbox_initialize,
 )
 
@@ -19,91 +18,8 @@ if TYPE_CHECKING:
     from pydantic import TypeAdapter
 
 
-class TestContainerEnv:
-    """Tests for the _container_env helper (Issue #57 token isolation)."""
-
-    def test_default_no_vcs_token(self) -> None:
-        """inject_vcs_token=False should return empty dict even if env vars are set."""
-        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
-            env = _container_env(inject_vcs_token=False)
-            assert env == {}
-
-    def test_inject_vcs_token_injects_github_token(self) -> None:
-        """inject_vcs_token=True should include GITHUB_TOKEN when set."""
-        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
-            env = _container_env(inject_vcs_token=True)
-            assert env.get("GITHUB_TOKEN") == "ghp_fake"
-
-    def test_inject_vcs_token_injects_gh_token(self) -> None:
-        """inject_vcs_token=True should include GH_TOKEN when set."""
-        with patch.dict(os.environ, {"GH_TOKEN": "gho_fake"}, clear=True):
-            env = _container_env(inject_vcs_token=True)
-            assert env.get("GH_TOKEN") == "gho_fake"
-
-    def test_inject_vcs_token_injects_github_token_source(self) -> None:
-        """inject_vcs_token=True should include GITHUB_TOKEN_SOURCE when set."""
-        with patch.dict(os.environ, {"GITHUB_TOKEN_SOURCE": "ghs_fake"}, clear=True):
-            env = _container_env(inject_vcs_token=True)
-            assert env.get("GITHUB_TOKEN_SOURCE") == "ghs_fake"
-
-    def test_inject_vcs_token_only_injects_set_vars(self) -> None:
-        """Only vars that are set in the environment should be injected."""
-        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
-            env = _container_env(inject_vcs_token=True)
-            assert "GITHUB_TOKEN" in env
-            assert "GH_TOKEN" not in env
-            assert "GITHUB_TOKEN_SOURCE" not in env
-
-    def test_inject_vcs_token_empty_when_no_vars_set(self) -> None:
-        """No env vars set should return empty dict even with inject_vcs_token=True."""
-        with patch.dict(os.environ, {}, clear=True):
-            env = _container_env(inject_vcs_token=True)
-            assert env == {}
-
-    def test_egress_proxied_suppresses_token_injection(self) -> None:
-        """A proxied container must not receive a VCS token in its env (#356)."""
-        with patch.dict(
-            os.environ,
-            {"GITHUB_TOKEN": "ghp_fake", "GH_TOKEN": "gho_fake", "GITHUB_TOKEN_SOURCE": "s"},
-            clear=True,
-        ):
-            env = _container_env(inject_vcs_token=True, egress_proxied=True)
-            assert env == {}
-
-    def test_egress_proxied_without_inject_is_still_empty(self) -> None:
-        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
-            assert _container_env(inject_vcs_token=False, egress_proxied=True) == {}
-
-
 class TestSandboxInitialize:
     """Tests for sandbox_initialize."""
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_inject_vcs_token_passed_to_container_env(
-        self,
-        mock_validate: MagicMock,
-        mock_ensure_image: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """inject_vcs_token=True should pass through to _container_env."""
-        mock_container = MagicMock()
-        mock_container.id = "abc123def456"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
-            result = sandbox_initialize(
-                image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                inject_vcs_token=True,
-            )
-
-        assert result == "abc123def456"
-        # Verify environment was passed with the token
-        call_kwargs = mock_client.containers.run.call_args[1]
-        assert call_kwargs["environment"].get("GITHUB_TOKEN") == "ghp_fake"
 
     @patch("code_sandbox_mcp.tools.container.proxy_lifecycle")
     @patch("code_sandbox_mcp.tools.container._docker")
@@ -116,7 +32,7 @@ class TestSandboxInitialize:
         mock_docker: MagicMock,
         mock_proxy_lifecycle: MagicMock,
     ) -> None:
-        """With the egress proxy on, inject_vcs_token must not reach the env (#356)."""
+        """With the egress proxy on, no VCS token reaches the container env (#356/#439)."""
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
         mock_client = MagicMock()
@@ -131,7 +47,6 @@ class TestSandboxInitialize:
         with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
             result = sandbox_initialize(
                 image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                inject_vcs_token=True,
                 allow_network=True,
             )
 
@@ -173,13 +88,12 @@ class TestSandboxInitialize:
         with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
             sandbox_initialize(
                 image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                inject_vcs_token=True,
                 allow_network=True,
                 clone_repo="owner/repo",
             )
 
-        # 5th positional arg = authenticated: must reflect the (token-free)
-        # container env, not the inject_vcs_token request flag.
+        # 5th positional arg = authenticated: reflects the token-free
+        # container env (a token is never injected, #439).
         assert mock_clone.call_args.args[4] is False
 
     @patch("code_sandbox_mcp.tools.container._setup_pr_branch")
@@ -214,20 +128,20 @@ class TestSandboxInitialize:
             )
 
         assert "PR #7" in result
-        # authenticated must reflect the (token-free) proxied container env,
-        # not the inject_vcs_token flag that pr=N force-enables.
+        # authenticated must reflect the (token-free) proxied container env
+        # (pr=N no longer force-enables any token flag, #439).
         assert mock_setup_pr.call_args.kwargs["authenticated"] is False
 
     @patch("code_sandbox_mcp.tools.container._docker")
     @patch("code_sandbox_mcp.tools.container._ensure_image")
     @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    def test_inject_vcs_token_false_omits_tokens(
+    def test_container_env_never_carries_vcs_token(
         self,
         mock_validate: MagicMock,
         mock_ensure_image: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """inject_vcs_token=False should omit VCS tokens from environment."""
+        """The container env never carries VCS tokens; they stay host-side (#439)."""
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
         mock_client = MagicMock()
@@ -237,7 +151,6 @@ class TestSandboxInitialize:
         with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}, clear=True):
             result = sandbox_initialize(
                 image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                inject_vcs_token=False,
             )
 
         assert result == "abc123def456"
@@ -683,39 +596,6 @@ class TestServerArgs:
         parser = _build_arg_parser()
         args = parser.parse_args(["--log-level", "DEBUG"])
         assert args.log_level == "DEBUG"
-
-
-class TestContainerEnvBroker:
-    """_container_env broker integration (Issue #232): COMMAND-first, static fallback."""
-
-    def test_minted_token_takes_precedence_over_static(self) -> None:
-        """A freshly minted broker token overrides the static GITHUB_TOKEN."""
-        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_static"}, clear=True):
-            with patch(
-                "code_sandbox_mcp.tools.container.token_broker.mint_token",
-                return_value="ghs_fresh",
-            ):
-                env = _container_env(inject_vcs_token=True)
-                assert env["GITHUB_TOKEN"] == "ghs_fresh"
-
-    def test_broker_failure_falls_back_to_static_token(self) -> None:
-        """When the broker yields nothing, the static GITHUB_TOKEN is used."""
-        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_static"}, clear=True):
-            with patch(
-                "code_sandbox_mcp.tools.container.token_broker.mint_token",
-                return_value=None,
-            ):
-                env = _container_env(inject_vcs_token=True)
-                assert env["GITHUB_TOKEN"] == "ghp_static"
-
-    def test_no_sources_is_noop(self) -> None:
-        """No broker and no static token yields an empty env."""
-        with patch.dict(os.environ, {}, clear=True):
-            with patch(
-                "code_sandbox_mcp.tools.container.token_broker.mint_token",
-                return_value=None,
-            ):
-                assert _container_env(inject_vcs_token=True) == {}
 
 
 class TestSandboxExecArgv:

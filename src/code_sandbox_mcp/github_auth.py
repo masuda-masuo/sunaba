@@ -9,8 +9,8 @@ authentication (same failure mode as shiori #95).
 
 To stay self-sufficient, the server can mint and refresh its *own* short-lived
 GitHub App installation token and publish it to ``os.environ["GITHUB_TOKEN"]``.
-``_container_env()`` only reads ``os.environ["GITHUB_TOKEN"]``, so no change is
-needed there.
+Host-side token resolution (``_resolve_vcs_token()`` / ``token_broker``) reads
+``os.environ["GITHUB_TOKEN"]``, so no change is needed there.
 
 Backward compatibility (most important)
 ---------------------------------------

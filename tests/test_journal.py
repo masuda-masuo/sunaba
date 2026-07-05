@@ -63,7 +63,6 @@ class TestJournalWrite:
         assert e["container_id"] == "abc123"
         assert e["image"] == "python@sha256:abcd"
         assert e["allow_network"] is True
-        assert e["inject_vcs_token"] is False
 
     def test_record_exec_creates_entry(self, tmp_path: Path):
         journal_dir = tmp_path / "journal"
@@ -198,7 +197,7 @@ class TestJournalWrite:
 
         with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
              patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
-            record_initialize("abc123", "python@sha256:abcd", allow_network=True, inject_vcs_token=True)
+            record_initialize("abc123", "python@sha256:abcd", allow_network=True)
             record_exec("abc123", ["echo hello"], exit_code=0)
             record_file_write("abc123", "test.py", "/root", 100)
             record_boundary_crossing("abc123", "git_push", "pushed", approved=True)

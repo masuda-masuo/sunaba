@@ -501,7 +501,7 @@ def issue_view(
     retrieved with :func:`read_file_range`.
 
     Because the network hop happens on the host, this works on **any**
-    container -- ``allow_network`` / ``inject_vcs_token`` are not required.
+    container -- ``allow_network`` is not required.
     This also fixes the tool for egress-proxied containers: the previous
     in-container ``gh issue view`` needed a container-side token, which the
     proxy deliberately never provides (#356), so it failed outright there.
@@ -728,12 +728,11 @@ def _resolve_vcs_token() -> str:
     ``clone_repo``/``sandbox_initialize``. There is nothing push-specific in
     its resolution order (broker mint -> static ``GITHUB_TOKEN``/``GH_TOKEN``).
 
-    Resolution order mirrors :func:`code_sandbox_mcp.tools.container._container_env`:
-    a freshly minted broker token (Issue #232) takes precedence, falling
-    back to the static host ``GITHUB_TOKEN`` / ``GH_TOKEN``.  Returns an
-    empty string when no token is available, in which case the push exec
-    relies on whatever credential the container already carries (e.g. a
-    startup-injected token, for backward compatibility).
+    Resolution order: a freshly minted broker token (Issue #232) takes
+    precedence, falling back to the static host ``GITHUB_TOKEN`` /
+    ``GH_TOKEN``.  Returns an empty string when no token is available, in
+    which case the push has no credential and fails cleanly -- the
+    container carries none of its own (#356/#439).
     """
     minted = token_broker.mint_token()
     if minted:
@@ -919,12 +918,11 @@ confirmation-token step -- the human gate is the MCP client's own
 tool-approval prompt and the egress proxy is the structural guard, so
 an in-band token would only add ceremony (V1.0 API cleanup).
 
-Requires a container started with ``allow_network=True``.
-``inject_vcs_token=True`` is *not* required: the push credential is
-resolved host-side at call time (Issue #347) and — with the egress proxy
-configured (#356) — injected by the proxy into the authorized push only,
-so the container never holds it.  PR creation likewise runs host-side
-(#360).
+Requires a container started with ``allow_network=True``.  No VCS token
+needs to reach the container: the push credential is resolved host-side
+at call time (Issue #347) and — with the egress proxy configured (#356)
+— injected by the proxy into the authorized push only, so the container
+never holds it.  PR creation likewise runs host-side (#360).
 
 .. rubric:: Use when
 
@@ -1078,12 +1076,11 @@ Returns:
 
     # --- Lazy VCS token injection (Issue #347) ---
     # Resolve a token host-side and hand it to the push / PR / API-push
-    # execs only.  This lets a container started *without*
-    # ``inject_vcs_token`` still publish (no re-init penalty), while
-    # containers that never publish never receive a token.  When no host
-    # token is available, ``push_env`` is ``None`` and the credential helper
-    # falls back to whatever the container already carries (a
-    # startup-injected token), preserving backward compatibility.
+    # execs only.  The container itself never carries a VCS token (#356/
+    # #439), so any networked container can publish while containers that
+    # never publish never see a token.  When no host token is available,
+    # ``push_env`` is ``None`` and the push has no credential to fall back
+    # on (it fails cleanly rather than silently pushing unauthenticated).
     #
     # With the egress proxy configured (#356), the credential goes to the
     # proxy instead, window-scoped via ``authorized_push_window(token=...)``:
@@ -1269,7 +1266,7 @@ def _try_api_push(
     *env* carries the lazily-injected VCS token (Issue #347).  It is
     forwarded only to the exec that runs the API-push script — the script
     reads ``GITHUB_TOKEN`` from its environment to authenticate — so a
-    container started without ``inject_vcs_token`` can still push via this
+    container that carries no VCS token of its own can still push via this
     fallback transport.
     """
     script_b64 = base64.b64encode(
@@ -1323,7 +1320,6 @@ def clone_repo(
     repo: str,
     dest_dir: str = "/home/sandbox",
     branch: str = "",
-    inject_vcs_token: bool = False,
 ) -> str:
     """Clone a Git repository inside the container.
 
@@ -1331,17 +1327,15 @@ def clone_repo(
     otherwise an anonymous ``git clone`` over HTTPS -- public repos clone
     without credentials (Issue #333).  The choice between those two
     container-side transports is made by probing the container itself
-    (``gh auth setup-git``), not by trusting *inject_vcs_token*.
+    (``gh auth setup-git``).
 
-    Requires a container started with ``allow_network=True``.  For a
-    *private* repository, ``inject_vcs_token=True`` is additionally required.
-    With the egress proxy active (#356) the container itself still never
-    receives a token regardless of this flag; instead, when
-    *inject_vcs_token* is ``True`` and the proxy is configured, a
-    host-resolved token is handed to the proxy for a short
-    read-authorization window (#419) so the clone's anonymous ``git clone``
-    is transparently authenticated at the network layer -- the container's
-    own env and any ``gh`` credential-helper state stay untouched.
+    Requires a container started with ``allow_network=True``.  A
+    *private* repository needs no extra flag: under the egress proxy
+    (#356) the container never receives a token, so a host-resolved
+    token is handed to the proxy for a short read-authorization window
+    (#419) that authenticates the clone's anonymous ``git clone`` at the
+    network layer -- the container's own env and any ``gh``
+    credential-helper state stay untouched.
 
     .. hint::
 
@@ -1362,12 +1356,12 @@ def clone_repo(
 
     .. rubric:: Prefer over
 
-    - Prefer over ``sandbox_exec`` + ``gh repo clone`` for VCS-authenticated clones (token injection handled automatically)
+    - Prefer over ``sandbox_exec`` + ``gh repo clone`` (the proxy read-authorization window handles private-repo auth, #419)
     - Prefer over ``clone_repo`` when starting a new container — use ``sandbox_initialize(clone_repo=...)`` instead
 
     .. rubric:: Fallback
 
-    - If ``clone_repo`` fails with a private repo, pass ``inject_vcs_token=True`` (works both with and without the egress proxy, #419)
+    - If a private clone fails, ensure the egress proxy has a host-resolvable token (broker / ``GITHUB_TOKEN``) for the read-authorization window (#419)
 
     Args:
         container_id: 12-character container ID prefix.
@@ -1376,12 +1370,6 @@ def clone_repo(
             into ``{dest_dir}/{repo_name}`` (default parent
             ``"/home/sandbox"``).
         branch: Branch name to clone. Omit for the default branch.
-        inject_vcs_token: Whether to authenticate the clone for a private
-            repository (default ``False``).  Without the egress proxy this
-            relies on whatever VCS token the container already carries
-            (from ``sandbox_initialize(inject_vcs_token=True)``).  With the
-            egress proxy active, this instead opens a short read-window
-            (#419) so the proxy authenticates just this clone.
 
     Returns:
         JSON string with ``status``, ``repo``, ``clone_path``, and
@@ -1439,7 +1427,7 @@ def clone_repo(
     # `authenticated` above is always False there; a read window (#419)
     # authenticates the clone at the proxy instead, without changing the
     # container-side (anonymous) command.
-    open_read_window = inject_vcs_token and not authenticated and proxy_configured()
+    open_read_window = not authenticated and proxy_configured()
     cmd = _build_clone_command(repo, clone_path, branch, authenticated)
 
     if open_read_window:

@@ -26,12 +26,12 @@ from code_sandbox_mcp.proxy_client import (
     authorized_push_grant,
     authorized_read_grant,
     close_api_write_grant,
-    close_read_grant,
     close_grant,
+    close_read_grant,
     fetch_proxy_fingerprint,
     open_api_write_grant,
-    open_read_grant,
     open_grant,
+    open_read_grant,
     proxy_configured,
 )
 

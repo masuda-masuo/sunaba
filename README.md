@@ -424,6 +424,17 @@ The sandbox container **never receives a VCS token.** There is no opt-in flag: c
 
 This follows the principle of least privilege — the container's own `git`/`gh` stay unauthenticated, so a stray in-container `git push` has no credential to leak. The proxy must be configured with a host-resolvable token (broker / `GITHUB_TOKEN`) for the read and push windows to authenticate.
 
+### Configuring the egress proxy
+
+When `CODE_SANDBOX_ENABLE_EGRESS_PROXY=true` is set, the egress proxy enforces an **allowlist** of repositories that the sandbox can push to. This is configured via the `CODE_SANDBOX_ALLOWED_REPOS` environment variable:
+
+```bash
+# Allow pushes to specific repositories
+CODE_SANDBOX_ALLOWED_REPOS="owner/repo-a,owner/repo-b"
+```
+
+If `CODE_SANDBOX_ALLOWED_REPOS` is unset or does not include the target repository, `publish` will fail with a clear error message. The push is **not** silently redirected through the Objects API fallback — this is intentional: bypassing the proxy would hide a configuration error and let adminstration proceed with a misconfigured setup (see [#401](https://github.com/masuda-masuo/code-sandbox-mcp/issues/401)).
+
 ## Observability
 
 The server maintains an append-only execution journal at `~/.code-sandbox-mcp/journal.log`. Every container lifecycle event (initialize, exec, stop) and boundary-crossing operation is recorded with timestamps and run IDs.

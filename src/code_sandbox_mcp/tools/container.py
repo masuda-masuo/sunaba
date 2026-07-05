@@ -141,58 +141,6 @@ _SENSITIVE_FILE_BASENAMES: frozenset[str] = frozenset(
 )
 
 
-def _container_env(
-    inject_vcs_token: bool = False, *, egress_proxied: bool = False
-) -> dict[str, str]:
-    """Build environment variables to pass to sandbox containers.
-
-    When *inject_vcs_token* is ``True``, passes through
-    ``GITHUB_TOKEN``, ``GITHUB_TOKEN_SOURCE``, and ``GH_TOKEN``
-    from the host environment so that GitHub MCP tools inside the
-    sandbox can authenticate automatically.
-
-    Token injection is opt-in (``inject_vcs_token=True``) to avoid
-    leaking credentials into containers that do not need VCS access
-    (principle of least privilege, Issue #57).
-
-    When a keystore broker is configured (``GITHUB_TOKEN_COMMAND`` or
-    ``GITHUB_TOKEN_BROKER_SERVICE``) a fresh token is minted per call and
-    takes precedence over the static host ``GITHUB_TOKEN`` (Issue #232).
-
-    When *egress_proxied* is ``True`` no token is injected even with
-    *inject_vcs_token* set (#356): the container's egress runs through the
-    proxy sidecar, ``publish`` hands the credential to the proxy per push
-    window, and a token in the container env would let a raw ``git push``
-    from ``sandbox_exec`` bypass that gate.  *egress_proxied* suppresses
-    **only** this token injection -- any non-VCS env vars this function may
-    grow later must be built outside the branch below so proxied containers
-    still receive them.
-    """
-    env: dict[str, str] = {}
-    if inject_vcs_token and egress_proxied:
-        logger.info(
-            "egress proxy active: VCS token kept out of container env (#356); "
-            "publish supplies it to the proxy per push window"
-        )
-    elif inject_vcs_token:
-        # Prefer a freshly minted token from the keystore broker (Issue #232):
-        # GITHUB_TOKEN_COMMAND or the pinned mcp-token CLI mint a short-lived
-        # token per container start. Falls back to the static host env vars
-        # below when no broker is configured or the command fails.
-        minted = token_broker.mint_token()
-        if minted:
-            env["GITHUB_TOKEN"] = minted
-            logger.info("Injected freshly minted GITHUB_TOKEN into container environment")
-        for key in ("GITHUB_TOKEN", "GITHUB_TOKEN_SOURCE", "GH_TOKEN"):
-            if key in env:
-                continue
-            val = os.environ.get(key)
-            if val:
-                env[key] = val
-                logger.info("Injected VCS env var %s into container environment", key)
-    return env
-
-
 def _resolve_image_ref(image: str) -> str:
     """Resolve a tag-based image reference to a digest-based one.
 
@@ -340,7 +288,6 @@ def _select_initial_image(
     clone_repo: str | None,
     repo: str | None,
     pr: int | None,
-    inject_vcs_token: bool,
 ) -> tuple[str, str | None]:
     """Choose the image (and optional notice) for a new container (Issue #313).
 
@@ -537,7 +484,7 @@ def _clone_repo_via_network(
     container_id: str,
     clone_repo: str,
     clone_dest: str,
-    inject_vcs_token: bool = False,
+    authenticated: bool = False,
     *,
     open_read_window: bool = False,
 ) -> str:
@@ -551,16 +498,15 @@ def _clone_repo_via_network(
         clone fine without credentials via an anonymous ``git clone`` (Issue #333), and injecting the token
         unconditionally would expose it to in-container code for no
         benefit, violating the host-permission-minimization principle.
-        Private repos therefore require the caller to opt in with
-        ``inject_vcs_token=True``; when the clone fails without a token
-        the raised error suggests doing so.
+        Private repos are authenticated at the network layer by the
+        egress proxy's read-authorization window (#419,
+        *open_read_window*), so no token ever enters the container.
 
     *open_read_window*, when ``True``, wraps the clone exec in a
     short-lived egress-proxy read-authorization window (#419) with a
     host-resolved token, so the proxy authenticates this anonymous
     ``git clone`` transparently.  Used under the egress proxy, where the
-    container itself never receives a token regardless of
-    *inject_vcs_token* (#356).
+    container itself never receives a token (#356).
     """
     # Not redundant with the callers: on the network-fallback path the
     # caller may skip _clone_shiori_repo_to_container entirely (when
@@ -570,7 +516,7 @@ def _clone_repo_via_network(
     _validate_clone_repo(clone_repo)
     repo_name = clone_repo.split("/")[-1]
     clone_path = clone_dest.rstrip("/") + "/" + repo_name
-    cmd = _build_clone_command(clone_repo, clone_path, authenticated=inject_vcs_token)
+    cmd = _build_clone_command(clone_repo, clone_path, authenticated=authenticated)
     if open_read_window:
         with authorized_read_window(clone_repo, token=_resolve_vcs_token() or None):
             exit_code, output = container.exec_run(["/bin/sh", "-c", cmd])
@@ -579,9 +525,9 @@ def _clone_repo_via_network(
     if exit_code != 0:
         detail = output.decode("utf-8", errors="replace").strip()
         hint = ""
-        if not inject_vcs_token:
-            hint = " (if this is a private repository, retry with inject_vcs_token=True so gh can authenticate)"
-        transport = "anonymous git clone" if not inject_vcs_token else "gh repo clone"
+        if not authenticated:
+            hint = " (private repo? the egress proxy needs a host-resolvable token to authenticate the read window)"
+        transport = "anonymous git clone" if not authenticated else "gh repo clone"
         # Record the egress-proxy read-window's outcome (#421): this is the
         # boundary crossing publish's push window already gets recorded for
         # (#356/#357), applied to the read side (#419) so a denied/failed
@@ -682,7 +628,7 @@ def _try_clone_into_container(
     container_id: str,
     clone_repo: str,
     clone_dest: str,
-    inject_vcs_token: bool = False,
+    authenticated: bool = False,
     *,
     open_read_window: bool = False,
 ) -> CloneResult:
@@ -702,7 +648,7 @@ def _try_clone_into_container(
                 container_id,
                 clone_repo,
                 clone_dest,
-                inject_vcs_token,
+                authenticated,
                 open_read_window=open_read_window,
             )
         else:
@@ -712,10 +658,10 @@ def _try_clone_into_container(
                 clone_repo,
                 clone_dest,
             )
-        if not inject_vcs_token:
-            # Both clone paths (Shiori pre-clone and network fallback) land
-            # here; warn once when there is no token so the caller knows the
-            # clone is read-only before attempting to publish (Issue #333).
+        if not authenticated and not open_read_window:
+            # Anonymous clone with no proxy read window (only reachable
+            # proxy-off): warn that a private repo would have failed and
+            # that this checkout is read-only (Issue #333).
             msg = f"{msg} — WARNING: {CLONE_NO_TOKEN_WARNING}"
         return CloneResult(msg, None)
     except Exception as e:
@@ -824,7 +770,7 @@ def _setup_pr_branch(
         pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
             Pass ``None`` to skip pip install entirely.
         authenticated: Whether the container env actually carries a VCS
-            token (ground truth, not the ``inject_vcs_token`` request flag).
+            token (ground truth: the env actually built, #356).
         open_read_window: When ``True`` and *authenticated* is ``False``,
             wrap the anonymous clone + fetch/checkout in a short-lived
             egress-proxy read-authorization window (#419) with a
@@ -922,8 +868,8 @@ def _setup_pr_branch(
                     if authenticated
                     else (
                         " (anonymous clone: the container holds no VCS token (#356);"
-                        " retry with a container started via clone_repo=/inject_vcs_token=True"
-                        " if this is a private repository, see #419)"
+                        " if this is a private repository, ensure the egress proxy has a"
+                        " host-resolvable token for the read-authorization window, see #419)"
                     )
                 )
                 raise RuntimeError(f"Failed to clone repo {repo}: {stderr_text or clone_output}{hint}")
@@ -1106,7 +1052,6 @@ def _reap_orphaned_init_containers(client: Any = None) -> list[str]:
 def sandbox_initialize(
     image: str | None = None,
     allow_network: bool = False,
-    inject_vcs_token: bool = False,
     clone_repo: str | None = None,
     clone_dest: str = "/tmp/repo",
     repo: str | None = None,
@@ -1158,45 +1103,23 @@ def sandbox_initialize(
                Set to ``True`` for VCS operations (git/gh) that need to
                reach GitHub API.  Network access is a boundary-crossing
                operation and should be used only when necessary.
-        inject_vcs_token: Whether to inject VCS authentication tokens
-               (``GITHUB_TOKEN``, ``GITHUB_TOKEN_SOURCE``, ``GH_TOKEN``)
-               as environment variables in the container (default ``False``).
-               Enable only for containers that need git/gh access to
-               remote repositories.  Token injection is a boundary-crossing
-               operation and should be used only when necessary.
-               **When the egress proxy is active (#356, see
-               ``CODE_SANDBOX_ENABLE_EGRESS_PROXY``), this flag is a no-op for
-               the container's own environment: no token ever lands there,
-               even when set to ``True``.**  The container's ``git``/``gh``
-               stay unauthenticated; use :func:`publish` for pushes and PR
-               creation -- it resolves the token host-side and hands it to
-               the proxy per authorized push window (#357) or calls the
-               GitHub API directly from the host (#360), so the container
-               never needs a credential of its own.  Reading a *private*
-               repo via ``clone_repo`` under the proxy still works with this
-               flag set: instead of an env var, a host-resolved
-               token is handed to the proxy for a short read-authorization
-               window (#419) so the container's anonymous ``git clone``
-               is transparently authenticated at the network layer.
         clone_repo: Optional ``owner/name`` repository to copy from the
                Shiori pre-cloned repos on the host into the container.
                Uses the host path configured via ``--shiori-repos-path``
                (default: ``None`` = no clone copy).  When Shiori is not
                configured, falls back to ``gh repo clone`` over the
-               network (``allow_network`` is auto-enabled).  Cloning a
-               *private* repo this way additionally requires
-               ``inject_vcs_token=True`` (authenticates via ``gh`` without
-               the proxy, or via a read-authorization window with it, #419);
-               the token is not auto-injected because public repos (the
-               common case) do not need it.
+               network (``allow_network`` is auto-enabled).  A *private*
+               repo clones transparently too: the egress proxy opens a
+               read-authorization window (#419) authenticated with a
+               host-resolved token, so no credential enters the container.
         clone_dest: Destination directory in the container for the
                cloned repository (default: ``/tmp/repo``).
                The actual path will be ``{clone_dest}/{repo_name}`` where *repo_name* is derived from *clone_repo* or *repo*.
         repo: Repository in ``"owner/name"`` format.
                Required when *pr* is specified.
         pr: Pull request number to clone and check out.
-               When set, implicitly enables ``allow_network=True``
-               and ``inject_vcs_token=True``, clones the repository
+               When set, implicitly enables ``allow_network=True``,
+               clones the repository
                inside the container, checks out the PR head branch,
                and installs dev dependencies.  Under the egress proxy
                (#403) this checkout is anonymous: the PR head ref is
@@ -1244,10 +1167,9 @@ def sandbox_initialize(
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("orphan reap failed: %s", e)
 
-    # When pr is specified, implicitly enable network and VCS token
+    # When pr is specified, implicitly enable network access.
     if pr is not None:
         allow_network = True
-        inject_vcs_token = True
 
     # Auto-enable network when pre-clone is absent (Issue #146, #178)
     if clone_repo and pr is None and not _shiori_preclone_exists(clone_repo):
@@ -1262,13 +1184,13 @@ def sandbox_initialize(
     # pick the variant that matches the project's language instead of a
     # hardcoded default.  *image_notice* explains any neutral fallback.
     resolved, image_notice = _select_initial_image(
-        image, clone_repo, repo, pr, inject_vcs_token
+        image, clone_repo, repo, pr
     )
     # -- Egress proxy sidecar (#358, Epic #353): opt-in, fail closed --
     # A proxied container gets no VCS token in its env (#356); publish
     # hands the credential to the proxy per push window instead.
     proxied = allow_network and proxy_lifecycle.egress_proxy_enabled()
-    env = _container_env(inject_vcs_token=inject_vcs_token, egress_proxied=proxied)
+    env: dict[str, str] = {}
     proxy_runtime = None
     if proxied:
         try:
@@ -1342,7 +1264,6 @@ def sandbox_initialize(
         cid,
         resolved,
         allow_network=allow_network,
-        inject_vcs_token=inject_vcs_token,
         mem_limit=mem_limit,
         cpus=cpus,
     )
@@ -1364,16 +1285,14 @@ def sandbox_initialize(
     # When pr is set, _setup_pr_branch handles its own clone,
     # so skip the Shiori clone copy to avoid redundant clone.
     clone_msg = ""
-    # Ground truth for "can gh authenticate in there": the env actually
-    # built above, not the request flag -- a proxied container gets no
-    # token even with inject_vcs_token=True (#356), so the network clone
-    # must take the anonymous git-clone path (#403 fallout).
+    # The container never carries a VCS token (#356/#439): its egress runs
+    # through the proxy, so the network clone always takes the anonymous
+    # git-clone path (#403).
     container_has_token = "GITHUB_TOKEN" in env or "GH_TOKEN" in env
-    # Under the egress proxy the container never carries a token even when
-    # inject_vcs_token=True (#356) -- container_has_token is always False
-    # there.  Open a read-authorization window (#419) instead, so the
-    # proxy authenticates the clone at the network layer.
-    open_read_window = proxied and inject_vcs_token and not container_has_token
+    # Authenticate private reads at the proxy via a read-authorization
+    # window (#419) whenever the container is networked; public reads are
+    # unaffected.
+    open_read_window = proxied and not container_has_token
     if clone_repo and pr is None:
         msg, err = _try_clone_into_container(
             container,
@@ -1440,7 +1359,6 @@ def sandbox_initialize(
 async def sandbox_initialize_tool(
     image: str | None = None,
     allow_network: bool = False,
-    inject_vcs_token: bool = False,
     clone_repo: str | None = None,
     clone_dest: str = "/tmp/repo",
     repo: str | None = None,
@@ -1476,16 +1394,14 @@ async def sandbox_initialize_tool(
     ``clone_repo`` uses is opened for the anonymous clone + checkout too,
     so ``pr=N`` alone is enough -- the egress proxy just needs to be
     configured with a host-resolvable token (broker / ``GITHUB_TOKEN``)
-    for the window to authenticate.  ``inject_vcs_token=True`` is a no-op
-    for the container's own environment while the egress proxy is active:
-    no token ever lands inside the container either way; pushes and PR
-    creation should go through :func:`publish` instead.
+    for the window to authenticate; pushes and PR creation go through
+    :func:`publish`, which resolves the token host-side, so the container
+    never needs a credential of its own.
     """
     def _work() -> str:
         return sandbox_initialize(
             image=image,
             allow_network=allow_network,
-            inject_vcs_token=inject_vcs_token,
             clone_repo=clone_repo,
             clone_dest=clone_dest,
             repo=repo,
@@ -1590,7 +1506,6 @@ def run_container_and_exec(
     offset: int = 0,
     limit: int = 50,
     allow_network: bool = False,
-    inject_vcs_token: bool = False,
     clone_repo: str | None = None,
     clone_dest: str = "/tmp/repo",
     repo: str | None = None,
@@ -1647,33 +1562,23 @@ def run_container_and_exec(
         allow_network: Whether to allow network access (default ``False``).
                Set to ``True`` for VCS operations (git/gh) that need to
                reach GitHub API.
-        inject_vcs_token: Whether to inject VCS authentication tokens
-               (``GITHUB_TOKEN``, ``GITHUB_TOKEN_SOURCE``, ``GH_TOKEN``)
-               as environment variables in the container (default
-               ``False``).  Enable only for containers that need git/gh
-               access to remote repositories.  **When the egress proxy is
-               active (#356), this flag is a no-op for the container's own
-               environment: no token ever lands there.**  Use
-               :func:`publish` for pushes and PR creation instead -- it
-               resolves the token host-side (#347/#360).
         clone_repo: Optional ``owner/name`` repository to copy from the
                Shiori pre-cloned repos on the host into the container.
                Uses the host path configured via ``--shiori-repos-path``
                (default: ``None`` = no clone copy).  When Shiori is not
                configured, falls back to ``gh repo clone`` over the
-               network (``allow_network`` is auto-enabled).  Cloning a
-               *private* repo this way additionally requires
-               ``inject_vcs_token=True`` so ``gh`` can authenticate;
-               the token is not auto-injected because public repos (the
-               common case) do not need it.
+               network (``allow_network`` is auto-enabled).  A *private*
+               repo clones transparently too: the egress proxy opens a
+               read-authorization window (#419) authenticated with a
+               host-resolved token, so no credential enters the container.
         clone_dest: Destination directory in the container for the
                cloned repository (default: ``/tmp/repo``).
                The actual path will be ``{clone_dest}/{repo_name}`` where *repo_name* is derived from *clone_repo* or *repo*.
         repo: Repository in ``"owner/name"`` format.
                Required when *pr* is specified.
         pr: Pull request number to clone and check out.
-               When set, implicitly enables ``allow_network=True``
-               and ``inject_vcs_token=True``, clones the repository
+               When set, implicitly enables ``allow_network=True``,
+               clones the repository
                inside the container, checks out the PR head branch,
                and installs dev dependencies.  Under the egress proxy
                (#403) this checkout is anonymous: the PR head ref is
@@ -1717,10 +1622,9 @@ def run_container_and_exec(
     if timeout < 0:
         return json.dumps({"status": "error", "error": "timeout must be >= 0"})
 
-    # When pr is specified, implicitly enable network and VCS token
+    # When pr is specified, implicitly enable network access.
     if pr is not None:
         allow_network = True
-        inject_vcs_token = True
 
     # Auto-enable network when pre-clone is absent (Issue #146, #178)
     if clone_repo and pr is None and not _shiori_preclone_exists(clone_repo):
@@ -1732,7 +1636,7 @@ def run_container_and_exec(
 
     # Detection-based image selection (Issue #313), same as sandbox_initialize.
     resolved, image_notice = _select_initial_image(
-        image, clone_repo, repo, pr, inject_vcs_token
+        image, clone_repo, repo, pr
     )
     if image_notice:
         logger.info("image selection: %s", image_notice)
@@ -1741,7 +1645,7 @@ def run_container_and_exec(
     # A proxied container gets no VCS token in its env (#356); publish
     # hands the credential to the proxy per push window instead.
     proxied = allow_network and proxy_lifecycle.egress_proxy_enabled()
-    env = _container_env(inject_vcs_token=inject_vcs_token, egress_proxied=proxied)
+    env: dict[str, str] = {}
     proxy_runtime = None
     if proxied:
         try:
@@ -1780,7 +1684,6 @@ def run_container_and_exec(
         container_id,
         resolved,
         allow_network=allow_network,
-        inject_vcs_token=inject_vcs_token,
         mem_limit=None,
         cpus=None,
     )
@@ -1966,11 +1869,11 @@ def run_container_and_exec(
         output_size=raw_size,
         max_output_tokens=max_output_tokens if max_output_tokens > 0 else None,
     )
-    if allow_network or inject_vcs_token:
+    if allow_network:
         record_boundary_crossing(
             container_id,
             "run_container_and_exec",
-            f"network={allow_network} vcs_token={inject_vcs_token}",
+            f"network={allow_network}",
         )
 
     record_stop(container_id)

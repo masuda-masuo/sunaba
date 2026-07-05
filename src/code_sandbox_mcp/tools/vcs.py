@@ -14,7 +14,7 @@ from typing import Any
 from docker.errors import NotFound
 
 from code_sandbox_mcp import proxy_lifecycle, token_broker
-from code_sandbox_mcp.journal import record_boundary_crossing
+from code_sandbox_mcp.journal import record_boundary_crossing, record_tool_use
 from code_sandbox_mcp.proxy_client import (
     ProxyAuthError,
     authorized_push_grant,
@@ -354,6 +354,8 @@ def checkpoint_list(
         return json.dumps({"error": f"Container {container_id[:12]} not found"})
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+    record_tool_use(container_id[:12], "checkpoint_list")
 
     working_dir = resolve_git_root(container, working_dir)
     safe_wd = shlex.quote(working_dir)

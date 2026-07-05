@@ -265,6 +265,32 @@ def read_file(container: Any, file_path: str) -> str:
     return stdout_text
 
 
+def _compute_file_size(text: str) -> dict[str, int]:
+    """Compute file-size metadata for LLM awareness (issue #187, ① only).
+
+    Returns ``{lines, bytes, approx_tokens}``.  ``lines`` is the true line
+    count (newline-count convention); note this is a *different* measure from
+    a pagination ``total_lines`` that counts the trailing segment after a
+    final newline, so the two can differ by one for newline-terminated files.
+    ``approx_tokens`` is a rough ``bytes // 4`` estimate for token-cost
+    awareness by the model.
+    """
+    encoded = text.encode("utf-8")
+    n_lines = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+    return _file_size_from_counts(len(encoded), n_lines)
+
+
+def _file_size_from_counts(n_bytes: int, n_lines: int) -> dict[str, int]:
+    """Build file-size metadata from precomputed byte/line counts.
+
+    Used where the full text isn't available (e.g. ``transform_file`` only
+    has the runner's ``new_size`` / ``new_lines``), keeping the
+    ``approx_tokens`` formula in one place shared with
+    :func:`_compute_file_size`.
+    """
+    return {"lines": n_lines, "bytes": n_bytes, "approx_tokens": n_bytes // 4}
+
+
 def _is_test_file(file_path: str) -> bool:
     """Check whether *file_path* follows test-file naming/directory conventions.
 
@@ -845,7 +871,8 @@ if not isinstance(new, str):
           "error": "transform() must return str, got " + type(new).__name__})
 
 if new == original:
-    emit({"status": "ok", "changed": False, "diff": "", "new_size": len(original)})
+    orig_lines = original.count("\n") + (1 if original and not original.endswith("\n") else 0)
+    emit({"status": "ok", "changed": False, "diff": "", "new_size": len(original), "new_lines": orig_lines})
 
 try:
     with open(FILE_PATH, "w", encoding="utf-8", newline="") as fh:
@@ -856,7 +883,8 @@ except Exception as e:
 diff = "\n".join(difflib.unified_diff(
     original.splitlines(), new.splitlines(),
     fromfile=FILE_PATH, tofile=FILE_PATH, lineterm=""))
-emit({"status": "ok", "changed": True, "diff": diff, "new_size": len(new)})
+new_lines = new.count("\n") + (1 if new and not new.endswith("\n") else 0)
+emit({"status": "ok", "changed": True, "diff": diff, "new_size": len(new), "new_lines": new_lines})
 '''
 
 
@@ -1001,6 +1029,7 @@ def read_file_lines(
         "shown": shown,
         "has_more": has_more,
         "next_offset": next_offset if has_more else None,
+        "file_size": _compute_file_size(content),
         "error": None,
     }
 

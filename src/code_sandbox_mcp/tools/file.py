@@ -16,6 +16,7 @@ from pathlib import Path
 from docker.errors import APIError, NotFound
 
 from code_sandbox_mcp.edit_verify import (
+    _file_size_from_counts,
     read_file,
     read_file_lines,
     transform_file_in_container,
@@ -926,6 +927,15 @@ def transform_file(
             "truncated": meta.truncated,
             "next_offset": page.next_offset,
             "has_more": page.has_more,
+            "file_size": _file_size_from_counts(
+                int(result.get("new_size", 0)), int(result.get("new_lines", 0))
+            ),
         })
 
+    # Unchanged (or error-free no-op) results still surface file_size so the
+    # model sees the current size without a separate read (issue #187, ①).
+    if result.get("status") == "ok" and not result.get("changed"):
+        result["file_size"] = _file_size_from_counts(
+            int(result.get("new_size", 0)), int(result.get("new_lines", 0))
+        )
     return json.dumps(result)

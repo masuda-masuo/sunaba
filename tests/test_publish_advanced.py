@@ -186,7 +186,7 @@ class TestPublishLazyTokenInjection:
     """Tests for lazy VCS-token injection at push time (Issue #347).
 
     The token is resolved host-side and handed only to the push / PR
-    execs, so a container started *without* ``inject_vcs_token`` can still
+    execs, so a container that carries no VCS token of its own can still
     publish, while read-only git execs never see a credential.
     """
 
@@ -256,11 +256,10 @@ class TestPublishLazyTokenInjection:
         mock_docker: MagicMock,
         mock_resolve: MagicMock,
     ) -> None:
-        """With no host token, the push exec env is None (backward compat).
+        """With no host token, the push exec env is None.
 
-        The container falls back to whatever credential it already carries
-        (e.g. a startup-injected token), so behaviour is unchanged for
-        containers started with ``inject_vcs_token=True``.
+        The container carries no VCS token of its own (#356/#439), so there
+        is no credential to fall back on -- the push proceeds without one.
         """
         mock_resolve.return_value = ""
 

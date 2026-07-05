@@ -449,7 +449,6 @@ class TestSandboxInitializePrParam:
     """Tests for sandbox_initialize with pr parameter."""
 
     @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._container_env")
     @patch("code_sandbox_mcp.tools.container._ensure_image")
     @patch("code_sandbox_mcp.tools.container.validate_image_ref")
     @patch("code_sandbox_mcp.tools.container._setup_pr_branch")
@@ -458,7 +457,6 @@ class TestSandboxInitializePrParam:
         mock_setup: MagicMock,
         mock_validate: MagicMock,
         mock_ensure_image: MagicMock,
-        mock_container_env: MagicMock,
         mock_docker: MagicMock,
     ):
         mock_container = MagicMock()
@@ -467,14 +465,12 @@ class TestSandboxInitializePrParam:
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
         mock_setup.return_value = "PR #136 (feature) \u2192 /tmp/repo/repo in container abc123"
-        mock_container_env.return_value = {"GITHUB_TOKEN": "fake-token"}
 
         result = sandbox_initialize(
             image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
             repo="owner/repo",
             pr=136,
             allow_network=False,
-            inject_vcs_token=False,
         )
 
         assert "abc123def456" in result
@@ -484,7 +480,7 @@ class TestSandboxInitializePrParam:
         assert args[2] == "owner/repo"
         assert args[3] == 136
         run_kwargs = mock_client.containers.run.call_args[1]
-        assert run_kwargs.get("environment", {}).get("GITHUB_TOKEN") == "fake-token"
+        assert "GITHUB_TOKEN" not in run_kwargs.get("environment", {})
 
     @patch("code_sandbox_mcp.tools.container._docker")
     @patch("code_sandbox_mcp.tools.container._ensure_image")
@@ -587,11 +583,11 @@ class TestRunContainerAndExecPrParam:
             ))
 
         assert result["status"] == "ok"
-        # pr=N forces inject_vcs_token, and the host env above carries a
-        # token, so the container env has one -> authenticated gh path.
+        # pr=N no longer injects a token; the container is token-free, so the
+        # PR checkout takes the anonymous (authenticated=False) path (#439).
         mock_setup.assert_called_once_with(
             mock_container, "abc123def456", "owner/repo", 136, "/tmp/repo", "[dev]",
-            authenticated=True,
+            authenticated=False,
         )
 
     @patch("code_sandbox_mcp.tools.container._docker")
@@ -696,7 +692,6 @@ class TestCloneRepoPrInteraction:
     """Tests for clone_repo + pr interaction."""
 
     @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._container_env")
     @patch("code_sandbox_mcp.tools.container._ensure_image")
     @patch("code_sandbox_mcp.tools.container.validate_image_ref")
     @patch("code_sandbox_mcp.tools.container._setup_pr_branch")
@@ -707,7 +702,6 @@ class TestCloneRepoPrInteraction:
         mock_setup: MagicMock,
         mock_validate: MagicMock,
         mock_ensure_image: MagicMock,
-        mock_container_env: MagicMock,
         mock_docker: MagicMock,
     ):
         mock_container = MagicMock()
@@ -716,7 +710,6 @@ class TestCloneRepoPrInteraction:
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
         mock_setup.return_value = "PR #136 setup done"
-        mock_container_env.return_value = {}
 
         sandbox_initialize(
             image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -732,7 +725,6 @@ class TestCloneRepoPrInteraction:
 
     @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
     @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._container_env")
     @patch("code_sandbox_mcp.tools.container._ensure_image")
     @patch("code_sandbox_mcp.tools.container.validate_image_ref")
     @patch("code_sandbox_mcp.tools.container._setup_pr_branch")
@@ -743,7 +735,6 @@ class TestCloneRepoPrInteraction:
         mock_setup: MagicMock,
         mock_validate: MagicMock,
         mock_ensure_image: MagicMock,
-        mock_container_env: MagicMock,
         mock_docker: MagicMock,
         mock_preclone_exists: MagicMock,
     ):
@@ -752,7 +743,6 @@ class TestCloneRepoPrInteraction:
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_container_env.return_value = {}
 
         sandbox_initialize(
             image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",

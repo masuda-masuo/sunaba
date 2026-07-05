@@ -6,14 +6,13 @@ Tests cover:
 - ``compute_failure_fingerprint`` — failure pattern detection
 - ``compress_failures`` — isomorphic failure compression
 - ``record_exec`` with cached/output_size fields
-- ``rerun_failed`` tool
 - ``sandbox_cache_stats`` tool
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from code_sandbox_mcp.journal import record_exec
 from code_sandbox_mcp.output_control import (
@@ -25,10 +24,6 @@ from code_sandbox_mcp.output_control import (
 from code_sandbox_mcp.server import (
     sandbox_cache_invalidate,
     sandbox_cache_stats,
-)
-from code_sandbox_mcp.tools.container import (
-    rerun_failed,
-    sandbox_exec_diff,
 )
 
 # =======================================================================
@@ -257,76 +252,6 @@ class TestRecordExecCacheFields:
 
 
 # =======================================================================
-# rerun_failed
-# =======================================================================
-
-
-class TestRerunFailed:
-    """Tests for rerun_failed tool."""
-
-    def _decode(self, result: str) -> dict:
-        return json.loads(result)
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
-    def test_no_failed_commands(
-        self,
-        mock_read_journal: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """No failed commands should return ok with empty diff."""
-        mock_read_journal.return_value = [
-            {"operation": "exec", "exit_code": 0, "commands": ["echo ok"]},
-        ]
-        result = self._decode(rerun_failed(
-            container_id="abc123",
-            run_id="run1",
-        ))
-        assert result["status"] == "ok"
-        assert "No failed commands" in result["message"]
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
-    def test_run_id_not_found(
-        self,
-        mock_read_journal: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Unknown run_id should return an error."""
-        mock_read_journal.return_value = []
-        result = self._decode(rerun_failed(
-            container_id="abc123",
-            run_id="nonexistent",
-        ))
-        assert result["status"] == "error"
-        assert "not found" in result["error"]
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
-    def test_rerun_with_failed_commands(
-        self,
-        mock_read_journal: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Should re-run failed commands and report status."""
-        mock_read_journal.return_value = [
-            {"operation": "exec", "exit_code": 1, "commands": ["false"]},
-        ]
-        mock_container = MagicMock()
-        mock_container.exec_run.return_value = (0, (b"rerun ok", b""))
-        mock_client = MagicMock()
-        mock_client.containers.get.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        result = self._decode(rerun_failed(
-            container_id="abc123",
-            run_id="run1",
-            commands=["true"],
-        ))
-        assert result["status"] == "ok"
-
-
-# =======================================================================
 # sandbox_cache_stats / sandbox_cache_invalidate
 # =======================================================================
 
@@ -351,122 +276,6 @@ class TestSandboxCacheTools:
             mock_inv.return_value = 1
             result = json.loads(sandbox_cache_invalidate(key="abc123"))
             assert result["invalidated"] == 1
-
-
-# =======================================================================
-# sandbox_exec_diff
-# =======================================================================
-
-
-class TestSandboxExecDiff:
-    """Tests for sandbox_exec_diff tool."""
-
-    def _decode(self, result: str) -> dict:
-        return json.loads(result)
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.get_cached_result")
-    def test_first_run_no_diff(
-        self,
-        mock_get_cache: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """First run (no cached result) should return ok with no diff."""
-        mock_get_cache.return_value = None
-        mock_container = MagicMock()
-        mock_container.exec_run.return_value = (0, (b"first run output", b""))
-        mock_client = MagicMock()
-        mock_client.containers.get.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        result = self._decode(sandbox_exec_diff(
-            container_id="abc123",
-            commands=["echo first"],
-        ))
-        assert result["status"] == "ok"
-        assert result["has_diff"] is False
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.get_cached_result")
-    def test_second_run_with_diff(
-        self,
-        mock_get_cache: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        """Second run (cached result exists) should show diff."""
-        mock_get_cache.return_value = {"output": "first run output"}
-        mock_container = MagicMock()
-        mock_container.exec_run.return_value = (0, (b"second run output", b""))
-        mock_client = MagicMock()
-        mock_client.containers.get.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        result = self._decode(sandbox_exec_diff(
-            container_id="abc123",
-            commands=["echo second"],
-        ))
-        assert result["status"] == "ok"
-
-
-# =======================================================================
-# Helpers
-# =======================================================================
-
-
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.get_cached_result")
-    def test_exec_diff_uses_separate_cache_key(
-        self,
-        mock_get_cache: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        mock_get_cache.return_value = None
-        mock_container = MagicMock()
-        mock_container.exec_run.return_value = (0, (b"output", b""))
-        mock_client = MagicMock()
-        mock_client.containers.get.return_value = mock_container
-        mock_docker.return_value = mock_client
-        with patch("code_sandbox_mcp.tools.container.set_cached_result") as mock_set:
-            sandbox_exec_diff(
-                container_id="abc123",
-                commands=["echo test"],
-            )
-            # Verify that the cache key uses the "diff:" prefix
-            call_args = mock_set.call_args[0]
-            key = call_args[0]
-            assert key.startswith("diff:"), f"Expected diff: prefix, got {key}"
-
-
-class TestRerunFailedGetCachedResult:
-    def _decode(self, result: str) -> dict:
-        return json.loads(result)
-
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
-    @patch("code_sandbox_mcp.tools.container.get_cached_result")
-    def test_rerun_with_cached_original_output(
-        self,
-        mock_get_cache: MagicMock,
-        mock_read_journal: MagicMock,
-        mock_docker: MagicMock,
-    ) -> None:
-        mock_read_journal.return_value = [
-            {"operation": "exec", "exit_code": 1, "commands": ["false"]},
-        ]
-        mock_get_cache.return_value = {"output": "original error output"}
-        mock_container = MagicMock()
-        mock_container.exec_run.return_value = (0, (b"rerun ok", b""))
-        mock_client = MagicMock()
-        mock_client.containers.get.return_value = mock_container
-        mock_docker.return_value = mock_client
-        result = self._decode(rerun_failed(
-            container_id="abc123",
-            run_id="run1",
-            commands=["true"],
-        ))
-        assert result["status"] == "ok"
-
 
 
 def _read_log(path: Path) -> list[dict]:

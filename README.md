@@ -60,7 +60,7 @@ The most expensive thing an AI coding loop does is re-read output. So the contra
 
 - **Structured results, not 5000-line logs.** A passing test run is a one-liner: `{status: ok, passed: 120, duration: 4.2s}`. A failure is `{test, error, file, line}` — the exact assertion and location, no scrollback.
 - **State lives on the server; the LLM holds a handle.** Every result is keyed by a `run_id`. "Show me the rest of the log" or "re-run only what failed" cost a handle, not a giant re-submission. Large artifacts (coverage, generated files) come back as sized resource handles, never inlined.
-- **Diffs, not full text.** Across an iteration loop the tools return only what changed since last time (`sandbox_exec_diff`, `rerun_failed`), fold duplicate failures into `×N`, and serve cached results when inputs are unchanged.
+- **Diffs, not full text.** Across an iteration loop the tools fold duplicate failures into `×N` and serve cached results when inputs are unchanged.
 - **Denoise before returning.** ANSI color, timestamps, progress bars, and library/framework stack frames are stripped so only the user's code remains.
 
 > The escape hatch is always present: defaults are diffs and summaries, but the full output is *always* retrievable by handle via `offset`/`limit`.
@@ -222,9 +222,6 @@ This is the full reference. You almost never touch most of it directly — the c
 | `sandbox_initialize` | Start a container. Returns 12-char `container_id`. Supports `image`, `allow_network`. |
 | `sandbox_stop` | Stop and remove a container. |
 | `run_container_and_exec` | One-shot: `initialize` → `exec` → `stop`. |
-| `run_test_environment` | Start a Compose-like multi-service test environment with health checks. |
-| `wait_for_condition` | Wait for TCP port open, HTTP 2xx, or log pattern match (replaces `sleep 30`). |
-| `stop_test_environment` | Stop and remove a test environment started by `run_test_environment`. |
 
 ### Execution
 
@@ -233,8 +230,6 @@ This is the full reference. You almost never touch most of it directly — the c
 | `sandbox_exec` | Run commands synchronously. Supports `verbose` (`error_only`/`summary`/`full`), truncation, pagination (`offset`/`limit`). |
 | `sandbox_exec_background` | Run commands with `nohup` in background. Returns `job_id`. |
 | `sandbox_exec_check` | Poll background job status. Returns `"running"`, stdout on success, or error on failure. |
-| `sandbox_exec_diff` | Execute commands and return only the diff from the cached result. |
-| `rerun_failed` | Re-run failed commands from a previous `run_id`, returning only the diff. |
 
 ### File operations
 

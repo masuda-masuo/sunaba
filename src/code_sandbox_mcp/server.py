@@ -27,14 +27,9 @@ from code_sandbox_mcp.security import (
 )
 
 from .tools.container import (
-    rerun_failed,
     run_container_and_exec,
-    run_test_environment,
-    sandbox_exec_diff,
     sandbox_initialize_tool,
     sandbox_stop,
-    stop_test_environment,
-    wait_for_condition,
 )
 from .tools.exec import (
     sandbox_exec,
@@ -101,11 +96,6 @@ clone_repo = mcp.tool()(clone_repo)
 sandbox_initialize_tool = mcp.tool(name="sandbox_initialize")(sandbox_initialize_tool)
 sandbox_stop = mcp.tool()(sandbox_stop)
 run_container_and_exec = mcp.tool()(run_container_and_exec)
-rerun_failed = mcp.tool()(rerun_failed)
-sandbox_exec_diff = mcp.tool()(sandbox_exec_diff)
-run_test_environment = mcp.tool()(run_test_environment)
-stop_test_environment = mcp.tool()(stop_test_environment)
-wait_for_condition = mcp.tool()(wait_for_condition)
 
 # File tool registrations
 write_file_sandbox = mcp.tool()(write_file_sandbox)

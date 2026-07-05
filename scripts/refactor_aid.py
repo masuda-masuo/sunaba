@@ -126,15 +126,18 @@ def _scan_function(node: ast.AST) -> tuple[set[str], list[int]]:
 
 def build_model(src_root: Path) -> Model:
     """Walk every ``*.py`` under *src_root* and build the reference model."""
-    pkgs = sorted(p.parent.name for p in src_root.glob("*/__init__.py"))
-    if len(pkgs) > 1:
-        pkgs_str = ', '.join(pkgs)
-        print(
-            f"note: multiple packages found under {src_root}: "
-            f"{pkgs_str}; using {pkgs[0]!r}",
-            file=sys.stderr,
-        )
-    top_pkg = pkgs[0] if pkgs else ""
+    if (src_root / "__init__.py").exists():
+        top_pkg = src_root.name
+    else:
+        pkgs = sorted(p.parent.name for p in src_root.glob("*/__init__.py"))
+        if len(pkgs) > 1:
+            pkgs_str = ', '.join(pkgs)
+            print(
+                f"note: multiple packages found under {src_root}: "
+                f"{pkgs_str}; using {pkgs[0]!r}",
+                file=sys.stderr,
+            )
+        top_pkg = pkgs[0] if pkgs else ""
 
     defs: dict[tuple[str, str], Definition] = {}
     funcs: dict[tuple[str, str], FuncInfo] = {}
@@ -194,6 +197,14 @@ def resolve_dep(model: Model, fi: FuncInfo, name: str) -> tuple[str, str, str] |
     if name in imap:
         tmod, tsym = imap[name]
         if _internal(model, tmod):
+            # Normalize dotted import path to src_root-relative module name.
+            # When src_root IS the package dir (e.g. src/code_sandbox_mcp/),
+            # module_name_for gives 'journal' but import says 'code_sandbox_mcp.journal'.
+            # Strip the top_pkg prefix to reconcile them.
+            if model.src_root.name == model.top_pkg:
+                prefix = model.top_pkg + "."
+                if tmod.startswith(prefix):
+                    tmod = tmod[len(prefix):]
             return ("import", tmod, tsym or name)
         return None
     if (fi.module, name) in model.defs:
@@ -411,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Function dependency graph / extraction aid."
     )
     parser.add_argument(
-        "--src", type=Path, default=_default_src_root(), help="Package src root."
+        "--src", type=Path, default=_default_src_root(), help="Package source root directory (default: repo_root/src). Point to the directory containing the package, not the package itself.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 

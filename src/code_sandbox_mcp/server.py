@@ -224,10 +224,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dashboard-port",
         type=int,
-        default=0,
+        default=8766,
         help=(
             "Start the observability web dashboard on localhost "
-            "(default: 0 = disabled).  Suggested: 8766."
+            "(default: 8766).  Pass --dashboard-port 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--dashboard-host",
+        type=str,
+        default="127.0.0.1",
+        help=(
+            "Host address for the observability dashboard "
+            "(default: 127.0.0.1).  Use 0.0.0.0 to allow WSL host access."
         ),
     )
     parser.add_argument(
@@ -420,7 +429,7 @@ def main() -> None:
     if args.dashboard_port > 0:
         from code_sandbox_mcp.dashboard import start_dashboard
 
-        msg = start_dashboard(port=args.dashboard_port)
+        msg = start_dashboard(host=args.dashboard_host, port=args.dashboard_port)
         dashboard_started = True
         logger.info(msg)
 

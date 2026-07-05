@@ -16,6 +16,8 @@ from pathlib import Path
 from docker.errors import APIError, NotFound
 
 from code_sandbox_mcp.edit_verify import (
+    _check_file_size_nag,
+    _compute_file_size,
     read_file,
     read_file_lines,
     transform_file_in_container,
@@ -427,7 +429,17 @@ def write_file_sandbox(
         write_file(container, container_id[:12], dest_path, content)
     except ValueError as e:
         return f"Error: {e}"
-    return f"Written {len(content)} bytes to {dest_path}"
+
+    file_size = _compute_file_size(content)
+    nag = _check_file_size_nag(container_id[:12], dest_path, file_size["lines"])
+    result = {
+        "status": "ok",
+        "message": f"Written {len(content)} bytes to {dest_path}",
+        "file_size": file_size,
+    }
+    if nag:
+        result["nag"] = nag
+    return json.dumps(result)
 
 
 # ---------------------------------------------------------------------------
@@ -917,7 +929,19 @@ def transform_file(
             verbose="full",
         )
         page = paginate_output(display, offset=offset, limit=limit)
-        return json.dumps({
+
+        new_size = result.get("new_size", 0)
+        new_lines = result.get("new_lines", 0)
+        file_size = {
+            "lines": new_lines,
+            "bytes": new_size,
+            "approx_tokens": new_size // 4,
+        }
+        nag = _check_file_size_nag(
+            container_id[:12], file_path, new_lines,
+        )
+
+        out = {
             "status": "ok",
             "changed": True,
             "diff": page.content,
@@ -926,6 +950,20 @@ def transform_file(
             "truncated": meta.truncated,
             "next_offset": page.next_offset,
             "has_more": page.has_more,
-        })
+            "file_size": file_size,
+        }
+        if nag:
+            out["nag"] = nag
+        return json.dumps(out)
 
+    # For unchanged files, compute file_size from original
+    if result.get("status") == "ok" and not result.get("changed"):
+        new_size = result.get("new_size", 0)
+        new_lines = result.get("new_lines", 0)
+        file_size = {
+            "lines": new_lines,
+            "bytes": new_size,
+            "approx_tokens": new_size // 4,
+        }
+        result["file_size"] = file_size
     return json.dumps(result)

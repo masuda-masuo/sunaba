@@ -30,7 +30,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
-from code_sandbox_mcp.journal import record_file_write
+from code_sandbox_mcp.journal import (
+    get_or_create_run_id,
+    read_journal,
+    record_file_write,
+    record_tier_nag,
+)
 
 # ===========================================================================
 # Status envelope (design-multilang-support.md S4)
@@ -263,6 +268,74 @@ def read_file(container: Any, file_path: str) -> str:
             f"Failed to read {file_path}: exit code {exit_code}\n{stderr_text}"
         )
     return stdout_text
+
+
+def _compute_file_size(text: str) -> dict[str, int]:
+    """Compute file size metadata for LLM awareness.
+
+    Returns ``{lines, bytes, approx_tokens}`` where *approx_tokens*
+    is a rough estimate (``bytes // 4``) suitable for token-cost
+    awareness by the model.
+    """
+    encoded = text.encode("utf-8")
+    return {
+        "lines": text.count("\n") + (1 if text and not text.endswith("\n") else 0),
+        "bytes": len(encoded),
+        "approx_tokens": len(encoded) // 4,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Default file-size tier thresholds for the once-per-tier nag (issue #187)
+# ---------------------------------------------------------------------------
+
+_FILE_TIERS: list[int] = [1500, 3000, 5000, 7500, 10000]
+
+
+def _parse_tiers() -> list[int]:
+    """Parse ``CODE_SANDBOX_FILE_TIERS`` env var, falling back to ``_FILE_TIERS``."""
+    import os
+    raw = os.environ.get("CODE_SANDBOX_FILE_TIERS", "")
+    if not raw:
+        return list(_FILE_TIERS)
+    try:
+        return [int(t.strip()) for t in raw.split(",") if t.strip()]
+    except ValueError:
+        return list(_FILE_TIERS)
+
+
+def _check_file_size_nag(
+    container_id: str,
+    file_path: str,
+    current_lines: int,
+) -> str | None:
+    """Return a once-per-tier nag message if *current_lines* crossed a
+    new threshold for *file_path*, or ``None`` if no new threshold
+    was crossed.
+
+    Reads the journal to find which tiers already have a ``tier_nag``
+    entry for *file_path* in this run, then checks whether *current_lines*
+    exceeds any *not-yet-nagged* tier.
+    """
+    tiers = _parse_tiers()
+    already_nagged: set[int] = set()
+    run_id = get_or_create_run_id(container_id)
+    for entry in read_journal():
+        if (entry.get("operation") == "tier_nag"
+                and entry.get("file_path") == file_path
+                and entry.get("run_id") == run_id):
+            already_nagged.add(entry["tier"])
+
+    for tier in tiers:
+        if current_lines > tier and tier not in already_nagged:
+            record_tier_nag(container_id, file_path, tier, current_lines)
+            return (
+                f"note: {posixpath.basename(file_path)} crossed {tier} lines "
+                f"(currently {current_lines}). Large files raise edit-bug risk "
+                f"and token cost \u2014 prefer line-range/transform_file over "
+                f"full rewrites, and consider splitting this module."
+            )
+    return None
 
 
 def _is_test_file(file_path: str) -> bool:
@@ -845,7 +918,8 @@ if not isinstance(new, str):
           "error": "transform() must return str, got " + type(new).__name__})
 
 if new == original:
-    emit({"status": "ok", "changed": False, "diff": "", "new_size": len(original)})
+    orig_lines = original.count("\n") + (1 if original and not original.endswith("\n") else 0)
+    emit({"status": "ok", "changed": False, "diff": "", "new_size": len(original), "new_lines": orig_lines})
 
 try:
     with open(FILE_PATH, "w", encoding="utf-8", newline="") as fh:
@@ -856,7 +930,9 @@ except Exception as e:
 diff = "\n".join(difflib.unified_diff(
     original.splitlines(), new.splitlines(),
     fromfile=FILE_PATH, tofile=FILE_PATH, lineterm=""))
-emit({"status": "ok", "changed": True, "diff": diff, "new_size": len(new)})
+new_lines = new.count("\n") + (1 if new and not new.endswith("\n") else 0)
+emit({"status": "ok", "changed": True, "diff": diff,
+      "new_size": len(new), "new_lines": new_lines})
 '''
 
 
@@ -1001,6 +1077,7 @@ def read_file_lines(
         "shown": shown,
         "has_more": has_more,
         "next_offset": next_offset if has_more else None,
+        "file_size": _compute_file_size(content),
         "error": None,
     }
 

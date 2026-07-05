@@ -241,6 +241,30 @@ def record_file_write(
     })
 
 
+def record_tier_nag(
+    container_id: str,
+    file_path: str,
+    tier: int,
+    current_lines: int,
+) -> None:
+    """Record that a tier nag was emitted for *file_path*.
+
+    Written once per tier per file so repeated edits above the same
+    threshold suppress repeated nagging.  The tier is the threshold
+    value (e.g. 1500), not the current line count.
+    """
+    run_id = get_or_create_run_id(container_id)
+    _append_json({
+        "ts": _utcnow_iso(),
+        "run_id": run_id,
+        "container_id": container_id,
+        "operation": "tier_nag",
+        "file_path": file_path,
+        "tier": tier,
+        "current_lines": current_lines,
+    })
+
+
 def record_copy(
     container_id: str,
     operation: str,  # "copy_project" | "copy_file"

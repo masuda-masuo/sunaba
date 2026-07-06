@@ -250,6 +250,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--prewarm-timeout-seconds",
+        type=int,
+        default=300,
+        help=(
+            "Maximum seconds to wait for the first prewarm cycle to complete "
+            "before starting the server anyway.  If the timeout expires, a "
+            "WARNING is logged and the server starts without a warm image, "
+            "meaning the first sandbox_initialize may be slower as it "
+            "performs the docker pull itself (default: 300)."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
@@ -426,7 +438,15 @@ def main() -> None:
     # (Issue #371).
     prewarm_ready = threading.Event()
     _start_image_prewarm(args.prewarm_interval_seconds, prewarm_ready)
-    prewarm_ready.wait()
+    if not prewarm_ready.wait(timeout=args.prewarm_timeout_seconds):
+        logger.warning(
+            "prewarm did not complete within %d seconds \u2014 starting server "
+            "without a warm image.  The first sandbox_initialize may be "
+            "slower as it performs docker pull itself.  "
+            "(prewarm_timeout_seconds=%d)",
+            args.prewarm_timeout_seconds,
+            args.prewarm_timeout_seconds,
+        )
 
     try:
         transport = args.transport

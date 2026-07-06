@@ -293,6 +293,23 @@ V1.0 の棚卸し（#457 / #458）で削除。`run_test_environment` / `stop_tes
 
 ---
 
+### Environment variables
+
+プロジェクト固有の環境変数は `CODE_SANDBOX_*` prefix に統一する。
+`GITHUB_*` / `GH_TOKEN` は GitHub エコシステム標準のため対象外。
+
+旧名（`CSB_*`、`SHIORI_REPOS_PATH`）は V1.0 リリース後に削除予定。
+各旧名はフォールバックとして読み取り、使用時は deprecation warning をログ出力する。
+
+| 新名 | 旧名（deprecated） | 用途 |
+|---|---|---|
+| `CODE_SANDBOX_OBSERVABILITY_TOOLS` | `CSB_OBSERVABILITY_TOOLS` | Observability ツール登録 |
+| `CODE_SANDBOX_TOKEN_BROKER_CACHE_DIR` | `CSB_TOKEN_BROKER_CACHE_DIR` | トークンブローカのキャッシュディレクトリ |
+| `CODE_SANDBOX_TOKEN_BROKER_NO_DOWNLOAD` | `CSB_TOKEN_BROKER_NO_DOWNLOAD` | トークンブローカのダウンロード抑止 |
+| `CODE_SANDBOX_SHIORI_REPOS_PATH` | `SHIORI_REPOS_PATH` | Shiori リポジトリルートへのホストパス |
+
+---
+
 ## 11. 外部VCS連携（issue→fix→verify→publish の自己完結）
 
 > 位置づけ: edit/verify ループの**入口（課題取得）と出口（提出）**だけを足す。GitHub MCP を介さず payload をコンテキストに通さないことが唯一の狙い。

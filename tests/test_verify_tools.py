@@ -210,7 +210,7 @@ class TestSearchInContainer:
         result = json.loads(
             search_in_container(container_id="abc123", pattern="foo")
         )
-        assert result == [{"error": "Container abc123 not found"}]
+        assert result == {"status": "error", "error": "Container abc123 not found"}
 
     @patch("code_sandbox_mcp.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
@@ -221,12 +221,14 @@ class TestSearchInContainer:
         result = json.loads(
             search_in_container(container_id="abc123", pattern="foo")
         )
-        assert result == [{"error": "connection refused"}]
+        assert result == {"status": "error", "error": "connection refused"}
 
     @patch("code_sandbox_mcp.tools.verify._docker")
     @patch("code_sandbox_mcp.tools.verify.search_files")
+    @patch("code_sandbox_mcp.tools.verify.resolve_git_root")
     def test_delegates_with_defaults(
         self,
+        mock_resolve: MagicMock,
         mock_impl: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
@@ -234,14 +236,17 @@ class TestSearchInContainer:
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_impl.return_value = [{"file": "a.txt", "line": 1, "text": "foo"}]
+        mock_resolve.return_value = "/repo"
+        mock_impl.return_value = {"matches": [{"file": "a.txt", "line": 1, "text": "foo"}], "shown": 1, "total": 1, "truncated": False}
 
         result = json.loads(
             search_in_container(container_id="abc123", pattern="foo")
         )
-        assert result == [{"file": "a.txt", "line": 1, "text": "foo"}]
+        assert result == {"matches": [{"file": "a.txt", "line": 1, "text": "foo"}], "shown": 1, "total": 1, "truncated": False}
         mock_impl.assert_called_once_with(
-            mock_client, "abc123", "foo", path="/", mode="lexical", max_results=50,
+            mock_client, "abc123", "foo", path="/repo", mode="lexical",
+            max_results=50, glob=None, ignore_case=False, context=0,
+            output_mode="content", offset=0,
         )
 
     @patch("code_sandbox_mcp.tools.verify._docker")
@@ -255,7 +260,7 @@ class TestSearchInContainer:
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_impl.return_value = []
+        mock_impl.return_value = {"matches": [], "shown": 0, "total": 0, "truncated": False}
 
         json.loads(
             search_in_container(
@@ -264,7 +269,9 @@ class TestSearchInContainer:
             )
         )
         mock_impl.assert_called_once_with(
-            mock_client, "abc123", "TODO", path="/home", mode="structural", max_results=10,
+            mock_client, "abc123", "TODO", path="/home", mode="structural",
+            max_results=10, glob=None, ignore_case=False, context=0,
+            output_mode="content", offset=0,
         )
 
 
@@ -284,9 +291,7 @@ class TestLintInContainer:
         result = json.loads(
             lint_in_container(container_id="abc123", file_path="/tmp/f.py")
         )
-        assert result == [
-            {"file": "/tmp/f.py", "line": 0, "rule": "error", "message": "Container abc123 not found"},
-        ]
+        assert result == {"status": "error", "error": "Container abc123 not found"}
 
     @patch("code_sandbox_mcp.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
@@ -297,9 +302,7 @@ class TestLintInContainer:
         result = json.loads(
             lint_in_container(container_id="abc123", file_path="/tmp/f.py")
         )
-        assert result == [
-            {"file": "/tmp/f.py", "line": 0, "rule": "error", "message": "connection refused"},
-        ]
+        assert result == {"status": "error", "error": "connection refused"}
 
     @patch("code_sandbox_mcp.tools.verify._docker")
     @patch("code_sandbox_mcp.tools.verify.lint_file")
@@ -466,9 +469,7 @@ class TestTypeCheckInContainer:
         result = json.loads(
             type_check_in_container(container_id="abc123", file_path="/tmp/f.py")
         )
-        assert result == [
-            {"file": "/tmp/f.py", "line": 0, "rule": "error", "message": "Container abc123 not found"},
-        ]
+        assert result == {"status": "error", "error": "Container abc123 not found"}
 
     @patch("code_sandbox_mcp.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
@@ -479,9 +480,7 @@ class TestTypeCheckInContainer:
         result = json.loads(
             type_check_in_container(container_id="abc123", file_path="/tmp/f.py")
         )
-        assert result == [
-            {"file": "/tmp/f.py", "line": 0, "rule": "error", "message": "connection refused"},
-        ]
+        assert result == {"status": "error", "error": "connection refused"}
 
     @patch("code_sandbox_mcp.tools.verify._docker")
     @patch("code_sandbox_mcp.tools.verify.type_check_file")

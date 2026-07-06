@@ -165,7 +165,7 @@ os.chdir(working_dir)
 # 1. Collect local commit info
 ec, head_sha, _ = _run("git rev-parse HEAD")
 if ec != 0:
-    print(json.dumps({"error": "git rev-parse HEAD failed", "detail": head_sha}))
+    print(json.dumps({"status": "error", "error": "git rev-parse HEAD failed", "detail": head_sha}))
     sys.exit(1)
 
 ec_log, commit_msg, _ = _run("git log -1 --format=%B")
@@ -188,7 +188,7 @@ for filepath in files:
         with open(filepath, "rb") as fh:
             file_content = base64.b64encode(fh.read()).decode()
     except OSError as e:
-        print(json.dumps({"error": f"read {filepath}: {e}"}))
+        print(json.dumps({"status": "error", "error": f"read {filepath}: {e}"}))
         sys.exit(1)
     blob = _gh_api(
         "POST",
@@ -273,9 +273,9 @@ def checkpoint(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"status": "error", "error": str(e)})
 
     cid = container_id[:12]
     working_dir = resolve_git_root(container, working_dir)
@@ -351,9 +351,9 @@ def checkpoint_list(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"status": "error", "error": str(e)})
 
     record_tool_use(container_id[:12], "checkpoint_list")
 
@@ -432,9 +432,9 @@ def checkpoint_restore(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"status": "error", "error": str(e)})
 
     cid = container_id[:12]
     working_dir = resolve_git_root(container, working_dir)
@@ -524,9 +524,9 @@ def issue_view(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"status": "error", "error": str(e)})
 
     cid = container_id[:12]
 
@@ -535,9 +535,7 @@ def issue_view(
             f"/repos/{repo}/issues/{issue_number}", _resolve_vcs_token()
         )
     except RuntimeError as e:
-        return json.dumps({
-            "error": f"Failed to fetch issue #{issue_number} from {repo}: {e}"
-        })
+        return json.dumps({"status": "error", "error": f"Failed to fetch issue #{issue_number} from {repo}: {e}"})
 
     number = issue_data.get("number", issue_number)
     title = issue_data.get("title", "")
@@ -560,9 +558,7 @@ def issue_view(
     )
 
     if exit_code2 != 0:
-        return json.dumps({
-            "error": f"Failed to write issue body to {save_to}"
-        })
+        return json.dumps({"status": "error", "error": f"Failed to write issue body to {save_to}"})
 
     size_bytes = len(body.encode("utf-8"))
 
@@ -644,23 +640,21 @@ def sandbox_issue_write(
         an ``error`` field.
     """
     if method not in _ISSUE_WRITE_METHODS:
-        return json.dumps({
-            "error": f"Invalid method: {method!r} (expected 'create' or 'comment')"
-        })
+        return json.dumps({"status": "error", "error": f"Invalid method: {method!r} (expected 'create' or 'comment')"})
     if not _REPO_FORMAT_RE.match(repo):
-        return json.dumps({"error": f"Invalid repo format: {repo} (expected owner/repo)"})
+        return json.dumps({"status": "error", "error": f"Invalid repo format: {repo} (expected owner/repo)"})
     if method == "create" and not title:
-        return json.dumps({"error": "title is required when method='create'"})
+        return json.dumps({"status": "error", "error": "title is required when method='create'"})
     if method == "comment" and not issue_number:
-        return json.dumps({"error": "issue_number is required when method='comment'"})
+        return json.dumps({"status": "error", "error": "issue_number is required when method='comment'"})
 
     client = _docker()
     try:
         client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"status": "error", "error": str(e)})
 
     cid = container_id[:12]
 
@@ -977,9 +971,9 @@ Returns:
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"status": "error", "error": str(e)})
 
     cid = container_id[:12]
     working_dir = resolve_git_root(container, working_dir)
@@ -1410,15 +1404,15 @@ def clone_repo(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"status": "error", "error": str(e)})
 
     cid = container_id[:12]
 
     if not _REPO_FORMAT_RE.match(repo):
         return json.dumps(
-            {"error": f"Invalid repo format: {repo} (expected owner/repo)"}
+            {"status": "error", "error": f"Invalid repo format: {repo} (expected owner/repo)"}
         )
 
     # ``gh repo clone`` treats its second argument as the clone target
@@ -1434,7 +1428,7 @@ def clone_repo(
     # exec and fails closed as early as possible.
     proxy_err = _ensure_proxy_env_fresh(client)
     if proxy_err:
-        return json.dumps({"error": proxy_err})
+        return json.dumps({"status": "error", "error": proxy_err})
 
     # ``gh auth setup-git`` configures gh as the git credential helper so a
     # later ``git push`` works with the injected token.  Its exit code also

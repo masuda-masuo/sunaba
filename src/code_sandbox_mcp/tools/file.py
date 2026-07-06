@@ -658,9 +658,9 @@ def read_file_range(
     try:
         _ = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"status": "error", "error": str(e)})
 
     if start_line is not None and offset != 0:
         return json.dumps({
@@ -668,13 +668,9 @@ def read_file_range(
             "Use start_line/end_line (1-indexed) or offset/limit (0-indexed), not both."
         })
     if start_line is not None and start_line < 1:
-        return json.dumps({
-            "error": "start_line must be >= 1 (1-indexed)"
-        })
+        return json.dumps({"status": "error", "error": "start_line must be >= 1 (1-indexed)"})
     if end_line is not None and start_line is not None and end_line < start_line:
-        return json.dumps({
-            "error": "end_line must be >= start_line"
-        })
+        return json.dumps({"status": "error", "error": "end_line must be >= start_line"})
     resolved_offset = offset
     resolved_limit = limit
     if start_line is not None:
@@ -747,9 +743,9 @@ def list_files(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"error": f"Container {container_id[:12]} not found"})
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"status": "error", "error": str(e)})
 
     safe_path = shlex.quote(path)
 
@@ -781,7 +777,7 @@ def list_files(
     )
 
     if exit_code != 0:
-        return json.dumps({"error": stderr_text or stdout_text})
+        return json.dumps({"status": "error", "error": stderr_text or stdout_text})
 
     record_tool_use(
         container_id[:12],

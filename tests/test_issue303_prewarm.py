@@ -2,11 +2,11 @@
 
 Two cooperating fixes are covered:
 
-- **Monotonic progress** — the async ``sandbox_initialize_tool`` wrapper emits
+- **Monotonic progress** - the async ``sandbox_initialize_tool`` wrapper emits
   an *increasing* progress value (elapsed seconds) rather than a constant 0,
   so clients that only reset their request timeout on advancing progress keep
   the connection alive (MCP "SHOULD increase").
-- **Image prewarm** — ``prewarm_default_image`` pulls the default sandbox
+- **Image prewarm** - ``prewarm_default_image`` pulls the default sandbox
   image ahead of time and ``_start_image_prewarm`` runs it in a daemon thread
   at startup, removing the cold-start cliff without depending on progress
   notifications at all.
@@ -84,7 +84,7 @@ class TestPrewarmDefaultImage:
             "code_sandbox_mcp.tools.container._ensure_image",
             side_effect=RuntimeError("docker down"),
         ):
-            # Must not raise — prewarm failures never break startup.
+            # Must not raise - prewarm failures never break startup.
             prewarm_default_image()
 
     def test_one_failing_image_does_not_block_others(self) -> None:
@@ -155,6 +155,13 @@ class TestStartImagePrewarm:
 
 
 class TestPrewarmTimeout:
+    def teardown_method(self) -> None:
+        # Reset the global security profile after calling main() so other
+        # tests (e.g. test_security.TestGetSetDefaultProfile) are not
+        # affected by the host-computed profile set in server.main().
+        import code_sandbox_mcp.security as security
+        security._effective_default_profile = None
+
     def test_arg_parser_default(self) -> None:
         from code_sandbox_mcp.server import _build_arg_parser
 

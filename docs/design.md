@@ -280,7 +280,7 @@ else:
 | `sandbox_trace_dir` | （なし） | — | 読取専用・opt-in（#460） |
 | `sandbox_issue_write` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write、一発実行） |
 
-読取専用の journal/trace 5ツールは `CSB_OBSERVABILITY_TOOLS=1` のときだけ登録される（#460）。記録側（`record_*`）は無条件で動く基盤であり、集計はホスト側で journal.log を直読みすれば足りる。この5ツールは意図的に非計装（#454）: デフォルト無効の観測用デバッグ面であり、journal の読み取りを journal に書くのは自己言及ノイズになる（`sandbox_journal_path` / `sandbox_trace_dir` は container_id 引数自体を持たない）。
+読取専用の journal/trace 5ツールは `CODE_SANDBOX_OBSERVABILITY_TOOLS=1` のときだけ登録される（#460）。記録側（`record_*`）は無条件で動く基盤であり、集計はホスト側で journal.log を直読みすれば足りる。この5ツールは意図的に非計装（#454）: デフォルト無効の観測用デバッグ面であり、journal の読み取りを journal に書くのは自己言及ノイズになる（`sandbox_journal_path` / `sandbox_trace_dir` は container_id 引数自体を持たない）。
 
 テストファイル: `tests/test_journal.py` に対応する単体テストを追加済み（#359 用の
 `TestRecordToolUse` クラス）。新しいツールを追加するときは必ずテストも追加すること。

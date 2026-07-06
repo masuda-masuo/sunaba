@@ -113,7 +113,7 @@ verify_in_container = mcp.tool()(verify_in_container)
 # unconditional infrastructure, but the LLM-facing read surface stays off
 # the default tool list.  Aggregation workflows read the journal file
 # directly on the host instead.
-OBSERVABILITY_TOOLS_ENV = "CSB_OBSERVABILITY_TOOLS"
+OBSERVABILITY_TOOLS_ENV = "CODE_SANDBOX_OBSERVABILITY_TOOLS"
 
 
 def observability_tools_enabled() -> bool:
@@ -150,13 +150,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--shiori-repos-path",
         type=str,
-        default=os.environ.get("SHIORI_REPOS_PATH"),
+        default=os.environ.get("CODE_SANDBOX_SHIORI_REPOS_PATH"),
         help=(
             "Host path to Shiori repos root (e.g. /data/repos). "
             "When set, sandbox_initialize and run_container_and_exec "
             "can use clone_repo to copy a pre-cloned repo into the "
             "container instead of a network git clone. "
-            "Also read from SHIORI_REPOS_PATH env var."
+            "Also read from CODE_SANDBOX_SHIORI_REPOS_PATH env var."
         ),
     )
     parser.add_argument(

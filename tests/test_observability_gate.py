@@ -3,7 +3,7 @@
 Telemetry writes are unconditional; the five read tools
 (``sandbox_read_journal`` / ``sandbox_trace`` / ``sandbox_list_runs`` /
 ``sandbox_journal_path`` / ``sandbox_trace_dir``) are only registered
-when ``CSB_OBSERVABILITY_TOOLS`` is set to a truthy value at import time.
+when ``CODE_SANDBOX_OBSERVABILITY_TOOLS`` is set to a truthy value at import time.
 """
 from __future__ import annotations
 

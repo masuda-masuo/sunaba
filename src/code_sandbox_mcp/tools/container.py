@@ -367,7 +367,7 @@ def _clone_shiori_repo_to_container(
         raise ValueError(f"clone_dest must start with /tmp/, got: {clone_dest!r}")
 
     if not _SHIORI_REPOS_PATH:
-        raise ValueError("Shiori repos path is not configured. Set --shiori-repos-path or SHIORI_REPOS_PATH env var.")
+        raise ValueError("Shiori repos path is not configured. Set --shiori-repos-path or CODE_SANDBOX_SHIORI_REPOS_PATH env var.")
 
     _validate_clone_repo(clone_repo)
     repo_name = clone_repo.split("/")[-1]

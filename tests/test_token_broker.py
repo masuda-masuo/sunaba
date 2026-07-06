@@ -84,8 +84,8 @@ class TestVerifyAndResolve:
     def test_corrupt_cache_without_download_refused(self, tmp_path) -> None:
         key = ("linux", "amd64")
         env = {
-            "CSB_TOKEN_BROKER_CACHE_DIR": str(tmp_path),
-            "CSB_TOKEN_BROKER_NO_DOWNLOAD": "1",
+            "CODE_SANDBOX_TOKEN_BROKER_CACHE_DIR": str(tmp_path),
+            "CODE_SANDBOX_TOKEN_BROKER_NO_DOWNLOAD": "1",
         }
         with patch.dict(os.environ, env, clear=True):
             with patch("code_sandbox_mcp.token_broker._platform_key", return_value=key):
@@ -96,7 +96,7 @@ class TestVerifyAndResolve:
 
     def test_download_failure_returns_none(self, tmp_path) -> None:
         key = ("linux", "amd64")
-        with patch.dict(os.environ, {"CSB_TOKEN_BROKER_CACHE_DIR": str(tmp_path)}, clear=True):
+        with patch.dict(os.environ, {"CODE_SANDBOX_TOKEN_BROKER_CACHE_DIR": str(tmp_path)}, clear=True):
             with patch("code_sandbox_mcp.token_broker._platform_key", return_value=key):
                 with patch(
                     "code_sandbox_mcp.token_broker._download_and_verify",

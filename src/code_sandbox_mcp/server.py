@@ -113,12 +113,20 @@ verify_in_container = mcp.tool()(verify_in_container)
 # unconditional infrastructure, but the LLM-facing read surface stays off
 # the default tool list.  Aggregation workflows read the journal file
 # directly on the host instead.
-OBSERVABILITY_TOOLS_ENV = "CSB_OBSERVABILITY_TOOLS"
+OBSERVABILITY_TOOLS_ENV = "CODE_SANDBOX_OBSERVABILITY_TOOLS"
 
 
 def observability_tools_enabled() -> bool:
     """True when the journal/trace read tools should be registered."""
-    return os.environ.get(OBSERVABILITY_TOOLS_ENV, "") not in ("", "0")
+    val = os.environ.get(OBSERVABILITY_TOOLS_ENV)
+    if val is None:
+        val = os.environ.get("CSB_OBSERVABILITY_TOOLS")
+        if val is not None:
+            logger.warning(
+                "CSB_OBSERVABILITY_TOOLS is deprecated, "
+                "use CODE_SANDBOX_OBSERVABILITY_TOOLS instead"
+            )
+    return val not in (None, "", "0")
 
 
 if observability_tools_enabled():
@@ -150,13 +158,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--shiori-repos-path",
         type=str,
-        default=os.environ.get("SHIORI_REPOS_PATH"),
+        default=os.environ.get("CODE_SANDBOX_SHIORI_REPOS_PATH"),
         help=(
             "Host path to Shiori repos root (e.g. /data/repos). "
             "When set, sandbox_initialize and run_container_and_exec "
             "can use clone_repo to copy a pre-cloned repo into the "
             "container instead of a network git clone. "
-            "Also read from SHIORI_REPOS_PATH env var."
+            "Also read from CODE_SANDBOX_SHIORI_REPOS_PATH env var."
         ),
     )
     parser.add_argument(
@@ -360,6 +368,14 @@ def main() -> None:
     if args.default_image:
         validate_image_ref(args.default_image)
         _ct_mod._DEFAULT_IMAGE = args.default_image
+    if args.shiori_repos_path is None:
+        old_val = os.environ.get("SHIORI_REPOS_PATH")
+        if old_val is not None:
+            logger.warning(
+                "SHIORI_REPOS_PATH is deprecated, "
+                "use CODE_SANDBOX_SHIORI_REPOS_PATH instead"
+            )
+            args.shiori_repos_path = old_val
     if args.shiori_repos_path:
         _ct_mod._SHIORI_REPOS_PATH = args.shiori_repos_path
 

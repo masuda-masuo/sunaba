@@ -280,7 +280,7 @@ else:
 | `sandbox_trace_dir` | （なし） | — | 読取専用・opt-in（#460） |
 | `sandbox_issue_write` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write、一発実行） |
 
-読取専用の journal/trace 5ツールは `CSB_OBSERVABILITY_TOOLS=1` のときだけ登録される（#460）。記録側（`record_*`）は無条件で動く基盤であり、集計はホスト側で journal.log を直読みすれば足りる。この5ツールは意図的に非計装（#454）: デフォルト無効の観測用デバッグ面であり、journal の読み取りを journal に書くのは自己言及ノイズになる（`sandbox_journal_path` / `sandbox_trace_dir` は container_id 引数自体を持たない）。
+読取専用の journal/trace 5ツールは `CODE_SANDBOX_OBSERVABILITY_TOOLS=1` のときだけ登録される（#460）。記録側（`record_*`）は無条件で動く基盤であり、集計はホスト側で journal.log を直読みすれば足りる。この5ツールは意図的に非計装（#454）: デフォルト無効の観測用デバッグ面であり、journal の読み取りを journal に書くのは自己言及ノイズになる（`sandbox_journal_path` / `sandbox_trace_dir` は container_id 引数自体を持たない）。
 
 テストファイル: `tests/test_journal.py` に対応する単体テストを追加済み（#359 用の
 `TestRecordToolUse` クラス）。新しいツールを追加するときは必ずテストも追加すること。
@@ -290,6 +290,23 @@ else:
 ## 10. テスト環境クイックパス
 
 V1.0 の棚卸し（#457 / #458）で削除。`run_test_environment` / `stop_test_environment` / `wait_for_condition` は実利用が無いまま休眠していたため、互換シム無しで撤去した（#438 と同方針）。多サービス環境が必要な場合は `sandbox_exec` から docker compose を直接使う。
+
+---
+
+### Environment variables
+
+プロジェクト固有の環境変数は `CODE_SANDBOX_*` prefix に統一する。
+`GITHUB_*` / `GH_TOKEN` は GitHub エコシステム標準のため対象外。
+
+旧名（`CSB_*`、`SHIORI_REPOS_PATH`）は V1.0 リリース後に削除予定。
+各旧名はフォールバックとして読み取り、使用時は deprecation warning をログ出力する。
+
+| 新名 | 旧名（deprecated） | 用途 |
+|---|---|---|
+| `CODE_SANDBOX_OBSERVABILITY_TOOLS` | `CSB_OBSERVABILITY_TOOLS` | Observability ツール登録 |
+| `CODE_SANDBOX_TOKEN_BROKER_CACHE_DIR` | `CSB_TOKEN_BROKER_CACHE_DIR` | トークンブローカのキャッシュディレクトリ |
+| `CODE_SANDBOX_TOKEN_BROKER_NO_DOWNLOAD` | `CSB_TOKEN_BROKER_NO_DOWNLOAD` | トークンブローカのダウンロード抑止 |
+| `CODE_SANDBOX_SHIORI_REPOS_PATH` | `SHIORI_REPOS_PATH` | Shiori リポジトリルートへのホストパス |
 
 ---
 

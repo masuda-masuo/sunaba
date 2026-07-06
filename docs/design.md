@@ -167,6 +167,8 @@
 search_in_container → read_file_range → write_file_sandbox(old_str) | transform_file → lint_in_container → type_check_in_container → verify_in_container → publish
 ```
 
+`search_in_container` はデフォルトでリポジトリルートを検索対象とし（従来の `path="/"` からの変更）、戻り値には切り詰めメタデータを含む（§6b）。
+
 ---
 
 ## 6. 出力制御
@@ -175,6 +177,49 @@ search_in_container → read_file_range → write_file_sandbox(old_str) | transf
 - トランケート＋メタデータ: `{ "shown": 20, "total_lines": 5000, "truncated": true }`。
 - ページング: `offset` / `limit`、レスポンスに `next_offset` / `has_more`。
 - 終了コード≠0 / stderrありの場合はエラー周辺を多めに含める。
+
+### 6a. エラー契約（Issue #467）
+
+全ツールのエラー戻り値は以下の単一形状に統一する:
+
+```json
+{"status": "error", "error": "<人間可読なメッセージ>"}
+```
+
+ツール固有の追加フィールド（例: `verify_in_container` の `gate_passed`）は許容する。
+エラー時は `status` と `error` の2フィールドを常に含むこと。
+
+**該当ツール一覧:**
+
+| ツール | 変更内容 |
+|--------|---------|
+| `search_in_container` | `[{"error":...}]` → `{"status":"error","error":"..."}` |
+| `lint_in_container` | 偽 finding (`rule:"error"`) → `{"status":"error","error":"..."}` |
+| `type_check_in_container` | 同上 |
+| `verify_in_container` | `gate_passed` は維持、`status` ＋ `error` を追加 |
+| `checkpoint` / `checkpoint_list` / `checkpoint_restore` | `{"error":...}` → `{"status":"error","error":"..."}` |
+| `clone_repo` | 同上 |
+| `issue_view` / `sandbox_issue_write` | 同上 |
+| `list_files` / `read_file_range` | 同上 |
+| `publish` | 同上（status ありと混在していたものを統一）|
+| `sandbox_exec` / `sandbox_exec_background` / `sandbox_exec_check` | 元から `{"status":"error","error":"..."}` 準拠。変更不要 |
+| `package_install` | 同上。変更不要 |
+
+### 6b. 検索結果の出力制御（Issue #469）
+
+`search_in_container` は切り詰めを明示するメタデータを返す:
+
+```json
+{"matches": [...], "shown": 20, "total": 150, "truncated": true, "next_offset": 20}
+```
+
+| フィールド | 意味 |
+|-----------|------|
+| `matches` | 該当行の配列（各要素: `file`, `line`, `text`） |
+| `shown` | 実際に含めた件数（`max_results` 以下） |
+| `total` | 見つかった件数（`max_results` 超過時は推定値を含む） |
+| `truncated` | 切り詰めが発生したか |
+| `next_offset` | 次のページを取得するためのオフセット（`truncated=true` 時のみ） |
 
 ---
 

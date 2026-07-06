@@ -85,3 +85,72 @@ class TestGetTraceDir:
         trace_dir = get_trace_dir()
         assert ".code-sandbox-mcp" in trace_dir
         assert "traces" in trace_dir
+
+
+class TestCleanupOldTraces:
+    """Tests for trace file cleanup (Issue #489)."""
+
+    def test_cleanup_noop_when_below_limit(self, tmp_path: Path):
+        from code_sandbox_mcp.trace import _cleanup_old_traces
+        with patch("code_sandbox_mcp.trace._TRACE_DIR", tmp_path):
+            for i in range(50):
+                (tmp_path / f"run{i}.json").write_text("{}")
+            _cleanup_old_traces()
+            remaining = list(tmp_path.iterdir())
+            assert len(remaining) == 50
+
+    def test_cleanup_removes_oldest_when_exceeding_limit(self, tmp_path: Path):
+        from code_sandbox_mcp.trace import _cleanup_old_traces
+        with patch("code_sandbox_mcp.trace._TRACE_DIR", tmp_path):
+            for i in range(110):
+                (tmp_path / f"run{i}.json").write_text("{}")
+            _cleanup_old_traces()
+            remaining = sorted(tmp_path.iterdir(), key=lambda p: p.stat().st_mtime)
+            assert len(remaining) == 100
+
+    def test_cleanup_skips_non_trace_files(self, tmp_path: Path):
+        from code_sandbox_mcp.trace import _cleanup_old_traces
+        with patch("code_sandbox_mcp.trace._TRACE_DIR", tmp_path):
+            for i in range(110):
+                (tmp_path / f"run{i}.json").write_text("{}")
+            (tmp_path / "readme.txt").write_text("hello")
+            _cleanup_old_traces()
+            assert (tmp_path / "readme.txt").exists()
+            remaining = [p for p in tmp_path.iterdir() if p.suffix in (".json", ".html")]
+            assert len(remaining) == 100
+
+    def test_cleanup_empty_dir_is_noop(self, tmp_path: Path):
+        from code_sandbox_mcp.trace import _cleanup_old_traces
+        with patch("code_sandbox_mcp.trace._TRACE_DIR", tmp_path):
+            _cleanup_old_traces()
+            assert list(tmp_path.iterdir()) == []
+
+    def test_cleanup_acquires_lock(self, tmp_path: Path):
+        from code_sandbox_mcp.trace import _cleanup_old_traces, _trace_lock
+        with patch("code_sandbox_mcp.trace._TRACE_DIR", tmp_path):
+            assert not _trace_lock.locked()
+            _cleanup_old_traces()
+
+    def test_generate_json_cleans_up_excess(self, tmp_path: Path):
+        for i in range(110):
+            (tmp_path / f"pre{i}.json").write_text("{}")
+        with patch("code_sandbox_mcp.trace._TRACE_DIR", tmp_path), \
+             patch("code_sandbox_mcp.trace.read_journal", return_value=[
+                 {"ts": "2026-01-01T00:00:00Z", "run_id": "new", "operation": "initialize", "image": "img"},
+             ]):
+            result = generate_json_trace("new")
+        assert Path(result).exists()
+        remaining = [p for p in tmp_path.iterdir() if p.suffix == ".json"]
+        assert len(remaining) == 100
+
+    def test_generate_html_cleans_up_excess(self, tmp_path: Path):
+        for i in range(110):
+            (tmp_path / f"pre{i}.html").write_text("<html/>")
+        with patch("code_sandbox_mcp.trace._TRACE_DIR", tmp_path), \
+             patch("code_sandbox_mcp.trace.read_journal", return_value=[
+                 {"ts": "2026-01-01T00:00:00Z", "run_id": "new", "operation": "initialize", "image": "img"},
+             ]):
+            result = generate_html_trace("new")
+        assert Path(result).exists()
+        remaining = [p for p in tmp_path.iterdir() if p.suffix == ".html"]
+        assert len(remaining) == 100

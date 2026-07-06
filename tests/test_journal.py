@@ -220,8 +220,10 @@ class TestJournalRead:
     """Tests for journal reading operations."""
 
     def test_read_empty_journal(self, tmp_path: Path):
+        backup_path = tmp_path / "nonexistent" / "journal.log.1"
         log_path = tmp_path / "nonexistent" / "journal.log"
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path):
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_BACKUP_PATH", backup_path):
             entries = read_journal()
             assert entries == []
 
@@ -259,8 +261,10 @@ class TestGetRuns:
     """Tests for get_runs summary."""
 
     def test_get_runs_empty(self, tmp_path: Path):
+        backup_path = tmp_path / "nonexistent" / "journal.log.1"
         log_path = tmp_path / "nonexistent" / "journal.log"
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path):
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_BACKUP_PATH", backup_path):
             runs = get_runs()
             assert runs == []
 
@@ -515,3 +519,106 @@ class TestContainerStateSidecar:
             # …but a new process (crash implies restart) re-syncs from the journal.
             with patch("code_sandbox_mcp.journal._state_synced", False):
                 assert read_container_states()["aaa111"]["complete"] is True
+
+
+class TestJournalRotation:
+    """Journal rotation at 100 MB threshold (Issue #489)."""
+
+    @contextmanager
+    def _journal_at(self, tmp_path: Path) -> Iterator[tuple[Path, Path, Path]]:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+        backup_path = journal_dir / "journal.log.1"
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_BACKUP_PATH", backup_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            yield journal_dir, log_path, backup_path
+
+    def test_rotation_fires_at_threshold(self, tmp_path: Path):
+        with self._journal_at(tmp_path) as (journal_dir, log_path, backup_path):
+            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", 1):
+                record_initialize("abc123", "python@sha256:abcd")
+                record_exec("abc123", ["echo x"], 0)
+        assert backup_path.exists()
+        assert log_path.exists()
+        assert log_path.stat().st_size > 0
+
+    def test_rotate_if_needed_unlocked_renames_file(self, tmp_path: Path):
+        from code_sandbox_mcp.journal import _rotate_if_needed_unlocked
+        with self._journal_at(tmp_path) as (journal_dir, log_path, backup_path):
+            log_path.write_text("x" * 100)
+            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", 50):
+                _rotate_if_needed_unlocked()
+        assert backup_path.exists()
+        assert backup_path.read_text() == "x" * 100
+        assert not log_path.exists()
+
+    def test_no_rotation_below_threshold(self, tmp_path: Path):
+        with self._journal_at(tmp_path) as (journal_dir, log_path, backup_path):
+            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", 10**9):
+                record_initialize("abc123", "python@sha256:abcd")
+        assert not backup_path.exists()
+
+    def test_read_journal_joins_backup_and_active(self, tmp_path: Path):
+        from code_sandbox_mcp.journal import _append_json, _read_journal_unlocked, _rotate_if_needed_unlocked
+
+        with self._journal_at(tmp_path) as (journal_dir, log_path, backup_path):
+            _append_json({"ts": "2026-01-01T00:00:01Z", "run_id": "run1",
+                          "container_id": "cid1", "operation": "initialize",
+                          "image": "img"})
+
+            entries_before = _read_journal_unlocked()
+            assert len(entries_before) == 1
+            assert not backup_path.exists()
+
+            _rotate_if_needed_unlocked()
+            assert not backup_path.exists()
+
+            log_size = log_path.stat().st_size
+            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", log_size):
+                _rotate_if_needed_unlocked()
+            assert backup_path.exists()
+            assert not log_path.exists()
+
+            _append_json({"ts": "2026-01-01T00:00:02Z", "run_id": "run1",
+                          "container_id": "cid1", "operation": "exec",
+                          "commands": ["echo first"], "exit_code": 0})
+            _append_json({"ts": "2026-01-01T00:00:03Z", "run_id": "run1",
+                          "container_id": "cid1", "operation": "exec",
+                          "commands": ["echo second"], "exit_code": 0})
+
+            assert log_path.exists()
+
+            entries = _read_journal_unlocked()
+            ops = [e["operation"] for e in entries]
+            assert ops == ["initialize", "exec", "exec"]
+
+    def test_get_active_environments_sees_rotated_entries(self, tmp_path: Path):
+        from code_sandbox_mcp.journal import _append_json, get_active_environments
+
+        with self._journal_at(tmp_path) as (journal_dir, log_path, backup_path):
+            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", 1):
+                _append_json({"ts": "2026-01-01T00:00:01Z", "run_id": "run1",
+                              "container_id": "env1",
+                              "operation": "test_environment",
+                              "services": [{"name": "web"}],
+                              "environment_status": "ready"})
+                _append_json({"ts": "2026-01-01T00:00:01Z", "run_id": "run1",
+                              "container_id": "env1",
+                              "operation": "exec",
+                              "commands": ["echo x"], "exit_code": 0})
+
+            assert backup_path.exists()
+
+            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", 10**9):
+                _append_json({"ts": "2026-01-01T00:00:02Z", "run_id": "run1",
+                              "container_id": "env2",
+                              "operation": "test_environment",
+                              "services": [{"name": "db"}],
+                              "environment_status": "ready"})
+
+            active = get_active_environments()
+            cids = {e["container_id"] for e in active}
+            assert "env1" in cids
+            assert "env2" in cids

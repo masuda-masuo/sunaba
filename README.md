@@ -197,9 +197,9 @@ Starts a local read-only web dashboard showing active containers, run history, a
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--dashboard-port` | `8766` | Dashboard port. Set to `0` to disable. |
-| `--dashboard-host` | `127.0.0.1` | Bind address. Use `0.0.0.0` for WSL host access. |
+| `--dashboard-host` | `127.0.0.1` | Bind address. |
 
-> **WSL tip**: If your MCP server binds to `--port 8766`, use `--dashboard-port 8767` to avoid conflict, and `--dashboard-host 0.0.0.0` to reach the dashboard from Windows at `http://localhost:8767`.
+> **WSL tip**: If your MCP server binds to `--port 8766`, use `--dashboard-port 8767` to avoid conflict. The dashboard is reachable from Windows at `http://localhost:8767` via WSL's localhost forwarding.
 
 ### Optional: push notifications
 

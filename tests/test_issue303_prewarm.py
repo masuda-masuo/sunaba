@@ -152,3 +152,46 @@ class TestStartImagePrewarm:
         startup_ready = threading.Event()
         _start_image_prewarm(0, startup_ready)
         assert startup_ready.is_set()
+
+
+class TestPrewarmTimeout:
+    def test_arg_parser_default(self) -> None:
+        from code_sandbox_mcp.server import _build_arg_parser
+
+        parser = _build_arg_parser()
+        args = parser.parse_args([])
+        assert args.prewarm_timeout_seconds == 300
+
+    def test_arg_parser_custom(self) -> None:
+        from code_sandbox_mcp.server import _build_arg_parser
+
+        parser = _build_arg_parser()
+        args = parser.parse_args(["--prewarm-timeout-seconds", "120"])
+        assert args.prewarm_timeout_seconds == 120
+
+    def test_main_starts_after_timeout_without_prewarm(self) -> None:
+        import sys as _sys
+
+        from code_sandbox_mcp.server import main
+
+        # Simulate a hang: _start_image_prewarm never signals the event.
+        # The server should still start after prewarm_timeout_seconds elapses
+        # (set to a short value) with a warning logged.
+        with patch(
+            "code_sandbox_mcp.server._start_image_prewarm",
+        ) as prewarm, patch(
+            "code_sandbox_mcp.server.mcp.run",
+        ) as mcp_run, patch(
+            "code_sandbox_mcp.server._start_github_app_token_refresh",
+        ), patch.object(
+            _sys, "argv",
+            ["prog", "--prewarm-timeout-seconds", "1", "--dashboard-port", "0"],
+        ):
+            # _start_image_prewarm is called but startup_event is never set
+            # (we replace it with a no-op that never sets the event).
+            def _noop(interval_seconds: int = 3600, startup_event: threading.Event | None = None) -> None:
+                pass
+
+            prewarm.side_effect = _noop
+            main()
+            mcp_run.assert_called_once()

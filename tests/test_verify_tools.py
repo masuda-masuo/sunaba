@@ -666,11 +666,13 @@ class TestVerifyInContainer:
                 path="tests/",
                 skip_lint_gate=True,
                 skip_type_gate=True,
+                skip_patch_targets_gate=True,
             ))
 
         mock_gate.assert_not_called()
         assert "lint" not in result
         assert "types" not in result
+        assert "patch_targets" not in result
 
     @patch("code_sandbox_mcp.tools.verify._docker")
     def test_skip_lint_gate_maps_to_gate_on_lint_false(self, mock_docker: MagicMock) -> None:

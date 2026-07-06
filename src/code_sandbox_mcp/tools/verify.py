@@ -303,6 +303,7 @@ def verify_in_container(
     working_dir: str | None = None,
     skip_lint_gate: bool = False,
     skip_type_gate: bool = False,
+    skip_patch_targets_gate: bool = False,
 ) -> str:
     """Run pytest with optional filter → full-suite fallback and diff summary.
 
@@ -390,14 +391,19 @@ def verify_in_container(
         skip_type_gate: Skip the type-check precondition (default
             ``False``).  Same edit-loop fast-path rationale as
             *skip_lint_gate*.
+        skip_patch_targets_gate: Skip the ``check_patch_targets.py``
+            precondition (default ``False``).  Same edit-loop fast-path
+            rationale as *skip_lint_gate*.
 
     Returns:
         JSON string with:
 
-        * ``gate_passed``: ``True`` if the lint + type gate passed and
-          the full test suite passed
+        * ``gate_passed``: ``True`` if the lint + type + patch-target gate
+          passed and the full test suite passed
         * ``lint``: lint findings from the pre-test gate (flat list)
         * ``types``: type-check findings from the pre-test gate (flat list)
+        * ``patch_targets``: patch-target findings from the pre-test gate
+          (flat list, empty when script absent)
         * ``lint_type_incomplete`` (optional): ``True`` when a lint/type
           tool was unavailable or errored
         * ``partial_test_run``: ``True`` when only filtered tests ran
@@ -504,7 +510,7 @@ def verify_in_container(
     # feedback when lint/type are known clean -- the gate is still
     # enforced on the final pre-publish call where the flags are left at
     # their default (False).
-    if not (skip_lint_gate and skip_type_gate):
+    if not (skip_lint_gate and skip_type_gate and skip_patch_targets_gate):
         _, dirs_out, _ = _run(
             "for d in src tests; do test -d \"$d\" && echo \"$d\"; done"
         )
@@ -519,16 +525,18 @@ def verify_in_container(
             language=language,
             gate_on_lint=not skip_lint_gate,
             gate_on_type=not skip_type_gate,
+            gate_on_patch_targets=not skip_patch_targets_gate,
         )
         result["lint"] = lt_gate["lint"]
         result["types"] = lt_gate["types"]
+        result["patch_targets"] = lt_gate.get("patch_targets", [])
         if lt_gate["incomplete"]:
             result["lint_type_incomplete"] = True
         if not lt_gate["gate_passed"]:
             result["gate_fail_reasons"] = lt_gate["gate_fail_reasons"]
             result["tests"] = {
                 "status": "skipped",
-                "message": "lint/type gate failed; tests not run",
+                "message": "precondition gate failed; tests not run",
             }
             return json.dumps(result)
 

@@ -417,6 +417,85 @@ class TestRunLintTypeGate:
         run_lint_type_gate(object(), "src")
         assert seen["lint_path"] == "src"
 
+    def test_patch_targets_gate_false_by_default(self, monkeypatch):
+        """gate_on_patch_targets=False by default so existing callers are
+        not forced to handle container.exec_run."""
+        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            lambda *a, **k: self._vr("ok"),
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            lambda *a, **k: self._vr("ok", tool="pyright"),
+        )
+        r = run_lint_type_gate(object(), "src")
+        assert r["gate_passed"] is True
+        assert r["patch_targets"] == []
+
+    def test_patch_targets_gate_true_fails_when_findings(self, monkeypatch):
+        """gate_on_patch_targets=True with unresolved targets fails the gate."""
+        from src.code_sandbox_mcp.edit_verify import VerifyResult, run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            lambda *a, **k: self._vr("ok"),
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            lambda *a, **k: self._vr("ok", tool="pyright"),
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._run_patch_targets_verify",
+            lambda *a, **k: VerifyResult(
+                tool="check-patch-targets", status="findings",
+                findings=[{"file": "test.py", "line": 42, "rule": "patch-target",
+                           "message": "stale target"}],
+                exit_code=1,
+            ),
+        )
+        r = run_lint_type_gate(
+            object(), "src", gate_on_patch_targets=True,
+        )
+        assert r["gate_passed"] is False
+        assert any("patch_targets" in reason for reason in r["gate_fail_reasons"])
+        assert len(r["patch_targets"]) == 1
+
+    def test_patch_targets_gate_true_passes_when_clean(self, monkeypatch):
+        """gate_on_patch_targets=True with no unresolved targets passes."""
+        from src.code_sandbox_mcp.edit_verify import VerifyResult, run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            lambda *a, **k: self._vr("ok"),
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            lambda *a, **k: self._vr("ok", tool="pyright"),
+        )
+        monkeypatch.setattr(
+            "src.code_sandbox_mcp.edit_verify._run_patch_targets_verify",
+            lambda *a, **k: VerifyResult(
+                tool="check-patch-targets", status="ok",
+                findings=[], exit_code=0,
+            ),
+        )
+        r = run_lint_type_gate(
+            object(), "src", gate_on_patch_targets=True,
+        )
+        assert r["gate_passed"] is True
+        assert r["patch_targets"] == []
+
+    def test_patch_targets_skipped_when_script_absent(self, monkeypatch):
+        """_run_patch_targets_verify returns skipped when script absent."""
+        from src.code_sandbox_mcp.edit_verify import _run_patch_targets_verify
+
+        mock_container = type("MockContainer", (), {})()
+        mock_container.exec_run = lambda *a, **k: (0, (b"NOT_FOUND\n", b""))
+        result = _run_patch_targets_verify(mock_container, working_dir=None)
+        assert result.status == "skipped"
+
 
 class TestQuotePath:
     """Tests for _quote_path -- single path vs multi-path shell quoting (#417)."""

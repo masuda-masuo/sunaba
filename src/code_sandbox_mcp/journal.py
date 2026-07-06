@@ -511,7 +511,7 @@ def get_journal_path() -> str:
 
 def get_runs() -> list[dict[str, Any]]:
     """Return a summary of all runs found in the journal."""
-    if not _JOURNAL_PATH.exists():
+    if not _JOURNAL_PATH.exists() and not _JOURNAL_BACKUP_PATH.exists():
         return []
 
     runs: dict[str, dict[str, Any]] = {}

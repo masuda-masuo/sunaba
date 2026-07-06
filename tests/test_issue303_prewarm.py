@@ -17,6 +17,8 @@ import asyncio
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from code_sandbox_mcp.server import _start_image_prewarm
 from code_sandbox_mcp.tools.container import (
     prewarm_default_image,
@@ -175,6 +177,13 @@ class TestPrewarmTimeout:
         parser = _build_arg_parser()
         args = parser.parse_args(["--prewarm-timeout-seconds", "120"])
         assert args.prewarm_timeout_seconds == 120
+
+    def test_arg_parser_rejects_negative(self) -> None:
+        from code_sandbox_mcp.server import _build_arg_parser
+
+        parser = _build_arg_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--prewarm-timeout-seconds", "-1"])
 
     def test_main_starts_after_timeout_without_prewarm(self) -> None:
         import sys as _sys

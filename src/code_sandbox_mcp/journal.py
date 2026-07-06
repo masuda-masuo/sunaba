@@ -6,7 +6,11 @@ boundary-crossing operation is recorded with timestamp, run_id,
 and operational metadata.
 
 Thread-safe via a module-level lock.  The journal is append-only
-by design — no record is ever deleted or overwritten.
+by design — no record is ever deleted or overwritten.  When the
+journal exceeds :data:`_MAX_JOURNAL_SIZE` the current file is
+rotated to ``journal.log.1`` before new writes continue, so the
+on-disk footprint is bounded by approximately twice the max size
+(one active file + one backup).
 """
 from __future__ import annotations
 
@@ -23,6 +27,10 @@ from typing import Any
 
 _JOURNAL_DIR: Path = Path.home() / ".code-sandbox-mcp"
 _JOURNAL_PATH: Path = _JOURNAL_DIR / "journal.log"
+_JOURNAL_BACKUP_PATH: Path = _JOURNAL_DIR / "journal.log.1"
+
+#: Max journal file size before rotation (100 MB).
+_MAX_JOURNAL_SIZE: int = 100 * 1024 * 1024
 
 
 def _get_state_path() -> Path:
@@ -82,10 +90,21 @@ def remove_run_id(container_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _rotate_if_needed_unlocked() -> None:
+    """Rename journal.log to journal.log.1 when size exceeds limit.
+
+    Called under ``_lock``.  If the backup already exists it is
+    silently overwritten (oldest history is discarded first).
+    """
+    if _JOURNAL_PATH.exists() and _JOURNAL_PATH.stat().st_size >= _MAX_JOURNAL_SIZE:
+        _JOURNAL_PATH.replace(_JOURNAL_BACKUP_PATH)
+
+
 def _append_json(entry: dict[str, Any]) -> None:
     """Append a single JSON-lines record to the journal."""
     _ensure_dir()
     with _lock:
+        _rotate_if_needed_unlocked()
         with open(_JOURNAL_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
@@ -422,19 +441,28 @@ def record_tool_use(
 
 
 def _read_journal_unlocked() -> list[dict[str, Any]]:
-    """Parse every journal line into dicts (caller must hold ``_lock``)."""
-    if not _JOURNAL_PATH.exists():
-        return []
+    """Parse every journal line into dicts (caller must hold ``_lock``).
+
+    Reads from both ``journal.log.1`` (backup, if present) and
+    ``journal.log`` (active), concatenating in chronological order.
+    """
     entries: list[dict[str, Any]] = []
-    with open(_JOURNAL_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+
+    def _load(path: Path) -> None:
+        if not path.exists():
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    _load(_JOURNAL_BACKUP_PATH)
+    _load(_JOURNAL_PATH)
     return entries
 
 

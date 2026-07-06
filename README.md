@@ -432,10 +432,12 @@ If `CODE_SANDBOX_ALLOWED_REPOS` is unset or does not include the target reposito
 
 The server maintains an append-only execution journal at `~/.code-sandbox-mcp/journal.log`. Every container lifecycle event (initialize, exec, stop) and boundary-crossing operation is recorded with timestamps and run IDs.
 
+When the journal exceeds 100 MB it is automatically rotated to `journal.log.1`; the on-disk footprint stays bounded to approximately twice that size (one active + one backup). Journal readers transparently merge both files in chronological order. Trace files under `~/.code-sandbox-mcp/traces/` are kept to at most 100 files, with oldest ones evicted first.
+
 | Component | Description |
 |-----------|-------------|
-| **Journal** | Append-only log of all operations. `tail -f` for real-time monitoring. |
-| **Trace** | HTML or JSON replay for any `run_id`. Post-hoc review of "why did it do that?" |
+| **Journal** | Append-only log of all operations. `tail -f` for real-time monitoring. Auto-rotates at 100 MB to `journal.log.1`. |
+| **Trace** | HTML or JSON replay for any `run_id`. Post-hoc review of "why did it do that?" Keeps at most 100 files. |
 | **Dashboard** | Local web UI at `http://127.0.0.1:<dashboard-port>`. Read-only, auto-refreshing. |
 | **Notifications** | OS desktop notifications or webhook callbacks for boundary-crossing events and failures. |
 

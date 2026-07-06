@@ -19,9 +19,30 @@ from code_sandbox_mcp.journal import read_journal
 
 _TRACE_DIR: Path = Path.home() / ".code-sandbox-mcp" / "traces"
 
+#: Max trace files to keep before cleaning old ones.
+_TRACE_MAX_FILES: int = 100
+
 
 def _ensure_trace_dir() -> None:
     _TRACE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _cleanup_old_traces() -> None:
+    """Remove oldest trace files when the count exceeds limit.
+
+    Keeps at most :data:`_TRACE_MAX_FILES` trace files, deleting
+    the least recently modified ones first.  Only affects ``.html``
+    and ``.json`` files in the trace directory.
+    """
+    if not _TRACE_DIR.exists():
+        return
+    files = sorted(
+        [p for p in _TRACE_DIR.iterdir() if p.suffix in (".html", ".json") and p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+    )
+    while len(files) > _TRACE_MAX_FILES:
+        f = files.pop(0)
+        f.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +71,7 @@ def generate_json_trace(run_id: str) -> str:
     _ensure_trace_dir()
     out_path = _TRACE_DIR / f"{run_id}.json"
     out_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+    _cleanup_old_traces()
     return str(out_path)
 
 
@@ -180,6 +202,7 @@ def generate_html_trace(run_id: str) -> str:
     _ensure_trace_dir()
     out_path = _TRACE_DIR / f"{run_id}.html"
     out_path.write_text(html_content, encoding="utf-8")
+    _cleanup_old_traces()
     return str(out_path)
 
 

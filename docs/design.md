@@ -279,7 +279,11 @@ else:
 §8の通り安全網の主役はここ。**実装の最優先はジャーナル**。
 
 - **人間可読の append-only 実行ジャーナル（最優先）**: `tail -f ~/.code-sandbox-mcp/journal.log` で「いつ・どのimageで・何を・実行結果サマリ・境界越え操作なら承認の有無・外部VCS操作の内容」が自然文で流れる。全実行を漏れなく記録。改竄しにくい append-only を厳守。
+  100MB に達すると `journal.log.1` へ自動退避し、ディスク使用量は最大約 200MB に抑制される。
+  退避後も同一ファイルへの追記は続かず、新しい `journal.log` が作られる。
+  読み取りは両ファイル (`journal.log.1` → `journal.log`) を透過的に結合する。退避より前の履歴も消えない。
 - **run_id 単位のリプレイ可能トレース出力（HTML / JSON）**: 事後に「なぜそう動いたか」を共有・レビュー。
+  最大 100 ファイルまで保持し、超過時は古いものから削除される。
 - **ローカルWebダッシュボード（localhost限定 / read-mostly / 自動更新）**: 稼働コンテナ・run履歴・pass/fail・リソース使用量・承認待ちを一目で。
 - **承認キュー＋ワンクリック Approve/Reject（縮小）**: §2.2 の境界越え操作トークンと連動。ダッシュボードの一機能。
 - **プッシュ通知（OS通知 / Webhook）**（`notify.py`）: 境界越え操作・失敗閾値超え（既定5回）・長時間実行（既定300秒）のときだけ。OS デスクトップ通知は Linux `notify-send` / macOS `osascript` / Windows PowerShell の3OS対応、Webhook は設定 URL への HTTP POST。閾値・宛先は CLI 引数 `--webhook-url` / `--failure-threshold` / `--long-run-seconds` で調整する。

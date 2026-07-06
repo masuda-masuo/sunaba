@@ -16,6 +16,7 @@ from code_sandbox_mcp.edit_verify import (
 )
 from code_sandbox_mcp.journal import record_tool_use
 from code_sandbox_mcp.tools.common import _docker
+from code_sandbox_mcp.tools.vcs import resolve_git_root
 
 
 def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
@@ -60,16 +61,19 @@ def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
 def search_in_container(
     container_id: str,
     pattern: str,
-    path: str = "/",
+    path: str | None = None,
     mode: str = "lexical",
     max_results: int = 50,
+    glob: str | None = None,
+    ignore_case: bool = False,
+    context: int = 0,
+    output_mode: str = "content",
+    offset: int = 0,
 ) -> str:
     """Search for *pattern* inside the container using ripgrep/ast-grep.
 
-    Returns a JSON array of matches, each with:
-    - ``file`` (str): file path
-    - ``line`` (int): line number
-    - ``text`` (str): matching line text
+    Returns a JSON object with ``matches`` (list), ``shown``, ``total``,
+    ``truncated``, and optionally ``next_offset``.
 
     **Lexical** mode (default) uses ripgrep (``rg``) with regex support,
     falling back to ``grep`` if ripgrep is not installed.
@@ -102,30 +106,41 @@ def search_in_container(
     Args:
         container_id: 12-character container ID prefix.
         pattern: Search pattern (regex for lexical, AST pattern for structural).
-        path: Directory or file path to search within (default ``"/"``).
+        path: Directory or file path to search within (default ``None`` = auto-detect repo root).
         mode: ``"lexical"`` (ripgrep → grep) or ``"structural"`` (ast-grep).
         max_results: Maximum results to return (default 50).
+        glob: Optional glob pattern to filter files (e.g. ``"*.py"``).
+        ignore_case: Case-insensitive search (default False).
+        context: Number of context lines before/after match (default 0).
+        output_mode: ``"content"`` (default), ``"files_with_matches"``, or ``"count"``.
+        offset: Line offset for pagination (default 0).
 
     Returns:
-        JSON string with a list of match objects, each with ``file``,
-        ``line`` (int), ``text`` fields.  On container-not-found returns
-        a JSON object with an ``error`` field.
+        JSON string with ``matches``, ``shown``, ``total``, ``truncated``,
+        and optionally ``next_offset``.
     """
     client = _docker()
     try:
-        _ = client.containers.get(container_id)
+        container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps([{"error": f"Container {container_id[:12]} not found"}])
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps([{"error": str(e)}])
+        return json.dumps({"status": "error", "error": str(e)})
+
+    # Auto-detect repo root when path is not specified (Issue #469)
+    resolved_path = path
+    if resolved_path is None:
+        resolved_path = resolve_git_root(container)
 
     record_tool_use(
         container_id[:12],
         "search_in_container",
-        {"pattern": pattern, "path": path, "mode": mode},
+        {"pattern": pattern, "path": resolved_path, "mode": mode},
     )
     results = search_files(
-        client, container_id, pattern, path=path, mode=mode, max_results=max_results
+        client, container_id, pattern, path=resolved_path, mode=mode,
+        max_results=max_results, glob=glob, ignore_case=ignore_case,
+        context=context, output_mode=output_mode, offset=offset,
     )
     return json.dumps(results)
 
@@ -196,20 +211,9 @@ def lint_in_container(container_id: str, file_path: str, fix: bool = False) -> s
     try:
         client.containers.get(container_id)
     except NotFound:
-        return json.dumps(
-            [
-                {
-                    "file": file_path,
-                    "line": 0,
-                    "rule": "error",
-                    "message": f"Container {container_id[:12]} not found",
-                }
-            ]
-        )
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps(
-            [{"file": file_path, "line": 0, "rule": "error", "message": str(e)}]
-        )
+        return json.dumps({"status": "error", "error": str(e)})
 
     ext = _get_extension(file_path)
     scope_workdir = _determine_scope(file_path) if ext in (".py", ".js", ".ts", ".jsx", ".tsx") else None
@@ -267,20 +271,9 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
     try:
         client.containers.get(container_id)
     except NotFound:
-        return json.dumps(
-            [
-                {
-                    "file": file_path,
-                    "line": 0,
-                    "rule": "error",
-                    "message": f"Container {container_id[:12]} not found",
-                }
-            ]
-        )
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
     except Exception as e:
-        return json.dumps(
-            [{"file": file_path, "line": 0, "rule": "error", "message": str(e)}]
-        )
+        return json.dumps({"status": "error", "error": str(e)})
 
     ext = _get_extension(file_path)
     scope_workdir = _determine_scope(file_path) if ext in (".py", ".ts", ".tsx") else None

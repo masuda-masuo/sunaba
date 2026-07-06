@@ -436,7 +436,7 @@ class TestRunLintTypeGate:
 
     def test_patch_targets_gate_true_fails_when_findings(self, monkeypatch):
         """gate_on_patch_targets=True with unresolved targets fails the gate."""
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate, VerifyResult
+        from src.code_sandbox_mcp.edit_verify import VerifyResult, run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
             "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
@@ -464,7 +464,7 @@ class TestRunLintTypeGate:
 
     def test_patch_targets_gate_true_passes_when_clean(self, monkeypatch):
         """gate_on_patch_targets=True with no unresolved targets passes."""
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate, VerifyResult
+        from src.code_sandbox_mcp.edit_verify import VerifyResult, run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
             "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
@@ -489,7 +489,7 @@ class TestRunLintTypeGate:
 
     def test_patch_targets_skipped_when_script_absent(self, monkeypatch):
         """_run_patch_targets_verify returns skipped when script absent."""
-        from src.code_sandbox_mcp.edit_verify import _run_patch_targets_verify, VerifyResult
+        from src.code_sandbox_mcp.edit_verify import _run_patch_targets_verify
 
         mock_container = type("MockContainer", (), {})()
         mock_container.exec_run = lambda *a, **k: (0, (b"NOT_FOUND\n", b""))

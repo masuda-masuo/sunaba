@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,9 @@ _TRACE_DIR: Path = Path.home() / ".code-sandbox-mcp" / "traces"
 #: Max trace files to keep before cleaning old ones.
 _TRACE_MAX_FILES: int = 100
 
+#: Module-level lock for thread-safe trace cleanup.
+_trace_lock: threading.Lock = threading.Lock()
+
 
 def _ensure_trace_dir() -> None:
     _TRACE_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,19 +34,22 @@ def _ensure_trace_dir() -> None:
 def _cleanup_old_traces() -> None:
     """Remove oldest trace files when the count exceeds limit.
 
+    Thread-safe via :data:`_trace_lock`.
+
     Keeps at most :data:`_TRACE_MAX_FILES` trace files, deleting
     the least recently modified ones first.  Only affects ``.html``
     and ``.json`` files in the trace directory.
     """
-    if not _TRACE_DIR.exists():
-        return
-    files = sorted(
-        [p for p in _TRACE_DIR.iterdir() if p.suffix in (".html", ".json") and p.is_file()],
-        key=lambda p: p.stat().st_mtime,
-    )
-    while len(files) > _TRACE_MAX_FILES:
-        f = files.pop(0)
-        f.unlink(missing_ok=True)
+    with _trace_lock:
+        if not _TRACE_DIR.exists():
+            return
+        files = sorted(
+            [p for p in _TRACE_DIR.iterdir() if p.suffix in (".html", ".json") and p.is_file()],
+            key=lambda p: p.stat().st_mtime,
+        )
+        while len(files) > _TRACE_MAX_FILES:
+            f = files.pop(0)
+            f.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

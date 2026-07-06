@@ -547,23 +547,16 @@ def get_active_environments() -> list[dict[str, Any]]:
 
     Returns a list of environments with status ``"starting"`` or
     ``"ready"`` that have no corresponding ``"stopped"`` entry.
-    """
-    if not _JOURNAL_PATH.exists():
-        return []
 
+    Reads from both ``journal.log.1`` (backup, if present) and
+    ``journal.log`` (active) via :func:`_read_journal_unlocked`,
+    so entries survive journal rotation transparently.
+    """
     env_entries: list[dict[str, Any]] = []
     with _lock:
-        with open(_JOURNAL_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if entry.get("operation") == "test_environment":
-                    env_entries.append(entry)
+        for entry in _read_journal_unlocked():
+            if entry.get("operation") == "test_environment":
+                env_entries.append(entry)
 
     active: dict[str, dict[str, Any]] = {}
     for entry in env_entries:

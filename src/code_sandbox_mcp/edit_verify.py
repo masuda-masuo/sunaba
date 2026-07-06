@@ -2104,6 +2104,55 @@ def _gate_type_runner(
     return _envelope_skipped(f"{lang}-type", f"language '{lang}' has no type layer")
 
 
+def _run_patch_targets_verify(
+    container: Any,
+    working_dir: str | None = None,
+) -> VerifyResult:
+    """Run ``python scripts/check_patch_targets.py`` if it exists.
+
+    Returns ``skipped`` when the script is not present (so projects
+    without it are not blocked).  Findings mirror the script's stderr
+    output format ``path:lineno: patch target ...``.
+    """
+    ec, output = container.exec_run(
+        ["/bin/sh", "-c",
+         f"{_SANDBOX_ENV}test -f scripts/check_patch_targets.py && echo EXISTS || echo NOT_FOUND"],
+        stdout=True, stderr=True, workdir=working_dir,
+    )
+    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    if stdout_text.strip() != "EXISTS":
+        return _envelope_skipped("check-patch-targets", "scripts/check_patch_targets.py not found")
+
+    ec, output = container.exec_run(
+        ["/bin/sh", "-c",
+         f"{_SANDBOX_ENV}python scripts/check_patch_targets.py 2>&1"],
+        stdout=True, stderr=True, workdir=working_dir,
+    )
+    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+
+    if ec == 127:
+        return _envelope_not_available("check-patch-targets", "python not found")
+
+    findings: list[dict[str, Any]] = []
+    for line in stdout_text.split("\n"):
+        m = re.match(r"^(.+?):(\d+): patch target.*", line)
+        if m:
+            findings.append({
+                "file": m.group(1),
+                "line": int(m.group(2)),
+                "rule": "patch-target",
+                "message": line,
+            })
+    return VerifyResult(
+        tool="check-patch-targets",
+        status="findings" if findings else "ok",
+        findings=findings,
+        exit_code=ec,
+    )
+
+
 def run_lint_type_gate(
     container: Any,
     scope: str,
@@ -2113,6 +2162,7 @@ def run_lint_type_gate(
     language: str | None = None,
     gate_on_lint: bool = True,
     gate_on_type: bool = True,
+    gate_on_patch_targets: bool = False,
 ) -> dict[str, Any]:
     """Run lint + type-check as a pre-test gate over *scope* (Issue #293).
 
@@ -2135,6 +2185,11 @@ def run_lint_type_gate(
       ``D101`` -- a "warning"-severity rule -- is caught here.)
     * **type** -- any type-checker finding fails the gate when
       *gate_on_type*.
+    * **patch_targets** -- when ``scripts/check_patch_targets.py`` exists,
+      any unresolved ``patch(...)`` target fails the gate when
+      *gate_on_patch_targets* (default ``False``, opt-in).  Skips
+      silently when the script is absent (so projects without it are
+      not blocked).
 
     Tool absence (``not_available``) or execution errors set
     ``incomplete=True`` but do **not** fail the gate -- a missing tool is
@@ -2142,8 +2197,8 @@ def run_lint_type_gate(
     not a code defect.
 
     Returns a dict with ``gate_passed``, ``incomplete``,
-    ``detected_languages``, ``lint`` / ``types`` (flat finding lists),
-    and ``gate_fail_reasons``.
+    ``detected_languages``, ``lint`` / ``types`` / ``patch_targets``
+    (flat finding lists), and ``gate_fail_reasons``.
     """
     # Detect from the project root so package markers (pyproject.toml, etc.)
     # are found; the linter/type-checker then run on the CI-aligned *scope*.
@@ -2152,6 +2207,10 @@ def run_lint_type_gate(
 
     lint_results: list[VerifyResult] = []
     type_results: list[VerifyResult] = []
+    patch_targets_result: VerifyResult | None = None
+    if gate_on_patch_targets:
+        patch_targets_result = _run_patch_targets_verify(container, working_dir)
+
     for lang in sorted(detected.languages):
         if gate_on_lint:
             lint_results.append(
@@ -2161,9 +2220,12 @@ def run_lint_type_gate(
             type_results.append(_gate_type_runner(container, scope, lang, working_dir))
 
     gate_fail_reasons: list[str] = []
+    _all_gate_results = [*lint_results, *type_results]
+    if patch_targets_result is not None:
+        _all_gate_results.append(patch_targets_result)
     incomplete = any(
         vr.status in ("not_available", "error")
-        for vr in (*lint_results, *type_results)
+        for vr in _all_gate_results
     )
 
     if gate_on_lint:
@@ -2177,6 +2239,13 @@ def run_lint_type_gate(
                     gate_fail_reasons.append(
                         f"lint ({vr.tool}): {len(violations)} violation(s)"
                     )
+
+    if gate_on_patch_targets and patch_targets_result is not None:
+        if patch_targets_result.status == "findings":
+            gate_fail_reasons.append(
+                f"patch_targets ({patch_targets_result.tool}): "
+                f"{len(patch_targets_result.findings)} unresolved target(s)"
+            )
 
     if gate_on_type:
         for vr in type_results:
@@ -2196,6 +2265,7 @@ def run_lint_type_gate(
         "detected_languages": sorted(detected.languages),
         "lint": _flatten_layer(lint_results),
         "types": _flatten_layer(type_results),
+        "patch_targets": _flatten_layer([patch_targets_result]) if patch_targets_result is not None else [],
         "gate_fail_reasons": gate_fail_reasons,
     }
 

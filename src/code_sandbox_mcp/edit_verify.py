@@ -651,12 +651,9 @@ def _search_structural(
     max_results: int,
 ) -> dict[str, Any]:
     """Structural search using ast-grep."""
-    quoted_pattern = shlex.quote(pattern)
-    quoted_path = shlex.quote(path)
-
-    cmd = f"sg run -p {quoted_pattern} {quoted_path} --json=stream"
+    args = ["sg", "run", "-p", pattern, path, "--json=stream"]
     exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", cmd],
+        args,
         stdout=True,
         stderr=True,
     )

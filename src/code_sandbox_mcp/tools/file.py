@@ -664,6 +664,7 @@ def read_file_range(
 
     if start_line is not None and offset != 0:
         return json.dumps({
+            "status": "error",
             "error": "start_line and offset are mutually exclusive. "
             "Use start_line/end_line (1-indexed) or offset/limit (0-indexed), not both."
         })

@@ -513,6 +513,11 @@ class TestComputeDefaultLimits:
 class TestGetSetDefaultProfile:
     """Tests for get_default_profile / set_default_profile."""
 
+    def setup_method(self) -> None:
+        # Reset before each test so external contamination doesn't affect assertions.
+        import code_sandbox_mcp.security as security
+        security._effective_default_profile = None
+
     def teardown_method(self) -> None:
         # Reset the module-level effective profile so tests don't leak state.
         import code_sandbox_mcp.security as security

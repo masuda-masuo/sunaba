@@ -142,6 +142,17 @@ if observability_tools_enabled():
 # ---------------------------------------------------------------------------
 
 
+def _positive_int(value: str) -> int:
+    """Argparse type: require an integer >= 1."""
+    try:
+        ivalue = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid integer: {value!r}")
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {ivalue}")
+    return ivalue
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the MCP server.
 
@@ -247,6 +258,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "and re-check every N seconds so the first sandbox_initialize is "
             "warm regardless of which image language detection picks "
             "(Issue #303). Set to 0 to disable prewarming (default: 3600)."
+        ),
+    )
+    parser.add_argument(
+        "--prewarm-timeout-seconds",
+        type=_positive_int,
+        default=300,
+        help=(
+            "Maximum seconds to wait for the first prewarm cycle to complete "
+            "before starting the server anyway.  If the timeout expires, a "
+            "WARNING is logged and the server starts without a warm image, "
+            "meaning the first sandbox_initialize may be slower as it "
+            "performs the docker pull itself (default: 300)."
         ),
     )
     parser.add_argument(
@@ -426,7 +449,13 @@ def main() -> None:
     # (Issue #371).
     prewarm_ready = threading.Event()
     _start_image_prewarm(args.prewarm_interval_seconds, prewarm_ready)
-    prewarm_ready.wait()
+    if not prewarm_ready.wait(timeout=args.prewarm_timeout_seconds):
+        logger.warning(
+            "prewarm did not complete within %d seconds \u2014 starting server "
+            "without a warm image.  The first sandbox_initialize may be "
+            "slower as it performs docker pull itself.",
+            args.prewarm_timeout_seconds,
+        )
 
     try:
         transport = args.transport

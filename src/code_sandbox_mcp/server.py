@@ -22,7 +22,9 @@ from code_sandbox_mcp.security import (
 
 from .tools.container import (
     run_container_and_exec,
+    sandbox_attach,
     sandbox_initialize_tool,
+    sandbox_list_containers,
     sandbox_stop,
 )
 from .tools.diff import (
@@ -85,6 +87,10 @@ checkpoint = mcp.tool()(checkpoint)
 checkpoint_list = mcp.tool()(checkpoint_list)
 checkpoint_restore = mcp.tool()(checkpoint_restore)
 clone_repo = mcp.tool()(clone_repo)
+
+# Container naming / discovery tools (Issue #478)
+sandbox_list_containers = mcp.tool()(sandbox_list_containers)
+sandbox_attach = mcp.tool()(sandbox_attach)
 
 
 

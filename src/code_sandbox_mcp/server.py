@@ -25,6 +25,9 @@ from .tools.container import (
     sandbox_initialize_tool,
     sandbox_stop,
 )
+from .tools.diff import (
+    diff_in_container,
+)
 from .tools.exec import (
     sandbox_exec,
     sandbox_exec_background,
@@ -101,6 +104,9 @@ list_files = mcp.tool()(list_files)
 
 # Package install tool registration
 package_install = mcp.tool()(package_install)
+
+# Diff tool registration
+diff_in_container = mcp.tool()(diff_in_container)
 
 # Verify tool registrations
 transform_file = mcp.tool()(transform_file)

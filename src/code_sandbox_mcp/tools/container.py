@@ -26,6 +26,7 @@ from pydantic import BeforeValidator
 from code_sandbox_mcp import image_pins, image_selection, proxy_lifecycle
 from code_sandbox_mcp.journal import (
     read_container_states,
+    read_journal,
     record_boundary_crossing,
     record_copy,
     record_initialize,
@@ -48,6 +49,7 @@ from code_sandbox_mcp.proxy_client import authorized_read_grant
 from code_sandbox_mcp.security import (
     CREATED_AT_LABEL,
     MANAGED_LABEL,
+    NAME_LABEL,
     _detect_host_resources,
     _parse_mem_to_mb,
     build_secure_run_kwargs,
@@ -1053,6 +1055,256 @@ def _reap_orphaned_init_containers(client: Any = None) -> list[str]:
     return reaped
 
 
+
+def _find_containers_by_name(client, name: str) -> list[str]:
+    """Find running containers with the given NAME_LABEL.
+
+    Returns a list of 12-character container ID prefixes.
+    """
+    try:
+        containers = client.containers.list(
+            all=True,
+            filters={"label": f"{NAME_LABEL}={name}"},
+        )
+    except Exception:
+        return []
+    return [c.id[:12] for c in containers if c.status == "running"]
+
+
+def sandbox_list_containers() -> str:
+    """List all managed sandbox containers with metadata.
+
+    Discovers containers via the ``MANAGED_LABEL`` Docker label so the
+    list is accurate even after a server restart.  Returns a JSON array
+    of container summaries, each with:
+
+    - ``container_id`` (str): 12-character prefix
+    - ``name`` (str | None): user-assigned name from ``sandbox_initialize(name=...)``
+    - ``image`` (str): image ref
+    - ``status`` (str): Docker container status (``running`` / ``exited`` / etc.)
+    - ``created_at`` (str | None): ISO-8601 timestamp from the creation label
+    - ``age_seconds`` (float | None): approximate age in seconds
+
+    Use this to discover existing containers across sessions, especially
+    when the server restarts and the in-memory registry is lost (Issue #478).
+
+    .. rubric:: Use when
+
+    - Finding a container by name across sessions
+    - Checking what containers are still alive before starting a new one
+    - Preparing to call :func:`sandbox_attach` with a name or ID
+
+    .. rubric:: Don't use when
+
+    - You already know the container ID — use :func:`sandbox_attach` directly
+    - Inspecting journal history — use :func:`sandbox_read_journal` instead
+
+    .. rubric:: Prefer over
+
+    - Prefer over ``sandbox_exec docker ps`` (structured JSON, filters to managed containers)
+
+    Returns:
+        JSON string with a ``containers`` array.
+    """
+    import json
+
+    client = _docker()
+    try:
+        containers = client.containers.list(
+            all=True,
+            filters={"label": f"{MANAGED_LABEL}=true"},
+        )
+    except Exception as e:
+        return json.dumps({"containers": [], "error": str(e)})
+
+    now = datetime.now(timezone.utc)
+    result: list[dict[str, Any]] = []
+    for c in containers:
+        cid = c.id[:12]
+        labels = getattr(c, "labels", None) or {}
+        created_raw = labels.get(CREATED_AT_LABEL)
+        name_val = labels.get(NAME_LABEL)
+        age = _age_seconds(created_raw, now)
+        result.append({
+            "container_id": cid,
+            "name": name_val,
+            "image": c.image.tags[0] if c.image.tags else str(c.image.short_id),
+            "status": c.status,
+            "created_at": created_raw,
+            "age_seconds": age,
+        })
+
+    return json.dumps({"containers": result}, ensure_ascii=False)
+
+
+def sandbox_attach(name_or_id: str) -> str:
+    """Connect to an existing container by name or ID prefix.
+
+    Looks up the container by:
+
+    1. **Name match** — the ``NAME_LABEL`` Docker label (set via
+       ``sandbox_initialize(name=...)``)
+    2. **ID prefix match** — a 12-character (or longer) container ID prefix
+
+    Returns a JSON orientation summary:
+
+    - ``found`` (bool): whether the container was located
+    - ``container_id`` (str): 12-character prefix
+    - ``name`` (str | None): user-assigned name
+    - ``status`` (str): Docker status
+    - ``image`` (str): image ref
+    - ``created_at`` (str | None): ISO-8601 creation time
+    - ``git``: git orientation when available:
+        - ``branch`` (str | None): current git branch
+        - ``status_short`` (str | None): ``git status --short`` output
+        - ``repo_root`` (str | None): detected git root
+    - ``last_checkpoint`` (str | None): most recent checkpoint message
+    - ``last_checkpoint_ts`` (str | None): timestamp of last checkpoint
+    - ``journal_activity`` (int): number of journal entries for this container
+    - ``error`` (str | None): error message on failure
+
+    The orientation summary lets a cold session (or a cheap model) pick up
+    where a previous session left off without re-reading the entire context
+    (Issue #478).
+
+    .. rubric:: Use when
+
+    - Reconnecting to a named container from a different session
+    - Quickly assessing a container's state without running shell commands
+    - Picking up work after a server restart
+
+    .. rubric:: Don't use when
+
+    - Starting a new container — use :func:`sandbox_initialize` instead
+    - Running commands on an already-attached container — use :func:`sandbox_exec`
+
+    .. rubric:: Prefer over
+
+    - Prefer over ``sandbox_exec`` for orientation (structured summary, no shell)
+    - Prefer over manual ``docker ps`` filtering
+
+    Args:
+        name_or_id: A user-assigned container name (from
+            ``sandbox_initialize(name=...)``) or a 12-character (or longer)
+            container ID prefix.
+
+    Returns:
+        JSON string with the orientation summary.
+    """
+    import json
+
+    client = _docker()
+    container_obj = None
+    cid = ""
+    match_type = ""
+
+    # 1) Try name match
+    if name_or_id:
+        try:
+            matches = client.containers.list(
+                all=True,
+                filters={"label": f"{NAME_LABEL}={name_or_id}"},
+            )
+        except Exception:
+            matches = []
+        if matches:
+            container_obj = matches[0]
+            cid = container_obj.id[:12]
+            match_type = "name"
+
+    # 2) Try ID prefix match
+    if container_obj is None:
+        try:
+            try:
+                container_obj = client.containers.get(name_or_id)
+            except Exception:
+                # ID prefix: list all managed and match by startswith
+                all_managed = client.containers.list(
+                    all=True,
+                    filters={"label": f"{MANAGED_LABEL}=true"},
+                )
+                for c in all_managed:
+                    if c.id.startswith(name_or_id):
+                        container_obj = c
+                        break
+        except Exception:
+            pass
+        if container_obj:
+            cid = container_obj.id[:12]
+            match_type = "id"
+
+    if container_obj is None:
+        return json.dumps({
+            "found": False,
+            "error": f"No container found matching {name_or_id!r}",
+        })
+
+    labels = getattr(container_obj, "labels", None) or {}
+    created_raw = labels.get(CREATED_AT_LABEL)
+    name_val = labels.get(NAME_LABEL)
+    now = datetime.now(timezone.utc)
+    age = _age_seconds(created_raw, now)
+
+    result: dict[str, Any] = {
+        "found": True,
+        "container_id": cid,
+        "name": name_val,
+        "status": container_obj.status,
+        "image": container_obj.image.tags[0] if container_obj.image.tags else str(container_obj.image.short_id),
+        "created_at": created_raw,
+        "age_seconds": age,
+        "match_type": match_type,
+    }
+
+    # --- Git orientation ---
+    try:
+        working_dir = resolve_git_root(container_obj, None)
+        if working_dir:
+            result["git"] = {"repo_root": str(working_dir)}
+            # Current branch
+            ec, out = container_obj.exec_run(
+                ["/bin/sh", "-c", "git rev-parse --abbrev-ref HEAD 2>/dev/null || true"],
+                workdir=working_dir,
+            )
+            stdout, _ = (out if isinstance(out, tuple) else (out, b""))
+            branch = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
+            if branch:
+                result["git"]["branch"] = branch
+            # git status --short
+            ec, out = container_obj.exec_run(
+                ["/bin/sh", "-c", "git status --short 2>/dev/null || true"],
+                workdir=working_dir,
+            )
+            stdout, _ = (out if isinstance(out, tuple) else (out, b""))
+            status_short = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
+            if status_short:
+                result["git"]["status_short"] = status_short
+    except Exception as e:
+        logger.debug("git orientation failed for %s: %s", cid, e)
+
+    # --- Last checkpoint ---
+    try:
+        wd = result.get("git", {}).get("repo_root")
+        cp_raw = json.loads(checkpoint_list(cid, wd))
+        cps = cp_raw.get("checkpoints", [])
+        if cps:
+            last = cps[0]
+            result["last_checkpoint"] = last.get("message", "")
+            result["last_checkpoint_ts"] = last.get("date", "")
+    except Exception as e:
+        logger.debug("checkpoint query failed for %s: %s", cid, e)
+
+    # --- Journal activity count ---
+    try:
+        entries = read_journal(run_id=None, max_entries=1000)
+        activity = [e for e in entries if e.get("container_id") == cid]
+        result["journal_activity"] = len(activity)
+    except Exception:
+        result["journal_activity"] = 0
+
+    return json.dumps(result, ensure_ascii=False)
+
+
 def sandbox_initialize(
     image: str | None = None,
     allow_network: bool = False,
@@ -1064,6 +1316,7 @@ def sandbox_initialize(
     pip_args: str | None = None,
     mem_limit: str | None = None,
     cpus: float | None = None,
+    name: str | None = None,
 ) -> str:
     """Start a new Docker sandbox container.
 
@@ -1152,6 +1405,11 @@ def sandbox_initialize(
                disabled at the new ceiling.
         cpus: Optional CPU-limit override in cores (e.g. ``2.0``).
                Defaults to the profile's 0.5-core cap when omitted.
+        name: Optional user-assigned name for the container (e.g.
+               ``\"issue-123\"``).  Stored as a Docker label so it survives
+               server restarts.  When a container with the same *name*
+               already exists and is still running, the call returns an
+               error to prevent accidental name collisions (Issue #478).
 
     The image must be pulled locally before use: docker pull <image>
 
@@ -1173,6 +1431,13 @@ def sandbox_initialize(
         _reap_orphaned_init_containers()
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("orphan reap failed: %s", e)
+
+    # Name collision check (Issue #478): reject if a container with the
+    # same user-assigned name is already running.
+    if name:
+        existing = _find_containers_by_name(_docker(), name)
+        if existing:
+            return f"Error: a container named {name!r} already exists ({existing[0][:12]}); use a different name or sandbox_attach to connect to it"
 
     # When pr is specified, implicitly enable network access.
     if pr is not None:
@@ -1246,14 +1511,18 @@ def sandbox_initialize(
 
     # Stamp the creation time so the orphan reaper can age a container even if
     # this call times out before any journal entry is written (Issue #298).
+    # Also stamp the user-assigned name label when provided (Issue #478).
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    labels: dict[str, str] = {CREATED_AT_LABEL: created_at}
+    if name:
+        labels[NAME_LABEL] = name
     run_kwargs = build_secure_run_kwargs(
         profile,
         command="sleep infinity",
         detach=True,
         remove=False,
         environment=env,
-        labels={CREATED_AT_LABEL: created_at},
+        labels=labels,
         **resource_overrides,
     )
     if proxy_runtime is not None:
@@ -1361,7 +1630,8 @@ def sandbox_initialize(
     record_initialize_complete(cid)
 
     image_msg = f" [image: {image_notice}]" if image_notice else ""
-    return cid + clone_msg + pr_msg + image_msg
+    name_msg = f" [name: {name}]" if name else ""
+    return cid + clone_msg + pr_msg + image_msg + name_msg
 
 
 async def sandbox_initialize_tool(
@@ -1375,6 +1645,7 @@ async def sandbox_initialize_tool(
     pip_args: str | None = None,
     mem_limit: str | None = None,
     cpus: float | None = None,
+    name: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Start a new Docker sandbox container (async MCP entry point).
@@ -1419,6 +1690,7 @@ async def sandbox_initialize_tool(
             pip_args=pip_args,
             mem_limit=mem_limit,
             cpus=cpus,
+            name=name,
         )
 
     if ctx is None:

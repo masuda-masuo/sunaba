@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+from collections.abc import Sequence
 
 from docker.errors import NotFound
 
@@ -35,7 +36,7 @@ def _read_container_meta(container) -> dict:
     return {}
 
 
-def _parse_name_status(lines: list[str]) -> dict[str, str]:
+def _parse_name_status(lines: Sequence[str]) -> dict[str, str]:
     """Parse ``git diff --name-status`` output into a {path: status} mapping.
 
     Format::
@@ -188,10 +189,13 @@ def _summary_diff(container, safe_wd: str, safe_base: str, raw_output: bool = Fa
     files = _parse_numstat(numstat_lines)
 
     # Merge status into each file record
+    name_status_failed = name_status_ec != 0
     for f in files:
         p = f.get("path", "")
         if p in status_map:
             f["status"] = status_map[p]
+        elif name_status_failed:
+            f["status"] = "?"  # --name-status failed
         else:
             f["status"] = "M"  # default: modified
 

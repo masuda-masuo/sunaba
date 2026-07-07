@@ -324,7 +324,7 @@ def verify_in_container(
     :func:`lint_in_container` / :func:`type_check_in_container` remain
     available as standalone single-file checks during the edit loop.
 
-    Returns a diff summary (``git diff --stat``) so the LLM can
+    Returns a structured diff summary (``git diff --numstat`` + ``git diff --name-status``) so the LLM can
     present changes to the user before calling :func:`publish`.
 
     .. note::
@@ -348,7 +348,7 @@ def verify_in_container(
     .. rubric:: Prefer over
 
     - Prefer over individual ``python -m pytest`` calls for the final pre-publish gate
-    - Prefer over manual ``git diff --stat`` — the diff summary is included automatically
+    - Prefer over manual ``git diff --numstat`` — the structured diff summary is included automatically
 
     .. rubric:: Fallback
 

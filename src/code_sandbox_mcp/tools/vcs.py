@@ -702,6 +702,147 @@ def sandbox_issue_write(
 
 
 # ---------------------------------------------------------------------------
+# sandbox_pr_review_write -- host-side PR review create+submit one-shot (#477)
+# ---------------------------------------------------------------------------
+
+_PR_REVIEW_EVENTS = ("APPROVE", "REQUEST_CHANGES", "COMMENT")
+
+
+def sandbox_pr_review_write(
+    container_id: str,
+    repo: str,
+    pr: int,
+    event: str,
+    body: str = "",
+    comments: list[dict[str, Any]] | None = None,
+) -> str:
+    """Create and submit a PR review in one shot -- host-side, no in-container gh.
+
+    One-shot PR review submission following the host-side pattern established
+    by :func:`sandbox_issue_write` (#414): the GitHub REST API is called
+    directly from the host process, so no token ever reaches the container.
+    Creates a review with optional inline comments and submits it in a single
+    API call.
+
+    .. rubric:: Use when
+
+    - Submitting a PR review (approve, request changes, or comment) from
+      inside a sandbox session
+    - Adding inline code review comments alongside the review body
+
+    .. rubric:: Don't use when
+
+    - **Managing review threads** (resolve/unresolve) -- use GitHub MCP
+    - **Commenting on an issue or PR** without a review -- use
+      :func:`sandbox_issue_write` with ``method="comment"`` instead
+
+    Args:
+        container_id: 12-character container ID prefix.  Used for the
+            journal trail; the container's own network/token state is
+            irrelevant since the GitHub call happens host-side.
+        repo: Repository in ``\"owner/repo\"`` format.
+        pr: PR number to review.
+        event: ``\"APPROVE\"``, ``\"REQUEST_CHANGES\"``, or ``\"COMMENT\"``.
+        body: Optional review body text (default ``\"\"``).
+        comments: Optional list of inline comment dicts, each with:
+            - ``path`` (str): file path
+            - ``line`` (int): line number
+            - ``side`` (str, optional): ``\"LEFT\"`` or ``\"RIGHT\"``
+              (default ``\"RIGHT\"``)
+            - ``body`` (str): comment text
+
+    Returns:
+        JSON string with ``status``, ``html_url`` (review URL), and
+        ``review_id``.  On error returns an ``error`` field.
+    """
+    if event not in _PR_REVIEW_EVENTS:
+        return json.dumps({
+            "status": "error",
+            "error": f"Invalid event: {event!r} (expected APPROVE, REQUEST_CHANGES, or COMMENT)",
+        })
+    if not _REPO_FORMAT_RE.match(repo):
+        return json.dumps({"status": "error", "error": f"Invalid repo format: {repo} (expected owner/repo)"})
+    if pr < 1:
+        return json.dumps({"status": "error", "error": f"Invalid PR number: {pr}"})
+
+    if comments is not None:
+        for i, c in enumerate(comments):
+            if not isinstance(c, dict):
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Invalid comment at index {i}: expected a dict, got {type(c).__name__}",
+                })
+            if "path" not in c:
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Comment at index {i} is missing required key 'path'",
+                })
+            if "body" not in c:
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Comment at index {i} is missing required key 'body'",
+                })
+
+    client = _docker()
+    try:
+        client.containers.get(container_id)
+    except NotFound:
+        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+    except Exception as e:
+        return json.dumps({"status": "error", "error": str(e)})
+
+    cid = container_id[:12]
+    details = f"repo={repo} pr=#{pr} event={event}"
+
+    push_token = _resolve_vcs_token()
+    if not push_token:
+        return json.dumps({
+            "status": "error",
+            "error": "No host-side GitHub token available (GITHUB_TOKEN / broker); "
+                     "PR review write requires one regardless of container state.",
+        })
+
+    # Resolve PR head SHA for inline comment commit_id
+    try:
+        pr_data = _github_api_request(f"/repos/{repo}/pulls/{pr}", push_token)
+    except RuntimeError as e:
+        record_boundary_crossing(cid, "pr_review_write", f"{details} failed to fetch PR data", approved=False)
+        return json.dumps({"status": "error", "error": f"Failed to fetch PR #{pr}: {e}"})
+
+    head_sha = pr_data.get("head", {}).get("sha", "")
+    if not head_sha:
+        record_boundary_crossing(cid, "pr_review_write", f"{details} no head sha", approved=False)
+        return json.dumps({"status": "error", "error": f"Could not resolve head SHA for PR #{pr}"})
+
+    payload: dict[str, Any] = {
+        "body": body,
+        "event": event,
+        "commit_id": head_sha,
+    }
+    if comments:
+        payload["comments"] = comments
+
+    try:
+        result = _github_api_request(
+            f"/repos/{repo}/pulls/{pr}/reviews",
+            push_token,
+            method="POST",
+            payload=payload,
+        )
+    except RuntimeError as e:
+        record_boundary_crossing(cid, "pr_review_write", f"{details} failed", approved=False)
+        return json.dumps({"status": "error", "error": str(e)})
+
+    record_boundary_crossing(cid, "pr_review_write", details, approved=True)
+
+    return json.dumps({
+        "status": "ok",
+        "html_url": result.get("html_url", ""),
+        "review_id": result.get("id"),
+    })
+
+
+# ---------------------------------------------------------------------------
 # publish
 # ---------------------------------------------------------------------------
 

@@ -1451,7 +1451,7 @@ async def sandbox_initialize_tool(
 def sandbox_stop(
     container_id: str,
     force: bool = False,
-    working_dir: str = "/home/sandbox",
+    working_dir: str | None = None,
 ) -> str:
     """Stop and remove a running sandbox container.
 
@@ -1460,7 +1460,7 @@ def sandbox_stop(
         force: If False (default), warns about unpushed checkpoints
             in the container's git repo.  Use True to override.
         working_dir: Directory in the container containing the git
-            repository (default ``"/home/sandbox"``).
+            repository (default ``None`` = auto-detect).
 
     Removal is forceful: the container is killed (SIGKILL) and removed
     with ``force=True`` rather than gracefully stopped.  A graceful

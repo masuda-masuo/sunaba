@@ -439,3 +439,33 @@ class TestSandboxStopUnpushedCheckpoints:
         container.kill.assert_called_once_with()
         container.remove.assert_called_once_with(force=True)
         assert "stopped and removed" in result
+
+
+    @patch("code_sandbox_mcp.tools.container.record_stop")
+    @patch("code_sandbox_mcp.tools.container.resolve_git_root", return_value="/tmp/repo/code-sandbox-mcp")
+    @patch("code_sandbox_mcp.tools.container.checkpoint_list")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    def test_working_dir_none_triggers_auto_detect(
+        self,
+        mock_docker: MagicMock,
+        mock_checkpoint_list: MagicMock,
+        mock_resolve_git_root: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        """Auto-detection fires when working_dir is not passed (None)."""
+        container = MagicMock()
+        client = MagicMock()
+        client.containers.get.return_value = container
+        mock_docker.return_value = client
+
+        mock_checkpoint_list.return_value = json.dumps({"checkpoints": []})
+
+        result = sandbox_stop("abc123def456")
+
+        # resolve_git_root was called with working_dir=None → auto-detection
+        mock_resolve_git_root.assert_called_once_with(container, None)
+        # checkpoint_list received the auto-detected path
+        mock_checkpoint_list.assert_called_once_with("abc123def456", "/tmp/repo/code-sandbox-mcp")
+        container.kill.assert_called_once_with()
+        container.remove.assert_called_once_with(force=True)
+        assert "stopped and removed" in result

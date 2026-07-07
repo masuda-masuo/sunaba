@@ -59,6 +59,7 @@ from .tools.vcs import (
     issue_view,
     publish,
     sandbox_issue_write,
+    sandbox_pr_review_write,
 )
 from .tools.verify import (
     lint_in_container,
@@ -79,6 +80,7 @@ sandbox_exec_check = mcp.tool()(sandbox_exec_check)
 issue_view = mcp.tool()(issue_view)
 publish = mcp.tool()(publish)
 sandbox_issue_write = mcp.tool()(sandbox_issue_write)
+sandbox_pr_review_write = mcp.tool()(sandbox_pr_review_write)
 checkpoint = mcp.tool()(checkpoint)
 checkpoint_list = mcp.tool()(checkpoint_list)
 checkpoint_restore = mcp.tool()(checkpoint_restore)

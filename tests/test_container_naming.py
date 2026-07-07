@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from code_sandbox_mcp.security import MANAGED_LABEL, NAME_LABEL
 from code_sandbox_mcp.tools.container import (
     sandbox_attach,

@@ -6,105 +6,65 @@ import json
 from unittest.mock import MagicMock, patch
 
 from code_sandbox_mcp.tools.diff import (
-    _parse_diffstat,
+    _parse_numstat,
     diff_in_container,
 )
 
 
-class TestParseDiffstat:
-    """Tests for _parse_diffstat helper."""
+class TestParseNumstat:
+    """Tests for _parse_numstat helper (git diff --numstat parser)."""
 
-    def test_basic_diffstat(self):
+    def test_basic_numstat(self):
         lines = [
-            " src/foo.py | 10 ++++++----",
-            " src/bar.py | 3 ++-",
-            " 2 files changed, 8 insertions(+), 5 deletions(-)",
+            "10\t5\tsrc/foo.py",
+            "3\t1\tsrc/bar.py",
         ]
-        result = _parse_diffstat(lines)
+        result = _parse_numstat(lines)
         assert len(result) == 2
         assert result[0] == {
             "path": "src/foo.py",
-            "additions": 6,
-            "deletions": 4,
-            "changes": 10,
+            "additions": 10,
+            "deletions": 5,
+            "changes": 15,
         }
         assert result[1] == {
             "path": "src/bar.py",
-            "additions": 2,
+            "additions": 3,
             "deletions": 1,
-            "changes": 3,
+            "changes": 4,
         }
 
     def test_single_file(self):
-        lines = [
-            " README.md | 2 +-",
-            " 1 file changed, 1 insertion(+), 1 deletion(-)",
-        ]
-        result = _parse_diffstat(lines)
+        result = _parse_numstat(["1\t1\tREADME.md"])
         assert len(result) == 1
         assert result[0]["path"] == "README.md"
         assert result[0]["additions"] == 1
         assert result[0]["deletions"] == 1
 
     def test_new_file(self):
-        lines = [
-            " new_file.py | 15 +++++++++++++++",
-            " 1 file changed, 15 insertions(+)",
-        ]
-        result = _parse_diffstat(lines)
-        assert len(result) == 1
-        assert result[0]["path"] == "new_file.py"
+        result = _parse_numstat(["15\t0\tnew_file.py"])
         assert result[0]["additions"] == 15
         assert result[0]["deletions"] == 0
 
     def test_deleted_file(self):
-        lines = [
-            " deleted.py | 12 --------------------",
-            " 1 file changed, 12 deletions(-)",
-        ]
-        result = _parse_diffstat(lines)
-        assert len(result) == 1
-        assert result[0]["path"] == "deleted.py"
+        result = _parse_numstat(["0\t12\tdeleted.py"])
         assert result[0]["additions"] == 0
-        # The visual bar has 20 `-` characters for 12 deletions (scaled)
-        assert result[0]["deletions"] == 20
+        assert result[0]["deletions"] == 12
 
-    def test_empty_lines(self):
-        result = _parse_diffstat([])
+    def test_binary_file(self):
+        result = _parse_numstat(["-\t-\timage.png"])
+        assert len(result) == 1
+        assert result[0]["path"] == "image.png"
+        assert result[0]["binary"] is True
+        assert result[0]["additions"] == 0
+        assert result[0]["deletions"] == 0
+
+    def test_empty_input(self):
+        assert _parse_numstat([]) == []
+
+    def test_no_tab_separator_skipped(self):
+        result = _parse_numstat(["not a valid line"])
         assert result == []
-
-    def test_no_stat_lines_only_total(self):
-        result = _parse_diffstat([" 0 files changed"])
-        assert result == []
-
-    def test_no_changes(self):
-        result = _parse_diffstat([" 0 files changed"])
-        assert result == []
-
-
-def _make_container_for_summary(diff_stdout: str, meta: str = "{}") -> MagicMock:
-    """Create a container mock that returns the given diff output.
-
-    The mock responds to:
-    1. Meta read (cat .sandbox-meta.json)
-    2. git diff --stat
-    """
-    container = MagicMock()
-    container.exec_run.side_effect = lambda cmd, **kw: (
-        _exec_for(cmd, diff_stdout, meta)
-        if isinstance(cmd, list) and len(cmd) == 3
-        else (0, (b"", b""))
-    )
-    return container
-
-
-def _exec_for(cmd: object, diff_stdout: str, meta: str):
-    cmd_str = cmd[-1] if isinstance(cmd, list) and len(cmd) == 3 else str(cmd)
-    if "cat /home/sandbox/.sandbox-meta.json" in cmd_str:
-        return (0, (meta.encode(), b""))
-    if "git diff" in cmd_str:
-        return (0, (diff_stdout.encode(), b""))
-    return (0, (b"", b""))
 
 
 class TestDiffInContainer:
@@ -123,11 +83,7 @@ class TestDiffInContainer:
 
     def test_summary_no_changes(self):
         container = MagicMock()
-        git_parts = [
-            (0, (b'{"clone_path":"/repo"}', b"")),
-            (0, (b"", b"")),
-        ]
-        container.exec_run.side_effect = git_parts
+        container.exec_run.return_value = (0, (b"", b""))
 
         with patch(
             "code_sandbox_mcp.tools.diff._docker",
@@ -147,12 +103,11 @@ class TestDiffInContainer:
 
     def test_summary_with_changes(self):
         container = MagicMock()
-        git_output = (
-            " src/foo.py | 10 ++++++----\n"
-            " src/bar.py | 3 ++-\n"
-            " 2 files changed, 8 insertions(+), 5 deletions(-)\n"
+        numstat_output = (
+            "10\t5\tsrc/foo.py\n"
+            "3\t1\tsrc/bar.py\n"
         )
-        container.exec_run.return_value = (0, (git_output.encode(), b""))
+        container.exec_run.return_value = (0, (numstat_output.encode(), b""))
 
         with patch(
             "code_sandbox_mcp.tools.diff._docker",
@@ -166,15 +121,14 @@ class TestDiffInContainer:
             result = json.loads(diff_in_container("abc123def456", base="main"))
 
         assert result["total_files"] == 2
-        assert result["total_additions"] == 8
-        assert result["total_deletions"] == 5
+        assert result["total_additions"] == 13
+        assert result["total_deletions"] == 6
 
     def test_summary_with_base_from_meta(self):
         container = MagicMock()
-        git_output = " new.py | 5 +++++\n 1 file changed, 5 insertions(+)\n"
         side_effects = [
             (0, (b'{"clone_path":"/repo","base_branch":"main"}', b"")),
-            (0, (git_output.encode(), b"")),
+            (0, (b"5\t0\tnew.py\n", b"")),
         ]
         container.exec_run.side_effect = side_effects
 
@@ -313,3 +267,32 @@ class TestDiffInContainer:
 
         assert result["status"] == "error"
         assert "git diff failed" in result["error"]
+
+    def test_no_newline_at_eof(self):
+        """``\\ No newline at end of file`` is included in the preceding hunk."""
+        container = MagicMock()
+        git_output = (
+            "@@ -1,2 +1,3 @@\n"
+            " a\n"
+            "-b\n"
+            "+c\n"
+            "+d\n"
+            "\\ No newline at end of file\n"
+        )
+        container.exec_run.return_value = (0, (git_output.encode(), b""))
+
+        with patch(
+            "code_sandbox_mcp.tools.diff._docker",
+            return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
+        ), patch(
+            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "code_sandbox_mcp.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container(
+                "abc123def456", base="main", path="foo.py"
+            ))
+
+        assert result["total"] == 1
+        assert "\\ No newline" in result["hunks"][0]["content"]

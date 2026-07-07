@@ -13,12 +13,17 @@ from code_sandbox_mcp.journal import record_tool_use
 from code_sandbox_mcp.tools.common import _docker
 from code_sandbox_mcp.tools.vcs import resolve_git_root
 
+#: Path inside the container for clone/PR metadata (also referenced by
+#: ``resolve_git_root`` in ``vcs.py`` and ``_write_clone_meta`` in
+#: ``container.py``).
+_META_PATH = "/home/sandbox/.sandbox-meta.json"
+
 
 def _read_container_meta(container) -> dict:
     """Read ``.sandbox-meta.json`` from the container, or return empty dict."""
     ec, out = container.exec_run(
         ["/bin/sh", "-c",
-         "cat /home/sandbox/.sandbox-meta.json 2>/dev/null || echo '{}'"],
+         f"cat {shlex.quote(_META_PATH)} 2>/dev/null || echo '{{}}'"],
         stdout=True,
     )
     if ec == 0:
@@ -31,41 +36,47 @@ def _read_container_meta(container) -> dict:
     return {}
 
 
-def _parse_diffstat(lines: Sequence[str]) -> list[dict]:
-    """Parse ``git diff --stat`` output into structured records.
+def _parse_numstat(lines: Sequence[str]) -> list[dict]:
+    """Parse ``git diff --numstat`` output into structured records.
 
-    Handles the standard format::
+    Format (tab-separated)::
 
-        src/foo.py | 10 +++++-----
-        src/bar.py | 3 ++-
-        2 files changed, 8 insertions(+), 5 deletions(-)
+        additions<tab>deletions<tab>path
+        -<tab>-<tab>path   (binary)
+
+    Example::
+
+        10      5       src/foo.py
+        3       1       src/bar.py
     """
     records: list[dict] = []
     for line in lines:
         line = line.rstrip()
-        if not line or " changed," in line or " file" in line:
+        if not line:
             continue
-        m = re.match(
-            r"^\s*(.+?)\s+\|\s+(\d+)\s+([+-]+)$",
-            line,
-        )
-        if m:
-            path_str = m.group(1).strip()
-            changes = m.group(3)
-            additions = changes.count("+")
-            deletions = changes.count("-")
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        raw_add, raw_del, path = parts[0], parts[1], parts[2]
+        if raw_add == "-" and raw_del == "-":
             records.append({
-                "path": path_str,
-                "additions": additions,
-                "deletions": deletions,
-                "changes": additions + deletions,
-            })
-        else:
-            records.append({
-                "path": line.strip(),
+                "path": path,
                 "additions": 0,
                 "deletions": 0,
                 "changes": 0,
+                "binary": True,
+            })
+        else:
+            try:
+                additions = int(raw_add)
+                deletions = int(raw_del)
+            except ValueError:
+                continue
+            records.append({
+                "path": path,
+                "additions": additions,
+                "deletions": deletions,
+                "changes": additions + deletions,
             })
     return records
 
@@ -84,12 +95,12 @@ def diff_in_container(
 
     **Summary mode** (no *path*): returns a list of file records, each
     with ``path``, ``additions``, ``deletions``, and ``changes`` count
-    — the structured equivalent of ``git diff --stat``.
+    \u2014 the structured equivalent of ``git diff --numstat``.
 
     **File mode** (*path* given): returns the hunks for that file as an
     array of hunk objects with ``old_start``, ``old_count``,
-    ``new_start``, ``new_count``, and ``content`` (the hunk header +
-    diff lines).  Supports *offset* / *limit* pagination.
+    ``new_start``, ``new_count``, ``header``, and ``content`` (the hunk
+    header + diff lines).  Supports *offset* / *limit* pagination.
 
     *base* defaults to the PR's base branch when the container was
     started with ``pr=N`` (stored in ``.sandbox-meta.json``), or
@@ -107,7 +118,8 @@ def diff_in_container(
         limit: Maximum number of hunks to return in file mode (default 50).
 
     Returns:
-        JSON string.  In summary mode: ``{files: [...], total_changes: N}``.
+        JSON string.  In summary mode:
+        ``{files: [...], total_files, total_additions, total_deletions}``.
         In file mode: ``{path: str, hunks: [...], shown, total, truncated,
         next_offset}``.
     """
@@ -143,8 +155,8 @@ def diff_in_container(
 
 
 def _summary_diff(container, safe_wd: str, safe_base: str) -> str:
-    """Return file-by-file diff summary."""
-    cmd = f"cd {safe_wd} && git diff {safe_base}...HEAD --stat 2>/dev/null"
+    """Return file-by-file diff summary via ``--numstat``."""
+    cmd = f"cd {safe_wd} && git diff {safe_base}...HEAD --numstat 2>/dev/null"
     ec, out = container.exec_run(["/bin/sh", "-c", cmd], stdout=True)
     stdout, _ = (out if isinstance(out, tuple) else (out, b""))
     raw = stdout.decode("utf-8", errors="replace") if stdout else ""
@@ -157,11 +169,9 @@ def _summary_diff(container, safe_wd: str, safe_base: str) -> str:
         })
 
     lines = raw.split("\n")
-    files = _parse_diffstat(lines)
-
-    # Parse total line: "N files changed, M insertions(+), K deletions(-)"
-    total_additions = sum(f["additions"] for f in files)
-    total_deletions = sum(f["deletions"] for f in files)
+    files = _parse_numstat(lines)
+    total_additions = sum(f.get("additions", 0) for f in files)
+    total_deletions = sum(f.get("deletions", 0) for f in files)
 
     return json.dumps({
         "files": files,
@@ -174,7 +184,6 @@ def _summary_diff(container, safe_wd: str, safe_base: str) -> str:
 def _file_diff(container, safe_wd: str, safe_base: str, path: str, offset: int, limit: int) -> str:
     """Return per-file hunks with pagination."""
     safe_path = shlex.quote(path)
-    # Get the full unified diff for the file
     cmd = (
         f"cd {safe_wd} && git diff {safe_base}...HEAD -- {safe_path} 2>/dev/null"
     )
@@ -195,7 +204,6 @@ def _file_diff(container, safe_wd: str, safe_base: str, path: str, offset: int, 
             "error": f"No diff for path: {path}",
         })
 
-    # Parse hunks from unified diff
     hunks: list[dict] = []
     current_hunk: dict | None = None
     for line in raw.split("\n"):
@@ -214,6 +222,7 @@ def _file_diff(container, safe_wd: str, safe_base: str, path: str, offset: int, 
                 "content": line + "\n",
             }
         elif current_hunk is not None:
+            # ``\ No newline at end of file`` is part of the previous hunk
             current_hunk["content"] += line + "\n"
 
     if current_hunk:

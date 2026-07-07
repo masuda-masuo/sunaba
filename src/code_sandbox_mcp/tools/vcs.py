@@ -765,6 +765,24 @@ def sandbox_pr_review_write(
     if pr < 1:
         return json.dumps({"status": "error", "error": f"Invalid PR number: {pr}"})
 
+    if comments is not None:
+        for i, c in enumerate(comments):
+            if not isinstance(c, dict):
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Invalid comment at index {i}: expected a dict, got {type(c).__name__}",
+                })
+            if "path" not in c:
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Comment at index {i} is missing required key 'path'",
+                })
+            if "body" not in c:
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Comment at index {i} is missing required key 'body'",
+                })
+
     client = _docker()
     try:
         client.containers.get(container_id)

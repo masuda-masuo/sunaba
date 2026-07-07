@@ -43,6 +43,43 @@ class TestSandboxPrReviewWriteValidation:
         assert "error" in result
         assert "not found" in result["error"]
 
+    def test_invalid_comment_not_a_dict(self) -> None:
+        result = _decode(sandbox_pr_review_write(
+            container_id="abc123def456", repo="owner/repo", pr=1,
+            event="COMMENT", comments=["not a dict"],
+        ))
+        assert "error" in result
+        assert "expected a dict" in result["error"]
+
+    def test_comment_missing_path(self) -> None:
+        result = _decode(sandbox_pr_review_write(
+            container_id="abc123def456", repo="owner/repo", pr=1,
+            event="COMMENT", comments=[{"body": "look here"}],
+        ))
+        assert "error" in result
+        assert "path" in result["error"]
+
+    def test_comment_missing_body(self) -> None:
+        result = _decode(sandbox_pr_review_write(
+            container_id="abc123def456", repo="owner/repo", pr=1,
+            event="COMMENT", comments=[{"path": "src/main.py"}],
+        ))
+        assert "error" in result
+        assert "body" in result["error"]
+
+    @patch("code_sandbox_mcp.tools.vcs._docker")
+    def test_empty_comments_list_is_accepted(self, mock_docker: MagicMock) -> None:
+        mock_docker.return_value = _make_client_mock(MagicMock())
+        from docker.errors import NotFound as DockerNotFound
+        mock_docker.return_value.containers.get.side_effect = DockerNotFound("no container")
+
+        result = _decode(sandbox_pr_review_write(
+            container_id="abc123def456", repo="owner/repo", pr=1,
+            event="COMMENT", comments=[],
+        ))
+        assert "error" in result
+        assert "not found" in result["error"]
+
 
 class TestSandboxPrReviewWriteExecute:
     """One-shot PR review via the host-side REST API."""

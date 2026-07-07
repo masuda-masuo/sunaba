@@ -25,6 +25,7 @@ def _make_container_mock(exec_returns: list[tuple[int, tuple[bytes, bytes]]]):
 
 _PR_INFO_JSON = json.dumps({
     "headRefName": "feature-branch",
+    "baseRefName": "main",
 })
 
 
@@ -126,7 +127,7 @@ class TestSetupPrBranch:
     def test_repo_name_in_path(self):
         mock_container = MagicMock()
         mock_container.exec_run.side_effect = [
-            (0, (b'{"headRefName":"feature-branch"}', b"")),
+            (0, (b'{"headRefName":"feature-branch","baseRefName":"main"}', b"")),
             (0, (b"Cloning into '/tmp/repo/myrepo'...", b"")),
             (0, (b"Switched to branch 'feature-branch'", b"")),
             (0, (b"Installed", b"")),
@@ -159,10 +160,12 @@ class TestResolvePrHeadRef:
     @patch("urllib.request.urlopen")
     def test_returns_head_ref(self, mock_urlopen, mock_token):
         mock_urlopen.return_value = self._mock_urlopen_response(
-            {"head": {"ref": "feature-branch"}}
+            {"head": {"ref": "feature-branch"}, "base": {"ref": "main"}}
         )
 
-        assert _resolve_pr_head_ref("owner/repo", 136) == "feature-branch"
+        head, base = _resolve_pr_head_ref("owner/repo", 136)
+        assert head == "feature-branch"
+        assert base == "main"
 
         request = mock_urlopen.call_args.args[0]
         assert request.full_url == "https://api.github.com/repos/owner/repo/pulls/136"
@@ -172,7 +175,7 @@ class TestResolvePrHeadRef:
     @patch("urllib.request.urlopen")
     def test_attaches_host_token_when_available(self, mock_urlopen, mock_token):
         mock_urlopen.return_value = self._mock_urlopen_response(
-            {"head": {"ref": "feature-branch"}}
+            {"head": {"ref": "feature-branch"}, "base": {"ref": "main"}}
         )
 
         _resolve_pr_head_ref("owner/repo", 136)
@@ -220,6 +223,16 @@ class TestResolvePrHeadRef:
         with pytest.raises(RuntimeError, match="no head ref"):
             _resolve_pr_head_ref("owner/repo", 136)
 
+    @patch("code_sandbox_mcp.tools.container._resolve_vcs_token", return_value="")
+    @patch("urllib.request.urlopen")
+    def test_missing_base_ref_raises(self, mock_urlopen, mock_token):
+        mock_urlopen.return_value = self._mock_urlopen_response(
+            {"head": {"ref": "feature-branch"}, "base": {}}
+        )
+
+        with pytest.raises(RuntimeError, match="no base ref"):
+            _resolve_pr_head_ref("owner/repo", 136)
+
     def test_invalid_repo_rejected_before_any_request(self):
         with pytest.raises(ValueError):
             _resolve_pr_head_ref("owner/repo/evil?x=1", 136)
@@ -238,7 +251,7 @@ class TestSetupPrBranchAnonymous:
 
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
-            return_value="feature-branch",
+            return_value=("feature-branch", "main"),
         ) as mock_resolve, patch(
             "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
@@ -266,7 +279,7 @@ class TestSetupPrBranchAnonymous:
 
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
-            return_value="feature-branch",
+            return_value=("feature-branch", "main"),
         ), patch(
             "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
@@ -284,7 +297,7 @@ class TestSetupPrBranchAnonymous:
 
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
-            return_value="feature-branch",
+            return_value=("feature-branch", "main"),
         ), patch(
             "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
@@ -326,7 +339,7 @@ class TestSetupPrBranchReadGrant:
 
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
-            return_value="feature-branch",
+            return_value=("feature-branch", "main"),
         ), patch(
             "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
@@ -351,7 +364,7 @@ class TestSetupPrBranchReadGrant:
 
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
-            return_value="feature-branch",
+            return_value=("feature-branch", "main"),
         ), patch(
             "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
@@ -373,10 +386,11 @@ class TestSetupPrBranchReadGrant:
         """authenticated=True (in-container gh token) never needs the proxy
         read grant, even if the caller passes open_read_grant=True."""
         container = _make_container_mock([
-            (0, (b'{"headRefName": "feature-branch"}', b"")),
+            (0, (b'{"headRefName": "feature-branch", "baseRefName": "main"}', b"")),
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
             (0, (b"Switched to branch 'feature-branch'\n", b"")),
             (0, (b"Installed\n", b"")),
+            (0, (b"", b"")),
         ])
 
         with patch("code_sandbox_mcp.tools.container.logger"):
@@ -400,7 +414,7 @@ class TestSetupPrBranchReadGrant:
 
         with patch(
             "code_sandbox_mcp.tools.container._resolve_pr_head_ref",
-            return_value="feature-branch",
+            return_value=("feature-branch", "main"),
         ), patch(
             "code_sandbox_mcp.tools.container._resolve_vcs_token", return_value=""
         ), patch("code_sandbox_mcp.tools.container.logger"):
@@ -422,7 +436,7 @@ class TestSetupPrBranchReadGrant:
         mock_resolve_token.return_value = "ghs_minted"
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps(
-            {"head": {"ref": "feature-branch"}}
+            {"head": {"ref": "feature-branch"}, "base": {"ref": "main"}}
         ).encode()
         mock_urlopen.return_value.__enter__.return_value = mock_response
 

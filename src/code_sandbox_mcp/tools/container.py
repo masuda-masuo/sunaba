@@ -315,18 +315,25 @@ def _select_initial_image(
         return (image or _DEFAULT_IMAGE), None
 
 
-def _write_clone_meta(container: Any, clone_path: str) -> None:
+def _write_clone_meta(container: Any, clone_path: str, base_branch: str | None = None) -> None:
     """Write clone destination path into container metadata.
 
     The metadata file (``/home/sandbox/.sandbox-meta.json``) is read by
     :func:`resolve_git_root` to auto-detect the git repository root
     regardless of the ``clone_dest`` value.
 
+    When *base_branch* is given (e.g. from a PR checkout), it is stored
+    as ``base_branch`` so that :func:`diff_in_container` can resolve the
+    default diff base automatically.
+
     Failures are logged but not propagated so that a metadata write
     failure never breaks an otherwise successful clone.
     """
     try:
-        meta_json = json.dumps({"clone_path": clone_path})
+        meta: dict[str, str] = {"clone_path": clone_path}
+        if base_branch:
+            meta["base_branch"] = base_branch
+        meta_json = json.dumps(meta)
         safe_meta = shlex.quote(meta_json)
         container.exec_run(
             ["/bin/sh", "-c",
@@ -667,8 +674,10 @@ def _try_clone_into_container(
         return CloneResult(None, str(e))
 
 
-def _resolve_pr_head_ref(repo: str, pr_number: int, *, token: str | None = None) -> str:
-    """Resolve a PR's head branch name host-side via the GitHub REST API.
+def _resolve_pr_head_ref(repo: str, pr_number: int, *, token: str | None = None) -> tuple[str, str]:
+    """Resolve a PR's head and base branch names host-side via the GitHub REST API.
+
+    Returns ``(head_ref, base_ref)`` tuple.
 
     A proxied container deliberately holds no VCS token (#356), so it cannot
     run the authenticated ``gh pr view`` the gh checkout path relies on.  The
@@ -726,11 +735,16 @@ def _resolve_pr_head_ref(repo: str, pr_number: int, *, token: str | None = None)
             f"Failed to resolve head ref for PR #{pr_number} in {repo}: {e.reason}"
         ) from e
     head_ref = (data.get("head") or {}).get("ref") or ""
+    base_ref = (data.get("base") or {}).get("ref") or ""
     if not head_ref:
         raise RuntimeError(
             f"GitHub API returned no head ref for PR #{pr_number} in {repo}"
         )
-    return head_ref
+    if not base_ref:
+        raise RuntimeError(
+            f"GitHub API returned no base ref for PR #{pr_number} in {repo}"
+        )
+    return head_ref, base_ref
 
 
 def _setup_pr_branch(
@@ -791,7 +805,7 @@ def _setup_pr_branch(
     anon_token: str | None = None
     if authenticated:
         # Step 1: Get PR head branch info via in-container gh
-        gh_info_cmd = f"gh pr view {pr_number} --repo {safe_repo} --json headRefName"
+        gh_info_cmd = f"gh pr view {pr_number} --repo {safe_repo} --json headRefName,baseRefName"
         exit_code, output = container.exec_run(
             ["/bin/sh", "-c", gh_info_cmd],
             stdout=True,
@@ -811,8 +825,11 @@ def _setup_pr_branch(
             raise RuntimeError(f"Failed to parse PR info JSON: {stdout_text[:200]}")
 
         head_ref = pr_info.get("headRefName", "")
+        base_ref = pr_info.get("baseRefName", "")
         if not head_ref:
             raise RuntimeError(f"Incomplete PR info: head_ref={head_ref!r}")
+        if not base_ref:
+            raise RuntimeError(f"Incomplete PR info: base_ref={base_ref!r}")
 
         # Clone the base repo (not head/fork) so that gh pr checkout
         # works correctly with the PR number from the base repository.
@@ -830,7 +847,7 @@ def _setup_pr_branch(
         # hand the head-ref lookup and the read grant two different tokens
         # for no benefit (#436 review).
         anon_token = _resolve_vcs_token()
-        head_ref = _resolve_pr_head_ref(repo, pr_number, token=anon_token or None)
+        head_ref, base_ref = _resolve_pr_head_ref(repo, pr_number, token=anon_token or None)
         clone_cmd = _build_clone_command(repo, f"{clone_dest}/{repo_name}")
         checkout_cmd = (
             f"cd {safe_dest} && git fetch origin pull/{pr_number}/head"
@@ -934,7 +951,7 @@ def _setup_pr_branch(
                 (stderr_text or install_output).strip(),
             )
 
-    _write_clone_meta(container, safe_dest)
+    _write_clone_meta(container, safe_dest, base_branch=base_ref)
 
     record_copy(
         cid,

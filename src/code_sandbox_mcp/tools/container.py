@@ -1055,7 +1055,6 @@ def _reap_orphaned_init_containers(client: Any = None) -> list[str]:
     return reaped
 
 
-
 def _find_containers_by_name(client, name: str) -> list[str]:
     """Find running containers with the given NAME_LABEL.
 
@@ -1198,7 +1197,7 @@ def sandbox_attach(name_or_id: str) -> str:
     cid = ""
     match_type = ""
 
-    # 1) Try name match
+    # 1) Try name match via NAME_LABEL
     if name_or_id:
         try:
             matches = client.containers.list(
@@ -1209,34 +1208,39 @@ def sandbox_attach(name_or_id: str) -> str:
             matches = []
         if matches:
             container_obj = matches[0]
+            if len(matches) > 1:
+                logger.warning(
+                    "sandbox_attach: multiple containers match name %r, using first (%s)",
+                    name_or_id, container_obj.id[:12],
+                )
             cid = container_obj.id[:12]
             match_type = "name"
 
-    # 2) Try ID prefix match
+    # 2) Try ID prefix match (managed containers only)
     if container_obj is None:
         try:
-            try:
-                container_obj = client.containers.get(name_or_id)
-            except Exception:
-                # ID prefix: list all managed and match by startswith
-                all_managed = client.containers.list(
-                    all=True,
-                    filters={"label": f"{MANAGED_LABEL}=true"},
-                )
-                for c in all_managed:
-                    if c.id.startswith(name_or_id):
-                        container_obj = c
-                        break
+            all_managed = client.containers.list(
+                all=True,
+                filters={"label": f"{MANAGED_LABEL}=true"},
+            )
+            exact_match = [c for c in all_managed if c.id == name_or_id or c.id.startswith(name_or_id)]
+            if len(exact_match) > 1:
+                ids = [c.id[:12] for c in exact_match]
+                return json.dumps({
+                    "found": False,
+                    "error": f"Ambiguous ID prefix {name_or_id!r} matches multiple containers: {ids}",
+                })
+            if exact_match:
+                container_obj = exact_match[0]
+                cid = container_obj.id[:12]
+                match_type = "id"
         except Exception:
             pass
-        if container_obj:
-            cid = container_obj.id[:12]
-            match_type = "id"
 
     if container_obj is None:
         return json.dumps({
             "found": False,
-            "error": f"No container found matching {name_or_id!r}",
+            "error": f"No managed container found matching {name_or_id!r}",
         })
 
     labels = getattr(container_obj, "labels", None) or {}
@@ -1432,13 +1436,6 @@ def sandbox_initialize(
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("orphan reap failed: %s", e)
 
-    # Name collision check (Issue #478): reject if a container with the
-    # same user-assigned name is already running.
-    if name:
-        existing = _find_containers_by_name(_docker(), name)
-        if existing:
-            return f"Error: a container named {name!r} already exists ({existing[0][:12]}); use a different name or sandbox_attach to connect to it"
-
     # When pr is specified, implicitly enable network access.
     if pr is not None:
         allow_network = True
@@ -1452,6 +1449,13 @@ def sandbox_initialize(
         )
 
     client = _docker()
+    # Name collision check (Issue #478): reject if a container with the
+    # same user-assigned name is already running.
+    if name:
+        existing = _find_containers_by_name(client, name)
+        if existing:
+            return f"Error: a container named {name!r} already exists ({existing[0][:12]}); use a different name or sandbox_attach to connect to it"
+
     # Detection-based image selection (Issue #313): when no image is given,
     # pick the variant that matches the project's language instead of a
     # hardcoded default.  *image_notice* explains any neutral fallback.

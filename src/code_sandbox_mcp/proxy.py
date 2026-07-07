@@ -121,6 +121,37 @@ API_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 #: Environment variable holding a comma-separated owner/repo allowlist (#358).
 ALLOWED_REPOS_ENV = "CODE_SANDBOX_ALLOWED_REPOS"
 
+#: Environment variable holding a comma-separated **destination-host**
+#: allowlist (#506).  This is orthogonal to :data:`ALLOWED_REPOS_ENV`, which
+#: is a *write-target* allowlist: this one governs which hosts the sandbox may
+#: reach at all.  Entries *extend* the always-on :data:`DEFAULT_EGRESS_HOSTS`;
+#: an entry beginning with ``.`` matches that domain and its subdomains
+#: (``.example.com`` -> ``example.com`` and ``a.example.com``).  The special
+#: single value ``*`` disables destination-host containment entirely (any host
+#: passes), restoring the pre-#506 passthrough behaviour for operators who
+#: need it.
+ALLOWED_EGRESS_HOSTS_ENV = "CODE_SANDBOX_ALLOWED_EGRESS_HOSTS"
+
+#: Sentinel in the egress-host allowlist meaning "allow any destination host".
+EGRESS_HOST_WILDCARD = "*"
+
+#: Destination hosts always reachable under the egress proxy, independent of
+#: user configuration: GitHub (git smart-HTTP, REST API, archive downloads,
+#: and the ``*.githubusercontent.com`` hosts serving raw files / release
+#: assets) plus the Python and Node package registries, so ``pip`` / ``npm``
+#: keep working under default-deny (#506).  Operators extend this set via
+#: :data:`ALLOWED_EGRESS_HOSTS_ENV`; they cannot shrink it (the built-ins are
+#: what make the proxy usable as a dev sandbox out of the box).
+DEFAULT_EGRESS_HOSTS: frozenset[str] = frozenset({
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    ".githubusercontent.com",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "registry.npmjs.org",
+})
+
 #: Static fallback push token injected into authorized pushes.  The primary
 #: path is the grant-scoped token ``publish`` hands over on ``/auth/allow``
 #: (#356), which needs no sidecar configuration and never outlives its grant;
@@ -314,6 +345,14 @@ API_WRITE_BLOCK_HINT = (
     "first-class tools such as sandbox_issue_write or publish."
 )
 
+#: 403 hint for a host blocked by destination-host containment (#506): the
+#: push/api hints above are irrelevant when the host itself is off-allowlist.
+EGRESS_HOST_BLOCK_HINT = (
+    "The sandbox may only reach allowlisted hosts (GitHub and the package "
+    "registries by default); add the host to CODE_SANDBOX_ALLOWED_EGRESS_HOSTS "
+    "if it is legitimately needed."
+)
+
 
 def block_body(reason: str, hint: str = PUSH_BLOCK_HINT) -> bytes:
     """Build the plain-text 403 body returned to the client for a denied request.
@@ -344,6 +383,7 @@ class EgressGuard:
         self,
         allowed_repos: set[str] | None = None,
         token: str | None = None,
+        allowed_egress_hosts: set[str] | None = None,
     ) -> None:
         """Create a guard.
 
@@ -352,8 +392,21 @@ class EgressGuard:
         regardless of grants.  *token*, when given, is the push token the
         proxy injects into authorized pushes so the container need not hold
         GitHub credentials (#356).
+
+        *allowed_egress_hosts* is the set of **destination hosts** the sandbox
+        may reach (#506); it is unioned with the always-on
+        :data:`DEFAULT_EGRESS_HOSTS` so the built-in registries can never be
+        configured away.  ``None`` (the default) means "built-ins only".  A
+        set containing :data:`EGRESS_HOST_WILDCARD` disables destination-host
+        containment.  This is orthogonal to *allowed_repos*: a host being
+        reachable says nothing about whether a push to it is authorized.
         """
         self._allowed: set[str] = {r.lower() for r in (allowed_repos or ())}
+        extra = {h.lower() for h in (allowed_egress_hosts or ())}
+        #: Destination-host allowlist (#506): built-ins unioned with operator
+        #: additions.  ``EGRESS_HOST_WILDCARD`` anywhere in the set means
+        #: "allow any host" (checked in :meth:`decide_host`).
+        self._allowed_hosts: frozenset[str] = DEFAULT_EGRESS_HOSTS | extra
         #: repo -> (monotonic expiry, grant-scoped push token or ``None``).
         #: The token travels with the grant (#356): ``publish`` hands it over
         #: on ``/auth/allow`` and it is dropped on revoke/expiry, so the proxy
@@ -529,6 +582,27 @@ class EgressGuard:
 
     # -- decision core (pure) --
 
+    def decide_host(self, host: str) -> Decision:
+        """Evaluate a request's **destination host** against the allowlist (#506).
+
+        This is the first gate every request passes through: a host outside
+        the allowlist is denied outright, so the proxy is a default-deny
+        egress point rather than a passthrough that only inspects git pushes.
+        An allowlist entry beginning with ``.`` matches that domain and any
+        subdomain; :data:`EGRESS_HOST_WILDCARD` disables the gate.  Pure and
+        free of grants/clock, so it is unit-testable in isolation.
+        """
+        h = host.lower()
+        if EGRESS_HOST_WILDCARD in self._allowed_hosts:
+            return Decision(True, "destination-host containment disabled (*)")
+        for entry in self._allowed_hosts:
+            if entry.startswith("."):
+                if h == entry[1:] or h.endswith(entry):
+                    return Decision(True, f"{h} matches allowed domain {entry}")
+            elif h == entry:
+                return Decision(True, f"{h} is in the egress host allowlist")
+        return Decision(False, f"egress to {h or '(unknown host)'} is not in the allowlist")
+
     def decide(self, path: str, query_service: str | None, now: float) -> Decision:
         """Evaluate a request against the policy; only git push is gated."""
         if not is_push(path, query_service):
@@ -658,6 +732,19 @@ class EgressGuard:
         path = flow.request.path.split("?", 1)[0]
         host = (flow.request.pretty_host or "").lower()
         now = time.monotonic()
+        # Destination-host containment (#506): the first gate.  A host outside
+        # the allowlist is refused here, before any git/API-specific logic, so
+        # arbitrary HTTPS GET exfil to an unknown host is blocked -- not just
+        # git pushes.  The GitHub hosts and package registries the later
+        # branches rely on are in DEFAULT_EGRESS_HOSTS, so they pass through.
+        host_decision = self.decide_host(host)
+        if not host_decision.allow:
+            flow.response = http.Response.make(
+                403,
+                block_body(host_decision.reason, hint=EGRESS_HOST_BLOCK_HINT),
+                {"Content-Type": "text/plain"},
+            )
+            return
         if host == API_HOST:
             method = flow.request.method
             decision = self.decide_api_write(method, path, now)
@@ -884,6 +971,20 @@ def allowed_repos_from_env(environ: dict[str, str] | None = None) -> set[str]:
     return {r.strip() for r in raw.split(",") if r.strip()}
 
 
+def allowed_egress_hosts_from_env(environ: dict[str, str] | None = None) -> set[str]:
+    """Parse the destination-host allowlist from ``CODE_SANDBOX_ALLOWED_EGRESS_HOSTS``.
+
+    Returns only the operator-supplied hosts (lower-cased); the built-in
+    :data:`DEFAULT_EGRESS_HOSTS` are added by :class:`EgressGuard`, so an unset
+    or empty value yields an empty set and the guard still allows the
+    registries.  The special value ``*`` passes through unchanged so the guard
+    can recognise it as the containment-disable sentinel (#506).
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get(ALLOWED_EGRESS_HOSTS_ENV, "")
+    return {h.strip().lower() for h in raw.split(",") if h.strip()}
+
+
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
@@ -918,5 +1019,6 @@ addons = [
     EgressGuard(
         allowed_repos_from_env(),
         token=os.environ.get(PROXY_TOKEN_ENV) or None,
+        allowed_egress_hosts=allowed_egress_hosts_from_env(),
     )
 ]

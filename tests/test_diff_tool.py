@@ -1,12 +1,13 @@
-"""Tests for diff_in_container tool (Issue #476)."""
+"""Tests for diff_in_container tool (Issue #476, #500)."""
 
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock, patch
 
+from code_sandbox_mcp.tools.common import _parse_numstat
 from code_sandbox_mcp.tools.diff import (
-    _parse_numstat,
+    _parse_name_status,
     diff_in_container,
 )
 
@@ -67,6 +68,49 @@ class TestParseNumstat:
         assert result == []
 
 
+class TestParseNameStatus:
+    """Tests for _parse_name_status helper (git diff --name-status parser)."""
+
+    def test_modified(self):
+        result = _parse_name_status(["M\tsrc/foo.py"])
+        assert result == {"src/foo.py": "M"}
+
+    def test_added(self):
+        result = _parse_name_status(["A\tsrc/new.py"])
+        assert result == {"src/new.py": "A"}
+
+    def test_deleted(self):
+        result = _parse_name_status(["D\tsrc/deleted.py"])
+        assert result == {"src/deleted.py": "D"}
+
+    def test_renamed(self):
+        result = _parse_name_status(["R100\tsrc/old.py\tsrc/new.py"])
+        assert result == {"src/new.py": "R"}
+
+    def test_copied(self):
+        result = _parse_name_status(["C080\tsrc/orig.py\tsrc/copy.py"])
+        assert result == {"src/copy.py": "C"}
+
+    def test_multiple_files(self):
+        result = _parse_name_status([
+            "M\tsrc/foo.py",
+            "A\tsrc/new.py",
+            "R100\tsrc/old.py\tsrc/renamed.py",
+        ])
+        assert result == {
+            "src/foo.py": "M",
+            "src/new.py": "A",
+            "src/renamed.py": "R",
+        }
+
+    def test_empty_input(self):
+        assert _parse_name_status([]) == {}
+
+    def test_no_tab_separator_skipped(self):
+        result = _parse_name_status(["not valid"])
+        assert result == {}
+
+
 class TestDiffInContainer:
     """Tests for diff_in_container tool."""
 
@@ -106,8 +150,17 @@ class TestDiffInContainer:
         numstat_output = (
             "10\t5\tsrc/foo.py\n"
             "3\t1\tsrc/bar.py\n"
-        )
-        container.exec_run.return_value = (0, (numstat_output.encode(), b""))
+        ).encode()
+        name_status_output = b"M\tsrc/foo.py\nM\tsrc/bar.py\n"
+
+        def exec_side_effect(cmd, **kwargs):
+            if "--numstat" in cmd[-1]:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd[-1]:
+                return (0, (name_status_output, b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
 
         with patch(
             "code_sandbox_mcp.tools.diff._docker",
@@ -123,12 +176,138 @@ class TestDiffInContainer:
         assert result["total_files"] == 2
         assert result["total_additions"] == 13
         assert result["total_deletions"] == 6
+        assert result["files"][0]["status"] == "M"
+        assert result["files"][1]["status"] == "M"
+
+    def test_summary_with_mixed_statuses(self):
+        """Files should have correct status from --name-status."""
+        container = MagicMock()
+        numstat_output = b"10\t5\tsrc/foo.py\n0\t8\tdeleted.py\n15\t0\tnew.py\n"
+        name_status_output = b"M\tsrc/foo.py\nD\tdeleted.py\nA\tnew.py\n"
+
+        def exec_side_effect(cmd, **kwargs):
+            if "--numstat" in cmd[-1]:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd[-1]:
+                return (0, (name_status_output, b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "code_sandbox_mcp.tools.diff._docker",
+            return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
+        ), patch(
+            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "code_sandbox_mcp.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container("abc123def456", base="main"))
+
+        statuses = {f["path"]: f["status"] for f in result["files"]}
+        assert statuses == {
+            "src/foo.py": "M",
+            "deleted.py": "D",
+            "new.py": "A",
+        }
+
+    def test_summary_with_renamed_file(self):
+        """Renamed files get status 'R' from --name-status."""
+        container = MagicMock()
+        numstat_output = b"0\t0\tsrc/renamed.py\n"
+        name_status_output = b"R100\tsrc/old.py\tsrc/renamed.py\n"
+
+        def exec_side_effect(cmd, **kwargs):
+            if "--numstat" in cmd[-1]:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd[-1]:
+                return (0, (name_status_output, b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "code_sandbox_mcp.tools.diff._docker",
+            return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
+        ), patch(
+            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "code_sandbox_mcp.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container("abc123def456", base="main"))
+
+        assert result["files"][0]["status"] == "R"
+        assert result["files"][0]["path"] == "src/renamed.py"
+
+    def test_summary_raw_escape_hatch(self):
+        """When raw=True, raw_diff is included in the summary response."""
+        container = MagicMock()
+        numstat_output = b"5\t0\tnew.py\n"
+        name_status_output = b"A\tnew.py\n"
+        raw_diff_output = b"diff --git a/new.py b/new.py\n..."
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            if "--numstat" in cmd_str:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd_str:
+                return (0, (name_status_output, b""))
+            else:
+                return (0, (raw_diff_output, b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "code_sandbox_mcp.tools.diff._docker",
+            return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
+        ), patch(
+            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "code_sandbox_mcp.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container("abc123def456", base="main", raw=True))
+
+        assert "raw_diff" in result
+        assert "diff --git" in result["raw_diff"]
+
+    def test_summary_raw_false_default(self):
+        """When raw=False (default), raw_diff is NOT included."""
+        container = MagicMock()
+        numstat_output = b"5\t0\tnew.py\n"
+        name_status_output = b"A\tnew.py\n"
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            if "--numstat" in cmd_str:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd_str:
+                return (0, (name_status_output, b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "code_sandbox_mcp.tools.diff._docker",
+            return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
+        ), patch(
+            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "code_sandbox_mcp.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container("abc123def456", base="main"))
+
+        assert "raw_diff" not in result
 
     def test_summary_with_base_from_meta(self):
         container = MagicMock()
         side_effects = [
             (0, (b'{"clone_path":"/repo","base_branch":"main"}', b"")),
             (0, (b"5\t0\tnew.py\n", b"")),
+            (0, (b"A\tnew.py\n", b"")),
         ]
         container.exec_run.side_effect = side_effects
 
@@ -296,3 +475,25 @@ class TestDiffInContainer:
 
         assert result["total"] == 1
         assert "\\ No newline" in result["hunks"][0]["content"]
+
+    def test_file_mode_raw_escape_hatch(self):
+        """When raw=True in file mode, raw_diff is included."""
+        container = MagicMock()
+        git_output = "@@ -1,1 +1,1 @@\n-old\n+new\n"
+        container.exec_run.return_value = (0, (git_output.encode(), b""))
+
+        with patch(
+            "code_sandbox_mcp.tools.diff._docker",
+            return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
+        ), patch(
+            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "code_sandbox_mcp.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container(
+                "abc123def456", base="main", path="foo.py", raw=True
+            ))
+
+        assert "raw_diff" in result
+        assert result["raw_diff"] == git_output

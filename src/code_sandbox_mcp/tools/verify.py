@@ -403,7 +403,8 @@ def verify_in_container(
           (filtered failed, full was never executed)
         * ``detected_languages``: list of detected language keys
         * ``tests``: result dict with ``filtered`` and/or ``full`` keys
-        * ``diff_summary``: ``git diff --stat`` output
+        * ``diff_summary``: structured JSON with ``unstaged`` and
+          ``staged`` file-change records
         * ``gate_fail_reasons`` (optional): list of human-readable reasons
     """
     import shlex
@@ -413,6 +414,7 @@ def verify_in_container(
         detect_languages,
         run_lint_type_gate,
     )
+    from code_sandbox_mcp.tools.common import _parse_numstat
     from code_sandbox_mcp.tools.vcs import resolve_git_root
 
     client = _docker()
@@ -462,14 +464,34 @@ def verify_in_container(
         )
         return ec, stdout_text, stderr_text
 
-    # --- Get diff summary ---
-    diff_ec, diff_out, diff_err = _run(
-        "git diff HEAD --stat 2>/dev/null && echo '---UNSTAGED---' && "
-        "git diff --cached --stat 2>/dev/null"
+    # --- Get diff summary (structured JSON, issue #500) ---
+    unstaged_ec, unstaged_raw, _ = _run(
+        "git diff HEAD --numstat 2>/dev/null"
     )
-    diff_summary = (diff_out + "\n" + diff_err).strip()
-    if not diff_summary:
-        diff_summary = "(no changes detected)"
+    staged_ec, staged_raw, _ = _run(
+        "git diff --cached --numstat 2>/dev/null"
+    )
+
+    def _build_diff_section(raw_text: str) -> dict:
+        if not raw_text.strip():
+            return {
+                "files": [],
+                "total_files": 0,
+                "total_additions": 0,
+                "total_deletions": 0,
+            }
+        files = _parse_numstat(raw_text.split("\n"))
+        return {
+            "files": files,
+            "total_files": len(files),
+            "total_additions": sum(f.get("additions", 0) for f in files),
+            "total_deletions": sum(f.get("deletions", 0) for f in files),
+        }
+
+    diff_summary = {
+        "unstaged": _build_diff_section(unstaged_raw),
+        "staged": _build_diff_section(staged_raw),
+    }
 
     # --- Determine if partial test run (filter provided) ---
     has_filter = bool(test_filter or pytest_args)

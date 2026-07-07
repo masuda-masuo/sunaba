@@ -5,7 +5,53 @@ from __future__ import annotations
 import json
 import os
 import shlex
-from typing import Any
+from typing import Any, Sequence
+
+
+def _parse_numstat(lines: Sequence[str]) -> list[dict]:
+    """Parse ``git diff --numstat`` output into structured records.
+
+    Format (tab-separated)::
+
+        additions<tab>deletions<tab>path
+        -<tab>-<tab>path   (binary)
+
+    Example::
+
+        10      5       src/foo.py
+        3       1       src/bar.py
+    """
+    records: list[dict] = []
+    for line in lines:
+        line = line.rstrip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        raw_add, raw_del, path = parts[0], parts[1], parts[2]
+        if raw_add == "-" and raw_del == "-":
+            records.append({
+                "path": path,
+                "additions": 0,
+                "deletions": 0,
+                "changes": 0,
+                "binary": True,
+            })
+        else:
+            try:
+                additions = int(raw_add)
+                deletions = int(raw_del)
+            except ValueError:
+                continue
+            records.append({
+                "path": path,
+                "additions": additions,
+                "deletions": deletions,
+                "changes": additions + deletions,
+            })
+    return records
+
 
 #: Short per-request Docker API timeout (seconds) for *recovery* and
 #: *poll* operations (e.g. ``sandbox_stop``, ``sandbox_exec_check``).

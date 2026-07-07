@@ -722,7 +722,8 @@ class TestVerifyInContainer:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
         mock_container.exec_run.side_effect = [
-            (0, (b"", b"")),  # git diff
+            (0, (b"", b"")),  # git diff HEAD --numstat
+            (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"src\ntests\n", b"")),  # src/tests existence probe
             (5, (b"collected 0 items\n", b"")),  # pytest
         ]
@@ -759,7 +760,8 @@ class TestVerifyInContainer:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
         mock_container.exec_run.side_effect = [
-            (0, (b"", b"")),  # git diff
+            (0, (b"", b"")),  # git diff HEAD --numstat
+            (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"", b"")),  # src/tests existence probe: neither exists
             (5, (b"collected 0 items\n", b"")),  # pytest
         ]
@@ -794,6 +796,7 @@ class TestVerifyInContainer:
         mock_docker.return_value = mock_client
 
         mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
             (0, (b"", b"")),
             (0, (b"", b"")),
             (2, (b"---PYTEST-RAW---\nImportError: No module named 'foo'\n", b"")),
@@ -835,6 +838,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),
             (5, (b"collected 0 items\n", b"")),
         ]
 
@@ -872,6 +876,7 @@ class TestVerifyInContainer:
         mock_docker.return_value = mock_client
 
         mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
             (0, (b"", b"")),
             (0, (b"", b"")),
             (5, (b"collected 0 items\n", b"")),
@@ -919,6 +924,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),
             (0, (f"{json_report}\n---PYTEST-RAW---\n".encode(), b"")),
         ]
 
@@ -956,6 +962,7 @@ class TestVerifyInContainer:
         mock_docker.return_value = mock_client
 
         mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
             (0, (b"", b"")),
             (0, (b"", b"")),
             (2, (b"---PYTEST-RAW---\nImportError: No module named 'bar'\n", b"")),
@@ -999,6 +1006,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),
             (1, (
                 b"---PYTEST-RAW---\n"
                 b"python3: No module named pytest\n",
@@ -1040,6 +1048,7 @@ class TestVerifyInContainer:
 
         # Exit code 1 + "No module named pytest" in raw output
         mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
             (0, (b"", b"")),
             (0, (b"", b"")),
             (1, (

@@ -730,6 +730,12 @@ def _resolve_vcs_token() -> str:
     string when no token is available, in which case the push has no
     credential and fails cleanly -- the container carries none of its
     own (#356/#439).
+
+    Note: the ``AppTokenProvider.get_token()`` step can raise
+    ``RuntimeError`` if the GitHub API is unreachable *and* no
+    previously-cached token is usable — this is intentional: the caller
+    should surface the failure rather than silently falling back to a
+    stale env var.  Broker mint and env var reads never raise.
     """
     minted = token_broker.mint_token()
     if minted:

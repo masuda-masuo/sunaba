@@ -186,6 +186,11 @@ def setup_github_app_token() -> AppTokenProvider | None:
 # Global provider singleton (issue #474)
 # ---------------------------------------------------------------------------
 
+# Shared between the main thread and the refresh daemon thread
+# (server._start_github_app_token_refresh).  The daemon only *reads*
+# the provider (via get_global_provider/get_token), so no lock is needed:
+# CPython's GIL serialises the single-pointer write in set_global_provider
+# and all reads.  No lock needed (issue #474 review).
 _GLOBAL_PROVIDER: AppTokenProvider | None = None
 
 

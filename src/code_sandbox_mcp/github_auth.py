@@ -9,8 +9,10 @@ authentication (same failure mode as shiori #95).
 
 To stay self-sufficient, the server can mint and refresh its *own* short-lived
 GitHub App installation token and publish it to ``os.environ["GITHUB_TOKEN"]``.
-Host-side token resolution (``_resolve_vcs_token()`` / ``token_broker``) reads
-``os.environ["GITHUB_TOKEN"]``, so no change is needed there.
+Host-side token resolution (``_resolve_vcs_token()`` / ``token_broker``) can
+now read directly from the provider (:func:`get_global_provider`) instead of
+``os.environ["GITHUB_TOKEN"]`` (issue #474).  The env write is retained for
+backward compatibility.
 
 Backward compatibility (most important)
 ---------------------------------------
@@ -178,3 +180,27 @@ def setup_github_app_token() -> AppTokenProvider | None:
         os.environ["GITHUB_TOKEN"] = token
         log.info("GITHUB_TOKEN set from GitHub App installation token")
     return provider
+
+
+# ---------------------------------------------------------------------------
+# Global provider singleton (issue #474)
+# ---------------------------------------------------------------------------
+
+_GLOBAL_PROVIDER: AppTokenProvider | None = None
+
+
+def set_global_provider(provider: AppTokenProvider | None) -> None:
+    """Register the AppTokenProvider as the global token source.
+
+    Consumers that call :func:`get_global_provider` then use
+    ``provider.get_token()`` directly instead of reading
+    ``os.environ["GITHUB_TOKEN"]`` — making the env-write refresh
+    thread's side effect replaceable (issue #474).
+    """
+    global _GLOBAL_PROVIDER  # noqa: PLW0603
+    _GLOBAL_PROVIDER = provider
+
+
+def get_global_provider() -> AppTokenProvider | None:
+    """Return the registered :class:`AppTokenProvider`, or ``None``."""
+    return _GLOBAL_PROVIDER

@@ -13,7 +13,7 @@ from typing import Any
 
 from docker.errors import NotFound
 
-from code_sandbox_mcp import proxy_lifecycle, token_broker
+from code_sandbox_mcp import github_auth, proxy_lifecycle, token_broker
 from code_sandbox_mcp.journal import record_boundary_crossing, record_tool_use
 from code_sandbox_mcp.proxy_client import (
     ProxyAuthError,
@@ -725,14 +725,20 @@ def _resolve_vcs_token() -> str:
     its resolution order (broker mint -> static ``GITHUB_TOKEN``/``GH_TOKEN``).
 
     Resolution order: a freshly minted broker token (Issue #232) takes
-    precedence, falling back to the static host ``GITHUB_TOKEN`` /
-    ``GH_TOKEN``.  Returns an empty string when no token is available, in
-    which case the push has no credential and fails cleanly -- the
-    container carries none of its own (#356/#439).
+    precedence, then the global ``AppTokenProvider`` (issue #474), then
+    the static host ``GITHUB_TOKEN`` / ``GH_TOKEN``.  Returns an empty
+    string when no token is available, in which case the push has no
+    credential and fails cleanly -- the container carries none of its
+    own (#356/#439).
     """
     minted = token_broker.mint_token()
     if minted:
         return minted
+    provider = github_auth.get_global_provider()
+    if provider is not None:
+        token = provider.get_token()
+        if token:
+            return token
     for key in ("GITHUB_TOKEN", "GH_TOKEN"):
         val = os.environ.get(key)
         if val:

@@ -23,7 +23,7 @@ from docker.errors import APIError, NotFound
 from fastmcp import Context
 from pydantic import BeforeValidator
 
-from code_sandbox_mcp import image_pins, image_selection, proxy_lifecycle, token_broker
+from code_sandbox_mcp import image_pins, image_selection, proxy_lifecycle
 from code_sandbox_mcp.journal import (
     read_container_states,
     record_boundary_crossing,
@@ -300,11 +300,7 @@ def _select_initial_image(
     try:
         token: str | None = None
         if network_clone:
-            token = (
-                token_broker.mint_token()
-                or os.environ.get("GITHUB_TOKEN")
-                or os.environ.get("GH_TOKEN")
-            )
+            token = _resolve_vcs_token() or None
         return image_selection.resolve_initial_image(
             explicit_image=image,
             target_repo=target_repo,

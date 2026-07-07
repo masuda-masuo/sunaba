@@ -176,7 +176,7 @@ def test_refresh_error_messages(monkeypatch, rsa_pem, code, fragment):
     assert fragment in str(ei.value)
 
 
-def test_refresh_network_error_reuses_cached_token(monkeypatch, rsa_pem):
+# --- global provider singleton (issue #474) -----------------------------------\n\n\ndef test_global_provider_default_none(clean_env):\n    assert github_auth.get_global_provider() is None\n\n\ndef test_set_global_provider(clean_env, rsa_pem):\n    provider = AppTokenProvider(\"123\", rsa_pem, \"456\")\n    github_auth.set_global_provider(provider)\n    assert github_auth.get_global_provider() is provider\n    github_auth.set_global_provider(None)\n    assert github_auth.get_global_provider() is None\n\n\ndef test_resolve_vcs_token_uses_global_provider(monkeypatch, clean_env, rsa_pem):\n    from code_sandbox_mcp.tools import vcs\n\n    clean_env.setenv(\"GITHUB_TOKEN\", \"ghp_static\")\n    provider = AppTokenProvider(\"123\", rsa_pem, \"456\")\n    provider._token = \"ghs_provider_tok\"\n    provider._expires_at = time.time() + 3600\n    github_auth.set_global_provider(provider)\n\n    # provider should take precedence over static env\n    assert vcs._resolve_vcs_token() == \"ghs_provider_tok\"\n    github_auth.set_global_provider(None)\n\n\ndef test_resolve_vcs_token_falls_back_to_env_without_provider(clean_env):\n    from code_sandbox_mcp.tools import vcs\n\n    clean_env.setenv(\"GITHUB_TOKEN\", \"ghp_static\")\n    assert github_auth.get_global_provider() is None\n    assert vcs._resolve_vcs_token() == \"ghp_static\"\n\n\ndef test_refresh_network_error_reuses_cached_token(monkeypatch, rsa_pem):
     prov = AppTokenProvider("1", rsa_pem, "2")
     prov._token = "ghs_cached"
     prov._expires_at = time.time() + 1000  # still valid

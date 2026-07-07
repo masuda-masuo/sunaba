@@ -13,7 +13,7 @@ import time
 
 from fastmcp import FastMCP
 
-from code_sandbox_mcp.github_auth import setup_github_app_token
+from code_sandbox_mcp.github_auth import set_global_provider, setup_github_app_token
 from code_sandbox_mcp.security import (
     compute_default_limits,
     set_default_profile,
@@ -295,6 +295,7 @@ def _start_github_app_token_refresh(interval_seconds: int = 120) -> None:
         return
     if provider is None:
         return
+    set_global_provider(provider)
 
     def _refresh_loop() -> None:
         while True:

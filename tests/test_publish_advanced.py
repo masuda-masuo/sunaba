@@ -444,6 +444,20 @@ class TestResolvePushToken:
             assert _resolve_vcs_token() == "ghs_static"
 
     @patch("code_sandbox_mcp.tools.vcs.token_broker.mint_token")
+    @patch("code_sandbox_mcp.tools.vcs.github_auth.get_global_provider")
+    def test_prefers_global_provider_over_static_env(
+        self, mock_get_provider: MagicMock, mock_mint: MagicMock
+    ) -> None:
+        from code_sandbox_mcp.tools.vcs import _resolve_vcs_token
+
+        mock_mint.return_value = None
+        mock_provider = MagicMock()
+        mock_provider.get_token.return_value = "ghs_provider_tok"
+        mock_get_provider.return_value = mock_provider
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "ghs_static"}, clear=True):
+            assert _resolve_vcs_token() == "ghs_provider_tok"
+
+    @patch("code_sandbox_mcp.tools.vcs.token_broker.mint_token")
     def test_empty_when_no_token_available(self, mock_mint: MagicMock) -> None:
         from code_sandbox_mcp.tools.vcs import _resolve_vcs_token
 

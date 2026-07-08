@@ -948,3 +948,31 @@ def struct_tool_ops_from_journal(structured_ops: dict[str, int]) -> int:
         if tool in tool_values:
             count += n
     return count
+
+
+def get_last_activity_per_container() -> dict[str, str]:
+    """Return the most recent activity timestamp for each container.
+
+    Scans the full journal for ``ts`` fields grouped by ``container_id``.
+    Containers with a ``stop`` entry are excluded (they are no longer
+    active).  The result is a ``{container_id: last_ts}`` mapping where
+    *last_ts* is the ISO-8601 timestamp of the most recent journal entry
+    for that container.
+    """
+    entries = read_journal()
+    last_ts: dict[str, str] = {}
+    seen_stopped: set[str] = set()
+    for entry in entries:
+        cid = entry.get("container_id")
+        if not cid:
+            continue
+        if entry.get("operation") == "stop":
+            seen_stopped.add(cid)
+            last_ts.pop(cid, None)
+            continue
+        ts = entry.get("ts", "")
+        if ts:
+            last_ts[cid] = ts
+    for cid in seen_stopped:
+        last_ts.pop(cid, None)
+    return last_ts

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 from code_sandbox_mcp.security import MANAGED_LABEL, NAME_LABEL
@@ -204,6 +205,7 @@ class TestSandboxListContainers:
 
         result = json.loads(sandbox_list_containers())
         assert result["containers"] == []
+        assert result["reaped_ids"] == []
 
     @patch("code_sandbox_mcp.tools.container._docker")
     def test_list_filters_by_managed_label(
@@ -215,10 +217,11 @@ class TestSandboxListContainers:
         mock_client.containers.list.return_value = []
         mock_docker.return_value = mock_client
 
-        sandbox_list_containers()
+        result = json.loads(sandbox_list_containers())
 
         call_filters = mock_client.containers.list.call_args[1]
         assert call_filters["filters"]["label"] == f"{MANAGED_LABEL}=true"
+        assert result["reaped_ids"] == []
 
     @patch("code_sandbox_mcp.tools.container._docker")
     def test_list_without_name(
@@ -232,6 +235,7 @@ class TestSandboxListContainers:
 
         result = json.loads(sandbox_list_containers())
         assert result["containers"][0]["name"] is None
+        assert result["reaped_ids"] == []
 
 
 class TestSandboxAttach:
@@ -371,3 +375,146 @@ class TestSandboxAttach:
         result = json.loads(sandbox_attach("no-git"))
         assert result["found"] is True
         assert "git" not in result
+
+
+class TestListContainersIdleTime:
+    """sandbox_list_containers with idle time (Issue #480)."""
+
+    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    def test_idle_seconds_in_output(
+        self,
+        mock_docker: MagicMock,
+        mock_activity: MagicMock,
+    ) -> None:
+        """list_containers includes idle_seconds and last_activity_ts."""
+        c = _make_container(container_id="abc111", name="idle-test")
+        client = _make_client([c])
+        mock_docker.return_value = client
+        mock_activity.return_value = {"abc111": "2026-01-01T00:00:00+00:00"}
+
+        result = json.loads(sandbox_list_containers())
+        entry = result["containers"][0]
+        assert "idle_seconds" in entry
+        assert "last_activity_ts" in entry
+        assert entry["last_activity_ts"] == "2026-01-01T00:00:00+00:00"
+
+    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    def test_idle_none_when_no_activity(
+        self,
+        mock_docker: MagicMock,
+        mock_activity: MagicMock,
+    ) -> None:
+        """idle_seconds is None when there is no journal entry."""
+        c = _make_container(container_id="abc222", name="no-activity")
+        client = _make_client([c])
+        mock_docker.return_value = client
+        mock_activity.return_value = {}
+
+        result = json.loads(sandbox_list_containers())
+        entry = result["containers"][0]
+        assert entry["idle_seconds"] is None
+        assert entry["last_activity_ts"] is None
+
+
+class TestGetContainerTTL:
+    """_get_container_ttl_seconds (Issue #480)."""
+
+    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": "3600"})
+    def test_reads_env_var(self) -> None:
+        from code_sandbox_mcp.tools.container import _get_container_ttl_seconds
+        assert _get_container_ttl_seconds() == 3600
+
+    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": ""})
+    def test_empty_env_returns_zero(self) -> None:
+        from code_sandbox_mcp.tools.container import _get_container_ttl_seconds
+        assert _get_container_ttl_seconds() == 0
+
+    @patch.dict(os.environ, {})
+    def test_unset_env_returns_zero(self) -> None:
+        from code_sandbox_mcp.tools.container import _get_container_ttl_seconds
+        assert _get_container_ttl_seconds() == 0
+
+    @patch.dict(os.environ, {"CSB_CONTAINER_TTL_SECONDS": "7200"})
+    def test_deprecated_env_var(self) -> None:
+        from code_sandbox_mcp.tools.container import _get_container_ttl_seconds
+        assert _get_container_ttl_seconds() == 7200
+
+
+class TestReapIdleContainers:
+    """_reap_idle_containers and reap-on-list (Issue #480)."""
+
+    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch.dict(os.environ, {}, clear=True)
+    def test_noop_when_ttl_not_set(
+        self,
+        mock_docker: MagicMock,
+        mock_activity: MagicMock,
+    ) -> None:
+        """Reap is a no-op when TTL env var is not set."""
+        from code_sandbox_mcp.tools.container import _reap_idle_containers
+        result = _reap_idle_containers()
+        assert result == []
+        mock_docker.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
+    def test_reaps_idle_container(
+        self,
+        mock_docker: MagicMock,
+        mock_activity: MagicMock,
+    ) -> None:
+        """Container idle longer than TTL is stopped."""
+        from code_sandbox_mcp.tools.container import _reap_idle_containers
+
+        c = _make_container(container_id="idle-cid", name="idle")
+        client = _make_client([c])
+        mock_docker.return_value = client
+        mock_activity.return_value = {"idle-cid": "2025-01-01T00:00:00+00:00"}
+
+        result = _reap_idle_containers()
+        c.kill.assert_called_once()
+        assert "idle-cid" in result
+
+    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
+    def test_does_not_reap_active_container(
+        self,
+        mock_docker: MagicMock,
+        mock_activity: MagicMock,
+    ) -> None:
+        """Container with recent activity is not stopped."""
+        from code_sandbox_mcp.tools.container import _reap_idle_containers
+
+        c = _make_container(container_id="active-cid", name="active")
+        client = _make_client([c])
+        mock_docker.return_value = client
+        from datetime import datetime, timezone
+        recent = datetime.now(timezone.utc).isoformat()
+        mock_activity.return_value = {"active-cid": recent}
+
+        result = _reap_idle_containers()
+        assert result == []
+        c.kill.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
+    def test_list_reaps_idle_container(
+        self,
+        mock_docker: MagicMock,
+        mock_activity: MagicMock,
+    ) -> None:
+        """sandbox_list_containers reaps idle containers when TTL is set."""
+        c = _make_container(container_id="idle-cid", name="idle")
+        client = _make_client([c])
+        mock_docker.return_value = client
+        mock_activity.return_value = {"idle-cid": "2025-01-01T00:00:00+00:00"}
+
+        result = json.loads(sandbox_list_containers())
+        assert "idle-cid" in result["reaped_ids"]
+        c.kill.assert_called_once()

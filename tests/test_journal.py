@@ -11,6 +11,7 @@ from unittest.mock import patch
 from code_sandbox_mcp.journal import (
     generate_run_id,
     get_journal_path,
+    get_last_activity_per_container,
     get_or_create_run_id,
     get_runs,
     get_session_label,
@@ -702,3 +703,56 @@ class TestSessionLabel:
             # Find the run for our cid
             run = next((r for r in runs if "label-for-runs" in r.get("session_labels", set())), None)
             assert run is not None
+
+
+class TestGetLastActivity:
+    """Tests for get_last_activity_per_container (Issue #480)."""
+
+    def test_empty_journal_returns_empty(self, tmp_path: Path) -> None:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            result = get_last_activity_per_container()
+            assert result == {}
+
+    def test_single_container_activity(self, tmp_path: Path) -> None:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            record_initialize("cid-1", "python@sha256:abcd")
+            result = get_last_activity_per_container()
+            assert "cid-1" in result
+            assert result["cid-1"] is not None
+
+    def test_stopped_container_excluded(self, tmp_path: Path) -> None:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            record_initialize("cid-stopped", "python@sha256:abcd")
+            record_stop("cid-stopped")
+            result = get_last_activity_per_container()
+            assert "cid-stopped" not in result
+
+    def test_multiple_containers(self, tmp_path: Path) -> None:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            record_initialize("cid-a", "python@sha256:abcd")
+            record_exec("cid-a", ["echo hello"], 0)
+            record_initialize("cid-b", "python@sha256:abcd")
+            result = get_last_activity_per_container()
+            assert "cid-a" in result
+            assert "cid-b" in result
+            assert result["cid-a"] >= result["cid-b"]

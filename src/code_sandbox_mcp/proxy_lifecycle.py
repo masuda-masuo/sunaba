@@ -100,7 +100,7 @@ def _resolve_proxy_image(source: MutableMapping[str, str]) -> str:
     return load_proxy_pin() or _DEFAULT_PROXY_IMAGE
 
 #: Host loopback port the control API is published on (``127.0.0.1`` only;
-#: the server and dashboard use 8766/8767, so the sidecar takes the next one).
+#: the server and dashboard use 8750/8751, so the sidecar takes the next one).
 CONTROL_HOST_PORT_ENV = "CODE_SANDBOX_PROXY_CONTROL_HOST_PORT"
 _DEFAULT_CONTROL_HOST_PORT = 8768
 

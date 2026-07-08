@@ -212,16 +212,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port",
         type=int,
-        default=8765,
-        help="Port for HTTP transport (default: 8765)",
+        default=8750,
+        help="Port for HTTP transport (default: 8750)",
     )
     parser.add_argument(
         "--dashboard-port",
         type=int,
-        default=8766,
+        default=8751,
         help=(
             "Start the observability web dashboard on localhost "
-            "(default: 8766).  Pass --dashboard-port 0 to disable."
+            "(default: 8751).  Pass --dashboard-port 0 to disable."
         ),
     )
     parser.add_argument(
@@ -379,7 +379,7 @@ def main() -> None:
 
     ``--default-image`` for overriding the default Docker image,
     ``--transport`` to select the MCP transport protocol,
-    ``--dashboard-port`` for the observability dashboard (default: 8766),
+    ``--dashboard-port`` for the observability dashboard (default: 8751),
     ``--dashboard-host`` to set the bind address (default: 127.0.0.1),
     ``--webhook-url`` for push notifications,
     and ``--log-level`` to control logging verbosity (default: INFO).

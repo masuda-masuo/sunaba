@@ -4,11 +4,17 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from code_sandbox_mcp.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
 from code_sandbox_mcp.tools.vcs import publish
 from tests.conftest import _decode, _make_client_mock, _make_container_mock
 
 
 class TestPublishSquashCheckpoints:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for publish with automatic checkpoint squash."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
@@ -77,6 +83,9 @@ class TestPublishSquashCheckpoints:
 
 
 class TestPublishAllowForcePush:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for publish with allow_force_push=True."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
@@ -116,6 +125,9 @@ class TestPublishAllowForcePush:
 
 
 class TestPublishApiPushFallback:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for publish when git push fails and falls back to _try_api_push."""
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
@@ -183,6 +195,9 @@ class TestPublishApiPushFallback:
 
 
 class TestPublishLazyTokenInjection:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for lazy VCS-token injection at push time (Issue #347).
 
     The token is resolved host-side and handed only to the push / PR

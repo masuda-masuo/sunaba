@@ -4,10 +4,16 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from code_sandbox_mcp.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
 from code_sandbox_mcp.tools.container import run_container_and_exec
 
 
 class TestRunContainerAndExecCloneRepo:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for run_container_and_exec with clone_repo."""
 
     @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
@@ -164,6 +170,9 @@ class TestRunContainerAndExecCloneRepo:
 
 
 class TestRunContainerAndExecPipExtras:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for pip_extras with clone_repo in run_container_and_exec (Issue #245)."""
 
     @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
@@ -467,6 +476,9 @@ class TestRunContainerAndExecTimeout:
 
 
 class TestPipArgs:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for pip_args propagation through _run_pip_install."""
 
     @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)

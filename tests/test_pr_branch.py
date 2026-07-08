@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from code_sandbox_mcp.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
 from code_sandbox_mcp.tools.container import (
     _resolve_pr_head_ref,
     _setup_pr_branch,
@@ -460,6 +461,9 @@ class TestSetupPrBranchReadGrant:
 
 
 class TestSandboxInitializePrParam:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for sandbox_initialize with pr parameter."""
 
     @patch("code_sandbox_mcp.tools.container._docker")
@@ -570,6 +574,9 @@ class TestSandboxInitializePrParam:
 
 
 class TestRunContainerAndExecPrParam:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for run_container_and_exec with pr parameter."""
 
     @patch("code_sandbox_mcp.tools.container._docker")
@@ -703,6 +710,9 @@ class TestPipExtrasParam:
 
 
 class TestCloneRepoPrInteraction:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for clone_repo + pr interaction."""
 
     @patch("code_sandbox_mcp.tools.container._docker")

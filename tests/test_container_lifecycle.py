@@ -17,6 +17,9 @@ from code_sandbox_mcp.tools.container import (
 
 
 class TestSandboxInitializeCloneRepo:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for sandbox_initialize with clone_repo."""
 
     @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
@@ -173,6 +176,9 @@ class TestSandboxInitializeCloneRepo:
 
 
 class TestSandboxInitializeCloneRepoPipExtras:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for pip_extras with clone_repo (Issue #245)."""
 
     @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
@@ -362,7 +368,7 @@ class TestSandboxInitializeCloneRepoPipExtras:
 
 
 class TestSandboxInitializeEgressProxy:
-    """Egress-proxy wiring in sandbox_initialize (#358): opt-in, fail closed."""
+    """Egress-proxy wiring in sandbox_initialize (#358, #509): default-on, fail closed."""
 
     _IMAGE = "python@sha256:" + "0" * 64
     _CA = b"-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
@@ -393,7 +399,7 @@ class TestSandboxInitializeEgressProxy:
         mock_docker: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.delenv(ENABLE_EGRESS_PROXY_ENV, raising=False)
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
         client, _ = self._client()
         mock_docker.return_value = client
 

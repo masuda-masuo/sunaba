@@ -25,6 +25,7 @@ from pydantic import BeforeValidator
 
 from code_sandbox_mcp import image_pins, image_selection, proxy_lifecycle
 from code_sandbox_mcp.journal import (
+    get_session_label,
     read_container_states,
     read_journal,
     record_boundary_crossing,
@@ -32,6 +33,7 @@ from code_sandbox_mcp.journal import (
     record_initialize,
     record_initialize_complete,
     record_stop,
+    set_session_label,
 )
 from code_sandbox_mcp.journal import (
     record_exec as journal_record_exec,
@@ -1136,7 +1138,7 @@ def sandbox_list_containers() -> str:
     return json.dumps({"containers": result}, ensure_ascii=False)
 
 
-def sandbox_attach(name_or_id: str) -> str:
+def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
     """Connect to an existing container by name or ID prefix.
 
     Looks up the container by:
@@ -1144,6 +1146,16 @@ def sandbox_attach(name_or_id: str) -> str:
     1. **Name match** — the ``NAME_LABEL`` Docker label (set via
        ``sandbox_initialize(name=...)``)
     2. **ID prefix match** — a 12-character (or longer) container ID prefix
+
+    Args:
+        name_or_id: A user-assigned container name (from
+            ``sandbox_initialize(name=...)``) or a 12-character (or longer)
+            container ID prefix.
+        session_label: Optional session identifier string.  When provided,
+            this label is recorded in the journal for all subsequent
+            operations on this container, replacing any previous label.
+            Use this to distinguish operations from different model
+            sessions or task contexts (Issue #479).
 
     Returns a JSON orientation summary:
 
@@ -1153,6 +1165,7 @@ def sandbox_attach(name_or_id: str) -> str:
     - ``status`` (str): Docker status
     - ``image`` (str): image ref
     - ``created_at`` (str | None): ISO-8601 creation time
+    - ``session_label`` (str | None): current session label attached to this container
     - ``git``: git orientation when available:
         - ``branch`` (str | None): current git branch
         - ``status_short`` (str | None): ``git status --short`` output
@@ -1260,6 +1273,12 @@ def sandbox_attach(name_or_id: str) -> str:
         "match_type": match_type,
     }
 
+    if session_label is not None:
+        set_session_label(cid, session_label)
+    current_label = get_session_label(cid)
+    if current_label is not None:
+        result["session_label"] = current_label
+
     # --- Git orientation ---
     try:
         working_dir = resolve_git_root(container_obj, None)
@@ -1321,6 +1340,7 @@ def sandbox_initialize(
     mem_limit: str | None = None,
     cpus: float | None = None,
     name: str | None = None,
+    session_label: str | None = None,
 ) -> str:
     """Start a new Docker sandbox container.
 
@@ -1409,6 +1429,11 @@ def sandbox_initialize(
                disabled at the new ceiling.
         cpus: Optional CPU-limit override in cores (e.g. ``2.0``).
                Defaults to the profile's 0.5-core cap when omitted.
+        session_label: Optional session identifier string.  When provided,
+               this label is recorded in the journal for all subsequent
+               operations on this container, replacing any previous label.
+               Use this to distinguish operations from different model
+               sessions or task contexts (Issue #479).
         name: Optional user-assigned name for the container (e.g.
                ``\"issue-123\"``).  Stored as a Docker label so it survives
                server restarts.  When a container with the same *name*
@@ -1546,6 +1571,7 @@ def sandbox_initialize(
         allow_network=allow_network,
         mem_limit=mem_limit,
         cpus=cpus,
+        session_label=session_label,
     )
 
     # The CA must be trusted before anything in the sandbox (starting with
@@ -1650,6 +1676,7 @@ async def sandbox_initialize_tool(
     mem_limit: str | None = None,
     cpus: float | None = None,
     name: str | None = None,
+    session_label: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Start a new Docker sandbox container (async MCP entry point).
@@ -1669,6 +1696,9 @@ async def sandbox_initialize_tool(
     full per-parameter docs (this wrapper's own docstring is what MCP
     clients actually see, since the inner function is never registered as a
     tool -- callers should not need to open the source to learn this).
+
+    ``session_label`` is forwarded to :func:`sandbox_initialize` \u2014 see its
+    docstring for details.
 
     **Private-repo note (``pr=`` and** ``clone_repo`` **on a private
     repository):** under the egress proxy (#403), ``pr=N`` resolves the PR
@@ -1695,6 +1725,7 @@ async def sandbox_initialize_tool(
             mem_limit=mem_limit,
             cpus=cpus,
             name=name,
+            session_label=session_label,
         )
 
     if ctx is None:
@@ -1800,6 +1831,7 @@ def run_container_and_exec(
     pip_args: str | None = None,
     timeout: int = 0,
     max_output_tokens: int = 0,
+    session_label: str | None = None,
 ) -> str:
     """Start a container, execute commands, then remove it (one-shot).
 
@@ -1884,6 +1916,11 @@ def run_container_and_exec(
         pip_args: Additional pip arguments (e.g. ``"--index-url https://download.pytorch.org/whl/cpu"``)
                passed through to the pip install command.
                Ignored when *pip_extras* is ``None`` since pip install is skipped entirely.
+        session_label: Optional session identifier string.  When provided,
+               this label is recorded in the journal for all subsequent
+               operations on this container, replacing any previous label.
+               Use this to distinguish operations from different model
+               sessions or task contexts (Issue #479).
         timeout: Maximum seconds to let the command run (``0`` = no
                limit, the default).  When the timeout expires the process
                is killed and the tool returns ``status="timeout"`` with
@@ -1975,6 +2012,7 @@ def run_container_and_exec(
         allow_network=allow_network,
         mem_limit=None,
         cpus=None,
+        session_label=session_label,
     )
 
     # Same fail-closed CA wiring as sandbox_initialize (#358).

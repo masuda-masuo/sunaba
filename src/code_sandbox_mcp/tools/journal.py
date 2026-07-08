@@ -11,6 +11,7 @@ from code_sandbox_mcp.trace import generate_html_trace, generate_json_trace, get
 def sandbox_read_journal(
     run_id: str | None = None,
     max_entries: int = 100,
+    session_label: str | None = None,
 ) -> str:
     """Read the append-only execution journal.
 
@@ -23,13 +24,15 @@ def sandbox_read_journal(
             Omit to see all journal entries.
         max_entries: Maximum number of entries to return
             (most recent first, default 100).
+        session_label: If provided, only return entries with this
+            session label (Issue #479).
 
     Returns:
         JSON string with a list of journal entry objects, each
         containing ``ts``, ``run_id``, ``container_id``,
         ``operation``, and operation-specific fields.
     """
-    entries = read_journal(run_id=run_id, max_entries=max_entries)
+    entries = read_journal(run_id=run_id, max_entries=max_entries, session_label=session_label)
     return json.dumps(entries, ensure_ascii=False)
 
 

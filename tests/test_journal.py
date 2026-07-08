@@ -13,6 +13,7 @@ from code_sandbox_mcp.journal import (
     get_journal_path,
     get_or_create_run_id,
     get_runs,
+    get_session_label,
     read_container_states,
     read_journal,
     record_boundary_crossing,
@@ -23,6 +24,7 @@ from code_sandbox_mcp.journal import (
     record_initialize_complete,
     record_stop,
     remove_run_id,
+    set_session_label,
 )
 
 
@@ -622,3 +624,81 @@ class TestJournalRotation:
             cids = {e["container_id"] for e in active}
             assert "env1" in cids
             assert "env2" in cids
+
+
+class TestSessionLabel:
+    """Tests for session_label tracking (Issue #479)."""
+
+    def test_set_and_get_session_label(self) -> None:
+        set_session_label("cid-sess-1", "my-session")
+        assert get_session_label("cid-sess-1") == "my-session"
+
+    def test_get_session_label_default_none(self) -> None:
+        assert get_session_label("cid-sess-nonexistent") is None
+
+    def test_set_session_label_overwrites(self) -> None:
+        set_session_label("cid-sess-2", "first-label")
+        set_session_label("cid-sess-2", "second-label")
+        assert get_session_label("cid-sess-2") == "second-label"
+
+    def test_remove_run_id_clears_label(self) -> None:
+        get_or_create_run_id("cid-sess-3")
+        set_session_label("cid-sess-3", "label-to-clear")
+        remove_run_id("cid-sess-3")
+        assert get_session_label("cid-sess-3") is None
+
+    def test_record_initialize_includes_session_label(self, tmp_path: Path) -> None:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            set_session_label("cid-sess-4", "issue479-test")
+            record_initialize("cid-sess-4", "python@sha256:abcd", allow_network=True)
+
+        entries = _read_log(log_path)
+        assert len(entries) == 1
+        assert entries[0]["session_label"] == "issue479-test"
+
+    def test_read_journal_filters_by_session_label(self, tmp_path: Path) -> None:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            set_session_label("cid-sess-5a", "session-a")
+            record_initialize("cid-sess-5a", "python@sha256:a")
+            set_session_label("cid-sess-5b", "session-b")
+            record_initialize("cid-sess-5b", "python@sha256:b")
+
+            all_entries = read_journal()
+            assert len(all_entries) == 2
+
+            entries_a = read_journal(session_label="session-a")
+            assert len(entries_a) == 1
+            assert entries_a[0]["container_id"] == "cid-sess-5a"
+
+            entries_b = read_journal(session_label="session-b")
+            assert len(entries_b) == 1
+            assert entries_b[0]["container_id"] == "cid-sess-5b"
+
+            entries_c = read_journal(session_label="nonexistent")
+            assert len(entries_c) == 0
+
+    def test_session_label_in_get_runs(self, tmp_path: Path) -> None:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
+             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+            set_session_label("cid-sess-6", "label-for-runs")
+            record_initialize("cid-sess-6", "python@sha256:abcd")
+
+            runs = get_runs()
+            assert len(runs) > 0
+            # Find the run for our cid
+            run = next((r for r in runs if "label-for-runs" in r.get("session_labels", set())), None)
+            assert run is not None

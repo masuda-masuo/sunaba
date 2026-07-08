@@ -57,13 +57,37 @@ def _utcnow_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Run ID mapping
+# Run ID mapping / Session label
 # ---------------------------------------------------------------------------
 
 #: Maps container ID prefixes → run IDs so that all operations on the
 #: same container share a run_id.
 _run_map: dict[str, str] = {}
 _run_map_lock: threading.Lock = threading.Lock()
+
+#: Maps container ID prefixes → session labels so that all operations
+#: on the same container (for the current attach session) share a label.
+_session_map: dict[str, str] = {}
+_session_map_lock: threading.Lock = threading.Lock()
+
+
+def set_session_label(container_id: str, label: str | None) -> None:
+    """Set the session label for *container_id*.
+
+    Pass ``None`` to clear.  When set, all subsequent journal entries
+    for this container include ``session_label``.
+    """
+    with _session_map_lock:
+        if label is None:
+            _session_map.pop(container_id, None)
+        else:
+            _session_map[container_id] = label
+
+
+def get_session_label(container_id: str) -> str | None:
+    """Return the current session label for *container_id*, or ``None``."""
+    with _session_map_lock:
+        return _session_map.get(container_id)
 
 
 def generate_run_id() -> str:
@@ -83,6 +107,7 @@ def remove_run_id(container_id: str) -> None:
     """Remove the run_id mapping when a container is stopped."""
     with _run_map_lock:
         _run_map.pop(container_id, None)
+    set_session_label(container_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +267,7 @@ def record_initialize(
     allow_network: bool = False,
     mem_limit: str | None = None,
     cpus: float | None = None,
+    session_label: str | None = None,
 ) -> None:
     """Record a container initialization event.
 
@@ -251,7 +277,11 @@ def record_initialize(
         allow_network: Whether network access was granted.
         mem_limit: Override mem_limit if specified (Issue #201).
         cpus: Override cpus if specified (Issue #201).
+        session_label: Optional session identifier (e.g. model name,
+            task name) for this session (Issue #479).
     """
+    if session_label is not None:
+        set_session_label(container_id, session_label)
     run_id = get_or_create_run_id(container_id)
     entry: dict[str, Any] = {
         "ts": _utcnow_iso(),
@@ -261,6 +291,9 @@ def record_initialize(
         "image": image,
         "allow_network": allow_network,
     }
+    label = get_session_label(container_id)
+    if label is not None:
+        entry["session_label"] = label
     if mem_limit is not None:
         entry["mem_limit"] = mem_limit
     if cpus is not None:
@@ -279,12 +312,16 @@ def record_initialize_complete(container_id: str) -> None:
     the signal that an ``initialize`` was abandoned partway through.
     """
     run_id = get_or_create_run_id(container_id)
-    _append_json({
+    entry: dict[str, Any] = {
         "ts": _utcnow_iso(),
         "run_id": run_id,
         "container_id": container_id,
         "operation": "initialize_complete",
-    })
+    }
+    label = get_session_label(container_id)
+    if label is not None:
+        entry["session_label"] = label
+    _append_json(entry)
     _update_container_state(container_id, complete=True)
 
 
@@ -296,6 +333,7 @@ def record_exec(
     allow_network: bool = False,
     output_size: int = 0,
     max_output_tokens: int | None = None,
+    session_label: str | None = None,
 ) -> None:
     """Append an ``exec`` operation entry to the run journal.
 
@@ -303,6 +341,8 @@ def record_exec(
     size, boundary crossing) under the run id resolved from
     *container_id*.
     """
+    if session_label is not None:
+        set_session_label(container_id, session_label)
     run_id = get_or_create_run_id(container_id)
     boundary = allow_network
     entry: dict[str, Any] = {
@@ -316,6 +356,9 @@ def record_exec(
         "boundary_crossing": boundary,
         "output_size": output_size,
     }
+    label = get_session_label(container_id)
+    if label is not None:
+        entry["session_label"] = label
     if max_output_tokens is not None:
         entry["max_output_tokens"] = max_output_tokens
     _append_json(entry)
@@ -325,12 +368,16 @@ def record_exec(
 def record_stop(container_id: str) -> None:
     """Record a container stop event."""
     run_id = get_or_create_run_id(container_id)
-    _append_json({
+    entry: dict[str, Any] = {
         "ts": _utcnow_iso(),
         "run_id": run_id,
         "container_id": container_id,
         "operation": "stop",
-    })
+    }
+    label = get_session_label(container_id)
+    if label is not None:
+        entry["session_label"] = label
+    _append_json(entry)
     _update_container_state(container_id, stopped=True)
     remove_run_id(container_id)
 
@@ -340,12 +387,15 @@ def record_boundary_crossing(
     operation: str,
     details: str,
     approved: bool | None = None,
+    session_label: str | None = None,
 ) -> None:
     """Record a boundary-crossing operation.
 
     *approved* is ``None`` when no approval was required (e.g. read-only
     VCS access that only needs journal recording).
     """
+    if session_label is not None:
+        set_session_label(container_id, session_label)
     run_id = get_or_create_run_id(container_id)
     entry: dict[str, Any] = {
         "ts": _utcnow_iso(),
@@ -356,6 +406,9 @@ def record_boundary_crossing(
         "details": details,
         "approved": approved,
     }
+    label = get_session_label(container_id)
+    if label is not None:
+        entry["session_label"] = label
     _append_json(entry)
 
 
@@ -374,7 +427,7 @@ def record_file_write(
     flag "test changes" as a first-class signal (Issue #96).
     """
     run_id = get_or_create_run_id(container_id)
-    _append_json({
+    entry: dict[str, Any] = {
         "ts": _utcnow_iso(),
         "run_id": run_id,
         "container_id": container_id,
@@ -383,7 +436,11 @@ def record_file_write(
         "dest_dir": dest_dir,
         "byte_count": byte_count,
         "is_test": is_test,
-    })
+    }
+    label = get_session_label(container_id)
+    if label is not None:
+        entry["session_label"] = label
+    _append_json(entry)
 
 
 def record_copy(
@@ -394,14 +451,18 @@ def record_copy(
 ) -> None:
     """Record a file/directory copy into the container."""
     run_id = get_or_create_run_id(container_id)
-    _append_json({
+    entry: dict[str, Any] = {
         "ts": _utcnow_iso(),
         "run_id": run_id,
         "container_id": container_id,
         "operation": operation,
         "local_src": local_src,
         "dest_dir": dest_dir,
-    })
+    }
+    label = get_session_label(container_id)
+    if label is not None:
+        entry["session_label"] = label
+    _append_json(entry)
 
 
 
@@ -430,6 +491,9 @@ def record_tool_use(
         "operation": "tool_use",
         "tool_name": tool_name,
     }
+    label = get_session_label(container_id)
+    if label is not None:
+        entry["session_label"] = label
     if params:
         entry["params"] = params
     _append_json(entry)
@@ -471,6 +535,7 @@ def read_journal(
     max_entries: int | None = None,
     from_ts: str | None = None,
     to_ts: str | None = None,
+    session_label: str | None = None,
 ) -> list[dict[str, Any]]:
     """Read journal entries, optionally filtered by *run_id* and/or time range.
 
@@ -480,6 +545,8 @@ def read_journal(
             first when specified).
         from_ts: Inclusive lower bound for ``ts`` (ISO format).
         to_ts: Exclusive upper bound for ``ts`` (ISO format).
+        session_label: If provided, only return entries with this
+            session label (Issue #479).
 
     Returns:
         List of journal entry dicts, oldest first.
@@ -490,6 +557,8 @@ def read_journal(
     entries: list[dict[str, Any]] = []
     for entry in raw:
         if run_id is not None and entry.get("run_id") != run_id:
+            continue
+        if session_label is not None and entry.get("session_label") != session_label:
             continue
         ts = entry.get("ts", "")
         if from_ts is not None and ts < from_ts:
@@ -522,6 +591,7 @@ def get_runs() -> list[dict[str, Any]]:
                 "run_id": rid,
                 "started": entry.get("ts"),
                 "image": entry.get("image", "unknown"),
+                "session_labels": set(),
                 "operations": 0,
                 "boundary_crossings": 0,
                 "vcs_operations": 0,
@@ -531,6 +601,9 @@ def get_runs() -> list[dict[str, Any]]:
         run = runs[rid]
         run["operations"] += 1
         run["last_ts"] = entry.get("ts")
+        sl = entry.get("session_label")
+        if sl:
+            run["session_labels"].add(sl)
         if entry.get("operation") == "stop":
             run["status"] = "stopped"
         if entry.get("boundary_crossing") or entry.get("operation") == "boundary_crossing":
@@ -539,7 +612,11 @@ def get_runs() -> list[dict[str, Any]]:
             if sub_op in ("issue_view", "publish"):
                 run["vcs_operations"] += 1
 
-    return sorted(runs.values(), key=lambda r: r.get("started", ""), reverse=True)
+    result = sorted(runs.values(), key=lambda r: r.get("started", ""), reverse=True)
+    for r in result:
+        labels = r.get("session_labels", set())
+        r["session_labels"] = sorted(labels) if labels else []
+    return result
 
 
 def get_active_environments() -> list[dict[str, Any]]:

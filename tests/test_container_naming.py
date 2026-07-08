@@ -205,6 +205,7 @@ class TestSandboxListContainers:
 
         result = json.loads(sandbox_list_containers())
         assert result["containers"] == []
+        assert result["reaped_ids"] == []
 
     @patch("code_sandbox_mcp.tools.container._docker")
     def test_list_filters_by_managed_label(
@@ -216,10 +217,11 @@ class TestSandboxListContainers:
         mock_client.containers.list.return_value = []
         mock_docker.return_value = mock_client
 
-        sandbox_list_containers()
+        result = json.loads(sandbox_list_containers())
 
         call_filters = mock_client.containers.list.call_args[1]
         assert call_filters["filters"]["label"] == f"{MANAGED_LABEL}=true"
+        assert result["reaped_ids"] == []
 
     @patch("code_sandbox_mcp.tools.container._docker")
     def test_list_without_name(
@@ -233,6 +235,7 @@ class TestSandboxListContainers:
 
         result = json.loads(sandbox_list_containers())
         assert result["containers"][0]["name"] is None
+        assert result["reaped_ids"] == []
 
 
 class TestSandboxAttach:
@@ -440,7 +443,7 @@ class TestGetContainerTTL:
 
 
 class TestReapIdleContainers:
-    """_reap_idle_containers (Issue #480)."""
+    """_reap_idle_containers and reap-on-list (Issue #480)."""
 
     @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
     @patch("code_sandbox_mcp.tools.container._docker")
@@ -497,3 +500,21 @@ class TestReapIdleContainers:
         result = _reap_idle_containers()
         assert result == []
         c.kill.assert_not_called()
+
+    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
+    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
+    def test_list_reaps_idle_container(
+        self,
+        mock_docker: MagicMock,
+        mock_activity: MagicMock,
+    ) -> None:
+        """sandbox_list_containers reaps idle containers when TTL is set."""
+        c = _make_container(container_id="idle-cid", name="idle")
+        client = _make_client([c])
+        mock_docker.return_value = client
+        mock_activity.return_value = {"idle-cid": "2025-01-01T00:00:00+00:00"}
+
+        result = json.loads(sandbox_list_containers())
+        assert "idle-cid" in result["reaped_ids"]
+        c.kill.assert_called_once()

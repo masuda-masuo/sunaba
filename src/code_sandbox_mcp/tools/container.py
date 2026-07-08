@@ -1198,9 +1198,14 @@ def sandbox_list_containers() -> str:
     - Prefer over ``sandbox_exec docker ps`` (structured JSON, filters to managed containers)
 
     Returns:
-        JSON string with a ``containers`` array.
+        JSON string with a ``containers`` array.  When
+        :envvar:`CODE_SANDBOX_CONTAINER_TTL_SECONDS` is set, idle
+        containers are automatically stopped before listing, and
+        the ``reaped_ids`` field reports which containers were removed.
     """
     import json
+
+    reaped_ids = _reap_idle_containers()
 
     client = _docker()
     try:
@@ -1209,7 +1214,7 @@ def sandbox_list_containers() -> str:
             filters={"label": f"{MANAGED_LABEL}=true"},
         )
     except Exception as e:
-        return json.dumps({"containers": [], "error": str(e)})
+        return json.dumps({"containers": [], "error": str(e), "reaped_ids": reaped_ids})
 
     last_activity = get_last_activity_per_container()
     now = datetime.now(timezone.utc)
@@ -1235,7 +1240,10 @@ def sandbox_list_containers() -> str:
             "last_activity_ts": last_ts,
         })
 
-    return json.dumps({"containers": result}, ensure_ascii=False)
+    return json.dumps({
+        "containers": result,
+        "reaped_ids": reaped_ids,
+    }, ensure_ascii=False)
 
 
 def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:

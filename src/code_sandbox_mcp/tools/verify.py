@@ -298,7 +298,7 @@ def verify_in_container(
     skip_type_gate: bool = False,
     skip_patch_targets_gate: bool = False,
 ) -> str:
-    """Run pytest with optional filter → full-suite fallback and diff summary.
+    """Run tests (language-aware dispatch) with optional filter and diff summary.
 
     **Use this as the pre-publish quality gate.**  It runs lint and
     type-checking on the project source (mirroring CI's
@@ -308,6 +308,12 @@ def verify_in_container(
     filtered tests run first; if they pass, the full test suite runs
     automatically.  The gate decision is always based on the full suite
     result.
+
+    **Multi-language support (Issue #493):** the test phase dispatches to
+    the appropriate runner based on detected project languages: pytest
+    (Python), jest (JS/TS), or go test (Go), via the ``edit_verify._DISPATCH``
+    table.  Language detection is shared with the lint/type gate phase.
+    Use the *language* parameter to force a specific language.
 
     The lint gate runs on ``src/`` + ``tests/`` when both exist (or
     ``.`` when neither does), matching CI's actual scope so a lint-only
@@ -342,8 +348,7 @@ def verify_in_container(
     .. rubric:: Don't use when
 
     - **A single-file lint/type check during editing** — use :func:`lint_in_container` / :func:`type_check_in_container` (verify runs the project-wide gate)
-    - **Single specific test file only** — use ``sandbox_exec`` + ``python -m pytest`` instead (see refactoring rules)
-    - **Running non-Python tests** — use ``sandbox_exec`` with the appropriate test runner
+    - **Single specific test file only** — use ``sandbox_exec`` + the appropriate test runner instead (see refactoring rules)
 
     .. rubric:: Prefer over
 
@@ -555,8 +560,9 @@ def verify_in_container(
             }
             return json.dumps(result)
 
-    # --- Run pytest ---
-    def _run_pytest(filter_args: str) -> dict:
+    # --- Run tests (language-aware dispatch, Issue #493) ---
+    def _run_inline_pytest(filter_args: str) -> dict:
+        """Run pytest inline (kept for python-specific error detail)."""
         from code_sandbox_mcp.test_report import (
             PytestAdapter,
             build_pytest_cmd,
@@ -588,7 +594,6 @@ def verify_in_container(
             raw_report = json.loads(json_part)
             report = PytestAdapter.parse(raw_report)
             d = report.to_dict()
-            # Add collection metadata for better diagnostics (Issue #378)
             summary = raw_report.get("summary", {})
             d["collected"] = summary.get("collected", summary.get("total", 0))
             d["collection_errors"] = summary.get("errors", 0)
@@ -599,57 +604,173 @@ def verify_in_container(
                 result["raw_output"] = raw_tail
             return result
 
-    if has_filter:
-        # Phase 1: filtered test run
-        filtered_result = _run_pytest(extra_args)
-        result["tests"]["filtered"] = filtered_result
-        if filtered_result.get("status") != "ok":
-            result["partial_test_run"] = True
-            filtered_status = filtered_result.get("status", "unknown")
-            if filtered_status == "collection_error":
-                raw = filtered_result.get("raw_output", "")
-                msg = f"filtered tests collection error: {filtered_result.get('error', 'unknown')}"
-                if raw:
-                    msg += f"\n{raw}"
-            elif filtered_status == "not_available":
-                msg = "pytest not available in container"
-            elif filtered_status == "no_tests":
-                msg = f"filtered tests: no tests matched '{test_filter or pytest_args}'"
-            else:
-                msg = (
-                    f"filtered tests ({filtered_status}): "
-                    f"{filtered_result.get('failed', 0)} failed"
-                )
-            result["gate_fail_reasons"] = [msg]
-            return json.dumps(result)
-        # Phase 2: full test suite
-        full_result = _run_pytest("")
-        result["tests"]["full"] = full_result
-    else:
-        full_result = _run_pytest(extra_args)
-        result["tests"]["full"] = full_result
+    def _run_dispatch_test(lang: str, test_path: str) -> dict:
+        """Run test for a single language using DISPATCH table."""
+        from code_sandbox_mcp.edit_verify import _DISPATCH
 
-    if full_result.get("status") == "ok":
-        result["gate_passed"] = True
-    elif full_result.get("status") == "collection_error":
-        raw = full_result.get("raw_output", "")
-        msg = f"collection error: {full_result.get('error', 'unknown')}"
-        if raw:
-            msg += f"\n{raw}"
-        result["gate_fail_reasons"] = [msg]
-    elif full_result.get("status") == "not_available":
-        result["gate_fail_reasons"] = ["pytest not available in container"]
-    elif full_result.get("status") == "no_tests":
-        if has_filter:
-            result["gate_fail_reasons"] = [
-                f"no tests found (explicit filter specified): {full_result.get('error', 'unknown')}"
-            ]
+        runner = _DISPATCH.get(lang, {}).get("test")
+        if runner is None:
+            return {"status": "skipped", "error": f"no test runner for {lang}"}
+
+        try:
+            vr = runner(container, test_path)
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+        if vr.status == "not_available":
+            return {"status": "not_available", "error": vr.detail or f"{vr.tool} not available"}
+        if vr.status == "error":
+            detail = vr.detail or "unknown error"
+            if "test collection failed" in detail:
+                raw = detail.split("\n", 1)[1] if "\n" in detail else ""
+                return {"status": "collection_error", "error": "test collection failed", "raw_output": raw}
+            return {"status": "error", "error": detail}
+        if vr.status == "skipped":
+            return {"status": "no_tests", "error": vr.detail or "skipped"}
+
+        try:
+            d = json.loads(vr.detail) if vr.detail else {}
+            d["status"] = "ok" if vr.status == "ok" else "failed"
+            return d
+        except (json.JSONDecodeError, TypeError):
+            return {"status": "ok" if vr.status == "ok" else "failed",
+                    "raw_output": vr.detail}
+
+    def _run_all_tests() -> tuple[dict, bool]:
+        """Run tests for all detected languages, returning results dict."""
+        results = {}
+        overall_ok = True
+
+        for lang in sorted(detected.languages):
+            if lang == "python":
+                results[lang] = _run_inline_pytest("")
+            else:
+                results[lang] = _run_dispatch_test(lang, path)
+
+            if results[lang].get("status") not in ("ok", "no_tests", "skipped"):
+                overall_ok = False
+
+        return results, overall_ok
+
+    if has_filter:
+        if "python" in detected.languages:
+            # Phase 1: filtered pytest run (python only)
+            filtered_result = _run_inline_pytest(extra_args)
+            result["tests"]["filtered"] = filtered_result
+            if filtered_result.get("status") != "ok":
+                result["partial_test_run"] = True
+                filtered_status = filtered_result.get("status", "unknown")
+                if filtered_status == "collection_error":
+                    raw = filtered_result.get("raw_output", "")
+                    msg = f"filtered tests collection error: {filtered_result.get('error', 'unknown')}"
+                    if raw:
+                        msg += f"\n{raw}"
+                elif filtered_status == "not_available":
+                    msg = "pytest not available in container"
+                elif filtered_status == "no_tests":
+                    msg = f"filtered tests: no tests matched '{test_filter or pytest_args}'"
+                else:
+                    msg = (
+                        f"filtered tests ({filtered_status}): "
+                        f"{filtered_result.get('failed', 0)} failed"
+                    )
+                result["gate_fail_reasons"] = [msg]
+                return json.dumps(result)
+
+            # Phase 2: full test suite for all languages
+            full_results, overall_ok = _run_all_tests()
         else:
-            result["gate_pass_reason"] = "no tests found — gate passes"
-            result["gate_passed"] = True
+            full_results, overall_ok = _run_all_tests()
     else:
-        result["gate_fail_reasons"] = [
-            f"tests: {full_result.get('failed', 0)} failure(s)"
-        ]
+        full_results, overall_ok = _run_all_tests()
+
+    # --- Assign tests.full (backward-compatible: single lang -> unwrap) ---
+    if len(detected.languages) == 0:
+        # No languages detected at the target path.  Fall back to the
+        # working directory root for project-level markers (the find
+        # command in detect_languages already searches "." when path
+        # differs from working_dir, but still may return empty for
+        # paths outside a known project).  Gate passes silently with
+        # a reason so the caller knows no tests were selected.
+        result["tests"]["full"] = {"status": "no_tests", "error": "no languages detected"}
+        result["gate_pass_reason"] = "no languages detected \u2014 gate passes"
+        result["gate_passed"] = True
+        return json.dumps(result)
+    elif len(detected.languages) == 1:
+        lang = list(detected.languages)[0]
+        result["tests"]["full"] = full_results[lang]
+        full_result = full_results[lang]
+    else:
+        result["tests"]["full"] = full_results
+        full_result = None
+
+    # has_filter without Python: warn but still run full
+    if has_filter and "python" not in detected.languages:
+        result["filter_warning"] = (
+            "test_filter / pytest_args ignored: only Python supports "
+            "filtered test runs"
+        )
+
+    # --- Determine gate result ---
+    if len(detected.languages) == 1:
+        assert full_result is not None
+        if full_result.get("status") == "ok":
+            result["gate_passed"] = True
+        elif full_result.get("status") == "collection_error":
+            raw = full_result.get("raw_output", "")
+            msg = f"collection error: {full_result.get('error', 'unknown')}"
+            if raw:
+                msg += f"\n{raw}"
+            result["gate_fail_reasons"] = [msg]
+        elif full_result.get("status") == "not_available":
+            err = full_result.get("error", "unknown")
+            if "pytest" in err:
+                msg = "pytest not available in container"
+            else:
+                msg = f"{err}"
+            result["gate_fail_reasons"] = [msg]
+        elif full_result.get("status") == "no_tests":
+            if has_filter:
+                result["gate_fail_reasons"] = [
+                    f"no tests found (explicit filter specified): {full_result.get('error', 'unknown')}"
+                ]
+            else:
+                result["gate_pass_reason"] = "no tests found \u2014 gate passes"
+                result["gate_passed"] = True
+        else:
+            result["gate_fail_reasons"] = [
+                f"tests: {full_result.get('failed', 0)} failure(s)"
+            ]
+    else:
+        if overall_ok:
+            result["gate_passed"] = True
+        else:
+            reasons = []
+            for lang, lr in sorted(full_results.items()):
+                s = lr.get("status")
+                if s == "collection_error":
+                    raw = lr.get("raw_output", "")
+                    msg = f"{lang}: collection error: {lr.get('error', 'unknown')}"
+                    if raw:
+                        msg += f"\n{raw}"
+                    reasons.append(msg)
+                elif s == "not_available":
+                    reasons.append(f"{lang}: tests not available ({lr.get('error', 'unknown')})")
+                elif s == "error":
+                    reasons.append(f"{lang}: test error ({lr.get('error', 'unknown')})")
+                elif s == "failed":
+                    reasons.append(f"{lang}: {lr.get('failed', 0)} failure(s)")
+                elif s == "no_tests":
+                    if has_filter:
+                        reasons.append(f"{lang}: no tests found (explicit filter)")
+                    else:
+                        pass
+                elif s == "skipped":
+                    pass
+            if reasons:
+                result["gate_fail_reasons"] = reasons
+            if not reasons and not overall_ok:
+                result["gate_pass_reason"] = "no tests found \u2014 gate passes"
+                result["gate_passed"] = True
 
     return json.dumps(result)

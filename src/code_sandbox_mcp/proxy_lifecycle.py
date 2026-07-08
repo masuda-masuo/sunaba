@@ -43,6 +43,7 @@ from typing import Any
 
 from code_sandbox_mcp.image_pins import load_proxy_pin
 from code_sandbox_mcp.proxy import (
+    ALLOWED_EGRESS_HOSTS_ENV,
     ALLOWED_REPOS_ENV,
     CONTROL_HOST_ENV,
     CONTROL_PORT_ENV,
@@ -473,7 +474,7 @@ def _start_proxy_container(
         CONTROL_HOST_ENV: "0.0.0.0",
         CONTROL_SECRET_ENV: secret,
     }
-    for key in (ALLOWED_REPOS_ENV, PROXY_TOKEN_ENV):
+    for key in (ALLOWED_REPOS_ENV, ALLOWED_EGRESS_HOSTS_ENV, PROXY_TOKEN_ENV):
         value = source.get(key)
         if value:
             proxy_env[key] = value

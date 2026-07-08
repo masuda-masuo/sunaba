@@ -1604,7 +1604,7 @@ def sandbox_initialize(
     resolved, image_notice = _select_initial_image(
         image, clone_repo, repo, pr
     )
-    # -- Egress proxy sidecar (#358, Epic #353): opt-in, fail closed --
+    # -- Egress proxy sidecar (#358, Epic #509): default-on, fail closed --
     # A proxied container gets no VCS token in its env (#356); publish
     # hands the credential to the proxy per push grant instead.
     proxied = allow_network and proxy_lifecycle.egress_proxy_enabled()
@@ -2084,7 +2084,7 @@ def run_container_and_exec(
     if image_notice:
         logger.info("image selection: %s", image_notice)
     client = _docker()
-    # -- Egress proxy sidecar (#358, Epic #353): opt-in, fail closed --
+    # -- Egress proxy sidecar (#358, Epic #509): default-on, fail closed --
     # A proxied container gets no VCS token in its env (#356); publish
     # hands the credential to the proxy per push grant instead.
     proxied = allow_network and proxy_lifecycle.egress_proxy_enabled()

@@ -109,10 +109,11 @@ def load_image_pins() -> dict[str, str]:
 PROXY_PIN_KEY: str = "proxy"
 
 #: Data file for the proxy pin, shipped alongside this module.  Unlike
-#: ``image_pins.json`` it may be *absent*: the egress proxy is opt-in (feature
-#: flagged off by default) and the pin is bootstrapped by CI after the first
-#: GHCR push (#432), so a missing file is a valid pre-pin state that falls back
-#: to the locally built tag rather than an error.
+#: ``image_pins.json`` it may be *absent*: the egress proxy is default-on (can
+#: be disabled via ``CODE_SANDBOX_ENABLE_EGRESS_PROXY=false``) and the pin is
+#: bootstrapped by CI after the first GHCR push (#432), so a missing file is
+#: a valid pre-pin state that falls back to the locally built tag rather than
+#: an error.
 _PROXY_PINS_RESOURCE: str = "proxy_pin.json"
 
 #: A proxy pin must be a fully digest-pinned GHCR ``.../proxy@sha256:<64hex>``

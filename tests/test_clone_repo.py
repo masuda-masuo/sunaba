@@ -272,6 +272,10 @@ def _make_client(container):
 class TestCloneRepo:
     """Tests for clone_repo tool endpoint."""
 
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     def test_successful_clone(self, mock_record, mock_docker):
@@ -479,6 +483,10 @@ class TestCloneRepoViaNetwork:
 
 class TestCloneRepoTransportSelection:
     """Issue #333: clone_repo picks gh vs anonymous git by token presence."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
 
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")

@@ -7,9 +7,9 @@ It idempotently starts the shared proxy sidecar (built by
 the wiring the sandbox needs: proxy env vars, the network to join, and the
 proxy's CA certificate to install (:func:`install_ca`).
 
-Inert unless ``CODE_SANDBOX_ENABLE_EGRESS_PROXY=true`` (staged rollout,
-default off).  When the flag is on but the sidecar cannot be started, callers
-must **fail closed** -- refuse to start a networked sandbox rather than fall
+Enabled by default; set ``CODE_SANDBOX_ENABLE_EGRESS_PROXY=false`` to opt
+out.  When the proxy cannot be started, callers must **fail closed** --
+refuse to start a networked sandbox rather than fall
 back to an unproxied bridge network.
 
 Topology (one sidecar shared by all sandboxes)::
@@ -59,8 +59,9 @@ from code_sandbox_mcp.security import MANAGED_LABEL
 
 logger = logging.getLogger(__name__)
 
-#: Feature flag: the whole egress-proxy integration is opt-in (default off)
-#: for staged rollout.  Truthy values: ``1/true/yes/on`` (case-insensitive).
+#: Feature flag: the whole egress-proxy integration is opt-out (default on).
+#: Set to ``false``, ``0``, ``off``, or ``no`` to disable.
+#: Absent = enabled (default).
 ENABLE_EGRESS_PROXY_ENV = "CODE_SANDBOX_ENABLE_EGRESS_PROXY"
 
 #: Env override for the sidecar image reference (an explicit operator escape
@@ -156,6 +157,7 @@ _FINGERPRINT_READY_WAIT_SECONDS = 3.0
 _FINGERPRINT_POLL_INTERVAL_SECONDS = 0.25
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSY = frozenset({"0", "false", "off", "no"})
 
 
 class EgressProxyError(RuntimeError):
@@ -184,9 +186,16 @@ class EgressProxyRuntime:
 
 
 def egress_proxy_enabled(env: MutableMapping[str, str] | None = None) -> bool:
-    """Return whether the egress-proxy integration is switched on."""
+    """Return whether the egress-proxy integration is enabled.
+
+    Default is ``True`` (on); set ``CODE_SANDBOX_ENABLE_EGRESS_PROXY=false``
+    to opt out.
+    """
     source = os.environ if env is None else env
-    return (source.get(ENABLE_EGRESS_PROXY_ENV) or "").strip().lower() in _TRUTHY
+    raw = (source.get(ENABLE_EGRESS_PROXY_ENV) or "").strip().lower()
+    if not raw:
+        return True  # absent -> default on
+    return raw not in _FALSY
 
 
 def ensure_egress_proxy(

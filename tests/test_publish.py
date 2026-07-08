@@ -30,6 +30,10 @@ _PUSH_SEQUENCE = [
 class TestPublish:
     """Tests for publish (one-shot execute)."""
 
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+
     @patch("code_sandbox_mcp.tools.vcs._docker")
     @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
     def test_successful_push(
@@ -369,8 +373,10 @@ class TestPublish:
         self,
         mock_record: MagicMock,
         mock_docker: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """#401: egress proxy block must NOT fall back to Objects API."""
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
         # The git push error contains "BLOCKED by egress proxy" -- exactly
         # what the real proxy.py::block_body() emits.  There are only 6
         # exec calls: the 5 pre-push steps + the failed git push.  No

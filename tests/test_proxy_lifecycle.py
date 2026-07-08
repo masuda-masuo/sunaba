@@ -79,16 +79,16 @@ def _stub_fingerprint_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestEgressProxyEnabled:
     """Flag parsing for CODE_SANDBOX_ENABLE_EGRESS_PROXY."""
 
-    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " True "])
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " True ", "banana"])
     def test_truthy(self, value: str) -> None:
         assert pl.egress_proxy_enabled({pl.ENABLE_EGRESS_PROXY_ENV: value}) is True
 
-    @pytest.mark.parametrize("value", ["", "0", "false", "off", "banana"])
+    @pytest.mark.parametrize("value", ["0", "false", "off"])
     def test_falsy(self, value: str) -> None:
         assert pl.egress_proxy_enabled({pl.ENABLE_EGRESS_PROXY_ENV: value}) is False
 
     def test_absent(self) -> None:
-        assert pl.egress_proxy_enabled({}) is False
+        assert pl.egress_proxy_enabled({}) is True
 
 
 class TestEnsureEgressProxyFresh:

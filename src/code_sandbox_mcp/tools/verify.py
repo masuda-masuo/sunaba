@@ -605,7 +605,7 @@ def verify_in_container(
             return result
 
     def _run_dispatch_test(lang: str, test_path: str) -> dict:
-        """Run test for a single language using DISPATCH table (non-python)."""
+        """Run test for a single language using DISPATCH table."""
         from code_sandbox_mcp.edit_verify import _DISPATCH
 
         runner = _DISPATCH.get(lang, {}).get("test")
@@ -626,17 +626,15 @@ def verify_in_container(
                 return {"status": "collection_error", "error": "test collection failed", "raw_output": raw}
             return {"status": "error", "error": detail}
         if vr.status == "skipped":
-            detail = vr.detail or ""
-            if "No module named pytest" in detail or "pytest not found" in detail:
-                return {"status": "not_available", "error": "pytest not installed", "raw_output": detail}
-            return {"status": "no_tests", "error": detail}
+            return {"status": "no_tests", "error": vr.detail or "skipped"}
 
         try:
             d = json.loads(vr.detail) if vr.detail else {}
             d["status"] = "ok" if vr.status == "ok" else "failed"
             return d
         except (json.JSONDecodeError, TypeError):
-            return {"status": "ok" if vr.status == "ok" else "failed"}
+            return {"status": "ok" if vr.status == "ok" else "failed",
+                    "raw_output": vr.detail}
 
     def _run_all_tests() -> tuple[dict, bool]:
         """Run tests for all detected languages, returning results dict."""
@@ -687,13 +685,31 @@ def verify_in_container(
         full_results, overall_ok = _run_all_tests()
 
     # --- Assign tests.full (backward-compatible: single lang -> unwrap) ---
-    if len(detected.languages) == 1:
+    if len(detected.languages) == 0:
+        # No languages detected at the target path.  Fall back to the
+        # working directory root for project-level markers (the find
+        # command in detect_languages already searches "." when path
+        # differs from working_dir, but still may return empty for
+        # paths outside a known project).  Gate passes silently with
+        # a reason so the caller knows no tests were selected.
+        result["tests"]["full"] = {"status": "no_tests", "error": "no languages detected"}
+        result["gate_pass_reason"] = "no languages detected \u2014 gate passes"
+        result["gate_passed"] = True
+        return json.dumps(result)
+    elif len(detected.languages) == 1:
         lang = list(detected.languages)[0]
         result["tests"]["full"] = full_results[lang]
         full_result = full_results[lang]
     else:
         result["tests"]["full"] = full_results
         full_result = None
+
+    # has_filter without Python: warn but still run full
+    if has_filter and "python" not in detected.languages:
+        result["filter_warning"] = (
+            "test_filter / pytest_args ignored: only Python supports "
+            "filtered test runs"
+        )
 
     # --- Determine gate result ---
     if len(detected.languages) == 1:

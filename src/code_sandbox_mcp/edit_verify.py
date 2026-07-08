@@ -176,7 +176,16 @@ def detect_languages(
     for pattern, _ in _DETECTION_MARKERS:
         find_expr_parts.append(f'-name "{pattern}"')
     or_expr = " -o ".join(find_expr_parts)
-    find_cmd = f"find {shlex.quote(path)} -maxdepth 1 \\( {or_expr} \\) 2>/dev/null"
+    # Search both the target path and the working directory root for
+    # project-level markers (e.g. pyproject.toml at repo root, found when
+    # path="tests/").  The working_dir root is "." when workdir is set.
+    search_paths = [shlex.quote(path)]
+    if path not in (".", "", working_dir):
+        search_paths.append(".")
+    find_cmd = "; ".join(
+        f"find {p} -maxdepth 1 \\( {or_expr} \\) 2>/dev/null"
+        for p in search_paths
+    )
 
     ec, output = container.exec_run(
         ["/bin/sh", "-c", find_cmd],

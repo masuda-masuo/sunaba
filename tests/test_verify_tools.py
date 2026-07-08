@@ -1082,3 +1082,175 @@ class TestVerifyInContainer:
         assert result["tests"]["filtered"]["status"] == "not_available"
         assert "pytest not available" in result["gate_fail_reasons"][0]
 
+# ===================================================================
+# verify_in_container: dispatch path (Issue #493)
+# ===================================================================
+
+class TestVerifyDispatch:
+    """Tests for the language-aware test dispatch in verify_in_container."""
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_no_languages_detected_passes_gate(self, mock_docker: MagicMock) -> None:
+        """detect_languages returns empty set -> gate passes with reason."""
+        from code_sandbox_mcp.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.exec_run.return_value = (0, (b"", b""))
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(languages=set(), scope={}, reason="no markers"),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value={
+                "gate_passed": True, "incomplete": False,
+                "lint": [], "types": [], "gate_fail_reasons": [],
+            },
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+                skip_lint_gate=True, skip_type_gate=True, skip_patch_targets_gate=True,
+            ))
+
+        assert result["gate_passed"] is True
+        assert "gate_pass_reason" in result
+        assert "no languages detected" in result["gate_pass_reason"]
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_has_filter_without_python_warns(self, mock_docker: MagicMock) -> None:
+        """has_filter=True but python not in detected -> filter_warning set."""
+        from code_sandbox_mcp.edit_verify import DetectionResult, VerifyResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.exec_run.return_value = (0, (b"", b""))
+
+        mock_runner = MagicMock(return_value=VerifyResult(
+            tool="go test", status="ok", detail=json.dumps({
+                "status": "ok", "passed": 1, "duration": 0.1,
+            }),
+        ))
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"go"}, scope={"go": "."}, reason=None,
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value={
+                "gate_passed": True, "incomplete": False,
+                "lint": [], "types": [], "gate_fail_reasons": [],
+            },
+        ), patch(
+            "code_sandbox_mcp.edit_verify._DISPATCH",
+            {"go": {"test": mock_runner, "lint": None, "type": None}},
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+                test_filter="TestFoo",
+                skip_lint_gate=True, skip_type_gate=True, skip_patch_targets_gate=True,
+            ))
+
+        assert "filter_warning" in result
+        assert "only Python supports" in result["filter_warning"]
+        assert result["gate_passed"] is True
+        assert result["tests"]["full"]["status"] == "ok"
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_dispatch_runner_not_available(self, mock_docker: MagicMock) -> None:
+        """Dispatch runner returns not_available -> gate fails."""
+        from code_sandbox_mcp.edit_verify import DetectionResult, VerifyResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.exec_run.return_value = (0, (b"", b""))
+
+        mock_runner = MagicMock(return_value=VerifyResult(
+            tool="go test", status="not_available",
+            detail="go not installed in container",
+        ))
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"go"}, scope={"go": "."}, reason=None,
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value={
+                "gate_passed": True, "incomplete": False,
+                "lint": [], "types": [], "gate_fail_reasons": [],
+            },
+        ), patch(
+            "code_sandbox_mcp.edit_verify._DISPATCH",
+            {"go": {"test": mock_runner, "lint": None, "type": None}},
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+                skip_lint_gate=True, skip_type_gate=True, skip_patch_targets_gate=True,
+            ))
+
+        assert result["gate_passed"] is False
+        assert "not installed" in result["gate_fail_reasons"][0]
+
+    @patch("code_sandbox_mcp.tools.verify._docker")
+    def test_multi_language_results(self, mock_docker: MagicMock) -> None:
+        """Multiple languages (non-python) produce per-language test results via dispatch."""
+        from code_sandbox_mcp.edit_verify import DetectionResult, VerifyResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.exec_run.return_value = (0, (b"", b""))
+
+        mock_js_runner = MagicMock(return_value=VerifyResult(
+            tool="jest", status="ok",
+            detail=json.dumps({
+                "status": "ok", "passed": 5, "duration": 0.5,
+            }),
+        ))
+        mock_go_runner = MagicMock(return_value=VerifyResult(
+            tool="go test", status="ok",
+            detail=json.dumps({
+                "status": "ok", "passed": 3, "duration": 0.3,
+            }),
+        ))
+
+        with patch(
+            "code_sandbox_mcp.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"js", "go"}, scope={}, reason=None,
+            ),
+        ), patch(
+            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            return_value={
+                "gate_passed": True, "incomplete": False,
+                "lint": [], "types": [], "gate_fail_reasons": [],
+            },
+        ), patch(
+            "code_sandbox_mcp.edit_verify._DISPATCH",
+            {
+                "js": {"test": mock_js_runner, "lint": None, "type": None},
+                "go": {"test": mock_go_runner, "lint": None, "type": None},
+            },
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+                skip_lint_gate=True, skip_type_gate=True, skip_patch_targets_gate=True,
+            ))
+
+        assert result["gate_passed"] is True
+        full = result["tests"]["full"]
+        assert "js" in full
+        assert "go" in full
+        assert full["js"]["status"] == "ok"
+        assert full["go"]["status"] == "ok"

@@ -19,7 +19,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE_DIR="${HOME}/.cache/code-sandbox-mcp/bin"
-RELEASE_TAG="mcp-token/v1.1.1"
+RELEASE_TAG="mcp-token/v1.2.0"
 REPO="masuda-masuo/mcp-launcher"
 
 # ---------------------------------------------------------------------------

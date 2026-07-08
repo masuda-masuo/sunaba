@@ -70,15 +70,15 @@ logger = logging.getLogger(__name__)
 
 # Pinned mcp-launcher "mcp-token" broker release (issue #232 / mcp-launcher#25).
 BROKER_REPO = "masuda-masuo/mcp-launcher"
-BROKER_TAG = "mcp-token/v1.1.1"
+BROKER_TAG = "mcp-token/v1.2.0"
 
 # (os, arch) -> (asset_name, sha256). Verified against the GitHub release.
 _BROKER_ASSETS: dict[tuple[str, str], tuple[str, str]] = {
-    ("linux", "amd64"): ("mcp-token-linux-amd64", "08d22380f0af932508aaaea80cb114acada1ef46d0a3b32507755c67f5f77bba"),
-    ("linux", "arm64"): ("mcp-token-linux-arm64", "032ee0942fd4e2184158f111873c67f32d843def0cbefca576df614bfc8d3c64"),
-    ("darwin", "amd64"): ("mcp-token-darwin-amd64", "4212dd3da0a099f6150d05f0334dca530e28a8d018e4a2f9d40ea86b6be8c2ed"),
-    ("darwin", "arm64"): ("mcp-token-darwin-arm64", "68c41c1c5aae90a78dd3916947c336847bb004cb685c2354b99c09084385ec7e"),
-    ("windows", "amd64"): ("mcp-token-windows-amd64.exe", "b35fcd1aba907b7dd410d25373481d293e30b74d0fc603350d7043e966c50658"),
+    ("linux", "amd64"): ("mcp-token-linux-amd64", "835416c6ace399f645d175534d5109f5f20ea37660b791609668264e2f037499"),
+    ("linux", "arm64"): ("mcp-token-linux-arm64", "669eebd8120dfd5b8d4305e560ee4c92b9227857bc772530c45349d96f94eec7"),
+    ("darwin", "amd64"): ("mcp-token-darwin-amd64", "17af5c02ddedd4aa02539612618f25cdbfd89cb495bcbac7c00b36cebe82232c"),
+    ("darwin", "arm64"): ("mcp-token-darwin-arm64", "530edb3ba2266dcaf78fb154b039317f21e800c051c3683aaef3283382c19397"),
+    ("windows", "amd64"): ("mcp-token-windows-amd64.exe", "08c91b6aae4b12c2282705eb7d8eb090dec18692ffea99c0e891eb07132dbdb3"),
 }
 
 # Normalise platform.machine() spellings to our short arch tokens.

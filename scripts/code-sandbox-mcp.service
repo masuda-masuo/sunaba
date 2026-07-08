@@ -1,0 +1,17 @@
+[Unit]
+Description=code-sandbox-mcp MCP Server (streamable-http)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@VENV_DIR@/bin/python -m code_sandbox_mcp.server \
+    --transport streamable-http --host 127.0.0.1 --port 8765
+WorkingDirectory=@PROJECT_DIR@
+Environment=GITHUB_TOKEN_BROKER_SERVICE=code-sandbox-mcp
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -585,6 +585,20 @@ diff・テスト出力などのペイロードはコンテナ内に留め、LLM 
 
 **参照**: #475、#478、#479、#480
 
+### #473 (2026-07-08): V1.0 リリース実務（version bump / tag / CHANGELOG / 互換性ポリシー）
+
+**決定**: `pyproject.toml` を `1.0.0` へ bump し、README に互換性ポリシー（MCP ツール名・引数・返却形状・環境変数名は semver 対象、破壊的変更は major のみ）を宣言。あわせて `CHANGELOG.md` を新設した。
+
+**経緯**: 契約凍結系の #467（エラー形状統一）・#468（env var 命名統一）・#469（search 返却形状変更）が本 issue のブロッカーとして先行完了済みだったため着手。着手時点で issue 本文が参照する「V1.0 棚卸しで削除したツール一覧」（#457/#458/#459/#438）は事実として正しかったが、issue 作成後に #475〜#481（レビュー実行のスコープ化とコンテナ共有）で `diff_in_container` / `sandbox_pr_review_write` / `sandbox_list_containers` / `sandbox_attach` が新設されており、README の「Available tools」表がこれら5ツールを反映していなかった（登録済みだが未記載）。契約凍結の前提となるツール一覧が不正確なままではポリシー宣言そのものが無意味なため、CHANGELOG 執筆前に README の表を `server.py` の実登録と突き合わせて修正した。
+
+**影響**:
+- `pyproject.toml`: `version = "1.0.0"`
+- `README.md`: Available tools 表に5ツール追記、Compatibility policy 節を新設、Installation/Quick start に `@v1.0.0` pin 例を追記、Sandbox image 節に image_pins.json とサーバーバージョンの互換性一言メモを追記
+- `CHANGELOG.md`: 新設。初版エントリは「Initial public release」の一言のみとし、README の互換性ポリシー・ツール一覧への参照だけを添えた。当初は Added（#476〜#478 起源のツール）/ Changed（#467/#468/#469 の契約変更）/ Removed（#458/#459/#438/#441 の削除）を機械的に列挙していたが、これらは一度も公開タグを打っていない `0.1.0` からの「差分」であり、比較対象となる公開済み前バージョンが存在しない。外部利用者にとっての Changed/Removed たり得ない内部開発史を CHANGELOG に持ち込んでいた（Added 節はさらに #476〜#478 起源という恣意的な直近ウィンドウの切り取りで、既存ツールの `package_install` 混入をレビューで指摘されてもいた）。開発判断の履歴は本節（design.md 決定ログ）が既に担っており、CHANGELOG は「公開後の差分」記録に徹する
+- `git tag v1.0.0` の打刻はこの PR のマージ後の作業として残置（feature branch 上で打つ意味がないため）
+
+**参照**: #467、#468、#469、#457、#458、#459、#438、#441、#475、#476、#477、#478
+
 
 ## まとめ
 

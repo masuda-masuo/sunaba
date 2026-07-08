@@ -128,7 +128,7 @@ The issue body, the source, and the diff never leave the container; the model on
 ## Quick start
 
 ```bash
-pip install git+https://github.com/masuda-masuo/code-sandbox-mcp
+pip install git+https://github.com/masuda-masuo/code-sandbox-mcp@v1.0.0
 ```
 
 Minimal `claude_desktop_config.json`:
@@ -173,10 +173,10 @@ A few things that aren't obvious from the Quick start above and commonly trip up
 ## Installation
 
 ```bash
-# Install
-pip install git+https://github.com/masuda-masuo/code-sandbox-mcp
+# Install (pinned to a released version, recommended)
+pip install git+https://github.com/masuda-masuo/code-sandbox-mcp@v1.0.0
 
-# Update
+# Update to the latest commit on the default branch
 pip install --force-reinstall git+https://github.com/masuda-masuo/code-sandbox-mcp
 
 # Pin to a specific commit
@@ -244,6 +244,8 @@ This is the full reference. You almost never touch most of it directly — the c
 | `sandbox_initialize` | Start a container. Returns 12-char `container_id`. Supports `image`, `allow_network`. |
 | `sandbox_stop` | Stop and remove a container. |
 | `run_container_and_exec` | One-shot: `initialize` → `exec` → `stop`. |
+| `sandbox_list_containers` | List all managed containers with metadata (name, image, status, age, idle time). |
+| `sandbox_attach` | Connect to an existing container by name or ID prefix. |
 
 ### Execution
 
@@ -252,6 +254,7 @@ This is the full reference. You almost never touch most of it directly — the c
 | `sandbox_exec` | Run commands synchronously. Supports `verbose` (`error_only`/`summary`/`full`), truncation, pagination (`offset`/`limit`). |
 | `sandbox_exec_background` | Run commands with `nohup` in background. Returns `job_id`. |
 | `sandbox_exec_check` | Poll background job status. Returns `"running"`, stdout on success, or error on failure. |
+| `package_install` | Structured `pip install` wrapper (packages/editable/constraints/requirements/upgrade/extras). Returns installed packages and error details instead of raw pip logs. |
 
 ### File operations
 
@@ -272,6 +275,7 @@ This is the full reference. You almost never touch most of it directly — the c
 | `lint_in_container` | Run linter on a file (`.py` → ruff/pylint, `.js/.ts/.jsx/.tsx` → eslint). Pass `fix=True` to apply `ruff check --fix` / `eslint --fix` autofixes and return the remaining findings. |
 | `type_check_in_container` | Run type checker on a file (`.py` → pyright, `.ts/.tsx` → tsc). |
 | `verify_in_container` | **Pre-publish test gate.** Run tests (pytest/jest/go test via language-aware dispatch), then auto-full-suite. Returns diff summary. |
+| `diff_in_container` | Structured `git diff` between *base* and HEAD. File-by-file summary (`path`/`status`/`additions`/`deletions`) or per-file hunks when a `path` is given. |
 
 ### Observability
 
@@ -296,6 +300,19 @@ These journal/trace **read** tools are opt-in: set `CODE_SANDBOX_OBSERVABILITY_T
 | `checkpoint_restore` | Restore working tree to a previous checkpoint (`git reset --hard`). |
 | `publish` | Stage, commit, push, and optionally create a PR (one-shot). |
 | `sandbox_issue_write` | Create a GitHub issue or comment on one, host-side (one-shot, #414). |
+| `sandbox_pr_review_write` | Create and submit a PR review (with optional inline comments) in one shot, host-side (#477). |
+
+## Compatibility policy
+
+Starting with `v1.0.0`, the external contract is versioned with [Semantic Versioning](https://semver.org/):
+
+- **Covered by semver**: MCP tool names, tool argument names/types, return-value shapes, and environment variable names.
+- **Breaking changes** (renaming/removing a tool or argument, changing a return shape, renaming an environment variable) land only in a **major** version bump and are recorded in [CHANGELOG.md](CHANGELOG.md).
+- **Additive changes** (new tools, new optional arguments, new fields appended to a return object) are **minor** bumps.
+- **Contract-neutral fixes** are **patch** bumps.
+- **Not covered**: the sandbox image contents (see below), internal module layout, and anything not exposed as an MCP tool surface.
+
+Pin to a released tag for stability (see [Installation](#installation)); track `main` only if you want unreleased changes and accept that the contract above does not apply until the next tag.
 
 ## Sandbox image
 
@@ -329,6 +346,8 @@ sandbox_initialize(image="my-image@sha256:...")
 ```
 
 A minimal variant (`docker/Dockerfile.sandbox.minimal`) with git + python + pytest only is also available for lightweight use.
+
+**Image/server compatibility**: sandbox images are versioned independently of the `code-sandbox-mcp` package — `image_pins.json` pins each variant to a GHCR digest (updated via `scripts/update_image_pins.py`) and is not part of the [compatibility policy](#compatibility-policy) above. Any server release is expected to work with its bundled `image_pins.json`; if you override `image` explicitly, keep the in-container toolset (§ table above) compatible with what the server's edit/verify tools expect (e.g. `ruff`/`pyright` for lint/type gates).
 
 ## Deployment & credential management
 

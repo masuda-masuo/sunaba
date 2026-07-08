@@ -591,6 +591,7 @@ def get_runs() -> list[dict[str, Any]]:
                 "run_id": rid,
                 "started": entry.get("ts"),
                 "image": entry.get("image", "unknown"),
+                "session_labels": set(),
                 "operations": 0,
                 "boundary_crossings": 0,
                 "vcs_operations": 0,
@@ -600,6 +601,9 @@ def get_runs() -> list[dict[str, Any]]:
         run = runs[rid]
         run["operations"] += 1
         run["last_ts"] = entry.get("ts")
+        sl = entry.get("session_label")
+        if sl:
+            run["session_labels"].add(sl)
         if entry.get("operation") == "stop":
             run["status"] = "stopped"
         if entry.get("boundary_crossing") or entry.get("operation") == "boundary_crossing":
@@ -608,7 +612,11 @@ def get_runs() -> list[dict[str, Any]]:
             if sub_op in ("issue_view", "publish"):
                 run["vcs_operations"] += 1
 
-    return sorted(runs.values(), key=lambda r: r.get("started", ""), reverse=True)
+    result = sorted(runs.values(), key=lambda r: r.get("started", ""), reverse=True)
+    for r in result:
+        labels = r.get("session_labels", set())
+        r["session_labels"] = sorted(labels) if labels else []
+    return result
 
 
 def get_active_environments() -> list[dict[str, Any]]:

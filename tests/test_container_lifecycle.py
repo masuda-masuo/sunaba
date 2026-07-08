@@ -17,6 +17,9 @@ from code_sandbox_mcp.tools.container import (
 
 
 class TestSandboxInitializeCloneRepo:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for sandbox_initialize with clone_repo."""
 
     @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)
@@ -173,6 +176,9 @@ class TestSandboxInitializeCloneRepo:
 
 
 class TestSandboxInitializeCloneRepoPipExtras:
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for pip_extras with clone_repo (Issue #245)."""
 
     @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists", return_value=True)

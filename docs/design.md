@@ -466,6 +466,41 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 - `sandbox_exec`: 稼働コンテナでコマンド実行（`commands` / `argv` の2モード）。
 - `sandbox_exec_background` / `sandbox_exec_check`: 長時間コマンドの非同期実行と完了確認。
 - `sandbox_stop`: コンテナ停止・削除（未 push の checkpoint があれば警告）。
+- `sandbox_list_containers` / `sandbox_attach`: 発見・再接続（#478）。出力に `idle_seconds`（最終操作からの経過時間）を含む。
+- `_reap_idle_containers`: アイドルコンテナの自動回収（#480）。**デフォルトは無効。**
+
+### 13.1 明示的な GC 方針（#480）
+
+#478（コンテナ共有）により、コンテナがイシュー/PR のライフタイムに紐づいて長生きするようになった。以下の方針で管理する。
+
+**1. idle 時間の可視化（既定の動作）**
+
+`sandbox_list_containers` / `sandbox_attach` の出力に `idle_seconds`（最終 journal 操作からの経過秒数）と `last_activity_ts` を含める。デフォルトでは**表示のみ**で自動削除は行わない。
+
+**2. opt-in TTL による自動 stop**
+
+環境変数 `CODE_SANDBOX_CONTAINER_TTL_SECONDS` に正の整数（秒）を設定すると、`_reap_idle_containers()` 呼び出し時に TTL を超えて idle のコンテナを自動停止する。デフォルトは未設定 = 無効。既存コンテナを誤って削除しないためのセーフガード。
+
+```python
+# 動作例: TTL=3600 の場合、最終操作から1時間以上経過したコンテナを停止
+CODE_SANDBOX_CONTAINER_TTL_SECONDS=3600
+```
+
+**3. 終端イベントでの回収規約**
+
+PR マージ/クローズ時、対応する名前付きコンテナ（`sandbox_initialize(name="issue-N")`）は手動で `sandbox_stop` することを**規約**とする。自動化はスコープ外だが、この規約により未使用コンテナの滞留を防ぐ。
+
+- PR クローズ → `sandbox_stop(container_id)` （force=True で checkpoint 警告を回避）
+- コンテナ一覧は `sandbox_list_containers` で確認
+
+**4. orphan reaper（#298）との関係**
+
+既存の orphan reaper（`_reap_orphaned_init_containers`）は `initialize_complete` イベントがなく、かつ `exec` も `stop` も記録されていない**未完成の初期化コンテナ**のみを対象とする。これは #480 の idle GC とは直交する：
+
+- orphan reaper: 途中でタイムアウトした `sandbox_initialize` の後片付け
+- idle GC（#480）: 使い終わったが停止されていないコンテナの後片付け（opt-in）
+
+両方とも「使用済みコンテナをデフォルトで自動削除しない」原則を守る。
 
 **Dockerfile 管理**: `docker/Dockerfile.{base,python,go}` （§12 参照）。CI でダイジェスト固定タグをビルド・管理。
 

@@ -25,6 +25,7 @@ from pydantic import BeforeValidator
 
 from code_sandbox_mcp import image_pins, image_selection, proxy_lifecycle
 from code_sandbox_mcp.journal import (
+    get_last_activity_per_container,
     get_session_label,
     read_container_states,
     read_journal,
@@ -116,6 +117,13 @@ _HARD_CAP_RATIO: float = 0.9
 #: ``sandbox_initialize`` so an in-progress init (possibly in a concurrent
 #: session) is never mistaken for an orphan.
 _ORPHAN_GRACE_SECONDS: int = 600
+
+#: Env var name for optional container idle TTL (Issue #480).
+#: When set to a positive integer, containers idle longer than this
+#: many seconds are automatically stopped by :func:`_reap_idle_containers`.
+#: Default 0 = disabled (no automatic idle reaping).
+_CONTAINER_TTL_ENV: str = "CODE_SANDBOX_CONTAINER_TTL_SECONDS"
+_CONTAINER_TTL_ENV_DEPRECATED: str = "CSB_CONTAINER_TTL_SECONDS"
 
 #: How often the async ``sandbox_initialize`` emits a progress notification to
 #: keep the MCP/HTTP connection alive during slow setup (Issue #298).  Must be
@@ -1057,6 +1065,87 @@ def _reap_orphaned_init_containers(client: Any = None) -> list[str]:
     return reaped
 
 
+def _get_container_ttl_seconds() -> int:
+    """Read the optional container idle TTL from the environment.
+
+    Returns:
+        Positive integer seconds, or 0 when TTL is not configured
+        (auto-reap disabled).
+    """
+    val = os.environ.get(_CONTAINER_TTL_ENV)
+    if val is None:
+        val = os.environ.get(_CONTAINER_TTL_ENV_DEPRECATED)
+        if val is not None:
+            logger.warning(
+                "%s is deprecated, use %s instead",
+                _CONTAINER_TTL_ENV_DEPRECATED, _CONTAINER_TTL_ENV,
+            )
+    if val is None or val.strip() == "":
+        return 0
+    try:
+        ttl = int(val.strip())
+        if ttl <= 0:
+            return 0
+        return ttl
+    except (ValueError, TypeError):
+        return 0
+
+
+def _reap_idle_containers() -> list[str]:
+    """Stop containers idle longer than the configured TTL (Issue #480).
+
+    Reads :envvar:`CODE_SANDBOX_CONTAINER_TTL_SECONDS` to determine the
+    threshold.  When the env var is not set or is 0, this is a no-op
+    (auto-reap disabled by default).
+
+    Only containers managed by us (``MANAGED_LABEL``) are considered.
+    A container is ``idle`` when no journal entry exists for it in the
+    last TTL seconds.  Failures are swallowed (best-effort GC).
+
+    Returns:
+        List of 12-character container ID prefixes that were stopped.
+    """
+    ttl = _get_container_ttl_seconds()
+    if ttl <= 0:
+        return []  # Opt-in only -- no auto-stop by default
+
+    client = _docker(timeout=RECOVERY_DOCKER_TIMEOUT)
+    try:
+        containers = client.containers.list(
+            all=True, filters={"label": f"{MANAGED_LABEL}=true"}
+        )
+    except Exception as e:
+        logger.warning("idle reap: failed to list containers: %s", e)
+        return []
+
+    last_activity = get_last_activity_per_container()
+    now = datetime.now(timezone.utc)
+    reaped: list[str] = []
+    for c in containers:
+        cid = c.id[:12]
+        last_ts = last_activity.get(cid)
+        idle_secs = _age_seconds(last_ts, now)
+        if idle_secs is None or idle_secs < ttl:
+            continue
+        logger.info(
+            "Reaping idle container %s (idle=%.0fs, ttl=%ds)", cid, idle_secs, ttl
+        )
+        try:
+            c.kill()
+        except (NotFound, APIError):
+            pass
+        try:
+            c.remove(force=True)
+        except NotFound:
+            pass
+        except Exception as e:
+            logger.warning("idle reap: failed to remove %s: %s", cid, e)
+            continue
+        record_stop(cid)
+        reaped.append(cid)
+    return reaped
+
+
 def _find_containers_by_name(client, name: str) -> list[str]:
     """Find running containers with the given NAME_LABEL.
 
@@ -1085,6 +1174,10 @@ def sandbox_list_containers() -> str:
     - ``status`` (str): Docker container status (``running`` / ``exited`` / etc.)
     - ``created_at`` (str | None): ISO-8601 timestamp from the creation label
     - ``age_seconds`` (float | None): approximate age in seconds
+    - ``idle_seconds`` (float | None): seconds since last journal activity
+      for this container (``None`` when the journal has no entries)
+    - ``last_activity_ts`` (str | None): ISO-8601 timestamp of the most
+      recent journal entry for this container
 
     Use this to discover existing containers across sessions, especially
     when the server restarts and the in-memory registry is lost (Issue #478).
@@ -1118,6 +1211,7 @@ def sandbox_list_containers() -> str:
     except Exception as e:
         return json.dumps({"containers": [], "error": str(e)})
 
+    last_activity = get_last_activity_per_container()
     now = datetime.now(timezone.utc)
     result: list[dict[str, Any]] = []
     for c in containers:
@@ -1126,6 +1220,10 @@ def sandbox_list_containers() -> str:
         created_raw = labels.get(CREATED_AT_LABEL)
         name_val = labels.get(NAME_LABEL)
         age = _age_seconds(created_raw, now)
+
+        idle = _age_seconds(last_activity.get(cid), now)
+        last_ts = last_activity.get(cid)
+
         result.append({
             "container_id": cid,
             "name": name_val,
@@ -1133,6 +1231,8 @@ def sandbox_list_containers() -> str:
             "status": c.status,
             "created_at": created_raw,
             "age_seconds": age,
+            "idle_seconds": idle,
+            "last_activity_ts": last_ts,
         })
 
     return json.dumps({"containers": result}, ensure_ascii=False)
@@ -1165,6 +1265,9 @@ def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
     - ``status`` (str): Docker status
     - ``image`` (str): image ref
     - ``created_at`` (str | None): ISO-8601 creation time
+    - ``age_seconds`` (float | None): approximate age in seconds
+    - ``idle_seconds`` (float | None): seconds since last journal activity
+    - ``last_activity_ts`` (str | None): most recent journal entry timestamp
     - ``session_label`` (str | None): current session label attached to this container
     - ``git``: git orientation when available:
         - ``branch`` (str | None): current git branch
@@ -1262,6 +1365,10 @@ def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
     now = datetime.now(timezone.utc)
     age = _age_seconds(created_raw, now)
 
+    last_activity = get_last_activity_per_container()
+    last_ts = last_activity.get(cid)
+    idle = _age_seconds(last_ts, now)
+
     result: dict[str, Any] = {
         "found": True,
         "container_id": cid,
@@ -1270,6 +1377,8 @@ def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
         "image": container_obj.image.tags[0] if container_obj.image.tags else str(container_obj.image.short_id),
         "created_at": created_raw,
         "age_seconds": age,
+        "idle_seconds": idle,
+        "last_activity_ts": last_ts,
         "match_type": match_type,
     }
 

@@ -8,27 +8,8 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [1.0.0] - 2026-07-08
 
-First versioned release. The entries below cover the tool-surface changes made
-while stabilizing the contract ahead of this release; see
-[README.md#available-tools](README.md#available-tools) for the full current
-tool reference.
-
-### Added
-
-- `diff_in_container` — structured `git diff` between a base ref and HEAD for
-  PR/branch review: a file-by-file summary, or per-file hunks with
-  `offset`/`limit` paging when a `path` is given (#476).
-- `sandbox_pr_review_write` — create and submit a PR review (with optional
-  inline comments) in one shot, host-side; no VCS token ever reaches the
-  container (#477).
-- `sandbox_list_containers` / `sandbox_attach` — discover and reattach to an
-  existing managed container by name or ID prefix across sessions, including
-  an orientation summary (branch, git status, last checkpoint, last verify
-  result) on attach (#478).
-- `name` parameter on `sandbox_initialize` for naming a container so it can be
-  found later via `sandbox_list_containers` / `sandbox_attach` (#478).
-- `session_label` parameter on `sandbox_initialize` / `sandbox_attach`,
-  recorded on subsequent journal entries for cross-session audit (#479).
+Initial versioned release. For the full current tool surface, see
+[README.md#available-tools](README.md#available-tools).
 
 ### Changed
 

@@ -594,7 +594,7 @@ diff・テスト出力などのペイロードはコンテナ内に留め、LLM 
 **影響**:
 - `pyproject.toml`: `version = "1.0.0"`
 - `README.md`: Available tools 表に5ツール追記、Compatibility policy 節を新設、Installation/Quick start に `@v1.0.0` pin 例を追記、Sandbox image 節に image_pins.json とサーバーバージョンの互換性一言メモを追記
-- `CHANGELOG.md`: 新設。Added（#476/#477/#478/#479 起源のツール・引数）/ Changed（#467/#468/#469）/ Removed（#458/#459/#438/#441）を記録
+- `CHANGELOG.md`: 新設。Changed（#467/#468/#469 の契約変更）/ Removed（#458/#459/#438/#441 の削除）を記録。Added 節は当初 #476〜#478 起源のツールのみを機械的に列挙していたが、初版としては根拠の薄い恣意的な切り取りだった（レビューで `package_install` 等の既存ツール混入を指摘されたのも同根）ため撤去し、フルツール一覧は README への参照のみとした。Changed/Removed は V1.0 で意図的に決定した契約凍結・削除そのものなので残置
 - `git tag v1.0.0` の打刻はこの PR のマージ後の作業として残置（feature branch 上で打つ意味がないため）
 
 **参照**: #467、#468、#469、#457、#458、#459、#438、#441、#475、#476、#477、#478

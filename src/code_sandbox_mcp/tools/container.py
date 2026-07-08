@@ -25,6 +25,7 @@ from pydantic import BeforeValidator
 
 from code_sandbox_mcp import image_pins, image_selection, proxy_lifecycle
 from code_sandbox_mcp.journal import (
+    get_session_label,
     read_container_states,
     read_journal,
     record_boundary_crossing,
@@ -32,6 +33,7 @@ from code_sandbox_mcp.journal import (
     record_initialize,
     record_initialize_complete,
     record_stop,
+    set_session_label,
 )
 from code_sandbox_mcp.journal import (
     record_exec as journal_record_exec,
@@ -1136,7 +1138,7 @@ def sandbox_list_containers() -> str:
     return json.dumps({"containers": result}, ensure_ascii=False)
 
 
-def sandbox_attach(name_or_id: str) -> str:
+def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
     """Connect to an existing container by name or ID prefix.
 
     Looks up the container by:
@@ -1260,6 +1262,13 @@ def sandbox_attach(name_or_id: str) -> str:
         "match_type": match_type,
     }
 
+    if session_label is not None:
+        set_session_label(cid, session_label)
+        result["session_label"] = session_label
+    current_label = get_session_label(cid)
+    if current_label is not None:
+        result["current_session_label"] = current_label
+
     # --- Git orientation ---
     try:
         working_dir = resolve_git_root(container_obj, None)
@@ -1321,6 +1330,7 @@ def sandbox_initialize(
     mem_limit: str | None = None,
     cpus: float | None = None,
     name: str | None = None,
+    session_label: str | None = None,
 ) -> str:
     """Start a new Docker sandbox container.
 
@@ -1546,6 +1556,7 @@ def sandbox_initialize(
         allow_network=allow_network,
         mem_limit=mem_limit,
         cpus=cpus,
+        session_label=session_label,
     )
 
     # The CA must be trusted before anything in the sandbox (starting with
@@ -1650,6 +1661,7 @@ async def sandbox_initialize_tool(
     mem_limit: str | None = None,
     cpus: float | None = None,
     name: str | None = None,
+    session_label: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Start a new Docker sandbox container (async MCP entry point).
@@ -1695,6 +1707,7 @@ async def sandbox_initialize_tool(
             mem_limit=mem_limit,
             cpus=cpus,
             name=name,
+            session_label=session_label,
         )
 
     if ctx is None:
@@ -1800,6 +1813,7 @@ def run_container_and_exec(
     pip_args: str | None = None,
     timeout: int = 0,
     max_output_tokens: int = 0,
+    session_label: str | None = None,
 ) -> str:
     """Start a container, execute commands, then remove it (one-shot).
 
@@ -1975,6 +1989,7 @@ def run_container_and_exec(
         allow_network=allow_network,
         mem_limit=None,
         cpus=None,
+        session_label=session_label,
     )
 
     # Same fail-closed CA wiring as sandbox_initialize (#358).

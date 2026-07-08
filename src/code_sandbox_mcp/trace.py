@@ -113,6 +113,7 @@ tr:hover {{ background: #161b22; }}
 .exit-ok {{ color: #7ee787; }}
 .exit-err {{ color: #f97583; }}
 .cmds {{ font-family: monospace; font-size: 12px; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.session-cell {{ color: #79c0ff; font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
 </style>
 </head>
 <body>
@@ -125,7 +126,7 @@ tr:hover {{ background: #161b22; }}
 </div>
 <table>
 <thead>
-<tr><th>Time</th><th>Operation</th><th>Details</th></tr>
+<tr><th>Time</th><th>Operation</th><th>Details</th><th>Session</th></tr>
 </thead>
 <tbody>
 {rows}
@@ -187,6 +188,7 @@ def generate_html_trace(run_id: str) -> str:
             f'<td>{_escape(e.get("ts", ""))}</td>'
             f'<td class="op {cls} {crossing}">{_escape(op)}</td>'
             f'<td>{details}</td>'
+            f'<td class="session-cell">{_escape(e.get("session_label", ""))}</td>'
             f'</tr>'
         )
 
@@ -196,6 +198,13 @@ def generate_html_trace(run_id: str) -> str:
         1 for e in entries
         if e.get("boundary_crossing") or e.get("operation") == "boundary_crossing"
     )
+    # Use the session_label from the first entry that has one
+    session_label = ""
+    for e in entries:
+        sl = e.get("session_label", "")
+        if sl:
+            session_label = sl
+            break
 
     html_content = _TEMPLATE.format(
         run_id=run_id,
@@ -203,6 +212,7 @@ def generate_html_trace(run_id: str) -> str:
         ended=ended,
         op_count=len(entries),
         boundary_count=boundary_count,
+        session_label=session_label,
         rows="\n".join(rows_parts),
     )
 

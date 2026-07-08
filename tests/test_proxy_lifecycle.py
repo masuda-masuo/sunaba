@@ -8,6 +8,7 @@ import pytest
 
 from code_sandbox_mcp import proxy_lifecycle as pl
 from code_sandbox_mcp.proxy import (
+    ALLOWED_EGRESS_HOSTS_ENV,
     ALLOWED_REPOS_ENV,
     CONTROL_HOST_ENV,
     CONTROL_PORT_ENV,
@@ -132,10 +133,15 @@ class TestEnsureEgressProxyFresh:
 
     def test_passes_allowlist_and_token_through(self) -> None:
         client, _, _ = _fresh_client()
-        env = {ALLOWED_REPOS_ENV: "owner/repo", PROXY_TOKEN_ENV: "tok"}
+        env = {
+            ALLOWED_REPOS_ENV: "owner/repo",
+            ALLOWED_EGRESS_HOSTS_ENV: "proxy.golang.org",
+            PROXY_TOKEN_ENV: "tok",
+        }
         pl.ensure_egress_proxy(client, env=env)
         proxy_env = client.containers.run.call_args.kwargs["environment"]
         assert proxy_env[ALLOWED_REPOS_ENV] == "owner/repo"
+        assert proxy_env[ALLOWED_EGRESS_HOSTS_ENV] == "proxy.golang.org"
         assert proxy_env[PROXY_TOKEN_ENV] == "tok"
 
     def test_image_and_port_overrides(self) -> None:

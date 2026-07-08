@@ -629,10 +629,10 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 _dashboard_server: HTTPServer | None = None
 _dashboard_thread: threading.Thread | None = None
 _dashboard_host: str = "127.0.0.1"
-_dashboard_port: int = 8766
+_dashboard_port: int = 8751
 
 
-def start_dashboard(host: str = "127.0.0.1", port: int = 8766) -> str:
+def start_dashboard(host: str = "127.0.0.1", port: int = 8751) -> str:
     """Start the web dashboard on *host*:*port* in a background thread.
 
     When *port* is 0, the OS assigns a free ephemeral port.

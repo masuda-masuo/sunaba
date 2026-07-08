@@ -255,7 +255,7 @@ else:
 ### 設定
 
 ```json
-"--transport", "sse", "--host", "127.0.0.1", "--port", "8765"
+"--transport", "sse", "--host", "127.0.0.1", "--port", "8750"
 ```
 
 `launcher` モードでも `--transport sse` を指定可能。launcher は stdio プロキシを省略し、サーバプロセスのみ管理する。

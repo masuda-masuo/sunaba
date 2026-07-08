@@ -199,7 +199,7 @@ stdio has a ~60 second client timeout. Long operations (`docker pull`, `pip inst
   "-m", "code_sandbox_mcp.server",
   "--transport", "sse",
   "--host", "127.0.0.1",
-  "--port", "8765"
+  "--port", "8750"
 ]
 ```
 
@@ -210,18 +210,18 @@ stdio has a ~60 second client timeout. Long operations (`docker pull`, `pip inst
 | `http` | None | Standard HTTP |
 | `streamable-http` | None | MCP spec Streamable HTTP |
 
-For SSE/HTTP transports, the server binds to `127.0.0.1:8765` by default.
+For SSE/HTTP transports, the server binds to `127.0.0.1:8750` by default.
 
 ### Observability dashboard
 
-Starts a local read-only web dashboard showing active containers, run history, and pass/fail stats on port **8766** by default.
+Starts a local read-only web dashboard showing active containers, run history, and pass/fail stats on port **8751** by default.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--dashboard-port` | `8766` | Dashboard port. Set to `0` to disable. |
+| `--dashboard-port` | `8751` | Dashboard port. Set to `0` to disable. |
 | `--dashboard-host` | `127.0.0.1` | Bind address. |
 
-> **WSL tip**: If your MCP server binds to `--port 8766`, use `--dashboard-port 8767` to avoid conflict. The dashboard is reachable from Windows at `http://localhost:8767` via WSL's localhost forwarding.
+> **WSL tip**: If your MCP server binds to `--port 8750`, use `--dashboard-port 8751` to avoid conflict. The dashboard is reachable from Windows at `http://localhost:8751` via WSL's localhost forwarding.
 
 ### Optional: push notifications
 
@@ -396,7 +396,7 @@ Useful for sharing one server across clients (e.g. opencode + Claude Desktop), d
 
 ```
 Claude Desktop ─ mcp-remote ┐
-                            ├─ code-sandbox-mcp (WSL2, streamable-http @ 127.0.0.1:8765/mcp)
+                            ├─ code-sandbox-mcp (WSL2, streamable-http @ 127.0.0.1:8750/mcp)
 opencode ───────────────────┘
 ```
 
@@ -449,7 +449,7 @@ intervention needed after boot or restart.
 # scripts/code-sandbox-mcp.service (template excerpt)
 [Service]
 ExecStart=@VENV_DIR@/bin/python -m code_sandbox_mcp.server \
-    --transport streamable-http --host 127.0.0.1 --port 8765
+    --transport streamable-http --host 127.0.0.1 --port 8750
 Environment=GITHUB_TOKEN_BROKER_SERVICE=code-sandbox-mcp
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 ```
@@ -459,7 +459,7 @@ Clients connect via `mcp-remote`:
 ```json
 { "mcpServers": { "code-sandbox-mcp": {
   "command": "npx",
-  "args": ["-y", "mcp-remote", "http://127.0.0.1:8765/mcp"]
+  "args": ["-y", "mcp-remote", "http://127.0.0.1:8750/mcp"]
 }}}
 ```
 
@@ -609,7 +609,7 @@ code-sandbox-mcp shifts the human from **active watching** to **passive monitori
 | Boundary crossing ops | Invisible | Explicitly tracked in the journal |
 | Human attention model | Must watch terminal | Check dashboard anytime, catch up in seconds |
 
-The dashboard (`--dashboard-port 8766`) runs on localhost, auto-refreshes every 10 seconds, and requires no external services. When a test fails, the trace shows exactly which assertion broke, on which line — no re-run needed.
+The dashboard (`--dashboard-port 8751`) runs on localhost, auto-refreshes every 10 seconds, and requires no external services. When a test fails, the trace shows exactly which assertion broke, on which line — no re-run needed.
 
 > This is the HITL layer that design.md §8-9 describes: the human's final control shifts from pre-execution approval to **post-hoc audit**, and the dashboard makes that audit practical rather than theoretical.
 

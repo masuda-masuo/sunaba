@@ -555,12 +555,12 @@ class TestServerArgs:
         assert args.transport == "streamable-http"
 
     def test_default_host_port(self) -> None:
-        """Default host and port should be 127.0.0.1:8765."""
+        """Default host and port should be 127.0.0.1:8750."""
         from code_sandbox_mcp.server import _build_arg_parser
         parser = _build_arg_parser()
         args = parser.parse_args([])
         assert args.host == "127.0.0.1"
-        assert args.port == 8765
+        assert args.port == 8750
 
     def test_log_level_default(self) -> None:
         """Default log level should be INFO."""

@@ -339,7 +339,7 @@ else:
 
 ## 10. テスト環境クイックパス
 
-V1.0 の棚卸し（#457 / #458）で削除。`run_test_environment` / `stop_test_environment` / `wait_for_condition` は実利用が無いまま休眠していたため、互換シム無しで撤去した（#438 と同方針）。多サービス環境が必要な場合は `sandbox_exec` から docker compose を直接使う。
+V1.0 の棚卸し（#457 / #458）で削除。`run_test_environment` / `stop_test_environment` / `wait_for_condition` は実利用が無いまま休眠していたため、互換シム無しで撤去した（#438 と同方針）。多サービス統合テストは現状スコープ外。§2.1 の静的ガードレールにより `/var/run/docker.sock` 等のマウントは拒否され、コンテナ内に Docker デーモンも無いため、`sandbox_exec` から docker compose を実行することは構造的にできない。
 
 ---
 

@@ -192,6 +192,8 @@ class TestDecideHost:
         assert guard.decide_host("pypi.org").allow is True
         assert guard.decide_host("files.pythonhosted.org").allow is True
         assert guard.decide_host("registry.npmjs.org").allow is True
+        assert guard.decide_host("proxy.golang.org").allow is True
+        assert guard.decide_host("sum.golang.org").allow is True
 
     def test_unknown_host_denied_by_default(self) -> None:
         guard = EgressGuard()
@@ -260,6 +262,10 @@ class TestAllowedEgressHostsFromEnv:
         # Built-ins still present.
         assert "github.com" in DEFAULT_EGRESS_HOSTS
         assert guard.decide_host("github.com").allow is True
+        assert "proxy.golang.org" in DEFAULT_EGRESS_HOSTS
+        assert guard.decide_host("proxy.golang.org").allow is True
+        assert "sum.golang.org" in DEFAULT_EGRESS_HOSTS
+        assert guard.decide_host("sum.golang.org").allow is True
         # And the block hint names the right env var.
         assert "CODE_SANDBOX_ALLOWED_EGRESS_HOSTS" in EGRESS_HOST_BLOCK_HINT
 

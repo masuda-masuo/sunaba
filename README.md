@@ -400,17 +400,33 @@ Claude Desktop ─ mcp-remote ┐
 opencode ───────────────────┘
 ```
 
-Run the server as a systemd **user** service and point the token resolver at the broker:
+Run the server as a systemd **user** service.  Use the install script from the repository:
+
+```bash
+# First, install the package in a venv:
+python -m venv /path/to/venv/code-sandbox-mcp
+/path/to/venv/code-sandbox-mcp/bin/pip install code-sandbox-mcp
+
+# Then install and start the systemd unit:
+./scripts/install-systemd.sh /path/to/venv/code-sandbox-mcp
+```
+
+The script places `code-sandbox-mcp.service` in `~/.config/systemd/user/`, runs
+`systemctl --user daemon-reload`, and `systemctl --user enable --now`.
+The unit file uses `@VENV_DIR@` and `@PROJECT_DIR@` template variables that the
+script substitutes at install time:
 
 ```ini
-# ~/.config/systemd/user/code-sandbox-mcp.service (excerpt)
+# scripts/code-sandbox-mcp.service (template)
 [Service]
-ExecStart=/path/to/venv/bin/python -m code_sandbox_mcp.server \
+ExecStart=@VENV_DIR@/bin/python -m code_sandbox_mcp.server \
     --transport streamable-http --host 127.0.0.1 --port 8765
-Environment="GITHUB_TOKEN_BROKER_SERVICE=code-sandbox-mcp"
-# Required so the service can reach GNOME Keyring:
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=GITHUB_TOKEN_BROKER_SERVICE=code-sandbox-mcp
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 ```
+
+The template approach (modelled after shiori#157) keeps the unit file under version
+control and makes the install repeatable — no more copy-paste from README.
 
 Clients connect via `mcp-remote`:
 

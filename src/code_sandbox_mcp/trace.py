@@ -123,6 +123,7 @@ tr:hover {{ background: #161b22; }}
   <div class="badge"><strong>Ended:</strong> {ended}</div>
   <div class="badge"><strong>Operations:</strong> {op_count}</div>
   <div class="badge"><strong>Boundary crossings:</strong> {boundary_count}</div>
+  <div class="badge"><strong>Session:</strong> {session_label}</div>
 </div>
 <table>
 <thead>

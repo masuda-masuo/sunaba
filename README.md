@@ -148,6 +148,28 @@ Minimal `claude_desktop_config.json`:
 
 > Use `which python` (Linux/macOS) or `(Get-Command python).Source` (Windows) to find the Python executable path if `"python"` alone doesn't work.
 
+## Prerequisites & first-run pitfalls
+
+A few things that aren't obvious from the Quick start above and commonly trip up first-time users:
+
+- **The Docker daemon must already be running.** `docker info` should succeed before you start. On Linux, your user typically needs to be in the `docker` group; on macOS/Windows, Docker Desktop needs to be up.
+- **The first `sandbox_initialize` call can take several minutes** while it pulls the pinned image from GHCR. This collides with stdio's ~60 second client timeout (see [Transport](#transport-stdio-vs-ssehttp) below): **the most common first-run failure is the very first `sandbox_initialize` timing out**, not a bug. If you'll be using this MCP regularly, set up [SSE or HTTP transport](#transport-stdio-vs-ssehttp) before your first call; otherwise just retry once the image is cached locally.
+- **Network is off by default.** Anything that touches the network inside the container — `clone_repo`, `package_install`, `pip install`, etc. — needs an explicit:
+  ```
+  sandbox_initialize(allow_network=True)
+  ```
+  Forgetting this doesn't error immediately; the network-dependent step just fails inside the container (connection/DNS errors, or a `BLOCKED by egress proxy` message — see below).
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `Cannot connect to the Docker daemon` | Docker isn't running or unreachable | Start Docker Desktop / `dockerd`, confirm with `docker info` |
+| `permission denied` on `/var/run/docker.sock` | User isn't in the `docker` group (Linux) | `sudo usermod -aG docker $USER`, then log out/in |
+| Image pull fails or hangs | Registry unreachable, or disk space exhausted | Check network access to GHCR; `docker system df` / `docker system prune` |
+| `sandbox_initialize` times out on first use | Initial GHCR image pull exceeds stdio's ~60s client timeout | Retry once cached, or switch to [SSE/HTTP](#transport-stdio-vs-ssehttp) |
+| `BLOCKED by egress proxy: ...` | Destination host not allowlisted, or `allow_network=True` was omitted | Re-check `sandbox_initialize(allow_network=True)`; for pushes, confirm the target repo is listed in `CODE_SANDBOX_ALLOWED_REPOS` (see [Security model](#security-model)) |
+
 ## Installation
 
 ```bash

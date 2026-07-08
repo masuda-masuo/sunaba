@@ -400,33 +400,59 @@ Claude Desktop ─ mcp-remote ┐
 opencode ───────────────────┘
 ```
 
-Run the server as a systemd **user** service.  Use the install script from the repository:
+Run the server as a systemd **user** service.  The setup is split into three phases, each
+with a dedicated script in `scripts/`:
+
+**Phase 1 — Install** (one-time, no auth needed)
+
+The package is public on GitHub, so a plain HTTPS clone works without credentials:
 
 ```bash
-# First, install the package in a venv:
 python -m venv /path/to/venv/code-sandbox-mcp
-/path/to/venv/code-sandbox-mcp/bin/pip install code-sandbox-mcp
+/path/to/venv/code-sandbox-mcp/bin/pip install \
+    git+https://github.com/masuda-masuo/code-sandbox-mcp@v1.0.0
+```
 
-# Then install and start the systemd unit:
+**Phase 2 — Setup** (one-time, interactive)
+
+Register your GitHub App credentials in the OS keystore.  The `mcp-token` binary
+(masuda-masuo/mcp-launcher, public repo) is downloaded automatically from the
+pinned release — no token bootstrap cycle:
+
+```bash
+./scripts/setup.sh
+```
+
+The script resolves `mcp-token` (PATH → local cache → anonymous download),
+prompts for the three GitHub App values (App ID, Installation ID, Private Key
+file path), and stores them in the OS keystore via `mcp-token register`.
+Secrets live in the keystore, never in config files or env vars.
+
+**Phase 3 — Enable** (one-time)
+
+Place the systemd user unit and start the service:
+
+```bash
 ./scripts/install-systemd.sh /path/to/venv/code-sandbox-mcp
 ```
 
-The script places `code-sandbox-mcp.service` in `~/.config/systemd/user/`, runs
+The script substitutes `@VENV_DIR@` and `@PROJECT_DIR@` template variables,
+places `code-sandbox-mcp.service` in `~/.config/systemd/user/`, runs
 `systemctl --user daemon-reload`, and `systemctl --user enable --now`.
-The unit file uses `@VENV_DIR@` and `@PROJECT_DIR@` template variables that the
-script substitutes at install time:
+
+The unit file uses `GITHUB_TOKEN_BROKER_SERVICE=code-sandbox-mcp` so the
+server calls `mcp-token code-sandbox-mcp` at runtime, which reads the
+keystore-registered credentials and mints a short-lived token — no human
+intervention needed after boot or restart.
 
 ```ini
-# scripts/code-sandbox-mcp.service (template)
+# scripts/code-sandbox-mcp.service (template excerpt)
 [Service]
 ExecStart=@VENV_DIR@/bin/python -m code_sandbox_mcp.server \
     --transport streamable-http --host 127.0.0.1 --port 8765
 Environment=GITHUB_TOKEN_BROKER_SERVICE=code-sandbox-mcp
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 ```
-
-The template approach (modelled after shiori#157) keeps the unit file under version
-control and makes the install repeatable — no more copy-paste from README.
 
 Clients connect via `mcp-remote`:
 

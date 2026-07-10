@@ -1,3 +1,3 @@
 {
-  "proxy": "ghcr.io/masuda-masuo/code-sandbox-mcp/proxy@sha256:65b973f0495c893d11edd020627474cf605d3a080d2d9816a438edac53ec1e61"
+  "proxy": "ghcr.io/masuda-masuo/sunaba/proxy@sha256:6f90ac27a74a43484a7e4afdfd4268f818f49243fab1320c47828599ebe52cfa"
 }

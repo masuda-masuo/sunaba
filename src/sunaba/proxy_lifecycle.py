@@ -140,26 +140,6 @@ _CA_PATH_IN_PROXY = f"{_CERTS_DIR_IN_PROXY}/mitmproxy-ca-cert.pem"
 #: into the system bundle so git/curl trust the TLS-terminating proxy.
 CA_CERT_PATH_IN_SANDBOX = "/usr/local/share/ca-certificates/sunaba-egress-ca.crt"
 
-#: ``proxy_pin.json`` pins the sidecar to a digest built before the ``sunaba``
-#: rename (#534), and its baked-in ``proxy.py`` / ``proxy_entrypoint.py`` read
-#: the old ``CODE_SANDBOX_*`` names.  Every variable that crosses the
-#: host->sidecar boundary is therefore passed under both spellings.  Once CI
-#: has published the sidecar under the new package and ``update_proxy_pin.py``
-#: has re-pinned it, delete this table and the ``_legacy_proxy_env`` call.
-_LEGACY_ENV_ALIASES: dict[str, str] = {
-    CONTROL_PORT_ENV: "CODE_SANDBOX_PROXY_CONTROL_PORT",
-    CONTROL_HOST_ENV: "CODE_SANDBOX_PROXY_CONTROL_HOST",
-    CONTROL_SECRET_ENV: "CODE_SANDBOX_PROXY_CONTROL_SECRET",
-    ALLOWED_REPOS_ENV: "CODE_SANDBOX_ALLOWED_REPOS",
-    ALLOWED_EGRESS_HOSTS_ENV: "CODE_SANDBOX_ALLOWED_EGRESS_HOSTS",
-    PROXY_TOKEN_ENV: "CODE_SANDBOX_PROXY_TOKEN",
-}
-
-
-def _legacy_proxy_env(proxy_env: MutableMapping[str, str]) -> dict[str, str]:
-    """Mirror *proxy_env* under the pre-rename variable names (see above)."""
-    return {legacy: proxy_env[key] for key, legacy in _LEGACY_ENV_ALIASES.items() if key in proxy_env}
-
 #: Debian system bundle (includes the proxy CA after ``update-ca-certificates``).
 _SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 
@@ -498,7 +478,6 @@ def _start_proxy_container(
         value = source.get(key)
         if value:
             proxy_env[key] = value
-    proxy_env.update(_legacy_proxy_env(proxy_env))
     logger.info("Starting egress-proxy sidecar %s (image=%s)", PROXY_CONTAINER_NAME, image)
     container = client.containers.run(
         image,

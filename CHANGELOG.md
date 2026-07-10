@@ -62,10 +62,11 @@ a default.  See `docs/design.md` §15 for the decision, and #531 / #534.
 ### Internal
 
 - Pinned `mcp-token` broker bumped to v1.2.0 (#525).
-- The sidecar is still pinned to a pre-rename digest, so `proxy_lifecycle.py`
-  passes boundary-crossing variables under both the `SUNABA_*` and legacy
-  `CODE_SANDBOX_*` names.  This shim is removed once the sidecar is rebuilt
-  under the new package and re-pinned (#534).
+- The rename initially shipped with a shim in `proxy_lifecycle.py` passing
+  boundary-crossing variables under both the `SUNABA_*` and legacy
+  `CODE_SANDBOX_*` names, because `proxy_pin.json` still pinned a pre-rename
+  sidecar that only read the old names.  #538 re-pinned the sidecar to an
+  image built from the renamed source, so the shim was removed (#534).
 
 ### Migration
 

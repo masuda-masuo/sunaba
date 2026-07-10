@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "sunaba"
 version = "0.8.0"
 description = "MCP server for Docker sandbox execution with pass-through-env support"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp>=2.0.0",
@@ -14,6 +16,11 @@ dependencies = [
     "pyjwt[crypto]>=2.0.0",
     "platformdirs>=3.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/masuda-masuo/sunaba"
+Changelog = "https://github.com/masuda-masuo/sunaba/blob/main/CHANGELOG.md"
+Issues = "https://github.com/masuda-masuo/sunaba/issues"
 
 [project.scripts]
 sunaba = "sunaba.server:main"

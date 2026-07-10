@@ -6,11 +6,11 @@ import os
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
-from code_sandbox_mcp.server import (
+from sunaba.server import (
     sandbox_exec,
     sandbox_exec_background,
 )
-from code_sandbox_mcp.tools.container import (
+from sunaba.tools.container import (
     sandbox_initialize,
 )
 
@@ -21,10 +21,10 @@ if TYPE_CHECKING:
 class TestSandboxInitialize:
     """Tests for sandbox_initialize."""
 
-    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.proxy_lifecycle")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
     def test_proxied_container_env_carries_no_vcs_token(
         self,
         mock_validate: MagicMock,
@@ -57,12 +57,12 @@ class TestSandboxInitialize:
         # The proxy wiring itself still lands in the env.
         assert env.get("HTTPS_PROXY") == "http://egress-proxy:8080"
 
-    @patch("code_sandbox_mcp.tools.container._run_pip_install")
-    @patch("code_sandbox_mcp.tools.container._try_clone_into_container")
-    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container._run_pip_install")
+    @patch("sunaba.tools.container._try_clone_into_container")
+    @patch("sunaba.tools.container.proxy_lifecycle")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
     def test_proxied_clone_goes_anonymous(
         self,
         mock_validate: MagicMock,
@@ -73,7 +73,7 @@ class TestSandboxInitialize:
         mock_pip: MagicMock,
     ) -> None:
         """Proxied init holds no token, so the clone must not pick gh (#403)."""
-        from code_sandbox_mcp.tools.container import CloneResult
+        from sunaba.tools.container import CloneResult
 
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -96,11 +96,11 @@ class TestSandboxInitialize:
         # container env (a token is never injected, #439).
         assert mock_clone.call_args.args[4] is False
 
-    @patch("code_sandbox_mcp.tools.container._setup_pr_branch")
-    @patch("code_sandbox_mcp.tools.container.proxy_lifecycle")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container._setup_pr_branch")
+    @patch("sunaba.tools.container.proxy_lifecycle")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
     def test_proxied_pr_checkout_goes_anonymous(
         self,
         mock_validate: MagicMock,
@@ -132,9 +132,9 @@ class TestSandboxInitialize:
         # (pr=N no longer force-enables any token flag, #439).
         assert mock_setup_pr.call_args.kwargs["authenticated"] is False
 
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
     def test_container_env_never_carries_vcs_token(
         self,
         mock_validate: MagicMock,
@@ -165,7 +165,7 @@ class TestSandboxExec:
     def _decode(self, result: str) -> dict:
         return json.loads(result)
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_success_returns_ok_with_output(
         self,
         mock_docker: MagicMock,
@@ -184,7 +184,7 @@ class TestSandboxExec:
         assert result["status"] == "ok"
         assert "hello world" in result["output"]
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_success_empty_stdout(
         self,
         mock_docker: MagicMock,
@@ -203,7 +203,7 @@ class TestSandboxExec:
         assert result["status"] == "ok"
         assert result["output"] == ""
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_failure_returns_both_stdout_and_stderr(
         self,
         mock_docker: MagicMock,
@@ -224,7 +224,7 @@ class TestSandboxExec:
         assert "stdout output" in result["output"]
         assert "stderr output" in result["stderr"]
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_failure_preserves_stdout(
         self,
         mock_docker: MagicMock,
@@ -247,7 +247,7 @@ class TestSandboxExec:
         assert "pytest failure summary" in result["output"]
         assert result["exit_code"] == 1
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_container_not_found(
         self,
         mock_docker: MagicMock,
@@ -266,7 +266,7 @@ class TestSandboxExec:
         assert result["status"] == "error"
         assert "not found" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_docker_exception(
         self,
         mock_docker: MagicMock,
@@ -283,7 +283,7 @@ class TestSandboxExec:
         assert result["status"] == "error"
         assert "connection refused" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_verbose_full_shows_all_output(
         self,
         mock_docker: MagicMock,
@@ -304,7 +304,7 @@ class TestSandboxExec:
         assert result["shown"] == 3
         assert result["truncated"] is False
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_verbose_error_only_hides_success_output(
         self,
         mock_docker: MagicMock,
@@ -324,7 +324,7 @@ class TestSandboxExec:
         assert result["status"] == "ok"
         assert result["output"] == ""
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_verbose_error_only_shows_on_failure(
         self,
         mock_docker: MagicMock,
@@ -344,7 +344,7 @@ class TestSandboxExec:
         assert result["status"] == "error"
         assert "error details" in result["output"]
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_timeout_status_on_exit_124(
         self,
         mock_docker: MagicMock,
@@ -364,7 +364,7 @@ class TestSandboxExec:
         assert result["status"] == "timeout"
         assert result["exit_code"] == 124
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_timeout_zero_not_applied(
         self,
         mock_docker: MagicMock,
@@ -381,7 +381,7 @@ class TestSandboxExec:
         cmd = mock_container.exec_run.call_args[0][0][-1]
         assert "timeout" not in cmd
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_exit_124_without_timeout_is_error(
         self,
         mock_docker: MagicMock,
@@ -399,7 +399,7 @@ class TestSandboxExec:
         ))
         assert result["status"] == "error"
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_negative_timeout_returns_error(
         self,
         mock_docker: MagicMock,
@@ -415,7 +415,7 @@ class TestSandboxExec:
         mock_docker.assert_not_called()
 
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_max_output_tokens_triggers_truncation(
         self,
         mock_docker: MagicMock,
@@ -435,7 +435,7 @@ class TestSandboxExec:
         assert "truncated" in result.get("output", "")
 
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_working_dir_prepends_cd(
         self,
         mock_docker: MagicMock,
@@ -450,7 +450,7 @@ class TestSandboxExec:
         result = sandbox_exec(
             "abc123def456",
             ["echo done"],
-            working_dir="/tmp/repo/code-sandbox-mcp",
+            working_dir="/tmp/repo/sunaba",
         )
 
         parsed = json.loads(result)
@@ -465,10 +465,10 @@ class TestSandboxExec:
         b64_start = cmd.index("echo ") + 5
         b64_end = cmd.index(" | base64 -d")
         decoded = base64.b64decode(cmd[b64_start:b64_end]).decode()
-        assert "cd /tmp/repo/code-sandbox-mcp" in decoded
+        assert "cd /tmp/repo/sunaba" in decoded
         assert "echo done" in decoded
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_working_dir_empty_does_nothing(
         self,
         mock_docker: MagicMock,
@@ -493,7 +493,7 @@ class TestSandboxExec:
         cmd = call_args[0][0][2]
         assert "cd " not in cmd
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_background_working_dir_prepends_cd(
         self,
         mock_docker: MagicMock,
@@ -506,7 +506,7 @@ class TestSandboxExec:
         sandbox_exec_background(
             "abc123def456",
             ["echo done"],
-            working_dir="/tmp/repo/code-sandbox-mcp",
+            working_dir="/tmp/repo/sunaba",
         )
 
         call_args = mock_container.exec_run.call_args
@@ -516,7 +516,7 @@ class TestSandboxExec:
         inner_start = cmd.index("echo ") + 5
         inner_end = cmd.index(" | base64 -d >")
         decoded = base64.b64decode(cmd[inner_start:inner_end]).decode()
-        assert "cd /tmp/repo/code-sandbox-mcp" in decoded
+        assert "cd /tmp/repo/sunaba" in decoded
         assert "echo done" in decoded
 
 
@@ -526,14 +526,14 @@ class TestServerArgs:
 
     def test_default_transport_is_stdio(self) -> None:
         """Default transport should be stdio."""
-        from code_sandbox_mcp.server import _build_arg_parser
+        from sunaba.server import _build_arg_parser
         parser = _build_arg_parser()
         args = parser.parse_args([])
         assert args.transport == "stdio"
 
     def test_sse_transport_parsed(self) -> None:
         """--transport sse should be parsed correctly."""
-        from code_sandbox_mcp.server import _build_arg_parser
+        from sunaba.server import _build_arg_parser
         parser = _build_arg_parser()
         args = parser.parse_args(["--transport", "sse", "--host", "0.0.0.0", "--port", "9876"])
         assert args.transport == "sse"
@@ -542,21 +542,21 @@ class TestServerArgs:
 
     def test_http_transport_parsed(self) -> None:
         """--transport http should be parsed correctly."""
-        from code_sandbox_mcp.server import _build_arg_parser
+        from sunaba.server import _build_arg_parser
         parser = _build_arg_parser()
         args = parser.parse_args(["--transport", "http"])
         assert args.transport == "http"
 
     def test_streamable_http_transport_parsed(self) -> None:
         """--transport streamable-http should be parsed correctly."""
-        from code_sandbox_mcp.server import _build_arg_parser
+        from sunaba.server import _build_arg_parser
         parser = _build_arg_parser()
         args = parser.parse_args(["--transport", "streamable-http"])
         assert args.transport == "streamable-http"
 
     def test_default_host_port(self) -> None:
         """Default host and port should be 127.0.0.1:8750."""
-        from code_sandbox_mcp.server import _build_arg_parser
+        from sunaba.server import _build_arg_parser
         parser = _build_arg_parser()
         args = parser.parse_args([])
         assert args.host == "127.0.0.1"
@@ -564,14 +564,14 @@ class TestServerArgs:
 
     def test_log_level_default(self) -> None:
         """Default log level should be INFO."""
-        from code_sandbox_mcp.server import _build_arg_parser
+        from sunaba.server import _build_arg_parser
         parser = _build_arg_parser()
         args = parser.parse_args([])
         assert args.log_level == "INFO"
 
     def test_log_level_debug(self) -> None:
         """--log-level DEBUG should be parsed correctly."""
-        from code_sandbox_mcp.server import _build_arg_parser
+        from sunaba.server import _build_arg_parser
         parser = _build_arg_parser()
         args = parser.parse_args(["--log-level", "DEBUG"])
         assert args.log_level == "DEBUG"
@@ -583,7 +583,7 @@ class TestSandboxExecArgv:
     def _decode(self, result: str) -> dict:
         return json.loads(result)
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_argv_runs_without_shell(self, mock_docker: MagicMock) -> None:
         """argv must reach exec_run verbatim, not wrapped in /bin/sh -c."""
         mock_container = MagicMock()
@@ -605,7 +605,7 @@ class TestSandboxExecArgv:
         assert called.args[0][0] != "/bin/sh"
         assert "shell" not in called.kwargs or not called.kwargs.get("shell")
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_argv_working_dir_uses_exec_workdir(self, mock_docker: MagicMock) -> None:
         """working_dir maps to the exec workdir kwarg, not a `cd &&` prefix."""
         mock_container = MagicMock()
@@ -623,7 +623,7 @@ class TestSandboxExecArgv:
         assert called.args[0] == ["git", "status", "wd-marker"]
         assert called.kwargs["workdir"] == "/tmp/repo"
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_argv_timeout_prepends_timeout_binary(self, mock_docker: MagicMock) -> None:
         """timeout>0 prepends `timeout N` as argv rather than a shell wrapper."""
         mock_container = MagicMock()
@@ -640,7 +640,7 @@ class TestSandboxExecArgv:
         called = mock_container.exec_run.call_args
         assert called.args[0] == ["timeout", "5", "gh", "run", "list", "timeout-marker"]
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_commands_and_argv_mutually_exclusive(self, mock_docker: MagicMock) -> None:
         """Passing both commands and argv is rejected before touching docker."""
         result = self._decode(sandbox_exec(
@@ -652,7 +652,7 @@ class TestSandboxExecArgv:
         assert "mutually exclusive" in result["error"]
         mock_docker.assert_not_called()
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_neither_commands_nor_argv_is_error(self, mock_docker: MagicMock) -> None:
         """Passing neither commands nor argv is rejected before touching docker."""
         result = self._decode(sandbox_exec(container_id="abc123def456"))
@@ -660,7 +660,7 @@ class TestSandboxExecArgv:
         assert "required" in result["error"]
         mock_docker.assert_not_called()
 
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec._docker")
     def test_empty_argv_is_rejected(self, mock_docker: MagicMock) -> None:
         """An empty argv list is rejected before touching docker (review #252)."""
         result = self._decode(sandbox_exec(
@@ -685,33 +685,33 @@ class TestCoerceListArg:
 
         from pydantic import BeforeValidator, TypeAdapter
 
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
+        from sunaba.tools.common import _coerce_list_arg
         return TypeAdapter(Annotated[list[str], BeforeValidator(_coerce_list_arg)])
 
     def test_list_passthrough(self) -> None:
         """A real list is returned unchanged."""
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
+        from sunaba.tools.common import _coerce_list_arg
         v = ["echo", "hi"]
         assert _coerce_list_arg(v) is v
 
     def test_json_string_is_coerced_to_list(self) -> None:
         """A JSON-encoded list string is decoded to a list."""
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
+        from sunaba.tools.common import _coerce_list_arg
         assert _coerce_list_arg('["echo", "hi"]') == ["echo", "hi"]
 
     def test_non_json_string_is_returned_as_is(self) -> None:
         """A non-JSON string is returned unchanged (pydantic will reject it later)."""
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
+        from sunaba.tools.common import _coerce_list_arg
         assert _coerce_list_arg("not-a-list") == "not-a-list"
 
     def test_json_object_string_not_coerced(self) -> None:
         """A JSON string whose payload is not a list is returned unchanged."""
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
+        from sunaba.tools.common import _coerce_list_arg
         assert _coerce_list_arg('{"key": "value"}') == '{"key": "value"}'
 
     def test_none_passthrough(self) -> None:
         """None is returned unchanged."""
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
+        from sunaba.tools.common import _coerce_list_arg
         assert _coerce_list_arg(None) is None
 
     def test_pydantic_accepts_json_string_for_commands(self) -> None:
@@ -737,7 +737,7 @@ class TestCoerceListArg:
 
         from pydantic import BeforeValidator, TypeAdapter
 
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
+        from sunaba.tools.common import _coerce_list_arg
         ta = TypeAdapter(Annotated[list[str], BeforeValidator(_coerce_list_arg)] | None)
         result = ta.validate_python('["echo", "hello"]')
         assert result == ["echo", "hello"]
@@ -748,7 +748,7 @@ class TestCoerceListArg:
 
         from pydantic import BeforeValidator, TypeAdapter
 
-        from code_sandbox_mcp.tools.common import _coerce_list_arg
+        from sunaba.tools.common import _coerce_list_arg
         ta = TypeAdapter(Annotated[str | list[str], BeforeValidator(_coerce_list_arg)] | None)
         # JSON-stringified list
         result = ta.validate_python('["requests", "click"]')
@@ -765,8 +765,8 @@ class TestBackgroundExecJournalRecording:
     detached background path was completely invisible to the journal.
     """
 
-    @patch("code_sandbox_mcp.tools.exec.journal_record_exec")
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec.journal_record_exec")
+    @patch("sunaba.tools.exec._docker")
     def test_background_records_exec(
         self,
         mock_docker: MagicMock,
@@ -790,16 +790,16 @@ class TestBackgroundExecJournalRecording:
 class TestPackageInstallJournalRecording:
     """package_install must record like ``sandbox_exec pip install`` (Issue #359)."""
 
-    @patch("code_sandbox_mcp.tools.package.journal_record_exec")
-    @patch("code_sandbox_mcp.tools.package._get_installed_packages")
-    @patch("code_sandbox_mcp.tools.package._run_in_container")
+    @patch("sunaba.tools.package.journal_record_exec")
+    @patch("sunaba.tools.package._get_installed_packages")
+    @patch("sunaba.tools.package._run_in_container")
     def test_install_records_exec(
         self,
         mock_run: MagicMock,
         mock_pkgs: MagicMock,
         mock_record: MagicMock,
     ) -> None:
-        from code_sandbox_mcp.tools.package import package_install
+        from sunaba.tools.package import package_install
 
         mock_pkgs.return_value = []
         mock_run.return_value = (0, "Successfully installed requests", "")

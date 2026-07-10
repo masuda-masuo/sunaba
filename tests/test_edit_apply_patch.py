@@ -12,7 +12,7 @@ class TestNormalizeDiffForGit:
     """Pure-function tests for diff normalization (no container/git)."""
 
     def test_rewrites_headers_to_target(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _normalize_diff_for_git
+        from src.sunaba.edit_verify import _normalize_diff_for_git
 
         diff = (
             "diff --git a/foo.py b/foo.py\n"
@@ -32,13 +32,13 @@ class TestNormalizeDiffForGit:
         assert "-b\n+B" in out
 
     def test_returns_none_without_hunks(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _normalize_diff_for_git
+        from src.sunaba.edit_verify import _normalize_diff_for_git
 
         assert _normalize_diff_for_git("--- a/x\n+++ b/x\n") is None
         assert _normalize_diff_for_git("") is None
 
     def test_returns_none_for_multi_file_diff(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _normalize_diff_for_git
+        from src.sunaba.edit_verify import _normalize_diff_for_git
 
         multi = (
             "--- a/file1.py\n"
@@ -58,11 +58,11 @@ class TestApplyPatchToFile:
 
     def _apply(self, real_path, diff, monkeypatch):  # noqa: ANN001
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify.record_file_write",
+            "src.sunaba.edit_verify.record_file_write",
             lambda *a, **k: None,
         )
         client = _FakeClient(_FakeContainer({self._POSIX: str(real_path)}))
-        from src.code_sandbox_mcp.edit_verify import apply_patch_to_file
+        from src.sunaba.edit_verify import apply_patch_to_file
 
         return apply_patch_to_file(client, "abc123", self._POSIX, diff)
 

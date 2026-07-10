@@ -19,8 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from code_sandbox_mcp.server import _start_image_prewarm
-from code_sandbox_mcp.tools.container import (
+from sunaba.server import _start_image_prewarm
+from sunaba.tools.container import (
     prewarm_default_image,
     sandbox_initialize_tool,
 )
@@ -40,8 +40,8 @@ class TestMonotonicProgress:
             return "cid1234567890"
 
         with patch(
-            "code_sandbox_mcp.tools.container.sandbox_initialize", side_effect=_slow
-        ), patch("code_sandbox_mcp.tools.container._PROGRESS_INTERVAL_SECONDS", 0.05):
+            "sunaba.tools.container.sandbox_initialize", side_effect=_slow
+        ), patch("sunaba.tools.container._PROGRESS_INTERVAL_SECONDS", 0.05):
             result = asyncio.run(sandbox_initialize_tool(image=_IMAGE, ctx=ctx))
 
         assert result == "cid1234567890"
@@ -58,9 +58,9 @@ class TestMonotonicProgress:
 class TestPrewarmDefaultImage:
     def test_calls_ensure_image_with_default(self) -> None:
         with patch(
-            "code_sandbox_mcp.tools.container._ensure_image"
+            "sunaba.tools.container._ensure_image"
         ) as ensure, patch(
-            "code_sandbox_mcp.tools.container._DEFAULT_IMAGE", _IMAGE
+            "sunaba.tools.container._DEFAULT_IMAGE", _IMAGE
         ):
             prewarm_default_image()
         ensure.assert_any_call(_IMAGE)
@@ -69,13 +69,13 @@ class TestPrewarmDefaultImage:
         # language detection can pick python/go instead of the
         # neutral default, so those must be warm too, not just the default.
         with patch(
-            "code_sandbox_mcp.tools.container._ensure_image"
+            "sunaba.tools.container._ensure_image"
         ) as ensure, patch(
-            "code_sandbox_mcp.tools.container._DEFAULT_IMAGE", _IMAGE
+            "sunaba.tools.container._DEFAULT_IMAGE", _IMAGE
         ), patch(
-            "code_sandbox_mcp.tools.container._PYTHON_IMAGE", "python-variant"
+            "sunaba.tools.container._PYTHON_IMAGE", "python-variant"
         ), patch(
-            "code_sandbox_mcp.tools.container._GO_IMAGE", "go-variant"
+            "sunaba.tools.container._GO_IMAGE", "go-variant"
         ):
             prewarm_default_image()
         called_images = {c.args[0] for c in ensure.call_args_list}
@@ -83,7 +83,7 @@ class TestPrewarmDefaultImage:
 
     def test_swallows_errors(self) -> None:
         with patch(
-            "code_sandbox_mcp.tools.container._ensure_image",
+            "sunaba.tools.container._ensure_image",
             side_effect=RuntimeError("docker down"),
         ):
             # Must not raise - prewarm failures never break startup.
@@ -91,14 +91,14 @@ class TestPrewarmDefaultImage:
 
     def test_one_failing_image_does_not_block_others(self) -> None:
         with patch(
-            "code_sandbox_mcp.tools.container._ensure_image",
+            "sunaba.tools.container._ensure_image",
             side_effect=RuntimeError("registry hiccup"),
         ) as ensure, patch(
-            "code_sandbox_mcp.tools.container._DEFAULT_IMAGE", _IMAGE
+            "sunaba.tools.container._DEFAULT_IMAGE", _IMAGE
         ), patch(
-            "code_sandbox_mcp.tools.container._PYTHON_IMAGE", "python-variant"
+            "sunaba.tools.container._PYTHON_IMAGE", "python-variant"
         ), patch(
-            "code_sandbox_mcp.tools.container._GO_IMAGE", "go-variant"
+            "sunaba.tools.container._GO_IMAGE", "go-variant"
         ):
             prewarm_default_image()
         assert ensure.call_count == 3
@@ -107,9 +107,9 @@ class TestPrewarmDefaultImage:
 class TestStartImagePrewarm:
     def test_disabled_when_interval_non_positive(self) -> None:
         with patch(
-            "code_sandbox_mcp.server.threading.Thread"
+            "sunaba.server.threading.Thread"
         ) as thread_cls, patch(
-            "code_sandbox_mcp.tools.container.prewarm_default_image"
+            "sunaba.tools.container.prewarm_default_image"
         ) as prewarm:
             _start_image_prewarm(0)
             _start_image_prewarm(-5)
@@ -123,7 +123,7 @@ class TestStartImagePrewarm:
             called.set()
 
         with patch(
-            "code_sandbox_mcp.tools.container.prewarm_default_image",
+            "sunaba.tools.container.prewarm_default_image",
             side_effect=_fake,
         ):
             # Long interval: the loop prewarms once, then parks in sleep.  The
@@ -135,7 +135,7 @@ class TestStartImagePrewarm:
         startup_ready = threading.Event()
 
         with patch(
-            "code_sandbox_mcp.tools.container.prewarm_default_image",
+            "sunaba.tools.container.prewarm_default_image",
         ):
             _start_image_prewarm(3600, startup_ready)
             assert startup_ready.wait(timeout=2.0)
@@ -144,7 +144,7 @@ class TestStartImagePrewarm:
         startup_ready = threading.Event()
 
         with patch(
-            "code_sandbox_mcp.tools.container.prewarm_default_image",
+            "sunaba.tools.container.prewarm_default_image",
             side_effect=RuntimeError("docker down"),
         ):
             _start_image_prewarm(3600, startup_ready)
@@ -161,25 +161,25 @@ class TestPrewarmTimeout:
         # Reset the global security profile after calling main() so other
         # tests (e.g. test_security.TestGetSetDefaultProfile) are not
         # affected by the host-computed profile set in server.main().
-        import code_sandbox_mcp.security as security
+        import sunaba.security as security
         security._effective_default_profile = None
 
     def test_arg_parser_default(self) -> None:
-        from code_sandbox_mcp.server import _build_arg_parser
+        from sunaba.server import _build_arg_parser
 
         parser = _build_arg_parser()
         args = parser.parse_args([])
         assert args.prewarm_timeout_seconds == 300
 
     def test_arg_parser_custom(self) -> None:
-        from code_sandbox_mcp.server import _build_arg_parser
+        from sunaba.server import _build_arg_parser
 
         parser = _build_arg_parser()
         args = parser.parse_args(["--prewarm-timeout-seconds", "120"])
         assert args.prewarm_timeout_seconds == 120
 
     def test_arg_parser_rejects_negative(self) -> None:
-        from code_sandbox_mcp.server import _build_arg_parser
+        from sunaba.server import _build_arg_parser
 
         parser = _build_arg_parser()
         with pytest.raises(SystemExit):
@@ -188,17 +188,17 @@ class TestPrewarmTimeout:
     def test_main_starts_after_timeout_without_prewarm(self) -> None:
         import sys as _sys
 
-        from code_sandbox_mcp.server import main
+        from sunaba.server import main
 
         # Simulate a hang: _start_image_prewarm never signals the event.
         # The server should still start after prewarm_timeout_seconds elapses
         # (set to a short value) with a warning logged.
         with patch(
-            "code_sandbox_mcp.server._start_image_prewarm",
+            "sunaba.server._start_image_prewarm",
         ) as prewarm, patch(
-            "code_sandbox_mcp.server.mcp.run",
+            "sunaba.server.mcp.run",
         ) as mcp_run, patch(
-            "code_sandbox_mcp.server._start_github_app_token_refresh",
+            "sunaba.server._start_github_app_token_refresh",
         ), patch.object(
             _sys, "argv",
             ["prog", "--prewarm-timeout-seconds", "1", "--dashboard-port", "0"],

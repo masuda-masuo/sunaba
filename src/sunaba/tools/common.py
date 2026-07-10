@@ -1,4 +1,4 @@
-"""Shared helpers for code_sandbox_mcp tools."""
+"""Shared helpers for sunaba tools."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def _parse_numstat(lines: Sequence[str]) -> list[dict]:
 #: (see docs/issue-181-followup.md for the full diagnosis).  Bounding
 #: these calls well under the client timeout keeps recovery answerable.
 #:
-#: Override via the ``CODE_SANDBOX_RECOVERY_DOCKER_TIMEOUT`` env var
+#: Override via the ``SUNABA_RECOVERY_DOCKER_TIMEOUT`` env var
 #: (seconds); non-numeric or non-positive values fall back to the
 #: 15s default (Issue #181).
 _DEFAULT_RECOVERY_DOCKER_TIMEOUT: float = 15.0
@@ -73,11 +73,11 @@ _DEFAULT_RECOVERY_DOCKER_TIMEOUT: float = 15.0
 def _recovery_timeout_from_env() -> float:
     """Resolve :data:`RECOVERY_DOCKER_TIMEOUT` from the environment.
 
-    Reads ``CODE_SANDBOX_RECOVERY_DOCKER_TIMEOUT``; falls back to
+    Reads ``SUNABA_RECOVERY_DOCKER_TIMEOUT``; falls back to
     :data:`_DEFAULT_RECOVERY_DOCKER_TIMEOUT` for unset, non-numeric, or
     non-positive values.
     """
-    raw = os.environ.get("CODE_SANDBOX_RECOVERY_DOCKER_TIMEOUT")
+    raw = os.environ.get("SUNABA_RECOVERY_DOCKER_TIMEOUT")
     if raw is None:
         return _DEFAULT_RECOVERY_DOCKER_TIMEOUT
     try:

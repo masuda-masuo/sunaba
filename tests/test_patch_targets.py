@@ -27,16 +27,16 @@ class TestResolvePatchTarget:
 
     def test_missing_attribute_is_reported(self) -> None:
         reason = cpt.resolve_patch_target(
-            "code_sandbox_mcp.server.totally_missing_attr"
+            "sunaba.server.totally_missing_attr"
         )
         assert reason is not None
         assert "totally_missing_attr" in reason
-        assert "code_sandbox_mcp.server" in reason
+        assert "sunaba.server" in reason
 
     def test_missing_module_is_reported(self) -> None:
-        reason = cpt.resolve_patch_target("code_sandbox_mcp.no_such_module.foo")
+        reason = cpt.resolve_patch_target("sunaba.no_such_module.foo")
         assert reason is not None
-        assert "code_sandbox_mcp.no_such_module" in reason
+        assert "sunaba.no_such_module" in reason
 
     def test_non_dotted_target_is_reported(self) -> None:
         assert cpt.resolve_patch_target("server") is not None
@@ -101,12 +101,12 @@ class TestCheckFile:
         # was moved out of server.py but is still patched.
         test_file.write_text(
             "from unittest.mock import patch\n"
-            "@patch('code_sandbox_mcp.server._docker_gone')\n"
+            "@patch('sunaba.server._docker_gone')\n"
             "def test_foo(m):\n"
             "    pass\n",
             encoding="utf-8",
         )
         errors = cpt.check_file(test_file)
         assert len(errors) == 1
-        assert errors[0].target == "code_sandbox_mcp.server._docker_gone"
+        assert errors[0].target == "sunaba.server._docker_gone"
         assert errors[0].lineno == 2

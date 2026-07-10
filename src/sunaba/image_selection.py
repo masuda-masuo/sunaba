@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 
 # Reuse the §3 project markers so image selection and verify dispatch never
 # drift apart (single source of truth for "which file means which language").
-from code_sandbox_mcp.edit_verify import _DETECTION_MARKERS
+from sunaba.edit_verify import _DETECTION_MARKERS
 
 #: Marker files for languages the tool deliberately does *not* support
 #: (``docs/design-multilang-support.md`` §9 freezes support at py / js / go).
@@ -128,7 +128,7 @@ def detect_from_github(
         url,
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": "code-sandbox-mcp",
+            "User-Agent": "sunaba",
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )

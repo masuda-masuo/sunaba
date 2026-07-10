@@ -4,7 +4,7 @@ These exercise the pure classifier and the decision core only, so they run
 without mitmproxy installed (the addon guards its ``from mitmproxy import
 http`` import).  End-to-end behaviour (real clone passes / push blocked
 through a TLS-terminating mitmproxy) was validated by a manual PoC; see the
-module docstring in ``code_sandbox_mcp.proxy``.
+module docstring in ``sunaba.proxy``.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import urllib.request
 
 import pytest
 
-from code_sandbox_mcp.proxy import (
+from sunaba.proxy import (
     API_WRITE_BLOCK_HINT,
     CONTROL_HOST_ENV,
     CONTROL_PORT_ENV,
@@ -167,15 +167,15 @@ class TestEgressGuardDecision:
 
 
 class TestAllowlistFromEnv:
-    """Parsing the CODE_SANDBOX_ALLOWED_REPOS env var."""
+    """Parsing the SUNABA_ALLOWED_REPOS env var."""
 
     def test_comma_separated(self) -> None:
-        env = {"CODE_SANDBOX_ALLOWED_REPOS": "a/b, c/d ,e/f"}
+        env = {"SUNABA_ALLOWED_REPOS": "a/b, c/d ,e/f"}
         assert allowed_repos_from_env(env) == {"a/b", "c/d", "e/f"}
 
     def test_empty(self) -> None:
         assert allowed_repos_from_env({}) == set()
-        assert allowed_repos_from_env({"CODE_SANDBOX_ALLOWED_REPOS": ""}) == set()
+        assert allowed_repos_from_env({"SUNABA_ALLOWED_REPOS": ""}) == set()
 
 
 class TestDecideHost:
@@ -239,23 +239,23 @@ class TestDecideHost:
 
 
 class TestAllowedEgressHostsFromEnv:
-    """Parsing CODE_SANDBOX_ALLOWED_EGRESS_HOSTS (built-ins added by the guard)."""
+    """Parsing SUNABA_ALLOWED_EGRESS_HOSTS (built-ins added by the guard)."""
 
     def test_comma_separated_lowercased(self) -> None:
-        env = {"CODE_SANDBOX_ALLOWED_EGRESS_HOSTS": "A.com, B.org ,.internal"}
+        env = {"SUNABA_ALLOWED_EGRESS_HOSTS": "A.com, B.org ,.internal"}
         assert allowed_egress_hosts_from_env(env) == {"a.com", "b.org", ".internal"}
 
     def test_empty_is_empty_set(self) -> None:
         assert allowed_egress_hosts_from_env({}) == set()
-        assert allowed_egress_hosts_from_env({"CODE_SANDBOX_ALLOWED_EGRESS_HOSTS": ""}) == set()
+        assert allowed_egress_hosts_from_env({"SUNABA_ALLOWED_EGRESS_HOSTS": ""}) == set()
 
     def test_wildcard_passes_through(self) -> None:
-        env = {"CODE_SANDBOX_ALLOWED_EGRESS_HOSTS": "*"}
+        env = {"SUNABA_ALLOWED_EGRESS_HOSTS": "*"}
         assert allowed_egress_hosts_from_env(env) == {EGRESS_HOST_WILDCARD}
 
     def test_env_wired_into_guard(self) -> None:
         hosts = allowed_egress_hosts_from_env(
-            {"CODE_SANDBOX_ALLOWED_EGRESS_HOSTS": "internal.example.com"}
+            {"SUNABA_ALLOWED_EGRESS_HOSTS": "internal.example.com"}
         )
         guard = EgressGuard(allowed_egress_hosts=hosts)
         assert guard.decide_host("internal.example.com").allow is True
@@ -267,7 +267,7 @@ class TestAllowedEgressHostsFromEnv:
         assert "sum.golang.org" in DEFAULT_EGRESS_HOSTS
         assert guard.decide_host("sum.golang.org").allow is True
         # And the block hint names the right env var.
-        assert "CODE_SANDBOX_ALLOWED_EGRESS_HOSTS" in EGRESS_HOST_BLOCK_HINT
+        assert "SUNABA_ALLOWED_EGRESS_HOSTS" in EGRESS_HOST_BLOCK_HINT
 
 
 class TestTokenInjection:
@@ -797,7 +797,7 @@ class TestLoadsUnderMitmdump:
         import importlib.util
         import sys
 
-        from code_sandbox_mcp import proxy as installed_proxy
+        from sunaba import proxy as installed_proxy
 
         name = "cs_proxy_mitmdump_probe"
         spec = importlib.util.spec_from_file_location(name, installed_proxy.__file__)

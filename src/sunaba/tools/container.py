@@ -23,8 +23,8 @@ from docker.errors import APIError, NotFound
 from fastmcp import Context
 from pydantic import BeforeValidator
 
-from code_sandbox_mcp import image_pins, image_selection, proxy_lifecycle
-from code_sandbox_mcp.journal import (
+from sunaba import image_pins, image_selection, proxy_lifecycle
+from sunaba.journal import (
     get_last_activity_per_container,
     get_session_label,
     read_container_states,
@@ -36,10 +36,10 @@ from code_sandbox_mcp.journal import (
     record_stop,
     set_session_label,
 )
-from code_sandbox_mcp.journal import (
+from sunaba.journal import (
     record_exec as journal_record_exec,
 )
-from code_sandbox_mcp.output_control import (
+from sunaba.output_control import (
     OutputMetadata,
     compress_failures,
     compress_repeated_lines,
@@ -48,8 +48,8 @@ from code_sandbox_mcp.output_control import (
     truncate_by_tokens,
     truncate_output,
 )
-from code_sandbox_mcp.proxy_client import authorized_read_grant
-from code_sandbox_mcp.security import (
+from sunaba.proxy_client import authorized_read_grant
+from sunaba.security import (
     CREATED_AT_LABEL,
     MANAGED_LABEL,
     NAME_LABEL,
@@ -59,14 +59,14 @@ from code_sandbox_mcp.security import (
     get_default_profile,
     validate_image_ref,
 )
-from code_sandbox_mcp.tools.common import (
+from sunaba.tools.common import (
     CLONE_NO_TOKEN_WARNING,
     RECOVERY_DOCKER_TIMEOUT,
     _build_clone_command,
     _coerce_list_arg,
     _docker,
 )
-from code_sandbox_mcp.tools.vcs import (
+from sunaba.tools.vcs import (
     _resolve_vcs_token,
     checkpoint_list,
     resolve_git_root,
@@ -79,9 +79,9 @@ logger: logging.Logger = logging.getLogger(__name__)
 # project's language is detected host-side (before container start) and the
 # matching variant image is chosen.  No language is hardcoded as "the
 # default" -- "Python is the default" only made sense because this repo
-# happens to be Python (see code_sandbox_mcp.image_selection).
+# happens to be Python (see sunaba.image_selection).
 #
-# The digest pins live as data in ``code_sandbox_mcp/image_pins.json``; CI
+# The digest pins live as data in ``sunaba/image_pins.json``; CI
 # (``.github/workflows/build-sandbox-variants.yml``) rewrites that file after
 # each variant build, then verifies this loader returns the new digest.  This
 # replaces the old ``sed``-on-source approach that broke silently when the
@@ -122,7 +122,7 @@ _ORPHAN_GRACE_SECONDS: int = 600
 #: When set to a positive integer, containers idle longer than this
 #: many seconds are automatically stopped by :func:`_reap_idle_containers`.
 #: Default 0 = disabled (no automatic idle reaping).
-_CONTAINER_TTL_ENV: str = "CODE_SANDBOX_CONTAINER_TTL_SECONDS"
+_CONTAINER_TTL_ENV: str = "SUNABA_CONTAINER_TTL_SECONDS"
 _CONTAINER_TTL_ENV_DEPRECATED: str = "CSB_CONTAINER_TTL_SECONDS"
 
 #: How often the async ``sandbox_initialize`` emits a progress notification to
@@ -382,7 +382,7 @@ def _clone_shiori_repo_to_container(
         raise ValueError(f"clone_dest must start with /tmp/, got: {clone_dest!r}")
 
     if not _SHIORI_REPOS_PATH:
-        raise ValueError("Shiori repos path is not configured. Set --shiori-repos-path or CODE_SANDBOX_SHIORI_REPOS_PATH env var.")
+        raise ValueError("Shiori repos path is not configured. Set --shiori-repos-path or SUNABA_SHIORI_REPOS_PATH env var.")
 
     _validate_clone_repo(clone_repo)
     repo_name = clone_repo.split("/")[-1]
@@ -719,7 +719,7 @@ def _resolve_pr_head_ref(repo: str, pr_number: int, *, token: str | None = None)
     url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "code-sandbox-mcp",
+        "User-Agent": "sunaba",
     }
     if token is None:
         token = _resolve_vcs_token()
@@ -1094,7 +1094,7 @@ def _get_container_ttl_seconds() -> int:
 def _reap_idle_containers() -> list[str]:
     """Stop containers idle longer than the configured TTL (Issue #480).
 
-    Reads :envvar:`CODE_SANDBOX_CONTAINER_TTL_SECONDS` to determine the
+    Reads :envvar:`SUNABA_CONTAINER_TTL_SECONDS` to determine the
     threshold.  When the env var is not set or is 0, this is a no-op
     (auto-reap disabled by default).
 
@@ -1199,7 +1199,7 @@ def sandbox_list_containers() -> str:
 
     Returns:
         JSON string with a ``containers`` array.  When
-        :envvar:`CODE_SANDBOX_CONTAINER_TTL_SECONDS` is set, idle
+        :envvar:`SUNABA_CONTAINER_TTL_SECONDS` is set, idle
         containers are automatically stopped before listing, and
         the ``reaped_ids`` field reports which containers were removed.
     """

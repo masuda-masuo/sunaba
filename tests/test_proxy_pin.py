@@ -14,15 +14,15 @@ from pathlib import Path
 
 import pytest
 
-from code_sandbox_mcp import image_pins
-from code_sandbox_mcp.image_pins import (
+from sunaba import image_pins
+from sunaba.image_pins import (
     _PROXY_PIN_PATTERN,
     PROXY_PIN_KEY,
     ImagePinError,
     load_proxy_pin,
 )
 
-_VALID_REF = f"ghcr.io/masuda-masuo/code-sandbox-mcp/proxy@sha256:{'a' * 64}"
+_VALID_REF = f"ghcr.io/masuda-masuo/sunaba/proxy@sha256:{'a' * 64}"
 
 
 def test_pattern_matches_digest_ref_only() -> None:
@@ -39,7 +39,7 @@ def test_packaged_pin_round_trips_when_present() -> None:
     # where the file legitimately does not exist (absence is tolerated).
     from importlib import resources
 
-    resource = resources.files("code_sandbox_mcp").joinpath(image_pins._PROXY_PINS_RESOURCE)
+    resource = resources.files("sunaba").joinpath(image_pins._PROXY_PINS_RESOURCE)
     if not resource.is_file():
         pytest.skip("proxy_pin.json not present (pre-bootstrap state)")
     ref = load_proxy_pin()

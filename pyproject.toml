@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "code-sandbox-mcp"
-version = "1.0.0"
+name = "sunaba"
+version = "0.8.0"
 description = "MCP server for Docker sandbox execution with pass-through-env support"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,11 +16,11 @@ dependencies = [
 ]
 
 [project.scripts]
-code-sandbox-mcp = "code_sandbox_mcp.server:main"
+sunaba = "sunaba.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["code_sandbox_mcp*"]
+include = ["sunaba*"]
 
 [tool.setuptools.package-data]
 # Ship the digest pin data files inside the wheel so importlib.resources can
@@ -29,7 +29,7 @@ include = ["code_sandbox_mcp*"]
 # the source tree until CI publishes the first proxy image; the glob simply
 # matches nothing then, and load_proxy_pin() treats absence as "use the local
 # tag" rather than an error.
-code_sandbox_mcp = ["image_pins.json", "proxy_pin.json"]
+sunaba = ["image_pins.json", "proxy_pin.json"]
 
 [project.optional-dependencies]
 test = ["pytest"]

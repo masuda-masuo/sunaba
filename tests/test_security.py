@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from code_sandbox_mcp.security import (
+from sunaba.security import (
     DEFAULT_SECURITY_PROFILE,
     SecurityProfile,
     _is_allowed_host_path,
@@ -418,32 +418,32 @@ class TestParseMemToMb:
     """Tests for _parse_mem_to_mb."""
 
     def test_parse_m(self) -> None:
-        from code_sandbox_mcp.security import _parse_mem_to_mb
+        from sunaba.security import _parse_mem_to_mb
         assert _parse_mem_to_mb("512m") == 512
         assert _parse_mem_to_mb("0m") == 0
 
     def test_parse_g(self) -> None:
-        from code_sandbox_mcp.security import _parse_mem_to_mb
+        from sunaba.security import _parse_mem_to_mb
         assert _parse_mem_to_mb("2g") == 2048
         assert _parse_mem_to_mb("1g") == 1024
 
     def test_parse_plain_number(self) -> None:
-        from code_sandbox_mcp.security import _parse_mem_to_mb
+        from sunaba.security import _parse_mem_to_mb
         assert _parse_mem_to_mb("2048") == 2048
         assert _parse_mem_to_mb("512") == 512
 
     def test_parse_case_insensitive(self) -> None:
-        from code_sandbox_mcp.security import _parse_mem_to_mb
+        from sunaba.security import _parse_mem_to_mb
         assert _parse_mem_to_mb("2G") == 2048
         assert _parse_mem_to_mb("512M") == 512
 
     def test_parse_empty_raises(self) -> None:
-        from code_sandbox_mcp.security import _parse_mem_to_mb
+        from sunaba.security import _parse_mem_to_mb
         with pytest.raises(ValueError, match="Empty memory string"):
             _parse_mem_to_mb("")
 
     def test_parse_invalid_raises(self) -> None:
-        from code_sandbox_mcp.security import _parse_mem_to_mb
+        from sunaba.security import _parse_mem_to_mb
         with pytest.raises(ValueError):
             _parse_mem_to_mb("not-a-number")
 
@@ -452,10 +452,10 @@ class TestComputeDefaultLimits:
     """Tests for compute_default_limits."""
 
     def test_computes_from_host_resources(self, monkeypatch) -> None:
-        from code_sandbox_mcp.security import compute_default_limits
+        from sunaba.security import compute_default_limits
         # Mock 16GB host / 8 CPUs
         monkeypatch.setattr(
-            "code_sandbox_mcp.security._detect_host_resources",
+            "sunaba.security._detect_host_resources",
             lambda: (16384, 8),
         )
         mem_str, cpus = compute_default_limits(0.25, 0.25)
@@ -465,10 +465,10 @@ class TestComputeDefaultLimits:
         assert cpus == 2.0
 
     def test_floor_mem_512(self, monkeypatch) -> None:
-        from code_sandbox_mcp.security import compute_default_limits
+        from sunaba.security import compute_default_limits
         # Very small host (e.g. 512MB)
         monkeypatch.setattr(
-            "code_sandbox_mcp.security._detect_host_resources",
+            "sunaba.security._detect_host_resources",
             lambda: (512, 1),
         )
         mem_str, cpus = compute_default_limits(0.25, 0.25)
@@ -476,10 +476,10 @@ class TestComputeDefaultLimits:
         assert mem_str == "512m"
 
     def test_floor_cpu_0_5(self, monkeypatch) -> None:
-        from code_sandbox_mcp.security import compute_default_limits
+        from sunaba.security import compute_default_limits
         # Single-core host
         monkeypatch.setattr(
-            "code_sandbox_mcp.security._detect_host_resources",
+            "sunaba.security._detect_host_resources",
             lambda: (8192, 1),
         )
         mem_str, cpus = compute_default_limits(0.25, 0.25)
@@ -487,9 +487,9 @@ class TestComputeDefaultLimits:
         assert cpus == 0.5
 
     def test_fallback_on_detection_failure(self, monkeypatch) -> None:
-        from code_sandbox_mcp.security import compute_default_limits
+        from sunaba.security import compute_default_limits
         monkeypatch.setattr(
-            "code_sandbox_mcp.security._detect_host_resources",
+            "sunaba.security._detect_host_resources",
             lambda: (0, 4),
         )
         mem_str, cpus = compute_default_limits(0.25, 0.25)
@@ -498,9 +498,9 @@ class TestComputeDefaultLimits:
         assert cpus == 0.5
 
     def test_custom_ratios(self, monkeypatch) -> None:
-        from code_sandbox_mcp.security import compute_default_limits
+        from sunaba.security import compute_default_limits
         monkeypatch.setattr(
-            "code_sandbox_mcp.security._detect_host_resources",
+            "sunaba.security._detect_host_resources",
             lambda: (32768, 16),
         )
         mem_str, cpus = compute_default_limits(0.5, 0.5)
@@ -515,16 +515,16 @@ class TestGetSetDefaultProfile:
 
     def setup_method(self) -> None:
         # Reset before each test so external contamination doesn't affect assertions.
-        import code_sandbox_mcp.security as security
+        import sunaba.security as security
         security._effective_default_profile = None
 
     def teardown_method(self) -> None:
         # Reset the module-level effective profile so tests don't leak state.
-        import code_sandbox_mcp.security as security
+        import sunaba.security as security
         security._effective_default_profile = None
 
     def test_returns_static_default_by_default(self) -> None:
-        from code_sandbox_mcp.security import (
+        from sunaba.security import (
             DEFAULT_SECURITY_PROFILE,
             get_default_profile,
         )
@@ -532,7 +532,7 @@ class TestGetSetDefaultProfile:
         assert result is DEFAULT_SECURITY_PROFILE
 
     def test_set_profile_returned_by_get(self) -> None:
-        from code_sandbox_mcp.security import (
+        from sunaba.security import (
             SecurityProfile,
             get_default_profile,
             set_default_profile,
@@ -546,7 +546,7 @@ class TestDetectHostResources:
     """Tests for _detect_host_resources."""
 
     def test_returns_positive_values(self) -> None:
-        from code_sandbox_mcp.security import _detect_host_resources
+        from sunaba.security import _detect_host_resources
         mem_mb, cpus = _detect_host_resources()
         assert cpus >= 1
         # mem_mb may be 0 on platforms without sysconf support

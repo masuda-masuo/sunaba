@@ -2,7 +2,7 @@
 """Lint that every ``patch("a.b.c")`` target actually exists.
 
 Background (issue #166): after the #154 refactor a test kept patching
-``code_sandbox_mcp.server._docker`` even though ``_docker`` had moved to a
+``sunaba.server._docker`` even though ``_docker`` had moved to a
 different module.  ``unittest.mock.patch`` resolves its target lazily, so the
 stale target was only discovered when the test ran.  This checker resolves
 every string ``patch(...)`` target statically (the same way ``mock`` does at

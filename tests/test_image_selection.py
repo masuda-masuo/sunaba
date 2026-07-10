@@ -5,8 +5,8 @@ from __future__ import annotations
 import io
 import json
 
-from code_sandbox_mcp import image_selection as imgsel
-from code_sandbox_mcp.image_selection import (
+from sunaba import image_selection as imgsel
+from sunaba.image_selection import (
     LanguageDetection,
     detect_from_github,
     detect_from_local_dir,

@@ -279,7 +279,7 @@ else:
 
 §8の通り安全網の主役はここ。**実装の最優先はジャーナル**。
 
-- **人間可読の append-only 実行ジャーナル（最優先）**: `tail -f ~/.code-sandbox-mcp/journal.log` で「いつ・どのimageで・何を・実行結果サマリ・境界越え操作なら承認の有無・外部VCS操作の内容」が自然文で流れる。全実行を漏れなく記録。改竄しにくい append-only を厳守。
+- **人間可読の append-only 実行ジャーナル（最優先）**: `tail -f ~/.sunaba/journal.log` で「いつ・どのimageで・何を・実行結果サマリ・境界越え操作なら承認の有無・外部VCS操作の内容」が自然文で流れる。全実行を漏れなく記録。改竄しにくい append-only を厳守。
   100MB に達すると `journal.log.1` へ自動退避し、ディスク使用量は最大約 200MB に抑制される。
   退避後も同一ファイルへの追記は続かず、新しい `journal.log` が作られる。
   読み取りは両ファイル (`journal.log.1` → `journal.log`) を透過的に結合する。退避より前の履歴も消えない。
@@ -330,7 +330,7 @@ else:
 | `sandbox_trace_dir` | （なし） | — | 読取専用・opt-in（#460） |
 | `sandbox_issue_write` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write、一発実行） |
 
-読取専用の journal/trace 5ツールは `CODE_SANDBOX_OBSERVABILITY_TOOLS=1` のときだけ登録される（#460）。記録側（`record_*`）は無条件で動く基盤であり、集計はホスト側で journal.log を直読みすれば足りる。この5ツールは意図的に非計装（#454）: デフォルト無効の観測用デバッグ面であり、journal の読み取りを journal に書くのは自己言及ノイズになる（`sandbox_journal_path` / `sandbox_trace_dir` は container_id 引数自体を持たない）。
+読取専用の journal/trace 5ツールは `SUNABA_OBSERVABILITY_TOOLS=1` のときだけ登録される（#460）。記録側（`record_*`）は無条件で動く基盤であり、集計はホスト側で journal.log を直読みすれば足りる。この5ツールは意図的に非計装（#454）: デフォルト無効の観測用デバッグ面であり、journal の読み取りを journal に書くのは自己言及ノイズになる（`sandbox_journal_path` / `sandbox_trace_dir` は container_id 引数自体を持たない）。
 
 テストファイル: `tests/test_journal.py` に対応する単体テストを追加済み（#359 用の
 `TestRecordToolUse` クラス）。新しいツールを追加するときは必ずテストも追加すること。
@@ -345,7 +345,7 @@ V1.0 の棚卸し（#457 / #458）で削除。`run_test_environment` / `stop_tes
 
 ### Environment variables
 
-プロジェクト固有の環境変数は `CODE_SANDBOX_*` prefix に統一する。
+プロジェクト固有の環境変数は `SUNABA_*` prefix に統一する。
 `GITHUB_*` / `GH_TOKEN` は GitHub エコシステム標準のため対象外。
 
 旧名（`CSB_*`、`SHIORI_REPOS_PATH`）は V1.0 リリース後に削除予定。
@@ -353,10 +353,10 @@ V1.0 の棚卸し（#457 / #458）で削除。`run_test_environment` / `stop_tes
 
 | 新名 | 旧名（deprecated） | 用途 |
 |---|---|---|
-| `CODE_SANDBOX_OBSERVABILITY_TOOLS` | `CSB_OBSERVABILITY_TOOLS` | Observability ツール登録 |
-| `CODE_SANDBOX_TOKEN_BROKER_CACHE_DIR` | `CSB_TOKEN_BROKER_CACHE_DIR` | トークンブローカのキャッシュディレクトリ |
-| `CODE_SANDBOX_TOKEN_BROKER_NO_DOWNLOAD` | `CSB_TOKEN_BROKER_NO_DOWNLOAD` | トークンブローカのダウンロード抑止 |
-| `CODE_SANDBOX_SHIORI_REPOS_PATH` | `SHIORI_REPOS_PATH` | Shiori リポジトリルートへのホストパス |
+| `SUNABA_OBSERVABILITY_TOOLS` | `CSB_OBSERVABILITY_TOOLS` | Observability ツール登録 |
+| `SUNABA_TOKEN_BROKER_CACHE_DIR` | `CSB_TOKEN_BROKER_CACHE_DIR` | トークンブローカのキャッシュディレクトリ |
+| `SUNABA_TOKEN_BROKER_NO_DOWNLOAD` | `CSB_TOKEN_BROKER_NO_DOWNLOAD` | トークンブローカのダウンロード抑止 |
+| `SUNABA_SHIORI_REPOS_PATH` | `SHIORI_REPOS_PATH` | Shiori リポジトリルートへのホストパス |
 
 ---
 
@@ -370,7 +370,7 @@ V1.0 の棚卸し（#457 / #458）で削除。`run_test_environment` / `stop_tes
 - **`clone_repo`**（read / 入口）: 対象リポジトリをコンテナ内へ匿名 `git clone`（`repo` / `dest_dir` / `branch`；private は proxy の read 認可ウィンドウで認証、#419）。issue_view と並ぶ作業の起点。`sandbox_initialize(clone_repo=…)` / `run_container_and_exec(clone_repo=…)` でも起動と同時にクローンできる。§2.2 read 扱い（ネットワーク明示許可・ジャーナル記録）。
 - **`publish`**（write / 境界越え）: コミット済みの状態を push し、任意で PR を作成する唯一の出口。verify は内蔵せず、LLM が `verify_in_container` で事前に行う。人間ゲートは MCP クライアントのツール承認、構造ガードは egress proxy（§2.2、二段階トークンは #438 で廃止）。§8 ジャーナルに結果を記録。
 
-  **egress proxy 遮断時は Objects API にフォールバックしない（#401）**: git push のエラー出力に `"BLOCKED by egress proxy"` が含まれている場合、`publish` は Objects API（blob→tree→commit→ref）による代替 push を行わず、そのままエラーを返す。これは意図的な設計判断である。API フォールバックはホスト側から api.github.com を直接叩くため proxy をバイパスする — もし proxy 遮断時にフォールバックが発動すると、allowlist 未設定などの構成ミスが隠蔽され、「なぜか API 経由でのみ push される」状態で運用が続くリスクがある。エラーメッセージには `CODE_SANDBOX_ALLOWED_REPOS` の設定が必要である旨のヒントを含める。
+  **egress proxy 遮断時は Objects API にフォールバックしない（#401）**: git push のエラー出力に `"BLOCKED by egress proxy"` が含まれている場合、`publish` は Objects API（blob→tree→commit→ref）による代替 push を行わず、そのままエラーを返す。これは意図的な設計判断である。API フォールバックはホスト側から api.github.com を直接叩くため proxy をバイパスする — もし proxy 遮断時にフォールバックが発動すると、allowlist 未設定などの構成ミスが隠蔽され、「なぜか API 経由でのみ push される」状態で運用が続くリスクがある。エラーメッセージには `SUNABA_ALLOWED_REPOS` の設定が必要である旨のヒントを含める。
 
 **認証（トークンはホスト側に留まる）**
 
@@ -479,11 +479,11 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 
 **2. opt-in TTL による自動 stop**
 
-環境変数 `CODE_SANDBOX_CONTAINER_TTL_SECONDS` に正の整数（秒）を設定すると、`_reap_idle_containers()` 呼び出し時に TTL を超えて idle のコンテナを自動停止する。デフォルトは未設定 = 無効。既存コンテナを誤って削除しないためのセーフガード。
+環境変数 `SUNABA_CONTAINER_TTL_SECONDS` に正の整数（秒）を設定すると、`_reap_idle_containers()` 呼び出し時に TTL を超えて idle のコンテナを自動停止する。デフォルトは未設定 = 無効。既存コンテナを誤って削除しないためのセーフガード。
 
 ```python
 # 動作例: TTL=3600 の場合、最終操作から1時間以上経過したコンテナを停止
-CODE_SANDBOX_CONTAINER_TTL_SECONDS=3600
+SUNABA_CONTAINER_TTL_SECONDS=3600
 ```
 
 **3. 終端イベントでの回収規約**
@@ -599,6 +599,32 @@ diff・テスト出力などのペイロードはコンテナ内に留め、LLM 
 
 **参照**: #467、#468、#469、#457、#458、#459、#438、#441、#475、#476、#477、#478
 
+
+### #531 / #534 (2026-07-10): V1.0 の撤回、0.8.0 への再番号付け、`sunaba` へのリネーム
+
+**決定**: #473 で宣言した `1.0.0` を撤回し、現 HEAD を `0.8.0` とする。あわせてプロジェクト名を `code-sandbox-mcp` から `sunaba`（砂場）へ変更する。README の互換性ポリシーは「0.x では破壊的変更を minor bump で行う（patch では不可）」に書き換え、契約凍結は 1.0.0 昇格時とした。
+
+**経緯**: #473 の決定にはタグ打刻が「マージ後の作業」として残置され、実際には打たれなかった。理由は運用がまだ安定しておらず 1.0 が時期尚早と判断したためだが、`pyproject.toml` と CHANGELOG だけが `1.0.0` を名乗る状態になった。さらにその後 #509（egress proxy の default-on 化）と #506（宛先ホストの default-deny 化）で既定挙動を2度反転させており、「破壊的変更は major のみ」という宣言と実態が乖離した。#531 本文は「1.0.0 に遡及打刻して現 HEAD を 1.1.0 にする」か「現 HEAD を 1.0.0 とする」の二択を提示していたが、いずれも既に破った約束を追認する形になる。
+
+`1.0.0` は git タグ・GHCR・PyPI のいずれにも公開されておらず、外部利用者がゼロであることを確認した（2026-07-10）。したがって「リリースされなかったもの」として撤回でき、0.x に戻せば既定反転は minor bump という semver の規約どおりの扱いになる。
+
+リネームを同じウェーブに含めたのは、(1) PyPI の `code-sandbox-mcp` が別者に取得済みで現名では公開経路が塞がっていること、(2) 0.x は破壊的変更が許容される期間であり、1.0 昇格後にリネームすると再び major bump が必要になること、による。名前は shiori（栞）と和名で揃い、「砂場 = sandbox」の直訳で後継であることが伝わる点を採った。`hakoniwa` は Rust 製サンドボックスツールと、`kekkai` は PyPI 既存パッケージと衝突するため見送った。
+
+**影響**:
+- `pyproject.toml`: `name = "sunaba"` / `version = "0.8.0"`、console script も `sunaba`
+- import パッケージ `code_sandbox_mcp` → `sunaba`、環境変数 `CODE_SANDBOX_*` → `SUNABA_*`（20個）
+- **ランタイム同一性**（機械的置換では壊れる箇所）: Docker ラベル `com.code-sandbox-mcp.*` → `com.sunaba.*`、ホスト状態ディレクトリ `~/.code-sandbox-mcp/` → `~/.sunaba/`、keyring サービス名 `GITHUB_TOKEN_BROKER_SERVICE=sunaba`、Docker ネットワーク/サイドカー/ボリューム `code-sandbox-egress*` → `sunaba-egress*`。いずれも「サーバーが既存の状態を発見する鍵」であり、移行手順を踏まないと既存コンテナを見失う・トークンチェーンが切れる。CHANGELOG に移行手順を記載した
+- **egress proxy サイドカーの暫定シム**: `proxy.py` / `proxy_entrypoint.py` はイメージに焼き込まれ、`proxy_pin.json` はリネーム前のダイジェストを指す。CI は `ghcr.io/${{ github.repository }}/proxy` に push するため新イメージはリネーム後にしか出ない（鶏と卵）。そこで `proxy_lifecycle.py` はホスト→サイドカー境界を越える6変数を新旧両方の名前で渡す。再 pin 後にこのシムを削除する
+- `image_pins.json` / `proxy_pin.json` は旧パッケージパスのまま据え置き（ダイジェストが旧パッケージにしか存在しないため）。CI が新パッケージへ publish した後に再 pin する
+- 旧名フォールバックは提供しない（利用者は自分のみ）。ただし上記サイドカー境界のみ例外
+
+**1.0.0 昇格条件**: 以下を全て満たしたときに検討する。
+1. 既定挙動の反転を伴う変更なしで4週間のドッグフーディング運用（VM・自宅機の両環境）
+2. リリース毎の CHANGELOG 更新が2リリース連続で守られる（#531 の再発防止）
+3. GHCR へのバージョンタグ付きイメージ発行が CI で自動化されている
+4. README のインストール手順が pin どおりに新規環境で通ることを確認済み
+
+**参照**: #531、#534、#473（本決定が上書きする決定元）、#506、#509、#517
 
 ## まとめ
 

@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 import docker.errors
 import pytest
 
-from code_sandbox_mcp import proxy_lifecycle as pl
-from code_sandbox_mcp.proxy import (
+from sunaba import proxy_lifecycle as pl
+from sunaba.proxy import (
     ALLOWED_EGRESS_HOSTS_ENV,
     ALLOWED_REPOS_ENV,
     CONTROL_HOST_ENV,
@@ -15,8 +15,8 @@ from code_sandbox_mcp.proxy import (
     CONTROL_SECRET_ENV,
     PROXY_TOKEN_ENV,
 )
-from code_sandbox_mcp.proxy_client import CONTROL_URL_ENV
-from code_sandbox_mcp.security import MANAGED_LABEL
+from sunaba.proxy_client import CONTROL_URL_ENV
+from sunaba.security import MANAGED_LABEL
 
 CA_PEM = b"-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
 
@@ -78,7 +78,7 @@ def _stub_fingerprint_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestEgressProxyEnabled:
-    """Flag parsing for CODE_SANDBOX_ENABLE_EGRESS_PROXY."""
+    """Flag parsing for SUNABA_ENABLE_EGRESS_PROXY."""
 
     @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " True ", "banana"])
     def test_truthy(self, value: str) -> None:
@@ -109,7 +109,7 @@ class TestEnsureEgressProxyFresh:
         runtime = pl.ensure_egress_proxy(client, env=env)
 
         run_kwargs = client.containers.run.call_args.kwargs
-        assert client.containers.run.call_args.args[0] == "code-sandbox-mcp/proxy:latest"
+        assert client.containers.run.call_args.args[0] == "sunaba/proxy:latest"
         assert run_kwargs["name"] == pl.PROXY_CONTAINER_NAME
         proxy_env = run_kwargs["environment"]
         assert proxy_env[CONTROL_PORT_ENV] == "9099"
@@ -174,7 +174,7 @@ class TestEnsureEgressProxyFresh:
 class TestResolveProxyImage:
     """Sidecar image precedence: env override -> GHCR pin -> local tag (#432)."""
 
-    _PIN = f"ghcr.io/masuda-masuo/code-sandbox-mcp/proxy@sha256:{'b' * 64}"
+    _PIN = f"ghcr.io/masuda-masuo/sunaba/proxy@sha256:{'b' * 64}"
 
     def test_env_override_wins_over_pin(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(pl, "load_proxy_pin", lambda: self._PIN)

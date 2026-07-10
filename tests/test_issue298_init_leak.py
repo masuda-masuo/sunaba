@@ -21,8 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from docker.errors import NotFound
 
-from code_sandbox_mcp.security import CREATED_AT_LABEL, MANAGED_LABEL, build_secure_run_kwargs
-from code_sandbox_mcp.tools.container import (
+from sunaba.security import CREATED_AT_LABEL, MANAGED_LABEL, build_secure_run_kwargs
+from sunaba.tools.container import (
     _ORPHAN_GRACE_SECONDS,
     _age_seconds,
     _journal_container_status,
@@ -57,9 +57,9 @@ class TestManagementLabel:
         assert kwargs["labels"][MANAGED_LABEL] == "true"
         assert kwargs["labels"][CREATED_AT_LABEL] == "2026-01-01T00:00:00+00:00"
 
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
     def test_sandbox_initialize_stamps_both_labels(
         self, mock_validate: MagicMock, mock_ensure: MagicMock, mock_docker: MagicMock
     ) -> None:
@@ -79,10 +79,10 @@ class TestManagementLabel:
 
 
 class TestCompletionMarker:
-    @patch("code_sandbox_mcp.tools.container.record_initialize_complete")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.record_initialize_complete")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
     def test_completion_recorded_after_init(
         self,
         mock_validate: MagicMock,
@@ -119,7 +119,7 @@ class TestAgeSeconds:
 
 
 class TestJournalContainerStatus:
-    @patch("code_sandbox_mcp.tools.container.read_container_states")
+    @patch("sunaba.tools.container.read_container_states")
     def test_aggregates_lifecycle(self, mock_journal: MagicMock) -> None:
         mock_journal.return_value = {
             "aaa": {"complete": False, "used": True, "stopped": False, "init_ts": None},
@@ -139,8 +139,8 @@ class TestReaper:
         client.containers.list.return_value = list(containers)
         return client
 
-    @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_container_states")
+    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.read_container_states")
     def test_reaps_orphaned_init(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         # Journal has an old initialize but no completion / exec / stop.
         mock_journal.return_value = {
@@ -156,8 +156,8 @@ class TestReaper:
         c.remove.assert_called_once_with(force=True)
         mock_stop.assert_called_once_with("orphan123456")
 
-    @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_container_states")
+    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.read_container_states")
     def test_skips_completed(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         mock_journal.return_value = {
             "done12345678": {"complete": True, "used": False, "stopped": False, "init_ts": _iso(_ORPHAN_GRACE_SECONDS + 60)},
@@ -166,8 +166,8 @@ class TestReaper:
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == []
         c.remove.assert_not_called()
 
-    @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_container_states")
+    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.read_container_states")
     def test_skips_used(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         mock_journal.return_value = {
             "used12345678": {"complete": False, "used": True, "stopped": False, "init_ts": _iso(_ORPHAN_GRACE_SECONDS + 60)},
@@ -176,8 +176,8 @@ class TestReaper:
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == []
         c.remove.assert_not_called()
 
-    @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_container_states")
+    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.read_container_states")
     def test_skips_within_grace(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         # Created just now — an in-progress init must never be reaped.
         mock_journal.return_value = {}
@@ -185,8 +185,8 @@ class TestReaper:
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == []
         c.remove.assert_not_called()
 
-    @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_container_states")
+    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.read_container_states")
     def test_skips_container_without_created_at(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         # e.g. a test-environment container: managed but not from sandbox_initialize.
         mock_journal.return_value = {}
@@ -194,8 +194,8 @@ class TestReaper:
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == []
         c.remove.assert_not_called()
 
-    @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_container_states")
+    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.read_container_states")
     def test_pre_record_orphan_aged_from_label(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         # The exact #298 case: timeout before any journal entry was written.
         # Age must come from the created_at label.
@@ -204,8 +204,8 @@ class TestReaper:
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == ["prerec123456"]
         mock_stop.assert_called_once_with("prerec123456")
 
-    @patch("code_sandbox_mcp.tools.container.record_stop")
-    @patch("code_sandbox_mcp.tools.container.read_container_states")
+    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.read_container_states")
     def test_remove_failure_is_swallowed(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         mock_journal.return_value = {}
         c = _fake_container("gone12345678", {MANAGED_LABEL: "true", CREATED_AT_LABEL: _iso(_ORPHAN_GRACE_SECONDS + 60)})
@@ -213,7 +213,7 @@ class TestReaper:
         # NotFound during remove must not raise; container is effectively gone.
         assert _reap_orphaned_init_containers(client=self._client_with(c)) == ["gone12345678"]
 
-    @patch("code_sandbox_mcp.tools.container.read_container_states")
+    @patch("sunaba.tools.container.read_container_states")
     def test_list_failure_returns_empty(self, mock_journal: MagicMock) -> None:
         client = MagicMock()
         client.containers.list.side_effect = RuntimeError("docker down")
@@ -221,7 +221,7 @@ class TestReaper:
 
 
 class TestAsyncWrapper:
-    @patch("code_sandbox_mcp.tools.container.sandbox_initialize")
+    @patch("sunaba.tools.container.sandbox_initialize")
     def test_ctx_none_runs_inline(self, mock_sync: MagicMock) -> None:
         mock_sync.return_value = "abc123def456"
         result = asyncio.run(sandbox_initialize_tool(image=_IMAGE, ctx=None))
@@ -237,8 +237,8 @@ class TestAsyncWrapper:
             _t.sleep(0.25)
             return "slowcid12345"
 
-        with patch("code_sandbox_mcp.tools.container.sandbox_initialize", side_effect=_slow), patch(
-            "code_sandbox_mcp.tools.container._PROGRESS_INTERVAL_SECONDS", 0.05
+        with patch("sunaba.tools.container.sandbox_initialize", side_effect=_slow), patch(
+            "sunaba.tools.container._PROGRESS_INTERVAL_SECONDS", 0.05
         ):
             result = asyncio.run(sandbox_initialize_tool(image=_IMAGE, ctx=ctx))
 
@@ -254,8 +254,8 @@ class TestAsyncWrapper:
             _t.sleep(0.2)
             return "okcid1234567"
 
-        with patch("code_sandbox_mcp.tools.container.sandbox_initialize", side_effect=_slow), patch(
-            "code_sandbox_mcp.tools.container._PROGRESS_INTERVAL_SECONDS", 0.05
+        with patch("sunaba.tools.container.sandbox_initialize", side_effect=_slow), patch(
+            "sunaba.tools.container._PROGRESS_INTERVAL_SECONDS", 0.05
         ):
             # Even though report_progress keeps raising, the work's result is returned.
             result = asyncio.run(sandbox_initialize_tool(image=_IMAGE, ctx=ctx))

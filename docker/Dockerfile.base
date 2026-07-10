@@ -2,9 +2,9 @@
 # docker/Dockerfile.base
 #
 # Code Sandbox MCP — 共有ベースイメージ（言語非依存インフラ + 横断ランタイム）
-# 公開タグ: ghcr.io/<owner>/code-sandbox-mcp/sandbox:base
+# 公開タグ: ghcr.io/<owner>/sunaba/sandbox:base
 # 用途: backend イメージ（Dockerfile.python / Dockerfile.go）の FROM 元。直接実行も可。
-# ビルド: docker build -f docker/Dockerfile.base -t code-sandbox-mcp/sandbox:base .
+# ビルド: docker build -f docker/Dockerfile.base -t sunaba/sandbox:base .
 #
 # 設計: docs/design-multilang-support.md §6
 #   方針「横断インフラが依存するランタイムは base へ。言語固有の開発ツール群は backend レイヤへ。」
@@ -97,8 +97,8 @@ RUN groupadd -r sandbox && useradd -r -g sandbox -m -d /home/sandbox sandbox
 # ── Git identity ─────────────────────────────────────────────────
 # 既定の commit author — submit が identity 未設定で失敗するのを防ぐ
 # ユーザーが明示的に指定した場合はそちらが優先される（server.py submit 参照）
-RUN git config --system user.name "code-sandbox-mcp[bot]" \
- && git config --system user.email "code-sandbox-mcp[bot]@users.noreply.github.com"
+RUN git config --system user.name "sunaba[bot]" \
+ && git config --system user.email "sunaba[bot]@users.noreply.github.com"
 USER sandbox
 WORKDIR /home/sandbox
 ENV PATH="/home/sandbox/.local/bin:${PATH}"

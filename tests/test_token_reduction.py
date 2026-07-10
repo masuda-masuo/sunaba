@@ -13,8 +13,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from code_sandbox_mcp.journal import record_exec
-from code_sandbox_mcp.output_control import (
+from sunaba.journal import record_exec
+from sunaba.output_control import (
     compress_failures,
     compute_failure_fingerprint,
     estimate_tokens,
@@ -187,8 +187,8 @@ class TestRecordExecOutputFields:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_exec("abc123", ["echo hello"], exit_code=0)
 
         entries = _read_log(log_path)
@@ -199,8 +199,8 @@ class TestRecordExecOutputFields:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_exec("abc123", ["echo hello"], exit_code=0, output_size=42)
 
         entries = _read_log(log_path)
@@ -211,8 +211,8 @@ class TestRecordExecOutputFields:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_exec("abc123", ["echo hello"], exit_code=0, max_output_tokens=500)
 
         entries = _read_log(log_path)
@@ -223,8 +223,8 @@ class TestRecordExecOutputFields:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_exec("abc123", ["echo hello"], exit_code=0, output_size=100)
 
         entries = _read_log(log_path)

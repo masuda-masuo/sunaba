@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
-from code_sandbox_mcp.tools.vcs import resolve_git_root
+from sunaba.tools.vcs import resolve_git_root
 
 
 def _make_container(exec_run_returns: list) -> MagicMock:
@@ -59,10 +59,10 @@ class TestResolveGitRootMeta:
             (128, (b"fatal: not a git repository\n", b"")),
             # Step 1: /tmp/repo scan behind the simplified mock
             _NO_META,
-            (0, (b"/tmp/repo/code-sandbox-mcp\n", b"")),
+            (0, (b"/tmp/repo/sunaba\n", b"")),
         ])
         result = resolve_git_root(container)
-        assert result == "/tmp/repo/code-sandbox-mcp"
+        assert result == "/tmp/repo/sunaba"
 
 
 class TestResolveGitRootStep1:
@@ -93,11 +93,11 @@ class TestResolveGitRootStep2:
             _NO_META,
             # Step 1: /home/sandbox → not a git repo
             (128, (b"fatal: not a git repository\n", b"")),
-            # Step 2: /tmp/repo/ code-sandbox-mcp found
-            (0, (b"/tmp/repo/code-sandbox-mcp\n", b"")),
+            # Step 2: /tmp/repo/ sunaba found
+            (0, (b"/tmp/repo/sunaba\n", b"")),
         ])
         result = resolve_git_root(container)
-        assert result == "/tmp/repo/code-sandbox-mcp"
+        assert result == "/tmp/repo/sunaba"
 
     def test_tmp_repo_no_repos_falls_back(self) -> None:
         container = _make_container([
@@ -155,7 +155,7 @@ class TestWriteMetaRoundTrip:
         This ensures the JSON format produced by _write_clone_meta
         is correctly parsed by resolve_git_root's Step 0.
         """
-        from code_sandbox_mcp.tools.container import _write_clone_meta
+        from sunaba.tools.container import _write_clone_meta
 
         clone_path = "/custom/dest/my-repo"
 

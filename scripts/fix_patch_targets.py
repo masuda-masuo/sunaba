@@ -2,9 +2,9 @@
 """Rewrite ``patch("a.b.c")`` targets in tests when a symbol moves modules.
 
 Background (issue #164): the #154 refactor moved ``sandbox_exec`` helpers from
-``code_sandbox_mcp.server`` to ``code_sandbox_mcp.tools.exec``.  Every test that
-patched ``code_sandbox_mcp.server._docker`` then had to be hand-edited to
-``code_sandbox_mcp.tools.exec._docker``.  ``unittest.mock.patch`` resolves its
+``sunaba.server`` to ``sunaba.tools.exec``.  Every test that
+patched ``sunaba.server._docker`` then had to be hand-edited to
+``sunaba.tools.exec._docker``.  ``unittest.mock.patch`` resolves its
 target lazily, so the stale patches only surfaced at run time.
 
 This codemod is the companion to ``check_patch_targets.py`` (issue #166): rather
@@ -17,11 +17,11 @@ Usage::
 
     # Preview (default): show what would change, touch nothing.
     python scripts/fix_patch_targets.py \\
-        --move code_sandbox_mcp.server._docker code_sandbox_mcp.tools.exec._docker
+        --move sunaba.server._docker sunaba.tools.exec._docker
 
     # Apply the rewrite in place.
     python scripts/fix_patch_targets.py -w \\
-        --move code_sandbox_mcp.server._docker code_sandbox_mcp.tools.exec._docker
+        --move sunaba.server._docker sunaba.tools.exec._docker
 
 Multiple ``--move OLD NEW`` pairs may be given.  Positional paths restrict the
 scan (default: ``tests``).  Exit code is non-zero only on error (e.g. a bad

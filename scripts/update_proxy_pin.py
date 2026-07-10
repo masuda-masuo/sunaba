@@ -5,7 +5,7 @@ sidecar image (``docker/Dockerfile.proxy``) is built and pushed to GHCR.  It is
 the proxy-side sibling of ``update_image_pins.py`` and follows the same
 anti-#214 discipline: the pin is written *structurally* (no ``sed`` regex anchor
 that can silently match nothing) and then re-read through the SAME loader the
-server uses at runtime -- :func:`code_sandbox_mcp.image_pins.load_proxy_pin`.
+server uses at runtime -- :func:`sunaba.image_pins.load_proxy_pin`.
 If a key drifts, the file moves, or the value is not a digest ref, the loader
 raises or the post-condition mismatch exits non-zero, so a stale/unusable pin
 fails loudly in CI instead of shipping in silence.
@@ -27,7 +27,7 @@ import sys
 from importlib import resources
 from pathlib import Path
 
-from code_sandbox_mcp.image_pins import (
+from sunaba.image_pins import (
     PROXY_PIN_KEY,
     _PROXY_PINS_RESOURCE,
     load_proxy_pin,
@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     ref = f"ghcr.io/{args.repo}/proxy@{args.digest}"
 
     # Locate the authoritative file the loader reads, and write it there.
-    path = Path(str(resources.files("code_sandbox_mcp").joinpath(_PROXY_PINS_RESOURCE)))
+    path = Path(str(resources.files("sunaba").joinpath(_PROXY_PINS_RESOURCE)))
     path.write_text(json.dumps({PROXY_PIN_KEY: ref}, indent=2) + "\n", encoding="utf-8")
 
     # Post-condition: the loader must now return exactly what we wrote.

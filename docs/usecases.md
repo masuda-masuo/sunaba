@@ -3,7 +3,7 @@
 > 位置づけ: LLM にこの MCP を使わせて開発させる場合の**想定ユースケースの棚卸し**と、
 > それに対する**機能カバレッジ**および**初見ユーザー向け情報の充足度**の評価。
 > 評価基準は `docs/design.md` の設計原則（最小コンテキスト / 境界防御 / 事後監査）と、
-> 2026-07 時点の実装（`src/code_sandbox_mcp/`）・README の突き合わせによる。
+> 2026-07 時点の実装（`src/sunaba/`）・README の突き合わせによる。
 
 ---
 
@@ -149,12 +149,12 @@ LLM には要約＋ハンドル）は §11 の入口/出口原則と整合する
      「なぜ必要か・忘れるとどう失敗するか」の説明がどこにもない。
 2. **トラブルシューティング節がない**。最低限: Docker 接続不可 / permission denied
    (docker group) / イメージ pull 失敗 / stdio タイムアウトの症状 / `BLOCKED by egress proxy`
-   エラーの意味と `CODE_SANDBOX_ALLOWED_REPOS` の設定。
+   エラーの意味と `SUNABA_ALLOWED_REPOS` の設定。
 
 **P2 — セットアップの段階性が示されていない**
 
 3. **egress proxy の有効条件が読み取れない**。「VCS token safety」節は proxy を常時の構造ガード
-   のように書くが、「Configuring the egress proxy」節は `CODE_SANDBOX_ENABLE_EGRESS_PROXY=true`
+   のように書くが、「Configuring the egress proxy」節は `SUNABA_ENABLE_EGRESS_PROXY=true`
    設定時のみ有効（実装既定は off、`proxy_lifecycle.py` の staged rollout）。
    **既定構成で何が有効で何が守られるのか**が初見では判別できない。
    「最小構成 / proxy 有効 / broker 併用」の3列で保証内容を並べた表が必要。
@@ -172,7 +172,7 @@ LLM には要約＋ハンドル）は §11 の入口/出口原則と整合する
    （例: Claude Code の permissions deny）の案内がない。思想だけあって操作がない状態。
 7. **ドキュメント言語の分裂**。README は英語、design.md は日本語。どちらかしか読めない
    ユーザーには半分が届かない。少なくとも README から design.md への参照に言語注記を。
-8. **環境変数リファレンスの一元化**。`CODE_SANDBOX_*` が design.md 内の表・README・
+8. **環境変数リファレンスの一元化**。`SUNABA_*` が design.md 内の表・README・
    各節に分散している。一覧表を README に一つ。
 
 ### 4.3 LLM（クライアント側モデル）にとっての充足度

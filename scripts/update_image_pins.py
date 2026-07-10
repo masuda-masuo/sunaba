@@ -3,7 +3,7 @@
 Run by ``.github/workflows/build-sandbox-variants.yml`` after each variant build.
 It replaces the old ``sed``-on-source update that broke silently (#214): instead
 of a regex anchor that can match nothing, this writes the pin file structurally
-and then re-reads it through :func:`code_sandbox_mcp.image_pins.load_image_pins`
+and then re-reads it through :func:`sunaba.image_pins.load_image_pins`
 -- the *same* loader the server uses at runtime.  If a key drifts, the file
 moved, or a value is not a digest ref, the loader raises or the post-condition
 mismatch exits non-zero, so the failure is loud in CI rather than a stale pin.
@@ -25,7 +25,7 @@ import sys
 from importlib import resources
 from pathlib import Path
 
-from code_sandbox_mcp.image_pins import PIN_KEYS, _PINS_RESOURCE, load_image_pins
+from sunaba.image_pins import PIN_KEYS, _PINS_RESOURCE, load_image_pins
 
 
 def _build_refs(repo: str, digests: dict[str, str]) -> dict[str, str]:
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Locate the authoritative file the loader reads, and write it there.
-    path = Path(str(resources.files("code_sandbox_mcp").joinpath(_PINS_RESOURCE)))
+    path = Path(str(resources.files("sunaba").joinpath(_PINS_RESOURCE)))
     path.write_text(json.dumps(refs, indent=2) + "\n", encoding="utf-8")
 
     # Post-condition: the loader must now return exactly what we wrote.  This is

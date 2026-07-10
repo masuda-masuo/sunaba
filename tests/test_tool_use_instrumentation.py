@@ -14,15 +14,15 @@ from unittest.mock import MagicMock, patch
 
 from docker.errors import NotFound
 
-from code_sandbox_mcp.tools.exec import sandbox_exec_check
-from code_sandbox_mcp.tools.file import transform_file
-from code_sandbox_mcp.tools.vcs import checkpoint_list
+from sunaba.tools.exec import sandbox_exec_check
+from sunaba.tools.file import transform_file
+from sunaba.tools.vcs import checkpoint_list
 from tests.conftest import _make_client_mock, _make_container_mock
 
 
 class TestCheckpointListRecordsToolUse:
-    @patch("code_sandbox_mcp.tools.vcs.record_tool_use")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_tool_use")
+    @patch("sunaba.tools.vcs._docker")
     def test_records_on_call(
         self, mock_docker: MagicMock, mock_record: MagicMock
     ) -> None:
@@ -33,8 +33,8 @@ class TestCheckpointListRecordsToolUse:
 
         mock_record.assert_called_once_with("abc123def456", "checkpoint_list")
 
-    @patch("code_sandbox_mcp.tools.vcs.record_tool_use")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_tool_use")
+    @patch("sunaba.tools.vcs._docker")
     def test_no_record_when_container_missing(
         self, mock_docker: MagicMock, mock_record: MagicMock
     ) -> None:
@@ -48,8 +48,8 @@ class TestCheckpointListRecordsToolUse:
 
 
 class TestSandboxExecCheckRecordsToolUse:
-    @patch("code_sandbox_mcp.tools.exec.record_tool_use")
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec.record_tool_use")
+    @patch("sunaba.tools.exec._docker")
     def test_records_on_call(
         self, mock_docker: MagicMock, mock_record: MagicMock
     ) -> None:
@@ -68,8 +68,8 @@ class TestSandboxExecCheckRecordsToolUse:
             "abc123def456", "sandbox_exec_check", {"job_id": "job-1"}
         )
 
-    @patch("code_sandbox_mcp.tools.exec.record_tool_use")
-    @patch("code_sandbox_mcp.tools.exec._docker")
+    @patch("sunaba.tools.exec.record_tool_use")
+    @patch("sunaba.tools.exec._docker")
     def test_no_record_when_container_missing(
         self, mock_docker: MagicMock, mock_record: MagicMock
     ) -> None:
@@ -83,9 +83,9 @@ class TestSandboxExecCheckRecordsToolUse:
 
 
 class TestTransformFileRecordsToolUse:
-    @patch("code_sandbox_mcp.tools.file.record_tool_use")
-    @patch("code_sandbox_mcp.tools.file.transform_file_in_container")
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file.record_tool_use")
+    @patch("sunaba.tools.file.transform_file_in_container")
+    @patch("sunaba.tools.file._docker")
     def test_records_even_when_unchanged(
         self,
         mock_docker: MagicMock,
@@ -111,8 +111,8 @@ class TestTransformFileRecordsToolUse:
             "abc123def456", "transform_file", {"file_path": "/tmp/f.txt"}
         )
 
-    @patch("code_sandbox_mcp.tools.file.record_tool_use")
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file.record_tool_use")
+    @patch("sunaba.tools.file._docker")
     def test_no_record_when_container_missing(
         self, mock_docker: MagicMock, mock_record: MagicMock
     ) -> None:

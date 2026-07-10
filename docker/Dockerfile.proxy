@@ -2,12 +2,12 @@
 # docker/Dockerfile.proxy
 #
 # Code Sandbox MCP — egress プロキシ sidecar イメージ（Issue #358 / Epic #353）
-# 公開タグ: ghcr.io/<owner>/code-sandbox-mcp/proxy
+# 公開タグ: ghcr.io/<owner>/sunaba/proxy
 # 用途: sandbox コンテナの egress を TLS 終端 MITM で受け、git push
 #       (git-receive-pack) をネットワーク層で遮断する sidecar。
-# ビルド: docker build -f docker/Dockerfile.proxy -t code-sandbox-mcp/proxy .
+# ビルド: docker build -f docker/Dockerfile.proxy -t sunaba/proxy .
 #
-# 設計: docs/design.md / designegressproxygitcontrol.md、src/code_sandbox_mcp/proxy.py
+# 設計: docs/design.md / designegressproxygitcontrol.md、src/sunaba/proxy.py
 #   proxy.py（mitmproxy addon 本体）と proxy_entrypoint.py（mitmdump 起動）を同梱し、
 #   allowlist・注入トークン・認可制御ポート/シークレットはすべて環境変数で設定する
 #   （proxy.py の ALLOWED_REPOS_ENV / PROXY_TOKEN_ENV / CONTROL_PORT_ENV /
@@ -18,7 +18,7 @@
 #
 # デプロイ時の同期 (#405): このイメージは proxy.py / proxy_entrypoint.py を焼き込む。
 # venv (サーバコード) を更新したらこのイメージも再ビルドし、sidecar
-# (code-sandbox-egress-proxy) を再作成して同期させること。ズレたまま起動すると
+# (sunaba-egress-proxy) を再作成して同期させること。ズレたまま起動すると
 # proxy_lifecycle が /version 経由で sidecar の指紋を照合し警告ログを出す
 # (fail はしない)。#404 は venv=新 proxy.py / sidecar=旧 proxy.py のズレで
 # publish が全滅した実例。
@@ -41,14 +41,14 @@ RUN groupadd -r egressproxy && useradd -r -g egressproxy -m -d /home/egressproxy
 # proxy_entrypoint.py も stdlib のみ。パッケージ全体を入れずにこの 2 ファイルで足りる。
 # COPY 元パスはリポジトリルートをビルドコンテキストとする前提
 # （ヘッダのビルド手順どおり `docker build -f docker/Dockerfile.proxy ... .`）。
-COPY src/code_sandbox_mcp/proxy.py /app/proxy.py
-COPY src/code_sandbox_mcp/proxy_entrypoint.py /app/proxy_entrypoint.py
+COPY src/sunaba/proxy.py /app/proxy.py
+COPY src/sunaba/proxy_entrypoint.py /app/proxy_entrypoint.py
 
 # ── mitmproxy の CA/設定ディレクトリ（proxy ユーザが書ける固定パス） ──
 # 初回起動時にここへ CA を生成する。#358 後続でこの mitmproxy-ca-cert.pem を
 # sandbox コンテナの信頼ストアへ配る。
 RUN mkdir -p /certs && chown egressproxy:egressproxy /certs
-ENV CODE_SANDBOX_PROXY_CONFDIR=/certs
+ENV SUNABA_PROXY_CONFDIR=/certs
 
 USER egressproxy
 WORKDIR /app

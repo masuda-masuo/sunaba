@@ -10,14 +10,14 @@ import time
 
 import pytest
 
-from code_sandbox_mcp.proxy import (
+from sunaba.proxy import (
     PROXY_SOURCE_FINGERPRINT,
     AuthControlServer,
     EgressGuard,
     basic_auth_header,
     bearer_auth_header,
 )
-from code_sandbox_mcp.proxy_client import (
+from sunaba.proxy_client import (
     CONTROL_SECRET_ENV,
     CONTROL_URL_ENV,
     ProxyAuthError,

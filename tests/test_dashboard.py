@@ -5,7 +5,7 @@ import json
 import urllib.error
 import urllib.request
 
-from code_sandbox_mcp.dashboard import (
+from sunaba.dashboard import (
     get_dashboard_url,
     start_dashboard,
     stop_dashboard,

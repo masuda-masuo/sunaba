@@ -1,7 +1,7 @@
 """Tests for the notification module (Issue #44)."""
 from __future__ import annotations
 
-from code_sandbox_mcp.notify import (
+from sunaba.notify import (
     configure,
 )
 

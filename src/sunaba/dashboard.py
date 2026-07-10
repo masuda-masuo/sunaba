@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from code_sandbox_mcp.journal import (
+from sunaba.journal import (
     get_active_environments,
     get_journal_path,
     get_runs,

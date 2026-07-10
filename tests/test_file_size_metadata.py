@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from code_sandbox_mcp.edit_verify import (
+from sunaba.edit_verify import (
     _compute_file_size,
     _file_size_from_counts,
     read_file_lines,
@@ -64,7 +64,7 @@ class TestFileSizeFromCounts:
 class TestReadFileLinesFileSize:
     def test_file_size_in_return(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "code_sandbox_mcp.edit_verify.read_file",
+            "sunaba.edit_verify.read_file",
             lambda _c, _p: "line1\nline2\nline3\n",
         )
         result = read_file_lines(
@@ -76,7 +76,7 @@ class TestReadFileLinesFileSize:
         """Even when only a slice is shown, file_size describes the whole file."""
         whole = "\n".join(f"line{i}" for i in range(100)) + "\n"
         monkeypatch.setattr(
-            "code_sandbox_mcp.edit_verify.read_file", lambda _c, _p: whole
+            "sunaba.edit_verify.read_file", lambda _c, _p: whole
         )
         result = read_file_lines(
             container=None, file_path="t.txt", offset=0, limit=5
@@ -88,7 +88,7 @@ class TestReadFileLinesFileSize:
         def _raise(*a, **k):
             raise ValueError("not found")
 
-        monkeypatch.setattr("code_sandbox_mcp.edit_verify.read_file", _raise)
+        monkeypatch.setattr("sunaba.edit_verify.read_file", _raise)
         result = read_file_lines(
             container=None, file_path="x.txt", offset=0, limit=10
         )
@@ -109,7 +109,7 @@ class TestTransformRunnerNewLines:
 
     def test_changed_emits_new_lines(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(
-            "code_sandbox_mcp.edit_verify.record_file_write", lambda *a, **k: None
+            "sunaba.edit_verify.record_file_write", lambda *a, **k: None
         )
         posix, client = self._client(tmp_path, "a\nb\nc\n")
         out = transform_file_in_container(
@@ -134,11 +134,11 @@ class TestTransformFileFileSize:
     """The tools.file.transform_file wrapper surfaces file_size in its JSON."""
 
     def _drive(self, tmp_path, monkeypatch, content: str, code: str):
-        from code_sandbox_mcp.tools import file as file_tools
+        from sunaba.tools import file as file_tools
         from tests.conftest import _FakeClient, _FakeContainer
 
         monkeypatch.setattr(
-            "code_sandbox_mcp.edit_verify.record_file_write", lambda *a, **k: None
+            "sunaba.edit_verify.record_file_write", lambda *a, **k: None
         )
         posix = "/sandbox/x.py"
         f = tmp_path / "x.py"
@@ -170,14 +170,14 @@ class TestReadFileRangeFileSize:
     """read_file_range surfaces file_size (whole-file) in its JSON output."""
 
     def test_includes_file_size(self, monkeypatch) -> None:
-        from code_sandbox_mcp.tools import file as file_tools
+        from sunaba.tools import file as file_tools
         from tests.conftest import _FakeClient, _FakeContainer
 
         monkeypatch.setattr(
-            "code_sandbox_mcp.edit_verify.read_file", lambda _c, _p: "a\nb\nc\n"
+            "sunaba.edit_verify.read_file", lambda _c, _p: "a\nb\nc\n"
         )
         monkeypatch.setattr(
-            "code_sandbox_mcp.tools.file.record_tool_use", lambda *a, **k: None
+            "sunaba.tools.file.record_tool_use", lambda *a, **k: None
         )
         client = _FakeClient(_FakeContainer())
         monkeypatch.setattr(file_tools, "_docker", lambda: client)

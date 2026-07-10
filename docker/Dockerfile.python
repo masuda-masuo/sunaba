@@ -2,17 +2,17 @@
 # docker/Dockerfile.python
 #
 # Code Sandbox MCP — Python backend イメージ（base + Python 開発ツール）
-# 公開タグ: ghcr.io/<owner>/code-sandbox-mcp/sandbox:python
+# 公開タグ: ghcr.io/<owner>/sunaba/sandbox:python
 # 設計: docs/design-multilang-support.md §6
 # ビルド:
 #   docker build -f docker/Dockerfile.python \
-#     --build-arg BASE_IMAGE=code-sandbox-mcp/sandbox:base \
-#     -t code-sandbox-mcp/sandbox:python .
+#     --build-arg BASE_IMAGE=sunaba/sandbox:base \
+#     -t sunaba/sandbox:python .
 #
 # 運用ではイメージはダイジェスト固定で参照すること (image@sha256:...)。
 # CI は base を先にビルドして digest を確定し、BASE_IMAGE にその digest を渡す。
 
-ARG BASE_IMAGE=code-sandbox-mcp/sandbox:base
+ARG BASE_IMAGE=sunaba/sandbox:base
 FROM ${BASE_IMAGE}
 
 # ── Python 開発ツール (base の永続 venv へ sandbox ユーザで導入) ──

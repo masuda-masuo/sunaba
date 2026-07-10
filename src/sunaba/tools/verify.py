@@ -6,7 +6,7 @@ import json
 
 from docker.errors import NotFound
 
-from code_sandbox_mcp.edit_verify import (
+from sunaba.edit_verify import (
     _determine_scope,
     _get_extension,
     apply_patch_to_file,
@@ -14,9 +14,9 @@ from code_sandbox_mcp.edit_verify import (
     search_files,
     type_check_file,
 )
-from code_sandbox_mcp.journal import record_tool_use
-from code_sandbox_mcp.tools.common import _docker
-from code_sandbox_mcp.tools.vcs import resolve_git_root
+from sunaba.journal import record_tool_use
+from sunaba.tools.common import _docker
+from sunaba.tools.vcs import resolve_git_root
 
 
 def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
@@ -414,13 +414,13 @@ def verify_in_container(
     """
     import shlex
 
-    from code_sandbox_mcp.edit_verify import (
+    from sunaba.edit_verify import (
         _SANDBOX_ENV,
         detect_languages,
         run_lint_type_gate,
     )
-    from code_sandbox_mcp.tools.common import _parse_numstat
-    from code_sandbox_mcp.tools.vcs import resolve_git_root
+    from sunaba.tools.common import _parse_numstat
+    from sunaba.tools.vcs import resolve_git_root
 
     client = _docker()
     try:
@@ -563,7 +563,7 @@ def verify_in_container(
     # --- Run tests (language-aware dispatch, Issue #493) ---
     def _run_inline_pytest(filter_args: str) -> dict:
         """Run pytest inline (kept for python-specific error detail)."""
-        from code_sandbox_mcp.test_report import (
+        from sunaba.test_report import (
             PytestAdapter,
             build_pytest_cmd,
             split_pytest_output,
@@ -606,7 +606,7 @@ def verify_in_container(
 
     def _run_dispatch_test(lang: str, test_path: str) -> dict:
         """Run test for a single language using DISPATCH table."""
-        from code_sandbox_mcp.edit_verify import _DISPATCH
+        from sunaba.edit_verify import _DISPATCH
 
         runner = _DISPATCH.get(lang, {}).get("test")
         if runner is None:

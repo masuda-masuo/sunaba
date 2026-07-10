@@ -26,9 +26,9 @@ Configuration (host env)
     Override path to an already-present broker binary (skips download).
 ``GITHUB_TOKEN_COMMAND_TIMEOUT``
     Command timeout in seconds (default 30).
-``CODE_SANDBOX_TOKEN_BROKER_CACHE_DIR``
+``SUNABA_TOKEN_BROKER_CACHE_DIR``
     Override the directory used to cache the downloaded broker binary.
-``CODE_SANDBOX_TOKEN_BROKER_NO_DOWNLOAD``
+``SUNABA_TOKEN_BROKER_NO_DOWNLOAD``
     Disable the network fetch entirely (verify-only): an already-cached,
     checksum-matching binary is reused, otherwise resolution fails and the
     caller falls back to the static token.  Use this to pin operators to a
@@ -47,7 +47,7 @@ and checksum-verified, fetch it once while a token is available (e.g. during
 setup, or a session still launched via mcp-launcher) and every later run reuses
 the cache.  For a fully tokenless daemon, pre-provision the binary out of band
 and point ``GITHUB_TOKEN_BROKER_BIN`` at it (or pre-warm
-``CODE_SANDBOX_TOKEN_BROKER_CACHE_DIR``); unauthenticated fetch of a private asset does
+``SUNABA_TOKEN_BROKER_CACHE_DIR``); unauthenticated fetch of a private asset does
 not work.
 """
 from __future__ import annotations
@@ -103,17 +103,17 @@ def _platform_key() -> tuple[str, str] | None:
 
 def _cache_dir() -> Path:
     """Return the directory used to cache the downloaded broker binary."""
-    override = os.environ.get("CODE_SANDBOX_TOKEN_BROKER_CACHE_DIR")
+    override = os.environ.get("SUNABA_TOKEN_BROKER_CACHE_DIR")
     if override:
         return Path(override)
     override = os.environ.get("CSB_TOKEN_BROKER_CACHE_DIR")
     if override:
         logger.warning(
             "CSB_TOKEN_BROKER_CACHE_DIR is deprecated, "
-            "use CODE_SANDBOX_TOKEN_BROKER_CACHE_DIR instead"
+            "use SUNABA_TOKEN_BROKER_CACHE_DIR instead"
         )
         return Path(override)
-    return Path(platformdirs.user_cache_dir("code-sandbox-mcp")) / "bin"
+    return Path(platformdirs.user_cache_dir("sunaba")) / "bin"
 
 
 def _dest_path(key: tuple[str, str]) -> Path:
@@ -186,12 +186,12 @@ def resolve_broker_binary(*, allow_download: bool = True) -> Path | None:
     dest = _dest_path(key)
     if dest.exists() and _sha256_file(dest) == sha256:
         return dest
-    if not allow_download or os.environ.get("CODE_SANDBOX_TOKEN_BROKER_NO_DOWNLOAD"):
+    if not allow_download or os.environ.get("SUNABA_TOKEN_BROKER_NO_DOWNLOAD"):
         return None
     if os.environ.get("CSB_TOKEN_BROKER_NO_DOWNLOAD"):
         logger.warning(
             "CSB_TOKEN_BROKER_NO_DOWNLOAD is deprecated, "
-            "use CODE_SANDBOX_TOKEN_BROKER_NO_DOWNLOAD instead"
+            "use SUNABA_TOKEN_BROKER_NO_DOWNLOAD instead"
         )
         return None
     try:

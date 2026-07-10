@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from code_sandbox_mcp.proxy_entrypoint import (
+from sunaba.proxy_entrypoint import (
     ADDON_ENV,
     CONFDIR_ENV,
     DEFAULT_ADDON,

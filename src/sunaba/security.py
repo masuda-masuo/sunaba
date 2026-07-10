@@ -17,7 +17,7 @@ from typing import Any
 #: (the orphan reaper in ``tools/container.py``) filters on this label so it
 #: only ever touches containers this server owns — never the user's other
 #: containers (Issue #298).
-MANAGED_LABEL: str = "com.code-sandbox-mcp.managed"
+MANAGED_LABEL: str = "com.sunaba.managed"
 
 #: Docker label carrying the ISO-8601 creation timestamp.  Set by
 #: ``sandbox_initialize`` so the reaper can compute a container's age even
@@ -25,14 +25,14 @@ MANAGED_LABEL: str = "com.code-sandbox-mcp.managed"
 #: Issue #298 is about).  Its presence also marks a container as having been
 #: created by ``sandbox_initialize`` specifically (test-environment and other
 #: managed containers do not carry it), keeping the reaper's scope tight.
-CREATED_AT_LABEL: str = "com.code-sandbox-mcp.created_at"
+CREATED_AT_LABEL: str = "com.sunaba.created_at"
 
 #: Docker label carrying an optional user-assigned name for the container
 #: (Issue #478).  Set by ``sandbox_initialize`` when *name* is given,
 #: enabling cross-session discovery via ``sandbox_list_containers`` and
 #: ``sandbox_attach``.  Stored alongside ``MANAGED_LABEL`` and
 #: ``CREATED_AT_LABEL`` so it survives server restarts.
-NAME_LABEL: str = "com.code-sandbox-mcp.name"
+NAME_LABEL: str = "com.sunaba.name"
 
 #: Dangerous socket paths that must not be mounted into containers.
 #: Mounting the Docker socket grants equivalent root access to the host

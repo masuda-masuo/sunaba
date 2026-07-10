@@ -41,28 +41,28 @@ class TestRewriteSource:
     """rewrite_source edits only matched literals and preserves the rest."""
 
     def _rename(self) -> list[fpt.Rename]:
-        return [fpt.Rename("code_sandbox_mcp.server._docker", "code_sandbox_mcp.tools.exec._docker")]
+        return [fpt.Rename("sunaba.server._docker", "sunaba.tools.exec._docker")]
 
     def test_decorator_target_rewritten(self) -> None:
         source = (
             "from unittest.mock import patch\n"
-            "@patch('code_sandbox_mcp.server._docker')\n"
+            "@patch('sunaba.server._docker')\n"
             "def test_x():\n"
             "    pass\n"
         )
         new_source, replacements = fpt.rewrite_source(source, self._rename())
-        assert "code_sandbox_mcp.tools.exec._docker" in new_source
+        assert "sunaba.tools.exec._docker" in new_source
         assert "server._docker" not in new_source
         assert len(replacements) == 1
         assert replacements[0].lineno == 2
 
     def test_quote_style_preserved(self) -> None:
-        source = 'patch("code_sandbox_mcp.server._docker")\n'
+        source = 'patch("sunaba.server._docker")\n'
         new_source, _ = fpt.rewrite_source(source, self._rename())
-        assert new_source == 'patch("code_sandbox_mcp.tools.exec._docker")\n'
+        assert new_source == 'patch("sunaba.tools.exec._docker")\n'
 
     def test_unrelated_target_untouched(self) -> None:
-        source = "patch('code_sandbox_mcp.server._other')\n"
+        source = "patch('sunaba.server._other')\n"
         new_source, replacements = fpt.rewrite_source(source, self._rename())
         assert replacements == []
         assert new_source == source
@@ -110,7 +110,7 @@ class TestRewritePaths:
         test_file = tmp_path / "test_drift.py"
         test_file.write_text(
             "from unittest.mock import patch\n"
-            "@patch('code_sandbox_mcp.server._docker')\n"
+            "@patch('sunaba.server._docker')\n"
             "def test_foo(m):\n"
             "    pass\n",
             encoding="utf-8",
@@ -118,7 +118,7 @@ class TestRewritePaths:
         return test_file
 
     def _renames(self) -> list[fpt.Rename]:
-        return [fpt.Rename("code_sandbox_mcp.server._docker", "code_sandbox_mcp.tools.exec._docker")]
+        return [fpt.Rename("sunaba.server._docker", "sunaba.tools.exec._docker")]
 
     def test_preview_does_not_write(self, tmp_path: Path) -> None:
         test_file = self._write_test(tmp_path)
@@ -132,7 +132,7 @@ class TestRewritePaths:
         results = fpt.rewrite_paths([tmp_path], self._renames(), write=True)
         assert test_file in results
         after = test_file.read_text(encoding="utf-8")
-        assert "code_sandbox_mcp.tools.exec._docker" in after
+        assert "sunaba.tools.exec._docker" in after
         assert "server._docker" not in after
 
 

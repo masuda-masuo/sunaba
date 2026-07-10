@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from src.code_sandbox_mcp.test_report import (
+from src.sunaba.test_report import (
     GoTestAdapter,
     JestAdapter,
     PytestAdapter,

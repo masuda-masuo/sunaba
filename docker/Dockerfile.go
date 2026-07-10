@@ -2,14 +2,14 @@
 # docker/Dockerfile.go
 #
 # Code Sandbox MCP — Go backend イメージ（base + Go ツールチェーン）
-# 公開タグ: ghcr.io/<owner>/code-sandbox-mcp/sandbox:go
+# 公開タグ: ghcr.io/<owner>/sunaba/sandbox:go
 # 設計: docs/design-multilang-support.md §6
 # ビルド:
 #   docker build -f docker/Dockerfile.go \
-#     --build-arg BASE_IMAGE=code-sandbox-mcp/sandbox:base \
-#     -t code-sandbox-mcp/sandbox:go .
+#     --build-arg BASE_IMAGE=sunaba/sandbox:base \
+#     -t sunaba/sandbox:go .
 
-ARG BASE_IMAGE=code-sandbox-mcp/sandbox:base
+ARG BASE_IMAGE=sunaba/sandbox:base
 FROM ${BASE_IMAGE}
 
 # ── Go ツールチェーン ─────────────────────────────────────────────

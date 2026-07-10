@@ -15,16 +15,16 @@ from pathlib import Path
 
 from docker.errors import APIError, NotFound
 
-from code_sandbox_mcp.edit_verify import (
+from sunaba.edit_verify import (
     _file_size_from_counts,
     read_file,
     read_file_lines,
     transform_file_in_container,
     write_file,
 )
-from code_sandbox_mcp.journal import record_copy, record_tool_use
-from code_sandbox_mcp.output_control import paginate_output, truncate_output
-from code_sandbox_mcp.tools.common import _docker
+from sunaba.journal import record_copy, record_tool_use
+from sunaba.output_control import paginate_output, truncate_output
+from sunaba.tools.common import _docker
 
 logger: logging.Logger = logging.getLogger(__name__)
 

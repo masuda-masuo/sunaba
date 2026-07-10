@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-time interactive setup: register GitHub App credentials in the OS
-# keystore so that code-sandbox-mcp can mint short-lived tokens at runtime.
+# keystore so that sunaba can mint short-lived tokens at runtime.
 #
-# Prerequisites: pip install code-sandbox-mcp (Phase 1).
+# Prerequisites: pip install sunaba (Phase 1).
 # Next step:     ./scripts/install-systemd.sh /path/to/venv
 #
 # This script:
@@ -12,13 +12,16 @@
 #      Private Key file path) and registers them in the OS keystore via
 #      mcp-token register.
 #
-# The registered service name is "github" so that code-sandbox-mcp's
-# token broker (GITHUB_TOKEN_BROKER_SERVICE=code-sandbox-mcp → mcp-token
-# code-sandbox-mcp) reads these keys from the keystore automatically.
+# The credentials are registered under service name "github", i.e. as
+# mcp-token/github/* keys in the keystore.  That alone is not enough for
+# sunaba's token broker (GITHUB_TOKEN_BROKER_SERVICE=sunaba → mcp-token
+# sunaba): mcp-token resolves "sunaba" through launcher.json (next to the
+# mcp-token binary, or $MCP_LAUNCHER_CONFIG), so a "sunaba" service entry
+# whose env_keys reference these mcp-token/github/* keys must exist there.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CACHE_DIR="${HOME}/.cache/code-sandbox-mcp/bin"
+CACHE_DIR="${HOME}/.cache/sunaba/bin"
 RELEASE_TAG="mcp-token/v1.2.0"
 REPO="masuda-masuo/mcp-launcher"
 
@@ -81,7 +84,7 @@ resolve_mcp_token() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
-    echo "==> code-sandbox-mcp setup (Phase 2/3)"
+    echo "==> sunaba setup (Phase 2/3)"
     echo ""
     echo "This script registers your GitHub App credentials in the OS keystore."
     echo "The credentials are stored securely (libsecret / GNOME Keyring) and"

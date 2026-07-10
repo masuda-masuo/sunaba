@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterator
 from unittest.mock import patch
 
-from code_sandbox_mcp.journal import (
+from sunaba.journal import (
     generate_run_id,
     get_journal_path,
     get_last_activity_per_container,
@@ -60,8 +60,8 @@ class TestJournalWrite:
         log_path = journal_dir / "journal.log"
 
         # Temporarily override the journal path
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_initialize("abc123", "python@sha256:abcd", allow_network=True)
 
         entries = _read_log(log_path)
@@ -77,8 +77,8 @@ class TestJournalWrite:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_exec("abc123", ["echo hello"], exit_code=0, verbose="summary")
 
         entries = _read_log(log_path)
@@ -95,8 +95,8 @@ class TestJournalWrite:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_exec("abc123", ["false"], exit_code=1)
 
         entries = _read_log(log_path)
@@ -107,8 +107,8 @@ class TestJournalWrite:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_initialize("abc123", "python@sha256:abcd")
             record_exec("abc123", ["echo hello"], exit_code=0)
             record_stop("abc123")
@@ -123,8 +123,8 @@ class TestJournalWrite:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_boundary_crossing("abc123", "git_push", "pushed to main", approved=True)
 
         entries = _read_log(log_path)
@@ -139,8 +139,8 @@ class TestJournalWrite:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_boundary_crossing("abc123", "gh_issue_view", "read issue #1", approved=None)
 
         entries = _read_log(log_path)
@@ -151,8 +151,8 @@ class TestJournalWrite:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_file_write("abc123", "test.py", "/root", byte_count=42)
 
         entries = _read_log(log_path)
@@ -166,8 +166,8 @@ class TestJournalWrite:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_file_write("abc123", "test_foo.py", "/tests", byte_count=42, is_test=True)
 
         entries = _read_log(log_path)
@@ -179,8 +179,8 @@ class TestJournalWrite:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_copy("abc123", "copy_project", "/src/myproject", "/root/myproject")
 
         entries = _read_log(log_path)
@@ -191,8 +191,8 @@ class TestJournalWrite:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_copy("abc123", "copy_file", "/src/file.txt", "/root/file.txt")
 
         entries = _read_log(log_path)
@@ -203,8 +203,8 @@ class TestJournalWrite:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_initialize("abc123", "python@sha256:abcd", allow_network=True)
             record_exec("abc123", ["echo hello"], exit_code=0)
             record_file_write("abc123", "test.py", "/root", 100)
@@ -225,8 +225,8 @@ class TestJournalRead:
     def test_read_empty_journal(self, tmp_path: Path):
         backup_path = tmp_path / "nonexistent" / "journal.log.1"
         log_path = tmp_path / "nonexistent" / "journal.log"
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_BACKUP_PATH", backup_path):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_BACKUP_PATH", backup_path):
             entries = read_journal()
             assert entries == []
 
@@ -235,8 +235,8 @@ class TestJournalRead:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_initialize("abc123", "python@sha256:abcd")
             record_exec("abc123", ["echo hello"], exit_code=0)
             entries = read_journal()
@@ -247,8 +247,8 @@ class TestJournalRead:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_initialize("abc123", "python@sha256:abcd")
             entries_all = read_journal()
             run_id = entries_all[0]["run_id"]
@@ -266,8 +266,8 @@ class TestGetRuns:
     def test_get_runs_empty(self, tmp_path: Path):
         backup_path = tmp_path / "nonexistent" / "journal.log.1"
         log_path = tmp_path / "nonexistent" / "journal.log"
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_BACKUP_PATH", backup_path):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_BACKUP_PATH", backup_path):
             runs = get_runs()
             assert runs == []
 
@@ -276,10 +276,10 @@ class TestGetRuns:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir), \
-             patch("code_sandbox_mcp.journal._run_map", {}), \
-             patch("code_sandbox_mcp.journal._run_map_lock", type(journal_dir)):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir), \
+             patch("sunaba.journal._run_map", {}), \
+             patch("sunaba.journal._run_map_lock", type(journal_dir)):
             # Directly write entries to avoid run_map interference
             _append_json_test(log_path, {"ts": "2026-01-01T00:00:00Z", "run_id": "run1", "container_id": "abc", "operation": "initialize", "image": "test"})
             _append_json_test(log_path, {"ts": "2026-01-01T00:00:01Z", "run_id": "run1", "container_id": "abc", "operation": "exec", "exit_code": 0})
@@ -299,8 +299,8 @@ class TestGetRuns:
         _append_json_test(log_path, {"ts": "2026-01-01T00:00:00Z", "run_id": "run1", "container_id": "abc", "operation": "initialize", "image": "test"})
         _append_json_test(log_path, {"ts": "2026-01-01T00:00:01Z", "run_id": "run1", "container_id": "abc", "operation": "boundary_crossing", "sub_operation": "git_push"})
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             runs = get_runs()
             assert runs[0]["boundary_crossings"] == 1
 
@@ -311,7 +311,7 @@ class TestJournalPath:
     def test_get_journal_path(self) -> None:
         path = get_journal_path()
         assert path.endswith("journal.log")
-        assert ".code-sandbox-mcp" in path
+        assert ".sunaba" in path
 
 
 # ---------------------------------------------------------------------------
@@ -338,14 +338,14 @@ class TestRecordToolUse:
     """Tests for record_tool_use (Issue #359 tier 3+4)."""
 
     def test_record_tool_use_creates_entry(self, tmp_path: Path) -> None:
-        from code_sandbox_mcp.journal import record_tool_use
+        from sunaba.journal import record_tool_use
 
         journal_dir = tmp_path / "journal"
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_tool_use(
                 "abc123def456",
                 "read_file_range",
@@ -361,14 +361,14 @@ class TestRecordToolUse:
         assert e["params"] == {"file_path": "/tmp/repo/repo/foo.py"}
 
     def test_record_tool_use_without_params(self, tmp_path: Path) -> None:
-        from code_sandbox_mcp.journal import record_tool_use
+        from sunaba.journal import record_tool_use
 
         journal_dir = tmp_path / "journal"
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_tool_use("abc123def456", "search_in_container")
 
         entries = _read_log(log_path)
@@ -379,14 +379,14 @@ class TestRecordToolUse:
         assert "params" not in e
 
     def test_get_tool_usage_counts_tool_use_entries(self, tmp_path: Path) -> None:
-        from code_sandbox_mcp.journal import get_tool_usage, record_tool_use
+        from sunaba.journal import get_tool_usage, record_tool_use
 
         journal_dir = tmp_path / "journal"
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_tool_use("abc123def456", "read_file_range")
             record_tool_use("abc123def456", "list_files")
             record_tool_use("abc123def456", "search_in_container")
@@ -408,7 +408,7 @@ class TestRecordToolUse:
 
     def test_end_to_end_tool_use_with_exec_entries(self, tmp_path: Path) -> None:
         """Integration test: tool_use entries coexist with exec entries in get_tool_usage()."""
-        from code_sandbox_mcp.journal import (
+        from sunaba.journal import (
             get_or_create_run_id,
             get_tool_usage,
             record_exec,
@@ -419,8 +419,8 @@ class TestRecordToolUse:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             get_or_create_run_id("cid-e2e")
             record_exec("cid-e2e", ["ls"], 0)
             record_exec("cid-e2e", ["cat foo"], 0)
@@ -443,9 +443,9 @@ class TestContainerStateSidecar:
     @contextmanager
     def _journal_at(self, tmp_path: Path) -> Iterator[Path]:
         journal_dir = tmp_path / "journal"
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", journal_dir / "journal.log"), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir), \
-             patch("code_sandbox_mcp.journal._state_synced", False):
+        with patch("sunaba.journal._JOURNAL_PATH", journal_dir / "journal.log"), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir), \
+             patch("sunaba.journal._state_synced", False):
             yield journal_dir
 
     def test_lifecycle_reflected_in_states(self, tmp_path: Path) -> None:
@@ -520,7 +520,7 @@ class TestContainerStateSidecar:
             # Within the same process the fast path trusts the fresher sidecar…
             assert read_container_states()["aaa111"]["complete"] is False
             # …but a new process (crash implies restart) re-syncs from the journal.
-            with patch("code_sandbox_mcp.journal._state_synced", False):
+            with patch("sunaba.journal._state_synced", False):
                 assert read_container_states()["aaa111"]["complete"] is True
 
 
@@ -533,14 +533,14 @@ class TestJournalRotation:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
         backup_path = journal_dir / "journal.log.1"
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_BACKUP_PATH", backup_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_BACKUP_PATH", backup_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             yield journal_dir, log_path, backup_path
 
     def test_rotation_fires_at_threshold(self, tmp_path: Path):
         with self._journal_at(tmp_path) as (journal_dir, log_path, backup_path):
-            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", 1):
+            with patch("sunaba.journal._MAX_JOURNAL_SIZE", 1):
                 record_initialize("abc123", "python@sha256:abcd")
                 record_exec("abc123", ["echo x"], 0)
         assert backup_path.exists()
@@ -548,10 +548,10 @@ class TestJournalRotation:
         assert log_path.stat().st_size > 0
 
     def test_rotate_if_needed_unlocked_renames_file(self, tmp_path: Path):
-        from code_sandbox_mcp.journal import _rotate_if_needed_unlocked
+        from sunaba.journal import _rotate_if_needed_unlocked
         with self._journal_at(tmp_path) as (journal_dir, log_path, backup_path):
             log_path.write_text("x" * 100)
-            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", 50):
+            with patch("sunaba.journal._MAX_JOURNAL_SIZE", 50):
                 _rotate_if_needed_unlocked()
         assert backup_path.exists()
         assert backup_path.read_text() == "x" * 100
@@ -559,12 +559,12 @@ class TestJournalRotation:
 
     def test_no_rotation_below_threshold(self, tmp_path: Path):
         with self._journal_at(tmp_path) as (journal_dir, log_path, backup_path):
-            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", 10**9):
+            with patch("sunaba.journal._MAX_JOURNAL_SIZE", 10**9):
                 record_initialize("abc123", "python@sha256:abcd")
         assert not backup_path.exists()
 
     def test_read_journal_joins_backup_and_active(self, tmp_path: Path):
-        from code_sandbox_mcp.journal import _append_json, _read_journal_unlocked, _rotate_if_needed_unlocked
+        from sunaba.journal import _append_json, _read_journal_unlocked, _rotate_if_needed_unlocked
 
         with self._journal_at(tmp_path) as (journal_dir, log_path, backup_path):
             _append_json({"ts": "2026-01-01T00:00:01Z", "run_id": "run1",
@@ -579,7 +579,7 @@ class TestJournalRotation:
             assert not backup_path.exists()
 
             log_size = log_path.stat().st_size
-            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", log_size):
+            with patch("sunaba.journal._MAX_JOURNAL_SIZE", log_size):
                 _rotate_if_needed_unlocked()
             assert backup_path.exists()
             assert not log_path.exists()
@@ -598,10 +598,10 @@ class TestJournalRotation:
             assert ops == ["initialize", "exec", "exec"]
 
     def test_get_active_environments_sees_rotated_entries(self, tmp_path: Path):
-        from code_sandbox_mcp.journal import _append_json, get_active_environments
+        from sunaba.journal import _append_json, get_active_environments
 
         with self._journal_at(tmp_path) as (journal_dir, log_path, backup_path):
-            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", 1):
+            with patch("sunaba.journal._MAX_JOURNAL_SIZE", 1):
                 _append_json({"ts": "2026-01-01T00:00:01Z", "run_id": "run1",
                               "container_id": "env1",
                               "operation": "test_environment",
@@ -614,7 +614,7 @@ class TestJournalRotation:
 
             assert backup_path.exists()
 
-            with patch("code_sandbox_mcp.journal._MAX_JOURNAL_SIZE", 10**9):
+            with patch("sunaba.journal._MAX_JOURNAL_SIZE", 10**9):
                 _append_json({"ts": "2026-01-01T00:00:02Z", "run_id": "run1",
                               "container_id": "env2",
                               "operation": "test_environment",
@@ -653,8 +653,8 @@ class TestSessionLabel:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             set_session_label("cid-sess-4", "issue479-test")
             record_initialize("cid-sess-4", "python@sha256:abcd", allow_network=True)
 
@@ -667,8 +667,8 @@ class TestSessionLabel:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             set_session_label("cid-sess-5a", "session-a")
             record_initialize("cid-sess-5a", "python@sha256:a")
             set_session_label("cid-sess-5b", "session-b")
@@ -693,8 +693,8 @@ class TestSessionLabel:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             set_session_label("cid-sess-6", "label-for-runs")
             record_initialize("cid-sess-6", "python@sha256:abcd")
 
@@ -713,8 +713,8 @@ class TestGetLastActivity:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             result = get_last_activity_per_container()
             assert result == {}
 
@@ -723,8 +723,8 @@ class TestGetLastActivity:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_initialize("cid-1", "python@sha256:abcd")
             result = get_last_activity_per_container()
             assert "cid-1" in result
@@ -735,8 +735,8 @@ class TestGetLastActivity:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_initialize("cid-stopped", "python@sha256:abcd")
             record_stop("cid-stopped")
             result = get_last_activity_per_container()
@@ -747,8 +747,8 @@ class TestGetLastActivity:
         journal_dir.mkdir()
         log_path = journal_dir / "journal.log"
 
-        with patch("code_sandbox_mcp.journal._JOURNAL_PATH", log_path), \
-             patch("code_sandbox_mcp.journal._JOURNAL_DIR", journal_dir):
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             record_initialize("cid-a", "python@sha256:abcd")
             record_exec("cid-a", ["echo hello"], 0)
             record_initialize("cid-b", "python@sha256:abcd")

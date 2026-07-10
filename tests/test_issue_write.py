@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from code_sandbox_mcp.tools.vcs import sandbox_issue_write
+from sunaba.tools.vcs import sandbox_issue_write
 from tests.conftest import _decode, _make_client_mock
 
 
@@ -38,7 +38,7 @@ class TestSandboxIssueWriteValidation:
         assert "error" in result
         assert "issue_number" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
         mock_docker.return_value = _make_client_mock(MagicMock())
         from docker.errors import NotFound as DockerNotFound
@@ -54,8 +54,8 @@ class TestSandboxIssueWriteValidation:
 class TestSandboxIssueWriteExecute:
     """One-shot execute via the host-side REST API (no dry_run/token step)."""
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs._docker")
     def test_no_host_token_is_error(
         self,
         mock_docker: MagicMock,
@@ -70,9 +70,9 @@ class TestSandboxIssueWriteExecute:
         assert result["status"] == "error"
         assert "host-side" in result["error"] or "token" in result["error"].lower()
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_execute_create_success(
         self,
         mock_record: MagicMock,
@@ -82,7 +82,7 @@ class TestSandboxIssueWriteExecute:
         mock_docker.return_value = _make_client_mock(MagicMock())
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             return_value={"number": 99, "html_url": "https://github.com/owner/repo/issues/99"},
         ) as mock_api:
             result = _decode(sandbox_issue_write(
@@ -100,9 +100,9 @@ class TestSandboxIssueWriteExecute:
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["approved"] is True
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_execute_comment_success(
         self,
         mock_record: MagicMock,
@@ -112,7 +112,7 @@ class TestSandboxIssueWriteExecute:
         mock_docker.return_value = _make_client_mock(MagicMock())
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             return_value={"html_url": "https://github.com/owner/repo/issues/42#issuecomment-1"},
         ) as mock_api:
             result = _decode(sandbox_issue_write(
@@ -127,9 +127,9 @@ class TestSandboxIssueWriteExecute:
             payload={"body": "thanks!"},
         )
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_api_failure_records_denied_and_reports_error(
         self,
         mock_record: MagicMock,
@@ -139,7 +139,7 @@ class TestSandboxIssueWriteExecute:
         mock_docker.return_value = _make_client_mock(MagicMock())
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             side_effect=RuntimeError("GitHub API POST /repos/owner/repo/issues returned HTTP 403: rate limited"),
         ):
             result = _decode(sandbox_issue_write(

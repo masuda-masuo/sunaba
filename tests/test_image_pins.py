@@ -14,8 +14,8 @@ from importlib import resources
 
 import pytest
 
-from code_sandbox_mcp import image_pins
-from code_sandbox_mcp.image_pins import (
+from sunaba import image_pins
+from sunaba.image_pins import (
     _PIN_PATTERN,
     PIN_KEYS,
     ImagePinError,
@@ -36,7 +36,7 @@ def test_every_pin_is_a_digest_ref() -> None:
 def test_json_resource_is_packaged() -> None:
     # importlib.resources must find the data file the way the runtime loader
     # does; a packaging regression (missing package-data) is caught here.
-    resource = resources.files("code_sandbox_mcp").joinpath("image_pins.json")
+    resource = resources.files("sunaba").joinpath("image_pins.json")
     assert resource.is_file()
     data = json.loads(resource.read_text(encoding="utf-8"))
     assert set(data) == set(PIN_KEYS)
@@ -45,7 +45,7 @@ def test_json_resource_is_packaged() -> None:
 def test_container_constants_are_wired_from_loader() -> None:
     # The values container.py actually starts containers with must equal the
     # pin data -- the wiring, not just the file, is what matters.
-    from code_sandbox_mcp.tools import container
+    from sunaba.tools import container
 
     pins = load_image_pins()
     assert container._NEUTRAL_IMAGE == pins["neutral"]

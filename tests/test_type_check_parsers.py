@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from src.code_sandbox_mcp.edit_verify import (
+from src.sunaba.edit_verify import (
     _parse_pyright_output,
     _parse_tsc_text,
 )
@@ -99,7 +99,7 @@ class TestTypeCheckParsers:
 
     def test_tsc_json_fallback(self) -> None:
         """tsc JSON output (if available) is parsed."""
-        from src.code_sandbox_mcp.edit_verify import _parse_tsc_json
+        from src.sunaba.edit_verify import _parse_tsc_json
 
         raw = json.dumps(
             {
@@ -119,7 +119,7 @@ class TestTypeCheckParsers:
         assert result[0]["rule"] == "TS1234"
 
     def test_tsc_json_empty(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _parse_tsc_json
+        from src.sunaba.edit_verify import _parse_tsc_json
 
         assert _parse_tsc_json("", "file.ts") == []
 
@@ -133,43 +133,43 @@ class TestNeedsPCRE2:
     """Tests for _needs_pcre2 helper."""
 
     def test_lookahead_positive(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _needs_pcre2
+        from src.sunaba.edit_verify import _needs_pcre2
         assert _needs_pcre2(r"foo(?=bar)")
 
     def test_lookahead_negative(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _needs_pcre2
+        from src.sunaba.edit_verify import _needs_pcre2
         assert _needs_pcre2(r"foo(?!bar)")
 
     def test_lookbehind_positive(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _needs_pcre2
+        from src.sunaba.edit_verify import _needs_pcre2
         assert _needs_pcre2(r"(?<=foo)bar")
 
     def test_lookbehind_negative(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _needs_pcre2
+        from src.sunaba.edit_verify import _needs_pcre2
         assert _needs_pcre2(r"(?<!foo)bar")
 
     def test_non_capturing_group_not_detected(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _needs_pcre2
+        from src.sunaba.edit_verify import _needs_pcre2
         assert not _needs_pcre2(r"(?:foo)")
 
     def test_flags_not_detected(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _needs_pcre2
+        from src.sunaba.edit_verify import _needs_pcre2
         assert not _needs_pcre2(r"(?i)foo")
 
     def test_named_group_not_detected(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _needs_pcre2
+        from src.sunaba.edit_verify import _needs_pcre2
         assert not _needs_pcre2(r"(?P<name>foo)")
 
     def test_simple_pattern_not_detected(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _needs_pcre2
+        from src.sunaba.edit_verify import _needs_pcre2
         assert not _needs_pcre2(r"foo.*bar")
 
     def test_atomic_group_not_detected(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _needs_pcre2
+        from src.sunaba.edit_verify import _needs_pcre2
         assert not _needs_pcre2(r"(?>foo)")
 
     def test_empty_pattern(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import _needs_pcre2
+        from src.sunaba.edit_verify import _needs_pcre2
         assert not _needs_pcre2("")
 
 
@@ -183,7 +183,7 @@ class TestRunPyrightVerify:
     def test_exit_code_1_returns_findings(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import _run_pyright_verify
+        from src.sunaba.edit_verify import _run_pyright_verify
 
         container = MagicMock()
         pyright_output = json.dumps({
@@ -207,7 +207,7 @@ class TestRunPyrightVerify:
     def test_exit_code_0_returns_ok(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import _run_pyright_verify
+        from src.sunaba.edit_verify import _run_pyright_verify
 
         container = MagicMock()
         pyright_output = json.dumps({"generalDiagnostics": []})
@@ -220,7 +220,7 @@ class TestRunPyrightVerify:
     def test_exit_code_127_returns_not_available(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import _run_pyright_verify
+        from src.sunaba.edit_verify import _run_pyright_verify
 
         container = MagicMock()
         container.exec_run.return_value = self._make_result(127)
@@ -231,7 +231,7 @@ class TestRunPyrightVerify:
     def test_exit_code_250_with_findings_returns_ok(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import _run_pyright_verify
+        from src.sunaba.edit_verify import _run_pyright_verify
 
         container = MagicMock()
         pyright_output = json.dumps({
@@ -254,7 +254,7 @@ class TestRunPyrightVerify:
     def test_exit_code_250_without_findings_returns_error(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import _run_pyright_verify
+        from src.sunaba.edit_verify import _run_pyright_verify
 
         container = MagicMock()
         container.exec_run.return_value = self._make_result(250, "", "FATAL ERROR: OOM")
@@ -265,7 +265,7 @@ class TestRunPyrightVerify:
     def test_exit_code_2_with_empty_output_returns_error(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import _run_pyright_verify
+        from src.sunaba.edit_verify import _run_pyright_verify
 
         container = MagicMock()
         container.exec_run.return_value = self._make_result(2)

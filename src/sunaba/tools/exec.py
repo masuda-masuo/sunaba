@@ -12,9 +12,9 @@ from typing import Annotated, Any
 from docker.errors import NotFound
 from pydantic import BeforeValidator
 
-from code_sandbox_mcp.journal import record_exec as journal_record_exec
-from code_sandbox_mcp.journal import record_tool_use
-from code_sandbox_mcp.output_control import (
+from sunaba.journal import record_exec as journal_record_exec
+from sunaba.journal import record_tool_use
+from sunaba.output_control import (
     OutputMetadata,
     compress_failures,
     compress_repeated_lines,
@@ -23,7 +23,7 @@ from code_sandbox_mcp.output_control import (
     truncate_by_tokens,
     truncate_output,
 )
-from code_sandbox_mcp.tools.common import RECOVERY_DOCKER_TIMEOUT, _coerce_list_arg, _docker
+from sunaba.tools.common import RECOVERY_DOCKER_TIMEOUT, _coerce_list_arg, _docker
 
 
 def sandbox_exec(

@@ -13,15 +13,15 @@ from typing import Any
 
 from docker.errors import NotFound
 
-from code_sandbox_mcp import github_auth, proxy_lifecycle, token_broker
-from code_sandbox_mcp.journal import record_boundary_crossing, record_tool_use
-from code_sandbox_mcp.proxy_client import (
+from sunaba import github_auth, proxy_lifecycle, token_broker
+from sunaba.journal import record_boundary_crossing, record_tool_use
+from sunaba.proxy_client import (
     ProxyAuthError,
     authorized_push_grant,
     authorized_read_grant,
     proxy_configured,
 )
-from code_sandbox_mcp.tools.common import (
+from sunaba.tools.common import (
     CLONE_NO_TOKEN_WARNING,
     _build_clone_command,
     _docker,
@@ -942,7 +942,7 @@ def _github_api_request(
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = urllib.request.Request(url, data=data, method=method)
     request.add_header("Accept", "application/vnd.github+json")
-    request.add_header("User-Agent", "code-sandbox-mcp")
+    request.add_header("User-Agent", "sunaba")
     if token:
         request.add_header("Authorization", f"Bearer {token}")
     if data is not None:
@@ -1010,7 +1010,7 @@ def _create_pr_via_api(
 def _ensure_proxy_env_fresh(client: Any) -> str | None:
     """Recover the egress-proxy control env vars if a server restart lost them (#428).
 
-    ``ensure_egress_proxy`` exports ``CODE_SANDBOX_PROXY_CONTROL_URL/SECRET``
+    ``ensure_egress_proxy`` exports ``SUNABA_PROXY_CONTROL_URL/SECRET``
     into this process's environment, but only ``sandbox_initialize`` calls
     it today. A restart of the MCP server process wipes those *dynamic* env
     vars while the sidecar -- and a pre-existing container's proxied network
@@ -1109,12 +1109,12 @@ Args:
         ``git push --force`` (opt-in; default ``False``).
     author_name: Git commit author name.  When set, takes precedence
         over the image-level default configured in
-        ``docker/Dockerfile.base`` (``code-sandbox-mcp[bot]``).
+        ``docker/Dockerfile.base`` (``sunaba[bot]``).
         When ``None``, the image-level default is used.
     author_email: Git commit author email.  When set, takes precedence
         over the image-level default configured in
         ``docker/Dockerfile.base``
-        (``code-sandbox-mcp[bot]@users.noreply.github.com``).
+        (``sunaba[bot]@users.noreply.github.com``).
         When ``None``, the image-level default is used.
 
 Returns:
@@ -1203,8 +1203,8 @@ Returns:
                 })
 
     # --- Git identity: set before commit ---
-    name_to_use = author_name if author_name is not None else "code-sandbox-mcp[bot]"
-    email_to_use = author_email if author_email is not None else "code-sandbox-mcp[bot]@users.noreply.github.com"
+    name_to_use = author_name if author_name is not None else "sunaba[bot]"
+    email_to_use = author_email if author_email is not None else "sunaba[bot]@users.noreply.github.com"
     safe_name = shlex.quote(name_to_use)
     safe_email = shlex.quote(email_to_use)
     git_commit_cmd = (
@@ -1287,8 +1287,8 @@ Returns:
                         "sha": sha,
                         "hint": (
                             "The egress proxy blocked this push. "
-                            "When CODE_SANDBOX_ENABLE_EGRESS_PROXY=true, "
-                            "set CODE_SANDBOX_ALLOWED_REPOS to allow "
+                            "When SUNABA_ENABLE_EGRESS_PROXY=true, "
+                            "set SUNABA_ALLOWED_REPOS to allow "
                             "pushes to specific repositories."
                         ),
                     })

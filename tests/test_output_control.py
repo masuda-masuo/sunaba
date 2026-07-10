@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from code_sandbox_mcp.output_control import (
+from sunaba.output_control import (
     compress_repeated_lines,
     mask_tokens,
     paginate_output,

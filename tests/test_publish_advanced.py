@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_sandbox_mcp.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
-from code_sandbox_mcp.tools.vcs import publish
+from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
+from sunaba.tools.vcs import publish
 from tests.conftest import _decode, _make_client_mock, _make_container_mock
 
 
@@ -17,8 +17,8 @@ class TestPublishSquashCheckpoints:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for publish with automatic checkpoint squash."""
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_execute_squash_checkpoints(
         self,
         mock_record: MagicMock,
@@ -53,8 +53,8 @@ class TestPublishSquashCheckpoints:
         ]
         assert len(reset_calls) == 1
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_execute_squash_checkpoints_no_tracking(
         self,
         mock_record: MagicMock,
@@ -88,8 +88,8 @@ class TestPublishAllowForcePush:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for publish with allow_force_push=True."""
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_execute_allow_force_push(
         self,
         mock_record: MagicMock,
@@ -130,8 +130,8 @@ class TestPublishApiPushFallback:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for publish when git push fails and falls back to _try_api_push."""
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_execute_api_push_fallback_succeeds(
         self,
         mock_record: MagicMock,
@@ -162,8 +162,8 @@ class TestPublishApiPushFallback:
         assert result["status"] == "pushed"
         assert result["sha"] == "bbbbbbb"
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_execute_api_push_fallback_fails(
         self,
         mock_record: MagicMock,
@@ -222,9 +222,9 @@ class TestPublishLazyTokenInjection:
         # exec_run is called as exec_run([...], stdout=, stderr=, environment=)
         return call.kwargs.get("environment")
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_token_injected_into_push_exec_only(
         self,
         mock_record: MagicMock,
@@ -262,9 +262,9 @@ class TestPublishLazyTokenInjection:
         assert readonly_calls  # sanity
         assert all(self._env_of(c) is None for c in readonly_calls)
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_no_host_token_leaves_push_env_unset(
         self,
         mock_record: MagicMock,
@@ -293,9 +293,9 @@ class TestPublishLazyTokenInjection:
         calls = container.exec_run.call_args_list
         assert all(self._env_of(c) is None for c in calls)
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_token_injected_into_api_push_fallback(
         self,
         mock_record: MagicMock,
@@ -354,11 +354,11 @@ class TestPublishProxiedCredentialRouting:
     def _env_of(call) -> dict | None:
         return call.kwargs.get("environment")
 
-    @patch("code_sandbox_mcp.tools.vcs.authorized_push_grant")
-    @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.authorized_push_grant")
+    @patch("sunaba.tools.vcs.proxy_configured", return_value=True)
+    @patch("sunaba.tools.vcs._resolve_vcs_token")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_push_exec_token_free_and_grant_carries_credential(
         self,
         mock_record: MagicMock,
@@ -390,11 +390,11 @@ class TestPublishProxiedCredentialRouting:
         assert calls  # sanity
         assert all(self._env_of(c) is None for c in calls)
 
-    @patch("code_sandbox_mcp.tools.vcs.authorized_push_grant")
-    @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.authorized_push_grant")
+    @patch("sunaba.tools.vcs.proxy_configured", return_value=True)
+    @patch("sunaba.tools.vcs._resolve_vcs_token")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_pr_create_runs_host_side_no_exec_token(
         self,
         mock_record: MagicMock,
@@ -412,7 +412,7 @@ class TestPublishProxiedCredentialRouting:
         mock_docker.return_value = client
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._create_pr_via_api",
+            "sunaba.tools.vcs._create_pr_via_api",
             return_value="https://github.com/owner/repo/pull/9",
         ) as mock_create_pr:
             result = _decode(publish(
@@ -442,28 +442,28 @@ class TestPublishProxiedCredentialRouting:
 class TestResolvePushToken:
     """Unit tests for the host-side token resolver (Issue #347)."""
 
-    @patch("code_sandbox_mcp.tools.vcs.token_broker.mint_token")
+    @patch("sunaba.tools.vcs.token_broker.mint_token")
     def test_prefers_minted_broker_token(self, mock_mint: MagicMock) -> None:
-        from code_sandbox_mcp.tools.vcs import _resolve_vcs_token
+        from sunaba.tools.vcs import _resolve_vcs_token
 
         mock_mint.return_value = "ghs_minted"
         with patch.dict("os.environ", {"GITHUB_TOKEN": "ghs_static"}):
             assert _resolve_vcs_token() == "ghs_minted"
 
-    @patch("code_sandbox_mcp.tools.vcs.token_broker.mint_token")
+    @patch("sunaba.tools.vcs.token_broker.mint_token")
     def test_falls_back_to_static_env(self, mock_mint: MagicMock) -> None:
-        from code_sandbox_mcp.tools.vcs import _resolve_vcs_token
+        from sunaba.tools.vcs import _resolve_vcs_token
 
         mock_mint.return_value = None
         with patch.dict("os.environ", {"GITHUB_TOKEN": "ghs_static"}, clear=True):
             assert _resolve_vcs_token() == "ghs_static"
 
-    @patch("code_sandbox_mcp.tools.vcs.token_broker.mint_token")
-    @patch("code_sandbox_mcp.tools.vcs.github_auth.get_global_provider")
+    @patch("sunaba.tools.vcs.token_broker.mint_token")
+    @patch("sunaba.tools.vcs.github_auth.get_global_provider")
     def test_prefers_global_provider_over_static_env(
         self, mock_get_provider: MagicMock, mock_mint: MagicMock
     ) -> None:
-        from code_sandbox_mcp.tools.vcs import _resolve_vcs_token
+        from sunaba.tools.vcs import _resolve_vcs_token
 
         mock_mint.return_value = None
         mock_provider = MagicMock()
@@ -472,9 +472,9 @@ class TestResolvePushToken:
         with patch.dict("os.environ", {"GITHUB_TOKEN": "ghs_static"}, clear=True):
             assert _resolve_vcs_token() == "ghs_provider_tok"
 
-    @patch("code_sandbox_mcp.tools.vcs.token_broker.mint_token")
+    @patch("sunaba.tools.vcs.token_broker.mint_token")
     def test_empty_when_no_token_available(self, mock_mint: MagicMock) -> None:
-        from code_sandbox_mcp.tools.vcs import _resolve_vcs_token
+        from sunaba.tools.vcs import _resolve_vcs_token
 
         mock_mint.return_value = None
         with patch.dict("os.environ", {}, clear=True):

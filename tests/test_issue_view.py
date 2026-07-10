@@ -3,16 +3,16 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from code_sandbox_mcp.tools.vcs import issue_view
+from sunaba.tools.vcs import issue_view
 from tests.conftest import _decode, _make_client_mock, _make_container_mock
 
 
 class TestIssueView:
     """Tests for issue_view."""
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_successful_fetch(
         self,
         mock_record: MagicMock,
@@ -27,7 +27,7 @@ class TestIssueView:
         mock_docker.return_value = client
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             return_value={
                 "number": 55,
                 "title": "Implement VCS tools",
@@ -57,8 +57,8 @@ class TestIssueView:
         assert call_args[0][1] == "issue_view"
         assert call_args[1]["approved"] is None
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
     def test_uses_host_token_when_available(
         self,
         mock_docker: MagicMock,
@@ -70,14 +70,14 @@ class TestIssueView:
         mock_docker.return_value = client
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             return_value={"number": 1, "title": "T", "body": "B"},
         ) as mock_api:
             issue_view(container_id="abc123def456", repo="owner/repo", issue_number=1)
 
         mock_api.assert_called_once_with("/repos/owner/repo/issues/1", "ghs_tok")
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._docker")
     def test_container_not_found(
         self,
         mock_docker: MagicMock,
@@ -98,8 +98,8 @@ class TestIssueView:
         assert "error" in result
         assert "not found" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs._docker")
     def test_api_error_is_reported(
         self,
         mock_docker: MagicMock,
@@ -111,7 +111,7 @@ class TestIssueView:
         mock_docker.return_value = client
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             side_effect=RuntimeError(
                 "GitHub API GET /repos/owner/repo/issues/999 returned HTTP 404: Not Found"
             ),
@@ -125,9 +125,9 @@ class TestIssueView:
         assert "error" in result
         assert "404" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_custom_save_path(
         self,
         mock_record: MagicMock,
@@ -140,7 +140,7 @@ class TestIssueView:
         mock_docker.return_value = client
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             return_value={"number": 1, "title": "Test", "body": "Simple body"},
         ):
             result = _decode(issue_view(
@@ -153,9 +153,9 @@ class TestIssueView:
         assert result["file"] == "/home/sandbox/issue.md"
         assert result["size_bytes"] == len("Simple body".encode())
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_empty_body(
         self,
         mock_record: MagicMock,
@@ -168,7 +168,7 @@ class TestIssueView:
         mock_docker.return_value = client
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             return_value={"number": 1, "title": "No content", "body": ""},
         ):
             result = _decode(issue_view(
@@ -180,8 +180,8 @@ class TestIssueView:
         assert result["summary"] == "(empty body)"
         assert result["size_bytes"] == 0
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs._docker")
     def test_write_failure_is_reported(
         self,
         mock_docker: MagicMock,
@@ -195,7 +195,7 @@ class TestIssueView:
         mock_docker.return_value = client
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             return_value={"number": 1, "title": "T", "body": "B"},
         ):
             result = _decode(issue_view(

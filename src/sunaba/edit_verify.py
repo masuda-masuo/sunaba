@@ -30,7 +30,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
-from code_sandbox_mcp.journal import record_file_write
+from sunaba.journal import record_file_write
 
 # ===========================================================================
 # Status envelope (design-multilang-support.md S4)
@@ -1495,7 +1495,7 @@ def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> Ve
 
 def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
     """Run pytest --json-report on *path*.  Returns VerifyResult envelope."""
-    from code_sandbox_mcp.test_report import (
+    from sunaba.test_report import (
         PytestAdapter,
         build_pytest_cmd,
         split_pytest_output,
@@ -1578,7 +1578,7 @@ def _run_jest_verify(container: Any, path: str) -> VerifyResult:
         return _envelope_skipped("jest", "no test output produced")
 
     try:
-        from code_sandbox_mcp.test_report import JestAdapter
+        from sunaba.test_report import JestAdapter
 
         report = JestAdapter.parse_json(stdout_text)
         d = report.to_dict()
@@ -1623,7 +1623,7 @@ def _run_go_test_verify(container: Any, path: str) -> VerifyResult:
         return _envelope_skipped("go test", "no test output produced")
 
     try:
-        from code_sandbox_mcp.test_report import GoTestAdapter
+        from sunaba.test_report import GoTestAdapter
 
         report = GoTestAdapter.parse_json(stdout_text)
         d = report.to_dict()

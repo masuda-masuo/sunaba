@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from code_sandbox_mcp.journal import get_journal_path, get_runs, read_journal
-from code_sandbox_mcp.trace import generate_html_trace, generate_json_trace, get_trace_dir
+from sunaba.journal import get_journal_path, get_runs, read_journal
+from sunaba.trace import generate_html_trace, generate_json_trace, get_trace_dir
 
 
 def sandbox_read_journal(
@@ -85,7 +85,7 @@ def sandbox_journal_path() -> str:
     """Return the filesystem path to the execution journal file.
 
     Returns:
-        Absolute path to ``~/.code-sandbox-mcp/journal.log``.
+        Absolute path to ``~/.sunaba/journal.log``.
     """
     return get_journal_path()
 
@@ -94,6 +94,6 @@ def sandbox_trace_dir() -> str:
     """Return the filesystem path to the trace output directory.
 
     Returns:
-        Absolute path to ``~/.code-sandbox-mcp/traces/``.
+        Absolute path to ``~/.sunaba/traces/``.
     """
     return get_trace_dir()

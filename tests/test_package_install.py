@@ -7,13 +7,13 @@ from unittest.mock import MagicMock, patch
 
 from docker.errors import NotFound
 
-from code_sandbox_mcp.tools.package import package_install
+from sunaba.tools.package import package_install
 
 
 class TestPackageInstall:
     """Tests for the package_install tool."""
 
-    @patch("code_sandbox_mcp.tools.package._docker")
+    @patch("sunaba.tools.package._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = NotFound("not found")
@@ -26,7 +26,7 @@ class TestPackageInstall:
         assert result["status"] == "error"
         assert "not found" in result["stderr"]
 
-    @patch("code_sandbox_mcp.tools.package._docker")
+    @patch("sunaba.tools.package._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = Exception("connection refused")
@@ -54,7 +54,7 @@ class TestPackageInstall:
         assert result["status"] == "error"
         assert "mutually exclusive" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.package._docker")
+    @patch("sunaba.tools.package._docker")
     def test_successful_install(self, mock_docker: MagicMock) -> None:
         container = MagicMock()
         call_count = 0
@@ -87,7 +87,7 @@ class TestPackageInstall:
         assert result["changed"] == 0  # pip list returns same data before/after
 
 
-    @patch("code_sandbox_mcp.tools.package._docker")
+    @patch("sunaba.tools.package._docker")
     def test_successful_editable_install(self, mock_docker: MagicMock) -> None:
         container = MagicMock()
 
@@ -117,7 +117,7 @@ class TestPackageInstall:
         ))
         assert result["status"] == "ok"
 
-    @patch("code_sandbox_mcp.tools.package._docker")
+    @patch("sunaba.tools.package._docker")
     def test_install_with_upgrade(self, mock_docker: MagicMock) -> None:
         container = MagicMock()
 
@@ -148,7 +148,7 @@ class TestPackageInstall:
         ))
         assert result["status"] == "ok"
 
-    @patch("code_sandbox_mcp.tools.package._docker")
+    @patch("sunaba.tools.package._docker")
     def test_install_failure(self, mock_docker: MagicMock) -> None:
         container = MagicMock()
         call_count = 0
@@ -178,7 +178,7 @@ class TestPackageInstall:
         assert result["status"] == "error"
         assert "exit code 1" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.package._docker")
+    @patch("sunaba.tools.package._docker")
     def test_install_list_packages(self, mock_docker: MagicMock) -> None:
         container = MagicMock()
         call_count = 0
@@ -207,7 +207,7 @@ class TestPackageInstall:
         ))
         assert result["status"] == "ok"
 
-    @patch("code_sandbox_mcp.tools.package._docker")
+    @patch("sunaba.tools.package._docker")
     def test_runtime_installer_selection(self, mock_docker: MagicMock) -> None:
         """#390: the installer is chosen at runtime inside the container —
         ``uv pip`` when ``$VIRTUAL_ENV`` is set (venv-baked images, PR #388),

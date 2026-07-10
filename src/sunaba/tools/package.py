@@ -9,8 +9,8 @@ from typing import Annotated
 from docker.errors import NotFound
 from pydantic import BeforeValidator
 
-from code_sandbox_mcp.journal import record_exec as journal_record_exec
-from code_sandbox_mcp.tools.common import _coerce_list_arg, _docker
+from sunaba.journal import record_exec as journal_record_exec
+from sunaba.tools.common import _coerce_list_arg, _docker
 
 
 def _run_in_container(container_id: str, cmd: list[str]) -> tuple[int, str, str]:

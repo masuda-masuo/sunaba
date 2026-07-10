@@ -7,13 +7,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_sandbox_mcp.tools.file import copy_file, copy_project
+from sunaba.tools.file import copy_file, copy_project
 
 
 class TestCopyProject:
     """Tests for copy_project tool."""
 
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file._docker")
     def test_copy_project_with_dot(
         self,
         mock_docker: MagicMock,
@@ -66,7 +66,7 @@ class TestCopyProject:
         assert "myproject/hello.txt" in names
         assert "myproject/subdir/nested.txt" in names
 
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file._docker")
     def test_copy_project_with_absolute_path(
         self,
         mock_docker: MagicMock,
@@ -107,7 +107,7 @@ class TestCopyProject:
             ["sh", "-c", "chown -R $(id -u):$(id -g) /opt/myapp"]
         )
 
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file._docker")
     def test_copy_project_container_not_found(
         self,
         mock_docker: MagicMock,
@@ -126,7 +126,7 @@ class TestCopyProject:
         assert "Error" in result
         assert "not found" in result
 
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file._docker")
     def test_copy_project_src_not_a_directory(
         self,
         mock_docker: MagicMock,
@@ -146,7 +146,7 @@ class TestCopyProject:
         assert "Error" in result
         assert "not a directory" in result
 
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file._docker")
     def test_copy_project_put_archive_fails(
         self,
         mock_docker: MagicMock,
@@ -181,7 +181,7 @@ class TestCopyProject:
         )
         assert "Error" in result
 
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file._docker")
     def test_copy_project_exec_run_fails(
         self,
         mock_docker: MagicMock,
@@ -208,8 +208,8 @@ class TestCopyProject:
         assert "Error" not in result
         assert "Copied" in result
 
-    @patch("code_sandbox_mcp.tools.file.logger")
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file.logger")
+    @patch("sunaba.tools.file._docker")
     def test_copy_project_chown_logs_debug_on_failure(
         self,
         mock_docker: MagicMock,
@@ -239,7 +239,7 @@ class TestCopyProject:
         call_args = mock_logger.debug.call_args
         assert "chown failed" in call_args[0][0]
 
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file._docker")
     def test_copy_project_special_chars_in_path(
         self,
         mock_docker: MagicMock,
@@ -268,8 +268,8 @@ class TestCopyProject:
         chown_cmd = ["sh", "-c", "chown -R $(id -u):$(id -g) '/home/sandbox/my project (1)'"]
         mock_container.exec_run.assert_called_once_with(chown_cmd)
 
-    @patch("code_sandbox_mcp.tools.file._docker")
-    @patch("code_sandbox_mcp.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    @patch("sunaba.tools.file.record_copy")
     def test_copy_file_default_dest_path(
         self,
         mock_record_copy: MagicMock,

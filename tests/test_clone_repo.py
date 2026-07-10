@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_sandbox_mcp.proxy_client import CONTROL_SECRET_ENV, CONTROL_URL_ENV
-from code_sandbox_mcp.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProxyError
-from code_sandbox_mcp.tools.container import (
+from sunaba.proxy_client import CONTROL_SECRET_ENV, CONTROL_URL_ENV
+from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProxyError
+from sunaba.tools.container import (
     _clone_repo_via_network,
     _clone_shiori_repo_to_container,
     _validate_clone_repo,
@@ -63,7 +63,7 @@ class TestCloneShioriRepoToContainer:
 
     def test_invalid_clone_dest(self) -> None:
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", "/data/repos"
+            "sunaba.tools.container._SHIORI_REPOS_PATH", "/data/repos"
         ):
             with pytest.raises(ValueError, match="must start with /tmp/"):
                 _clone_shiori_repo_to_container(
@@ -72,7 +72,7 @@ class TestCloneShioriRepoToContainer:
 
     def test_no_shiori_repos_path_configured(self) -> None:
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", None
+            "sunaba.tools.container._SHIORI_REPOS_PATH", None
         ):
             with pytest.raises(ValueError, match="not configured"):
                 _clone_shiori_repo_to_container(
@@ -81,7 +81,7 @@ class TestCloneShioriRepoToContainer:
 
     def test_repos_root_not_found(self) -> None:
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", "/nonexistent/path"
+            "sunaba.tools.container._SHIORI_REPOS_PATH", "/nonexistent/path"
         ):
             with pytest.raises(ValueError, match="not found"):
                 _clone_shiori_repo_to_container(
@@ -91,7 +91,7 @@ class TestCloneShioriRepoToContainer:
     def test_path_traversal_prevented_by_validate(self) -> None:
         """Path traversal via '../' is caught by _validate_clone_repo format check."""
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", "/data/repos"
+            "sunaba.tools.container._SHIORI_REPOS_PATH", "/data/repos"
         ):
             with pytest.raises(ValueError, match="owner/name"):
                 _clone_shiori_repo_to_container(
@@ -102,7 +102,7 @@ class TestCloneShioriRepoToContainer:
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
         ):
             with pytest.raises(ValueError, match="not found"):
                 _clone_shiori_repo_to_container(
@@ -116,7 +116,7 @@ class TestCloneShioriRepoToContainer:
         clone_dir.mkdir(parents=True)
         (clone_dir / "README.md").write_text("hello")
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
         ):
             with pytest.raises(ValueError, match="no .git directory"):
                 _clone_shiori_repo_to_container(
@@ -139,7 +139,7 @@ class TestCloneShioriRepoToContainer:
         )
 
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
         ):
             result = _clone_shiori_repo_to_container(
                 mock_container, "abc123", "owner/repo", "/tmp/repo"
@@ -170,7 +170,7 @@ class TestCloneShioriRepoToContainer:
         )
 
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
         ):
             result = _clone_shiori_repo_to_container(
                 mock_container, "abc123", "owner/repo", "/tmp/repo"
@@ -192,7 +192,7 @@ class TestCloneShioriRepoToContainer:
         mock_container.exec_run.side_effect = Exception("network error")
 
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
         ):
             result = _clone_shiori_repo_to_container(
                 mock_container, "abc123", "owner/repo", "/tmp/repo"
@@ -221,7 +221,7 @@ class TestCloneShioriRepoToContainer:
         )
 
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
         ):
             with pytest.raises(RuntimeError, match="Failed to copy repo"):
                 _clone_shiori_repo_to_container(
@@ -244,7 +244,7 @@ class TestCloneShioriRepoToContainer:
         )
 
         with patch(
-            "code_sandbox_mcp.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
         ):
             result = _clone_shiori_repo_to_container(
                 mock_container, "abc123", "owner/myrepo", "/tmp/repo"
@@ -276,8 +276,8 @@ class TestCloneRepo:
     def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_successful_clone(self, mock_record, mock_docker):
         """Successful clone returns ok with clone_path."""
         container = _make_container([
@@ -286,7 +286,7 @@ class TestCloneRepo:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
         assert result["repo"] == "owner/mytool"
@@ -294,8 +294,8 @@ class TestCloneRepo:
         assert result["branch"] == "default"
         mock_record.assert_called_once()
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_clone_with_branch(self, mock_record, mock_docker):
         """Clone with branch specified."""
         container = _make_container([
@@ -304,7 +304,7 @@ class TestCloneRepo:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(
             clone_repo("abc123def456", "owner/mytool", branch="develop")
         )
@@ -312,7 +312,7 @@ class TestCloneRepo:
         assert result["branch"] == "develop"
         mock_record.assert_called_once()
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._docker")
     def test_clone_failure(self, mock_docker):
         """Clone failure returns error status."""
         container = _make_container([
@@ -321,12 +321,12 @@ class TestCloneRepo:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/nonexistent"))
         assert result["status"] == "error"
         assert "repository not found" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._docker")
     def test_clone_with_custom_dest(self, mock_docker):
         """Clone with custom dest_dir computes correct clone_path."""
         container = _make_container([
@@ -335,13 +335,13 @@ class TestCloneRepo:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(
             clone_repo("abc123def456", "owner/mytool", dest_dir="/tmp/work")
         )
         assert result["clone_path"] == "/tmp/work/mytool"
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._docker")
     def test_clone_targets_repo_subdir(self, mock_docker):
         """Issue #131: gh clones into {dest_dir}/{repo_name}, not dest_dir."""
         container = _make_container([
@@ -350,14 +350,14 @@ class TestCloneRepo:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         clone_repo("abc123def456", "owner/mytool")
 
         cmd = container.exec_run.call_args[0][0][-1]
         assert "/home/sandbox/mytool" in cmd
         assert "gh repo clone 'owner/mytool' '/home/sandbox'" not in cmd
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._docker")
     def test_clone_existing_dir_adds_hint(self, mock_docker):
         """Issue #131: 'already exists' failures get an actionable hint."""
         container = _make_container([
@@ -371,14 +371,14 @@ class TestCloneRepo:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "error"
         assert "Hint:" in result["error"]
         assert "dest_dir" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_clone_succeeds_when_auth_setup_fails(self, mock_record, mock_docker):
         """gh auth setup-git failure is ignored; clone still proceeds."""
         container = _make_container([
@@ -387,7 +387,7 @@ class TestCloneRepo:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
         assert result["clone_path"] == "/home/sandbox/mytool"
@@ -443,7 +443,7 @@ class TestCloneRepoViaNetwork:
         cmd = c.exec_run.call_args_list[0][0][0][-1]
         assert "gh repo clone owner/repo" in cmd
 
-    @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
+    @patch("sunaba.tools.container.record_boundary_crossing")
     def test_read_grant_success_is_journaled(self, mock_record) -> None:
         """#421: a proxy-read-grant-authorized clone records approved=True."""
         c = self._container(0, b"")
@@ -457,7 +457,7 @@ class TestCloneRepoViaNetwork:
             approved=True,
         )
 
-    @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
+    @patch("sunaba.tools.container.record_boundary_crossing")
     def test_read_grant_failure_is_journaled(self, mock_record) -> None:
         """#421: a denied/failed proxy read grant must show up too, not just success."""
         c = self._container(1, b"fatal: could not read Username")
@@ -473,7 +473,7 @@ class TestCloneRepoViaNetwork:
             approved=False,
         )
 
-    @patch("code_sandbox_mcp.tools.container.record_boundary_crossing")
+    @patch("sunaba.tools.container.record_boundary_crossing")
     def test_no_read_grant_is_not_journaled(self, mock_record) -> None:
         """A plain (non-proxied) clone is unaffected -- no new journal entry."""
         c = self._container(0, b"")
@@ -488,8 +488,8 @@ class TestCloneRepoTransportSelection:
     def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_anonymous_when_setup_git_fails(self, mock_record, mock_docker) -> None:
         container = _make_container([
             (1, b"", b"gh: not logged in\n"),
@@ -497,7 +497,7 @@ class TestCloneRepoTransportSelection:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
         cmd = container.exec_run.call_args[0][0][-1]
@@ -509,8 +509,8 @@ class TestCloneRepoTransportSelection:
         assert "anonymous clone" in result["warning"]
         assert "no re-init needed" in result["warning"]
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_gh_when_setup_git_succeeds(self, mock_record, mock_docker) -> None:
         container = _make_container([
             (0, b"", b""),
@@ -518,7 +518,7 @@ class TestCloneRepoTransportSelection:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
         cmd = container.exec_run.call_args[0][0][-1]
@@ -529,11 +529,11 @@ class TestCloneRepoTransportSelection:
 class TestCloneRepoToolReadGrantJournal:
     """#421: clone_repo tool journals the proxy read-grant's outcome."""
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
-    @patch("code_sandbox_mcp.tools.vcs.authorized_read_grant")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.proxy_configured", return_value=True)
+    @patch("sunaba.tools.vcs.authorized_read_grant")
     def test_success_records_proxy_read_grant_flag(
         self, _mock_grant, _mock_proxy, _mock_token, mock_record, mock_docker
     ) -> None:
@@ -543,7 +543,7 @@ class TestCloneRepoToolReadGrantJournal:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
         assert "warning" not in result  # the read grant covers the credential gap
@@ -554,11 +554,11 @@ class TestCloneRepoToolReadGrantJournal:
             approved=True,
         )
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs.proxy_configured", return_value=True)
-    @patch("code_sandbox_mcp.tools.vcs.authorized_read_grant")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.proxy_configured", return_value=True)
+    @patch("sunaba.tools.vcs.authorized_read_grant")
     def test_failure_is_journaled_with_approved_false(
         self, _mock_grant, _mock_proxy, _mock_token, mock_record, mock_docker
     ) -> None:
@@ -568,7 +568,7 @@ class TestCloneRepoToolReadGrantJournal:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "error"
         mock_record.assert_called_once_with(
@@ -585,11 +585,11 @@ class TestCloneRepoRecoversProxyEnv:
     proxy_configured(), mirroring publish's recovery (see test_publish.py).
     """
 
-    @patch("code_sandbox_mcp.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs.authorized_read_grant")
+    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.authorized_read_grant")
     def test_recovers_env_and_opens_read_grant(
         self, mock_grant, _mock_token, mock_record, mock_docker, mock_ensure_proxy,
         monkeypatch: pytest.MonkeyPatch,
@@ -611,16 +611,16 @@ class TestCloneRepoRecoversProxyEnv:
         ])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
 
         assert result["status"] == "ok"
         mock_ensure_proxy.assert_called_once()
         mock_grant.assert_called_once()
 
-    @patch("code_sandbox_mcp.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_fails_closed_when_proxy_env_unrecoverable(
         self, mock_record, mock_docker, mock_ensure_proxy,
         monkeypatch: pytest.MonkeyPatch,
@@ -633,7 +633,7 @@ class TestCloneRepoRecoversProxyEnv:
         container = _make_container([])
         mock_docker.return_value = _make_client(container)
 
-        from code_sandbox_mcp.server import clone_repo
+        from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
 
         assert "sidecar unreachable" in result["error"]
@@ -643,10 +643,10 @@ class TestCloneRepoRecoversProxyEnv:
 class TestCloneWarnsWithoutToken:
     """Issue #333 follow-up: warn at clone time when no token (push fails)."""
 
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists",
+    @patch("sunaba.tools.container._shiori_preclone_exists",
            return_value=False)
     def test_network_clone_without_token_warns(self, _mock_pre) -> None:
-        from code_sandbox_mcp.tools.container import _try_clone_into_container
+        from sunaba.tools.container import _try_clone_into_container
         c = MagicMock()
         c.exec_run.return_value = (0, b"")
         res = _try_clone_into_container(
@@ -657,10 +657,10 @@ class TestCloneWarnsWithoutToken:
         # Issue #347: warning flags the anonymous clone, not a re-init demand.
         assert "anonymous clone" in res.msg
 
-    @patch("code_sandbox_mcp.tools.container._shiori_preclone_exists",
+    @patch("sunaba.tools.container._shiori_preclone_exists",
            return_value=False)
     def test_network_clone_with_token_no_warning(self, _mock_pre) -> None:
-        from code_sandbox_mcp.tools.container import _try_clone_into_container
+        from sunaba.tools.container import _try_clone_into_container
         c = MagicMock()
         c.exec_run.return_value = (0, b"")
         res = _try_clone_into_container(
@@ -677,7 +677,7 @@ class TestEditableInstallCmd:
     def test_runtime_installer_selection(self) -> None:
         # #390: uv when $VIRTUAL_ENV is set (venv-baked images, PR #388),
         # plain pip otherwise (venv-less images, the #380 constraint).
-        from code_sandbox_mcp.tools.container import _editable_install_cmd
+        from sunaba.tools.container import _editable_install_cmd
 
         cmd = _editable_install_cmd('".[dev]"')
 
@@ -688,7 +688,7 @@ class TestEditableInstallCmd:
     def test_pip_fallback_branch(self) -> None:
         # The pip branch must stay byte-identical to the pre-#390 command so
         # venv-less images keep the user-site fallback behaviour.
-        from code_sandbox_mcp.tools.container import _editable_install_cmd
+        from sunaba.tools.container import _editable_install_cmd
 
         cmd = _editable_install_cmd('".[dev]"')
 
@@ -697,7 +697,7 @@ class TestEditableInstallCmd:
     def test_no_temp_venv(self) -> None:
         # Regression for #383: the former uv path installed into a mktemp
         # venv and deleted it right away, discarding the install.
-        from code_sandbox_mcp.tools.container import _editable_install_cmd
+        from sunaba.tools.container import _editable_install_cmd
 
         cmd = _editable_install_cmd('".[dev]"')
 
@@ -705,14 +705,14 @@ class TestEditableInstallCmd:
         assert "rm -rf" not in cmd
 
     def test_quotes_target(self) -> None:
-        from code_sandbox_mcp.tools.container import _editable_install_cmd
+        from sunaba.tools.container import _editable_install_cmd
 
         cmd = _editable_install_cmd("foo[bar]")
 
         assert "'foo[bar]'" in cmd, "shlex.quote should wrap target in single quotes"
 
     def test_pip_args_appended(self) -> None:
-        from code_sandbox_mcp.tools.container import _editable_install_cmd
+        from sunaba.tools.container import _editable_install_cmd
 
         cmd = _editable_install_cmd('".[dev]"', pip_args="--index-url https://example.com")
 
@@ -721,7 +721,7 @@ class TestEditableInstallCmd:
         assert cmd.count("--index-url") == 2, "both uv and pip branches should have the arg"
 
     def test_pip_args_empty_string(self) -> None:
-        from code_sandbox_mcp.tools.container import _editable_install_cmd
+        from sunaba.tools.container import _editable_install_cmd
 
         cmd_with_empty = _editable_install_cmd('".[dev]"', pip_args="")
         cmd_with_none = _editable_install_cmd('".[dev]"')
@@ -732,7 +732,7 @@ class TestEditableInstallCmd:
         assert cmd_with_empty == cmd_with_none
 
     def test_pip_args_multiword(self) -> None:
-        from code_sandbox_mcp.tools.container import _editable_install_cmd
+        from sunaba.tools.container import _editable_install_cmd
 
         cmd = _editable_install_cmd(
             '".[dev]"',
@@ -744,7 +744,7 @@ class TestEditableInstallCmd:
         assert "--no-build-isolation" in cmd
 
     def test_pip_args_shell_injection_prevented(self) -> None:
-        from code_sandbox_mcp.tools.container import _editable_install_cmd
+        from sunaba.tools.container import _editable_install_cmd
 
         cmd = _editable_install_cmd('".[dev]"', pip_args='; rm -rf /')
 

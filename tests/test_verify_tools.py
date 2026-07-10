@@ -17,10 +17,10 @@ from unittest.mock import MagicMock, patch
 
 from docker.errors import NotFound
 
-from code_sandbox_mcp.tools.file import (
+from sunaba.tools.file import (
     transform_file,
 )
-from code_sandbox_mcp.tools.verify import (
+from sunaba.tools.verify import (
     apply_patch,
     lint_in_container,
     search_in_container,
@@ -35,7 +35,7 @@ from code_sandbox_mcp.tools.verify import (
 class TestApplyPatch:
     """Tests for the apply_patch wrapper."""
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = NotFound("not found")
@@ -49,7 +49,7 @@ class TestApplyPatch:
         assert "Error" in result
         assert "not found" in result
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = Exception("connection refused")
@@ -63,8 +63,8 @@ class TestApplyPatch:
         assert "Error" in result
         assert "connection refused" in result
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
-    @patch("code_sandbox_mcp.tools.verify.apply_patch_to_file")
+    @patch("sunaba.tools.verify._docker")
+    @patch("sunaba.tools.verify.apply_patch_to_file")
     def test_delegates_to_apply_patch_to_file(
         self,
         mock_impl: MagicMock,
@@ -94,7 +94,7 @@ class TestApplyPatch:
 class TestTransformFile:
     """Tests for the transform_file wrapper."""
 
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = NotFound("not found")
@@ -106,7 +106,7 @@ class TestTransformFile:
         assert result["status"] == "error"
         assert "not found" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.file._docker")
+    @patch("sunaba.tools.file._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = Exception("connection refused")
@@ -118,8 +118,8 @@ class TestTransformFile:
         assert result["status"] == "error"
         assert "connection refused" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.file._docker")
-    @patch("code_sandbox_mcp.tools.file.transform_file_in_container")
+    @patch("sunaba.tools.file._docker")
+    @patch("sunaba.tools.file.transform_file_in_container")
     def test_delegates_without_changes(
         self,
         mock_impl: MagicMock,
@@ -140,10 +140,10 @@ class TestTransformFile:
             mock_client, "abc123", "/tmp/f.txt", "def transform(text): return text",
         )
 
-    @patch("code_sandbox_mcp.tools.file._docker")
-    @patch("code_sandbox_mcp.tools.file.transform_file_in_container")
-    @patch("code_sandbox_mcp.tools.file.truncate_output")
-    @patch("code_sandbox_mcp.tools.file.paginate_output")
+    @patch("sunaba.tools.file._docker")
+    @patch("sunaba.tools.file.transform_file_in_container")
+    @patch("sunaba.tools.file.truncate_output")
+    @patch("sunaba.tools.file.paginate_output")
     def test_delegates_with_changes_and_paginates(
         self,
         mock_paginate: MagicMock,
@@ -201,7 +201,7 @@ class TestTransformFile:
 class TestSearchInContainer:
     """Tests for the search_in_container wrapper."""
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = NotFound("not found")
@@ -212,7 +212,7 @@ class TestSearchInContainer:
         )
         assert result == {"status": "error", "error": "Container abc123 not found"}
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = Exception("connection refused")
@@ -223,9 +223,9 @@ class TestSearchInContainer:
         )
         assert result == {"status": "error", "error": "connection refused"}
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
-    @patch("code_sandbox_mcp.tools.verify.search_files")
-    @patch("code_sandbox_mcp.tools.verify.resolve_git_root")
+    @patch("sunaba.tools.verify._docker")
+    @patch("sunaba.tools.verify.search_files")
+    @patch("sunaba.tools.verify.resolve_git_root")
     def test_delegates_with_defaults(
         self,
         mock_resolve: MagicMock,
@@ -249,8 +249,8 @@ class TestSearchInContainer:
             output_mode="content", offset=0,
         )
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
-    @patch("code_sandbox_mcp.tools.verify.search_files")
+    @patch("sunaba.tools.verify._docker")
+    @patch("sunaba.tools.verify.search_files")
     def test_delegates_with_explicit_args(
         self,
         mock_impl: MagicMock,
@@ -282,7 +282,7 @@ class TestSearchInContainer:
 class TestLintInContainer:
     """Tests for the lint_in_container wrapper."""
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = NotFound("not found")
@@ -293,7 +293,7 @@ class TestLintInContainer:
         )
         assert result == {"status": "error", "error": "Container abc123 not found"}
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = Exception("connection refused")
@@ -304,8 +304,8 @@ class TestLintInContainer:
         )
         assert result == {"status": "error", "error": "connection refused"}
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
-    @patch("code_sandbox_mcp.tools.verify.lint_file")
+    @patch("sunaba.tools.verify._docker")
+    @patch("sunaba.tools.verify.lint_file")
     def test_delegates(
         self,
         mock_impl: MagicMock,
@@ -325,8 +325,8 @@ class TestLintInContainer:
             mock_client, "abc123", "/tmp/f.py", scope_workdir=("/tmp", "/tmp"), fix=False
         )
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
-    @patch("code_sandbox_mcp.tools.verify.lint_file")
+    @patch("sunaba.tools.verify._docker")
+    @patch("sunaba.tools.verify.lint_file")
     def test_two_phase_scope_pass(
         self,
         mock_impl: MagicMock,
@@ -348,8 +348,8 @@ class TestLintInContainer:
             mock_client, "abc123", "src/foo.py", scope_workdir=("src", "."), fix=False
         )
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
-    @patch("code_sandbox_mcp.tools.verify.lint_file")
+    @patch("sunaba.tools.verify._docker")
+    @patch("sunaba.tools.verify.lint_file")
     def test_fix_true_propagates_to_lint_file(
         self,
         mock_impl: MagicMock,
@@ -393,7 +393,7 @@ class TestLintFileAutofix:
         return mock_client
 
     def test_ruff_fix_adds_fix_flag(self) -> None:
-        from code_sandbox_mcp.edit_verify import lint_file
+        from sunaba.edit_verify import lint_file
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"[]", b""))
@@ -407,7 +407,7 @@ class TestLintFileAutofix:
         assert "--fix" in cmd
 
     def test_ruff_no_fix_omits_fix_flag(self) -> None:
-        from code_sandbox_mcp.edit_verify import lint_file
+        from sunaba.edit_verify import lint_file
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"[]", b""))
@@ -420,7 +420,7 @@ class TestLintFileAutofix:
         assert "--fix" not in cmd
 
     def test_eslint_fix_adds_fix_flag(self) -> None:
-        from code_sandbox_mcp.edit_verify import lint_file
+        from sunaba.edit_verify import lint_file
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"[]", b""))
@@ -434,7 +434,7 @@ class TestLintFileAutofix:
 
     def test_scope_phase_stays_read_only_when_fixing(self) -> None:
         """Single-file fix must not pass --fix to the project-wide scope run."""
-        from code_sandbox_mcp.edit_verify import lint_file
+        from sunaba.edit_verify import lint_file
 
         mock_container = MagicMock()
         # First call (single file) → clean, triggers scope phase.
@@ -460,7 +460,7 @@ class TestLintFileAutofix:
 class TestTypeCheckInContainer:
     """Tests for the type_check_in_container wrapper."""
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = NotFound("not found")
@@ -471,7 +471,7 @@ class TestTypeCheckInContainer:
         )
         assert result == {"status": "error", "error": "Container abc123 not found"}
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = Exception("connection refused")
@@ -482,8 +482,8 @@ class TestTypeCheckInContainer:
         )
         assert result == {"status": "error", "error": "connection refused"}
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
-    @patch("code_sandbox_mcp.tools.verify.type_check_file")
+    @patch("sunaba.tools.verify._docker")
+    @patch("sunaba.tools.verify.type_check_file")
     def test_delegates(
         self,
         mock_impl: MagicMock,
@@ -510,7 +510,7 @@ class TestTypeCheckInContainer:
 class TestVerifyInContainer:
     """Tests for the rewritten verify_in_container (test-only with filter fallback)."""
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = NotFound("not found")
@@ -523,7 +523,7 @@ class TestVerifyInContainer:
         assert result["gate_passed"] is False
         assert "not found" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = Exception("connection refused")
@@ -536,7 +536,7 @@ class TestVerifyInContainer:
         assert result["gate_passed"] is False
         assert "connection refused" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_signature_accepts_test_filter(self, mock_docker: MagicMock) -> None:
         """verify_in_container accepts test_filter, verbose, pytest_args."""
         mock_client = MagicMock()
@@ -553,7 +553,7 @@ class TestVerifyInContainer:
         ))
         assert result["status"] == "error"  # container not found
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_signature_accepts_working_dir(self, mock_docker: MagicMock) -> None:
         """verify_in_container accepts working_dir parameter."""
         mock_client = MagicMock()
@@ -563,14 +563,14 @@ class TestVerifyInContainer:
         result = json.loads(verify_in_container(
             container_id="abc123",
             path="tests/",
-            working_dir="/tmp/repo/code-sandbox-mcp",
+            working_dir="/tmp/repo/sunaba",
         ))
         assert result["status"] == "error"  # container not found
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_working_dir_passed_to_exec_run(self, mock_docker: MagicMock) -> None:
         """working_dir is passed to exec_run internally."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -581,7 +581,7 @@ class TestVerifyInContainer:
         result = DetectionResult(languages={"python"}, scope={"python": "/repo"}, reason=None)
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=result,
         ) as mock_detect:
             # Mock exec_run for _run() calls (git diff, pytest)
@@ -593,7 +593,7 @@ class TestVerifyInContainer:
             verify_in_container(
                 container_id="abc123",
                 path="tests/",
-                working_dir="/tmp/repo/code-sandbox-mcp",
+                working_dir="/tmp/repo/sunaba",
             )
 
             # detect_languages runs twice now: once for the test path and
@@ -602,34 +602,34 @@ class TestVerifyInContainer:
             assert mock_detect.call_count == 2
             first_args, first_kwargs = mock_detect.call_args_list[0]
             assert first_args == (mock_container, "tests/", None)
-            assert first_kwargs == {"working_dir": "/tmp/repo/code-sandbox-mcp"}
+            assert first_kwargs == {"working_dir": "/tmp/repo/sunaba"}
             for _args, _kwargs in mock_detect.call_args_list:
-                assert _kwargs.get("working_dir") == "/tmp/repo/code-sandbox-mcp"
+                assert _kwargs.get("working_dir") == "/tmp/repo/sunaba"
             # Verify exec_run was called with workdir=working_dir
             _, kwargs = mock_container.exec_run.call_args
-            assert kwargs.get("workdir") == "/tmp/repo/code-sandbox-mcp"
+            assert kwargs.get("workdir") == "/tmp/repo/sunaba"
 
-    @patch("code_sandbox_mcp.tools.vcs.resolve_git_root")
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.vcs.resolve_git_root")
+    @patch("sunaba.tools.verify._docker")
     def test_working_dir_none_auto_detects_git_root(
         self, mock_docker: MagicMock, mock_resolve: MagicMock,
     ) -> None:
         """When working_dir is omitted, the git repo root is auto-detected
         instead of silently defaulting to /home/sandbox (matching the
         resolve_git_root usage already used by clone_repo/publish/etc.)."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
         mock_container.exec_run.return_value = (0, (b"", b""))
-        mock_resolve.return_value = "/tmp/repo/code-sandbox-mcp"
+        mock_resolve.return_value = "/tmp/repo/sunaba"
 
         result = DetectionResult(languages={"python"}, scope={"python": "/repo"}, reason=None)
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=result,
         ):
             verify_in_container(
@@ -639,12 +639,12 @@ class TestVerifyInContainer:
 
         mock_resolve.assert_called_once_with(mock_container, None)
         _, kwargs = mock_container.exec_run.call_args
-        assert kwargs.get("workdir") == "/tmp/repo/code-sandbox-mcp"
+        assert kwargs.get("workdir") == "/tmp/repo/sunaba"
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_skip_both_gates_bypasses_lint_type_gate(self, mock_docker: MagicMock) -> None:
         """skip_lint_gate + skip_type_gate skip the gate entirely (#294 review)."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -653,12 +653,12 @@ class TestVerifyInContainer:
         mock_container.exec_run.return_value = (0, (b"", b""))
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate"
+            "sunaba.edit_verify.run_lint_type_gate"
         ) as mock_gate:
             result = json.loads(verify_in_container(
                 container_id="abc123",
@@ -673,10 +673,10 @@ class TestVerifyInContainer:
         assert "types" not in result
         assert "patch_targets" not in result
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_skip_lint_gate_maps_to_gate_on_lint_false(self, mock_docker: MagicMock) -> None:
         """skip_lint_gate=True forwards gate_on_lint=False to run_lint_type_gate."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -689,12 +689,12 @@ class TestVerifyInContainer:
         }
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value=gate_ret,
         ) as mock_gate:
             verify_in_container(
@@ -708,14 +708,14 @@ class TestVerifyInContainer:
         assert kwargs["gate_on_lint"] is False
         assert kwargs["gate_on_type"] is True
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_gate_scope_includes_tests_dir_when_present(
         self, mock_docker: MagicMock
     ) -> None:
         """Regression for #417: when both src/ and tests/ exist, lint_scope
         must cover both (matching CI's ``ruff check src/ tests/``) while
         type_scope stays "src" (CI has no type-check step)."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -733,12 +733,12 @@ class TestVerifyInContainer:
         }
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value=gate_ret,
         ) as mock_gate:
             verify_in_container(container_id="abc123", path="tests/")
@@ -747,13 +747,13 @@ class TestVerifyInContainer:
         assert _args[1] == "src"
         assert kwargs["lint_scope"] == ["src", "tests"]
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_gate_scope_falls_back_to_dot_when_neither_dir_exists(
         self, mock_docker: MagicMock
     ) -> None:
         """No src/ or tests/ (e.g. a flat-layout project) -> both scopes
         fall back to "."."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -771,12 +771,12 @@ class TestVerifyInContainer:
         }
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value=gate_ret,
         ) as mock_gate:
             verify_in_container(container_id="abc123", path="tests/")
@@ -785,10 +785,10 @@ class TestVerifyInContainer:
         assert _args[1] == "."
         assert kwargs["lint_scope"] == "."
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_collection_error_ec2_gate_fail(self, mock_docker: MagicMock) -> None:
         """ec=2 (collection error) → gate_passed=false, raw_output in reasons."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -808,12 +808,12 @@ class TestVerifyInContainer:
         }
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value=gate_ret,
         ):
             result = json.loads(verify_in_container(
@@ -825,10 +825,10 @@ class TestVerifyInContainer:
         assert "collection error" in result["gate_fail_reasons"][0]
         assert "ImportError" in result["gate_fail_reasons"][0]
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_no_tests_with_filter_gate_fail(self, mock_docker: MagicMock) -> None:
         """has_filter + no_tests → gate fail (explicit filter mis-specified)."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -848,12 +848,12 @@ class TestVerifyInContainer:
         }
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value=gate_ret,
         ):
             result = json.loads(verify_in_container(
@@ -865,10 +865,10 @@ class TestVerifyInContainer:
         assert result["partial_test_run"] is True
         assert "no tests matched" in result["gate_fail_reasons"][0]
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_no_tests_without_filter_gate_pass(self, mock_docker: MagicMock) -> None:
         """no filter + no_tests → gate pass (project without tests is ok)."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -888,12 +888,12 @@ class TestVerifyInContainer:
         }
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value=gate_ret,
         ):
             result = json.loads(verify_in_container(
@@ -903,10 +903,10 @@ class TestVerifyInContainer:
         assert result["gate_passed"] is True
         assert result["gate_pass_reason"] == "no tests found — gate passes"
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_collected_metadata_in_result(self, mock_docker: MagicMock) -> None:
         """Result dict includes collected / collection_errors from pytest summary."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -934,12 +934,12 @@ class TestVerifyInContainer:
         }
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value=gate_ret,
         ):
             result = json.loads(verify_in_container(
@@ -951,10 +951,10 @@ class TestVerifyInContainer:
         assert full["collection_errors"] == 0
         assert result["gate_passed"] is True
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_filtered_collection_error_partial_run(self, mock_docker: MagicMock) -> None:
         """Filtered tests collection error → partial_test_run, gate fail."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -974,12 +974,12 @@ class TestVerifyInContainer:
         }
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value=gate_ret,
         ):
             result = json.loads(verify_in_container(
@@ -992,10 +992,10 @@ class TestVerifyInContainer:
         assert "collection error" in result["gate_fail_reasons"][0]
         assert result["tests"]["filtered"]["status"] == "collection_error"
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_no_pytest_module_gate_fail(self, mock_docker: MagicMock) -> None:
         """pytest not installed → not_available, gate fail (issue #381)."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -1020,12 +1020,12 @@ class TestVerifyInContainer:
         }
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value=gate_ret,
         ):
             result = json.loads(verify_in_container(
@@ -1036,10 +1036,10 @@ class TestVerifyInContainer:
         assert result["tests"]["full"]["status"] == "not_available"
         assert "pytest not available" in result["gate_fail_reasons"][0]
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_no_pytest_module_with_filter_gate_fail(self, mock_docker: MagicMock) -> None:
         """pytest not installed + filter → not_available, gate fail (issue #381)."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -1064,12 +1064,12 @@ class TestVerifyInContainer:
         }
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"python"}, scope={"python": "."}, reason=None
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value=gate_ret,
         ):
             result = json.loads(verify_in_container(
@@ -1089,10 +1089,10 @@ class TestVerifyInContainer:
 class TestVerifyDispatch:
     """Tests for the language-aware test dispatch in verify_in_container."""
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_no_languages_detected_passes_gate(self, mock_docker: MagicMock) -> None:
         """detect_languages returns empty set -> gate passes with reason."""
-        from code_sandbox_mcp.edit_verify import DetectionResult
+        from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -1101,10 +1101,10 @@ class TestVerifyDispatch:
         mock_container.exec_run.return_value = (0, (b"", b""))
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(languages=set(), scope={}, reason="no markers"),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value={
                 "gate_passed": True, "incomplete": False,
                 "lint": [], "types": [], "gate_fail_reasons": [],
@@ -1119,10 +1119,10 @@ class TestVerifyDispatch:
         assert "gate_pass_reason" in result
         assert "no languages detected" in result["gate_pass_reason"]
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_has_filter_without_python_warns(self, mock_docker: MagicMock) -> None:
         """has_filter=True but python not in detected -> filter_warning set."""
-        from code_sandbox_mcp.edit_verify import DetectionResult, VerifyResult
+        from sunaba.edit_verify import DetectionResult, VerifyResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -1137,18 +1137,18 @@ class TestVerifyDispatch:
         ))
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"go"}, scope={"go": "."}, reason=None,
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value={
                 "gate_passed": True, "incomplete": False,
                 "lint": [], "types": [], "gate_fail_reasons": [],
             },
         ), patch(
-            "code_sandbox_mcp.edit_verify._DISPATCH",
+            "sunaba.edit_verify._DISPATCH",
             {"go": {"test": mock_runner, "lint": None, "type": None}},
         ):
             result = json.loads(verify_in_container(
@@ -1162,10 +1162,10 @@ class TestVerifyDispatch:
         assert result["gate_passed"] is True
         assert result["tests"]["full"]["status"] == "ok"
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_dispatch_runner_not_available(self, mock_docker: MagicMock) -> None:
         """Dispatch runner returns not_available -> gate fails."""
-        from code_sandbox_mcp.edit_verify import DetectionResult, VerifyResult
+        from sunaba.edit_verify import DetectionResult, VerifyResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -1179,18 +1179,18 @@ class TestVerifyDispatch:
         ))
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"go"}, scope={"go": "."}, reason=None,
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value={
                 "gate_passed": True, "incomplete": False,
                 "lint": [], "types": [], "gate_fail_reasons": [],
             },
         ), patch(
-            "code_sandbox_mcp.edit_verify._DISPATCH",
+            "sunaba.edit_verify._DISPATCH",
             {"go": {"test": mock_runner, "lint": None, "type": None}},
         ):
             result = json.loads(verify_in_container(
@@ -1201,10 +1201,10 @@ class TestVerifyDispatch:
         assert result["gate_passed"] is False
         assert "not installed" in result["gate_fail_reasons"][0]
 
-    @patch("code_sandbox_mcp.tools.verify._docker")
+    @patch("sunaba.tools.verify._docker")
     def test_multi_language_results(self, mock_docker: MagicMock) -> None:
         """Multiple languages (non-python) produce per-language test results via dispatch."""
-        from code_sandbox_mcp.edit_verify import DetectionResult, VerifyResult
+        from sunaba.edit_verify import DetectionResult, VerifyResult
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -1226,18 +1226,18 @@ class TestVerifyDispatch:
         ))
 
         with patch(
-            "code_sandbox_mcp.edit_verify.detect_languages",
+            "sunaba.edit_verify.detect_languages",
             return_value=DetectionResult(
                 languages={"js", "go"}, scope={}, reason=None,
             ),
         ), patch(
-            "code_sandbox_mcp.edit_verify.run_lint_type_gate",
+            "sunaba.edit_verify.run_lint_type_gate",
             return_value={
                 "gate_passed": True, "incomplete": False,
                 "lint": [], "types": [], "gate_fail_reasons": [],
             },
         ), patch(
-            "code_sandbox_mcp.edit_verify._DISPATCH",
+            "sunaba.edit_verify._DISPATCH",
             {
                 "js": {"test": mock_js_runner, "lint": None, "type": None},
                 "go": {"test": mock_go_runner, "lint": None, "type": None},

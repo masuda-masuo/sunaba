@@ -1,6 +1,6 @@
 """Append-only execution journal for post-hoc audit (§9).
 
-Writes JSON-lines records to ``~/.code-sandbox-mcp/journal.log``.
+Writes JSON-lines records to ``~/.sunaba/journal.log``.
 Every container lifecycle event (initialize, exec, stop) and
 boundary-crossing operation is recorded with timestamp, run_id,
 and operational metadata.
@@ -25,7 +25,7 @@ from typing import Any
 # Constants
 # ---------------------------------------------------------------------------
 
-_JOURNAL_DIR: Path = Path.home() / ".code-sandbox-mcp"
+_JOURNAL_DIR: Path = Path.home() / ".sunaba"
 _JOURNAL_PATH: Path = _JOURNAL_DIR / "journal.log"
 _JOURNAL_BACKUP_PATH: Path = _JOURNAL_DIR / "journal.log.1"
 

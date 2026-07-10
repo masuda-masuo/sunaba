@@ -13,7 +13,7 @@ class TestDetectLanguages:
     """Tests for detect_languages and DetectionResult."""
 
     def test_detection_result_dataclass(self) -> None:
-        from src.code_sandbox_mcp.edit_verify import DetectionResult
+        from src.sunaba.edit_verify import DetectionResult
 
         r = DetectionResult(languages={"python"}, scope={"python": "/app"}, reason=None)
         assert r.languages == {"python"}
@@ -27,7 +27,7 @@ class TestDetectLanguages:
     def test_explicit_language_skips_detection(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         result = detect_languages(mock_container, "/some/path", language="python")
@@ -39,7 +39,7 @@ class TestDetectLanguages:
     def test_working_dir_passed_to_exec_run(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"/app/go.mod\n", b""))
@@ -52,7 +52,7 @@ class TestDetectLanguages:
     def test_working_dir_none_default(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"/app/go.mod\n", b""))
@@ -65,7 +65,7 @@ class TestDetectLanguages:
     def test_file_extension_python(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         result = detect_languages(mock_container, "/app/main.py")
@@ -75,7 +75,7 @@ class TestDetectLanguages:
     def test_file_extension_js(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         result = detect_languages(mock_container, "/app/index.js")
@@ -84,7 +84,7 @@ class TestDetectLanguages:
     def test_file_extension_jsx(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         result = detect_languages(mock_container, "/app/component.jsx")
@@ -93,7 +93,7 @@ class TestDetectLanguages:
     def test_file_extension_mjs(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         result = detect_languages(mock_container, "/app/module.mjs")
@@ -102,7 +102,7 @@ class TestDetectLanguages:
     def test_file_extension_cjs(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         result = detect_languages(mock_container, "/app/module.cjs")
@@ -111,7 +111,7 @@ class TestDetectLanguages:
     def test_file_extension_ts(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         # Mock upward tsconfig search: no tsconfig found
@@ -122,7 +122,7 @@ class TestDetectLanguages:
     def test_file_extension_tsx(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (1, (b"", b""))
@@ -132,7 +132,7 @@ class TestDetectLanguages:
     def test_file_extension_go(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         result = detect_languages(mock_container, "/app/main.go")
@@ -141,7 +141,7 @@ class TestDetectLanguages:
     def test_ts_file_with_tsconfig_upward(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         # Simulate tsconfig.json found in /app (parent of /app/src)
@@ -162,7 +162,7 @@ class TestDetectLanguages:
     def test_unknown_file_extension_returns_unknown(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (1, (b"", b""))
@@ -173,7 +173,7 @@ class TestDetectLanguages:
     def test_directory_go_detection(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         # Simulate find output showing go.mod
@@ -186,7 +186,7 @@ class TestDetectLanguages:
     def test_directory_python_detection(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"/app/pyproject.toml\n", b""))
@@ -197,7 +197,7 @@ class TestDetectLanguages:
     def test_directory_js_detection(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"/app/package.json\n", b""))
@@ -208,7 +208,7 @@ class TestDetectLanguages:
     def test_directory_ts_detection(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"/app/tsconfig.json\n", b""))
@@ -219,7 +219,7 @@ class TestDetectLanguages:
     def test_requirements_glob_pattern(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"/app/requirements-dev.txt\n", b""))
@@ -230,7 +230,7 @@ class TestDetectLanguages:
     def test_multiple_requirements_files_dedup(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"/app/requirements.txt\n/app/requirements-dev.txt\n", b""))
@@ -241,7 +241,7 @@ class TestDetectLanguages:
     def test_polyglot_python_and_js(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (
@@ -257,7 +257,7 @@ class TestDetectLanguages:
     def test_polyglot_ts_and_js(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (
@@ -274,7 +274,7 @@ class TestDetectLanguages:
     def test_no_markers_returns_unknown(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (1, (b"", b""))
@@ -288,7 +288,7 @@ class TestDetectLanguages:
         """node_modules/.venv etc are excluded by -maxdepth 1 and path scope."""
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"", b""))
@@ -299,7 +299,7 @@ class TestDetectLanguages:
     def test_find_cmd_includes_all_marker_patterns(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import _DETECTION_MARKERS, detect_languages
+        from src.sunaba.edit_verify import _DETECTION_MARKERS, detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (0, (b"/app/go.mod\n", b""))
@@ -317,7 +317,7 @@ class TestDetectLanguages:
         """Polyglot project where markers are in different subdirectories."""
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (
@@ -335,7 +335,7 @@ class TestDetectLanguages:
         """Multiple markers for the same language should not duplicate."""
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (
@@ -352,7 +352,7 @@ class TestDetectLanguages:
         """.ts file with tsconfig.json in a parent directory should detect ts with parent scope."""
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         def exec_side_effect(cmd, **kwargs):
@@ -372,7 +372,7 @@ class TestDetectLanguages:
         """.ts file without any tsconfig.json should still detect ts with file path scope."""
         from unittest.mock import MagicMock
 
-        from src.code_sandbox_mcp.edit_verify import detect_languages
+        from src.sunaba.edit_verify import detect_languages
 
         mock_container = MagicMock()
         mock_container.exec_run.return_value = (1, (b"", b""))

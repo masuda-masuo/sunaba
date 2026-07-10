@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Refactoring aid: function dependency graph + extraction risk checks (issue #165).
 
-Static (``ast``-based) analysis of the ``code_sandbox_mcp`` package, written to
+Static (``ast``-based) analysis of the ``sunaba`` package, written to
 support the ``server.py`` split series (issue #153).  Given a function it shows
 what that function depends on and -- the part off-the-shelf tools don't give --
 whether each dependency should be *moved together* with the function or
@@ -198,8 +198,8 @@ def resolve_dep(model: Model, fi: FuncInfo, name: str) -> tuple[str, str, str] |
         tmod, tsym = imap[name]
         if _internal(model, tmod):
             # Normalize dotted import path to src_root-relative module name.
-            # When src_root IS the package dir (e.g. src/code_sandbox_mcp/),
-            # module_name_for gives 'journal' but import says 'code_sandbox_mcp.journal'.
+            # When src_root IS the package dir (e.g. src/sunaba/),
+            # module_name_for gives 'journal' but import says 'sunaba.journal'.
             # Strip the top_pkg prefix to reconcile them.
             if model.src_root.name == model.top_pkg:
                 prefix = model.top_pkg + "."

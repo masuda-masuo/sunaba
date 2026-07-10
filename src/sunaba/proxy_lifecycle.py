@@ -7,7 +7,7 @@ It idempotently starts the shared proxy sidecar (built by
 the wiring the sandbox needs: proxy env vars, the network to join, and the
 proxy's CA certificate to install (:func:`install_ca`).
 
-Enabled by default; set ``CODE_SANDBOX_ENABLE_EGRESS_PROXY=false`` to opt
+Enabled by default; set ``SUNABA_ENABLE_EGRESS_PROXY=false`` to opt
 out.  When the proxy cannot be started, callers must **fail closed** --
 refuse to start a networked sandbox rather than fall
 back to an unproxied bridge network.
@@ -26,7 +26,7 @@ container additionally sits on the default bridge for upstream access.
 
 Runs **host-side** (in the MCP server process), never inside the sandbox:
 the control secret is passed to the proxy container and exported to this
-process's environment for :mod:`code_sandbox_mcp.proxy_client`, but is never
+process's environment for :mod:`sunaba.proxy_client`, but is never
 added to a sandbox container's environment.
 """
 from __future__ import annotations
@@ -41,8 +41,8 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass
 from typing import Any
 
-from code_sandbox_mcp.image_pins import load_proxy_pin
-from code_sandbox_mcp.proxy import (
+from sunaba.image_pins import load_proxy_pin
+from sunaba.proxy import (
     ALLOWED_EGRESS_HOSTS_ENV,
     ALLOWED_REPOS_ENV,
     CONTROL_HOST_ENV,
@@ -51,24 +51,24 @@ from code_sandbox_mcp.proxy import (
     PROXY_SOURCE_FINGERPRINT,
     PROXY_TOKEN_ENV,
 )
-from code_sandbox_mcp.proxy_client import (
+from sunaba.proxy_client import (
     CONTROL_URL_ENV,
     ProxyControlConfig,
     fetch_proxy_fingerprint,
 )
-from code_sandbox_mcp.security import MANAGED_LABEL
+from sunaba.security import MANAGED_LABEL
 
 logger = logging.getLogger(__name__)
 
 #: Feature flag: the whole egress-proxy integration is opt-out (default on).
 #: Set to ``false``, ``0``, ``off``, or ``no`` to disable.
 #: Absent = enabled (default).
-ENABLE_EGRESS_PROXY_ENV = "CODE_SANDBOX_ENABLE_EGRESS_PROXY"
+ENABLE_EGRESS_PROXY_ENV = "SUNABA_ENABLE_EGRESS_PROXY"
 
 #: Env override for the sidecar image reference (an explicit operator escape
 #: hatch that wins over the pin below).  Resolution order lives in
 #: :func:`_resolve_proxy_image`.
-PROXY_IMAGE_ENV = "CODE_SANDBOX_PROXY_IMAGE"
+PROXY_IMAGE_ENV = "SUNABA_PROXY_IMAGE"
 
 #: Locally built fallback tag from ``docker/Dockerfile.proxy``.  Used only when
 #: neither the env override nor a CI-published GHCR pin is available -- i.e. for
@@ -76,7 +76,7 @@ PROXY_IMAGE_ENV = "CODE_SANDBOX_PROXY_IMAGE"
 #: image is pushed (#432).  This ``:latest`` tag can silently drift from the
 #: installed package, which is exactly why :func:`_warn_on_source_drift` warns
 #: on a source mismatch (#405) and why CI now pins the image by digest (#432).
-_DEFAULT_PROXY_IMAGE = "code-sandbox-mcp/proxy:latest"
+_DEFAULT_PROXY_IMAGE = "sunaba/proxy:latest"
 
 
 def _resolve_proxy_image(source: MutableMapping[str, str]) -> str:
@@ -84,7 +84,7 @@ def _resolve_proxy_image(source: MutableMapping[str, str]) -> str:
 
     Order of precedence:
 
-    1. ``CODE_SANDBOX_PROXY_IMAGE`` -- an explicit operator override always wins.
+    1. ``SUNABA_PROXY_IMAGE`` -- an explicit operator override always wins.
     2. ``proxy_pin.json`` -- the digest pin CI publishes after building and
        pushing ``docker/Dockerfile.proxy`` (#432).  This is the default on a
        deployed server, so a plain ``pip install`` of the package now picks up
@@ -101,14 +101,14 @@ def _resolve_proxy_image(source: MutableMapping[str, str]) -> str:
 
 #: Host loopback port the control API is published on (``127.0.0.1`` only;
 #: the server and dashboard use 8750/8751, so the sidecar takes the next one).
-CONTROL_HOST_PORT_ENV = "CODE_SANDBOX_PROXY_CONTROL_HOST_PORT"
+CONTROL_HOST_PORT_ENV = "SUNABA_PROXY_CONTROL_HOST_PORT"
 _DEFAULT_CONTROL_HOST_PORT = 8768
 
 #: Dedicated sandbox-facing network (``internal=True``: no direct egress).
-EGRESS_NETWORK_NAME = "code-sandbox-egress"
+EGRESS_NETWORK_NAME = "sunaba-egress"
 
 #: Fixed sidecar container name -- the idempotency key for reuse.
-PROXY_CONTAINER_NAME = "code-sandbox-egress-proxy"
+PROXY_CONTAINER_NAME = "sunaba-egress-proxy"
 
 #: DNS alias sandboxes use to reach the proxy on the internal network.
 PROXY_NETWORK_ALIAS = "egress-proxy"
@@ -129,16 +129,36 @@ _CERTS_DIR_IN_PROXY = "/certs"
 #: existing CA in its confdir, so persisting the directory keeps the CA
 #: stable across sidecar recreations (allowlist changes, image updates,
 #: crashes) -- running sandboxes that trust the old CA keep working (#400).
-#: Deliberate CA rotation: ``docker volume rm code-sandbox-egress-certs``
+#: Deliberate CA rotation: ``docker volume rm sunaba-egress-certs``
 #: (with the sidecar removed), then let the next start regenerate it.
-CERTS_VOLUME_NAME = "code-sandbox-egress-certs"
+CERTS_VOLUME_NAME = "sunaba-egress-certs"
 
 #: Where mitmproxy writes its generated CA inside the sidecar.
 _CA_PATH_IN_PROXY = f"{_CERTS_DIR_IN_PROXY}/mitmproxy-ca-cert.pem"
 
 #: Where the CA lands in the sandbox; ``update-ca-certificates`` folds it
 #: into the system bundle so git/curl trust the TLS-terminating proxy.
-CA_CERT_PATH_IN_SANDBOX = "/usr/local/share/ca-certificates/code-sandbox-egress-ca.crt"
+CA_CERT_PATH_IN_SANDBOX = "/usr/local/share/ca-certificates/sunaba-egress-ca.crt"
+
+#: ``proxy_pin.json`` pins the sidecar to a digest built before the ``sunaba``
+#: rename (#534), and its baked-in ``proxy.py`` / ``proxy_entrypoint.py`` read
+#: the old ``CODE_SANDBOX_*`` names.  Every variable that crosses the
+#: host->sidecar boundary is therefore passed under both spellings.  Once CI
+#: has published the sidecar under the new package and ``update_proxy_pin.py``
+#: has re-pinned it, delete this table and the ``_legacy_proxy_env`` call.
+_LEGACY_ENV_ALIASES: dict[str, str] = {
+    CONTROL_PORT_ENV: "CODE_SANDBOX_PROXY_CONTROL_PORT",
+    CONTROL_HOST_ENV: "CODE_SANDBOX_PROXY_CONTROL_HOST",
+    CONTROL_SECRET_ENV: "CODE_SANDBOX_PROXY_CONTROL_SECRET",
+    ALLOWED_REPOS_ENV: "CODE_SANDBOX_ALLOWED_REPOS",
+    ALLOWED_EGRESS_HOSTS_ENV: "CODE_SANDBOX_ALLOWED_EGRESS_HOSTS",
+    PROXY_TOKEN_ENV: "CODE_SANDBOX_PROXY_TOKEN",
+}
+
+
+def _legacy_proxy_env(proxy_env: MutableMapping[str, str]) -> dict[str, str]:
+    """Mirror *proxy_env* under the pre-rename variable names (see above)."""
+    return {legacy: proxy_env[key] for key, legacy in _LEGACY_ENV_ALIASES.items() if key in proxy_env}
 
 #: Debian system bundle (includes the proxy CA after ``update-ca-certificates``).
 _SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
@@ -165,7 +185,7 @@ class EgressProxyError(RuntimeError):
     """The egress proxy is enabled but could not be started or wired up.
 
     Callers must fail closed on this: a networked sandbox must not start
-    without the proxy when ``CODE_SANDBOX_ENABLE_EGRESS_PROXY`` is on.
+    without the proxy when ``SUNABA_ENABLE_EGRESS_PROXY`` is on.
     """
 
 
@@ -189,7 +209,7 @@ class EgressProxyRuntime:
 def egress_proxy_enabled(env: MutableMapping[str, str] | None = None) -> bool:
     """Return whether the egress-proxy integration is enabled.
 
-    Default is ``True`` (on); set ``CODE_SANDBOX_ENABLE_EGRESS_PROXY=false``
+    Default is ``True`` (on); set ``SUNABA_ENABLE_EGRESS_PROXY=false``
     to opt out.
     """
     source = os.environ if env is None else env
@@ -478,6 +498,7 @@ def _start_proxy_container(
         value = source.get(key)
         if value:
             proxy_env[key] = value
+    proxy_env.update(_legacy_proxy_env(proxy_env))
     logger.info("Starting egress-proxy sidecar %s (image=%s)", PROXY_CONTAINER_NAME, image)
     container = client.containers.run(
         image,

@@ -1,6 +1,6 @@
 """Host-side client for the egress-proxy authorization control API (#357).
 
-Counterpart to the control server in :mod:`code_sandbox_mcp.proxy` (#356).
+Counterpart to the control server in :mod:`sunaba.proxy` (#356).
 ``publish`` opens a short-lived push grant before pushing and closes it after,
 so the egress-proxy sidecar lets *that* push through while still rejecting a raw
 ``git push`` from ``sandbox_exec``.
@@ -9,7 +9,7 @@ Runs **host-side** (in the MCP server process), never inside the sandbox
 container, so the shared control secret it sends never reaches sandboxed code --
 the container therefore cannot open its own push grant.
 
-Inert until configured: when ``CODE_SANDBOX_PROXY_CONTROL_URL`` is unset the
+Inert until configured: when ``SUNABA_PROXY_CONTROL_URL`` is unset the
 context manager is a no-op and ``publish`` behaves exactly as before the egress
 proxy exists.  This keeps the change mergeable ahead of the sidecar (#355/#358).
 """
@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from code_sandbox_mcp.proxy import (
+from sunaba.proxy import (
     CONTROL_SECRET_ENV,
     CONTROL_TOKEN_HEADER,
     DEFAULT_GRANT_TTL_SECONDS,
@@ -32,7 +32,7 @@ from code_sandbox_mcp.proxy import (
 #: Host-facing base URL of the proxy's control API (e.g. ``http://127.0.0.1:9099``
 #: or a Docker-network DNS name).  Unset = proxy integration disabled (no-op),
 #: so ``publish`` keeps working before the sidecar exists.
-CONTROL_URL_ENV = "CODE_SANDBOX_PROXY_CONTROL_URL"
+CONTROL_URL_ENV = "SUNABA_PROXY_CONTROL_URL"
 
 #: Seconds to wait on each control-API call.  The endpoint is a localhost/sidecar
 #: hop returning tiny JSON, so this only bounds the failure case (proxy down or
@@ -50,7 +50,7 @@ _REVOKE_API_WRITE_PATH = "/auth/revoke-api-write"
 class ProxyAuthError(RuntimeError):
     """A configured proxy's control API could not be reached or refused the call.
 
-    Raised only when the proxy *is* configured (``CODE_SANDBOX_PROXY_CONTROL_URL``
+    Raised only when the proxy *is* configured (``SUNABA_PROXY_CONTROL_URL``
     set) but opening the grant failed, so ``publish`` fails closed rather than
     pushing unprotected.  Never raised on the unconfigured (inert) path.
     """
@@ -68,7 +68,7 @@ class ProxyControlConfig:
         """Build config from the environment, or ``None`` when the proxy is unset.
 
         *env* defaults to ``os.environ``; pass an explicit mapping in tests.  A
-        blank/whitespace ``CODE_SANDBOX_PROXY_CONTROL_URL`` counts as unset.
+        blank/whitespace ``SUNABA_PROXY_CONTROL_URL`` counts as unset.
         """
         source = os.environ if env is None else env
         base_url = (source.get(CONTROL_URL_ENV) or "").strip()
@@ -248,7 +248,7 @@ def open_api_write_grant(
     writes other than the git Objects API (issue/PR create, comments,
     reviews, labels, releases) -- those reuse the push grant instead, since
     they run inside ``authorized_push_grant`` already (see
-    ``code_sandbox_mcp.proxy.is_git_data_api_path``).
+    ``sunaba.proxy.is_git_data_api_path``).
     """
     cfg = config or ProxyControlConfig.from_env()
     if cfg is None:

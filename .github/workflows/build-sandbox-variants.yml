@@ -183,7 +183,7 @@ jobs:
           GO_DIGEST: ${{ steps.go.outputs.digest }}
         run: |
           set -euo pipefail
-          F=src/code_sandbox_mcp/image_pins.json
+          F=src/sunaba/image_pins.json
 
           # Rewrite the digest pins and verify the loader returns them (#331).
           # PYTHONPATH=src makes the package importable without installing; the

@@ -220,15 +220,15 @@ class TestRunLintTypeGate:
     """Tests for run_lint_type_gate -- the pre-test lint+type gate (#293)."""
 
     def _vr(self, status, findings=None, tool="ruff"):
-        from src.code_sandbox_mcp.edit_verify import VerifyResult
+        from src.sunaba.edit_verify import VerifyResult
         return VerifyResult(
             tool=tool, status=status, findings=findings or [], exit_code=0
         )
 
     def _patch_detect(self, monkeypatch, languages={"python"}):
-        from src.code_sandbox_mcp.edit_verify import DetectionResult
+        from src.sunaba.edit_verify import DetectionResult
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify.detect_languages",
+            "src.sunaba.edit_verify.detect_languages",
             lambda *a, **k: DetectionResult(
                 languages=set(languages),
                 scope={lang: "." for lang in languages},
@@ -237,14 +237,14 @@ class TestRunLintTypeGate:
         )
 
     def test_clean_passes(self, monkeypatch):
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         r = run_lint_type_gate(object(), "src")
@@ -255,18 +255,18 @@ class TestRunLintTypeGate:
     def test_warning_severity_lint_rule_still_fails_gate(self, monkeypatch):
         """Regression for #293: D101 is severity 'warning' but must fail the
         gate -- CI's ``ruff check`` exits non-zero for it regardless."""
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         d101 = self._vr("findings", [{
             "file": "src/x.py", "line": 1, "rule": "D101",
             "severity": "warning", "message": "Missing docstring",
         }])
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify._gate_lint_runner",
             lambda *a, **k: d101,
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         r = run_lint_type_gate(object(), "src")
@@ -274,10 +274,10 @@ class TestRunLintTypeGate:
         assert any("lint" in reason for reason in r["gate_fail_reasons"])
 
     def test_type_error_fails_gate(self, monkeypatch):
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         type_err = self._vr("findings", [{
@@ -285,7 +285,7 @@ class TestRunLintTypeGate:
             "severity": "error", "message": "bad type",
         }], tool="pyright")
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify._gate_type_runner",
             lambda *a, **k: type_err,
         )
         r = run_lint_type_gate(object(), "src")
@@ -293,14 +293,14 @@ class TestRunLintTypeGate:
         assert any("type_check" in reason for reason in r["gate_fail_reasons"])
 
     def test_tool_absence_is_incomplete_but_does_not_block(self, monkeypatch):
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify._gate_lint_runner",
             lambda *a, **k: self._vr("not_available"),
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify._gate_type_runner",
             lambda *a, **k: self._vr("not_available", tool="pyright"),
         )
         r = run_lint_type_gate(object(), "src")
@@ -308,35 +308,35 @@ class TestRunLintTypeGate:
         assert r["incomplete"] is True
 
     def test_sentinel_only_findings_do_not_fail_gate(self, monkeypatch):
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         sentinel = self._vr("findings", [{
             "file": "src/x.py", "line": 0, "rule": "no-linter",
             "message": "no linter",
         }])
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify._gate_lint_runner",
             lambda *a, **k: sentinel,
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         r = run_lint_type_gate(object(), "src")
         assert r["gate_passed"] is True
 
     def test_no_languages_passes_vacuously(self, monkeypatch):
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch, languages=set())
         r = run_lint_type_gate(object(), "src")
         assert r["gate_passed"] is True
         assert r["detected_languages"] == []
 
     def test_gate_on_type_false_skips_type_layer(self, monkeypatch):
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         called = {"type": False}
@@ -346,7 +346,7 @@ class TestRunLintTypeGate:
             return self._vr("findings", [{"rule": "x", "severity": "error"}],
                             tool="pyright")
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner", _type_runner
+            "src.sunaba.edit_verify._gate_type_runner", _type_runner
         )
         r = run_lint_type_gate(object(), "src", gate_on_type=False)
         assert called["type"] is False
@@ -355,15 +355,15 @@ class TestRunLintTypeGate:
     def test_gate_lint_runner_uses_plain_ruff(self, monkeypatch):
         """The gate must run ruff WITHOUT the security extend-select so it
         matches CI exactly."""
-        from src.code_sandbox_mcp.edit_verify import _gate_lint_runner
+        from src.sunaba.edit_verify import _gate_lint_runner
         captured = {}
 
         def _fake_ruff(container, path, workdir=None, extra_select=True):
             captured["extra_select"] = extra_select
-            from src.code_sandbox_mcp.edit_verify import VerifyResult
+            from src.sunaba.edit_verify import VerifyResult
             return VerifyResult(tool="ruff", status="ok", findings=[], exit_code=0)
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._run_ruff_verify", _fake_ruff
+            "src.sunaba.edit_verify._run_ruff_verify", _fake_ruff
         )
         _gate_lint_runner(object(), "src", "python", None)
         assert captured["extra_select"] is False
@@ -372,7 +372,7 @@ class TestRunLintTypeGate:
         """Regression for #417: lint_scope must reach the lint runner while
         the type runner keeps using *scope* unchanged -- CI has no
         type-check step, so only lint needs the wider src+tests scope."""
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         seen = {}
 
@@ -385,10 +385,10 @@ class TestRunLintTypeGate:
             return self._vr("ok", tool="pyright")
 
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner", _fake_lint
+            "src.sunaba.edit_verify._gate_lint_runner", _fake_lint
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner", _fake_type
+            "src.sunaba.edit_verify._gate_type_runner", _fake_type
         )
         r = run_lint_type_gate(object(), "src", lint_scope=["src", "tests"])
         assert seen["lint_path"] == ["src", "tests"]
@@ -399,7 +399,7 @@ class TestRunLintTypeGate:
         """Back-compat: callers that don't pass lint_scope (e.g. direct
         run_lint_type_gate(container, "src") calls elsewhere in this test
         module) still lint the same scope as the type check."""
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         seen = {}
 
@@ -408,10 +408,10 @@ class TestRunLintTypeGate:
             return self._vr("ok")
 
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner", _fake_lint
+            "src.sunaba.edit_verify._gate_lint_runner", _fake_lint
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         run_lint_type_gate(object(), "src")
@@ -420,14 +420,14 @@ class TestRunLintTypeGate:
     def test_patch_targets_gate_false_by_default(self, monkeypatch):
         """gate_on_patch_targets=False by default so existing callers are
         not forced to handle container.exec_run."""
-        from src.code_sandbox_mcp.edit_verify import run_lint_type_gate
+        from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         r = run_lint_type_gate(object(), "src")
@@ -436,18 +436,18 @@ class TestRunLintTypeGate:
 
     def test_patch_targets_gate_true_fails_when_findings(self, monkeypatch):
         """gate_on_patch_targets=True with unresolved targets fails the gate."""
-        from src.code_sandbox_mcp.edit_verify import VerifyResult, run_lint_type_gate
+        from src.sunaba.edit_verify import VerifyResult, run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._run_patch_targets_verify",
+            "src.sunaba.edit_verify._run_patch_targets_verify",
             lambda *a, **k: VerifyResult(
                 tool="check-patch-targets", status="findings",
                 findings=[{"file": "test.py", "line": 42, "rule": "patch-target",
@@ -464,18 +464,18 @@ class TestRunLintTypeGate:
 
     def test_patch_targets_gate_true_passes_when_clean(self, monkeypatch):
         """gate_on_patch_targets=True with no unresolved targets passes."""
-        from src.code_sandbox_mcp.edit_verify import VerifyResult, run_lint_type_gate
+        from src.sunaba.edit_verify import VerifyResult, run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify._run_patch_targets_verify",
+            "src.sunaba.edit_verify._run_patch_targets_verify",
             lambda *a, **k: VerifyResult(
                 tool="check-patch-targets", status="ok",
                 findings=[], exit_code=0,
@@ -489,7 +489,7 @@ class TestRunLintTypeGate:
 
     def test_patch_targets_skipped_when_script_absent(self, monkeypatch):
         """_run_patch_targets_verify returns skipped when script absent."""
-        from src.code_sandbox_mcp.edit_verify import _run_patch_targets_verify
+        from src.sunaba.edit_verify import _run_patch_targets_verify
 
         mock_container = type("MockContainer", (), {})()
         mock_container.exec_run = lambda *a, **k: (0, (b"NOT_FOUND\n", b""))
@@ -501,7 +501,7 @@ class TestQuotePath:
     """Tests for _quote_path -- single path vs multi-path shell quoting (#417)."""
 
     def test_single_string_path_quoted_as_before(self):
-        from src.code_sandbox_mcp.edit_verify import _quote_path
+        from src.sunaba.edit_verify import _quote_path
         assert _quote_path("src") == "src"
         assert _quote_path("a b") == "'a b'"
 
@@ -509,7 +509,7 @@ class TestQuotePath:
         """A list must become multiple shell-quoted tokens, not one path
         string containing a literal space (which would name a
         non-existent directory)."""
-        from src.code_sandbox_mcp.edit_verify import _quote_path
+        from src.sunaba.edit_verify import _quote_path
         assert _quote_path(["src", "tests"]) == "src tests"
         assert _quote_path(["a b", "c"]) == "'a b' c"
 
@@ -518,10 +518,10 @@ class TestPathDisplay:
     """Tests for _path_display -- parse-fallback label rendering (#417)."""
 
     def test_string_passthrough(self):
-        from src.code_sandbox_mcp.edit_verify import _path_display
+        from src.sunaba.edit_verify import _path_display
         assert _path_display("src") == "src"
 
     def test_list_joined_with_space(self):
-        from src.code_sandbox_mcp.edit_verify import _path_display
+        from src.sunaba.edit_verify import _path_display
         assert _path_display(["src", "tests"]) == "src tests"
 

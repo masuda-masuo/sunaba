@@ -5,7 +5,7 @@ container entrypoint: it assembles the ``mitmdump`` command line from the
 environment and ``exec``s it, so the running proxy loads the :mod:`proxy` addon
 that gates ``git push`` at the network layer.
 
-The addon itself (:mod:`code_sandbox_mcp.proxy`) self-configures from the
+The addon itself (:mod:`sunaba.proxy`) self-configures from the
 environment -- allowlist, injected token, and the authorization control
 server -- so this module only has to decide *how* ``mitmdump`` is launched:
 which address to listen on, which port, where to keep the CA/config dir, and
@@ -26,22 +26,22 @@ from collections.abc import Callable, Mapping
 
 #: Interface the proxy listens on.  Defaults to all interfaces because the
 #: sandbox container reaches the sidecar across a Docker network, not loopback.
-LISTEN_HOST_ENV = "CODE_SANDBOX_PROXY_LISTEN_HOST"
+LISTEN_HOST_ENV = "SUNABA_PROXY_LISTEN_HOST"
 DEFAULT_LISTEN_HOST = "0.0.0.0"
 
 #: TCP port the proxy listens on (matches ``HTTPS_PROXY=http://proxy:8080``).
-LISTEN_PORT_ENV = "CODE_SANDBOX_PROXY_LISTEN_PORT"
+LISTEN_PORT_ENV = "SUNABA_PROXY_LISTEN_PORT"
 DEFAULT_LISTEN_PORT = 8080
 
 #: Where mitmproxy keeps its generated CA and config.  A fixed, writable path so
 #: the lifecycle wiring (#358 follow-up) can read ``mitmproxy-ca-cert.pem`` from
 #: it and mount it into the sandbox container's trust store.
-CONFDIR_ENV = "CODE_SANDBOX_PROXY_CONFDIR"
+CONFDIR_ENV = "SUNABA_PROXY_CONFDIR"
 DEFAULT_CONFDIR = "/certs"
 
 #: Path to the addon script inside the image; the Dockerfile copies ``proxy.py``
 #: here.  Overridable mainly so tests and local runs can point elsewhere.
-ADDON_ENV = "CODE_SANDBOX_PROXY_ADDON"
+ADDON_ENV = "SUNABA_PROXY_ADDON"
 DEFAULT_ADDON = "/app/proxy.py"
 
 

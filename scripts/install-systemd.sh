@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install code-sandbox-mcp systemd user unit and enable auto-start.
+# Install sunaba systemd user unit and enable auto-start.
 # Run once after pip install.  Requires systemd (Linux, WSL2 with systemd enabled).
 #
 # Usage:
@@ -16,7 +16,7 @@ USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 if [ $# -ge 1 ]; then
     VENV_DIR="$1"
 else
-    echo -n "Enter path to the venv (e.g. /home/user/venv/code-sandbox-mcp): "
+    echo -n "Enter path to the venv (e.g. /home/user/venv/sunaba): "
     read -r VENV_DIR
 fi
 
@@ -25,7 +25,7 @@ if [ ! -f "$VENV_DIR/bin/python" ]; then
     exit 1
 fi
 
-echo "==> Installing code-sandbox-mcp systemd user unit"
+echo "==> Installing sunaba systemd user unit"
 echo "    venv dir    : $VENV_DIR"
 echo "    project dir : $PROJECT_DIR"
 echo "    unit dir    : $USER_UNIT_DIR"
@@ -35,17 +35,17 @@ mkdir -p "$USER_UNIT_DIR"
 
 sed -e "s|@VENV_DIR@|$VENV_DIR|g" \
     -e "s|@PROJECT_DIR@|$PROJECT_DIR|g" \
-    "$SCRIPT_DIR/code-sandbox-mcp.service" > "$USER_UNIT_DIR/code-sandbox-mcp.service"
+    "$SCRIPT_DIR/sunaba.service" > "$USER_UNIT_DIR/sunaba.service"
 
 systemctl --user daemon-reload
-systemctl --user enable --now code-sandbox-mcp.service
+systemctl --user enable --now sunaba.service
 
 echo ""
 echo "==> Done.  Useful commands:"
-echo "    systemctl --user status code-sandbox-mcp"
-echo "    systemctl --user stop code-sandbox-mcp"
-echo "    systemctl --user restart code-sandbox-mcp"
-echo "    journalctl --user -u code-sandbox-mcp -f"
+echo "    systemctl --user status sunaba"
+echo "    systemctl --user stop sunaba"
+echo "    systemctl --user restart sunaba"
+echo "    journalctl --user -u sunaba -f"
 echo ""
 
 # Ensure user services survive logout (optional, requires root or polkit).

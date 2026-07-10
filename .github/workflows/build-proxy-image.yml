@@ -19,8 +19,8 @@ on:
     branches: [main]
     paths:
       - "docker/Dockerfile.proxy"
-      - "src/code_sandbox_mcp/proxy.py"
-      - "src/code_sandbox_mcp/proxy_entrypoint.py"
+      - "src/sunaba/proxy.py"
+      - "src/sunaba/proxy_entrypoint.py"
   workflow_dispatch:
 
 permissions:
@@ -102,7 +102,7 @@ jobs:
           PROXY_DIGEST: ${{ steps.proxy.outputs.digest }}
         run: |
           set -euo pipefail
-          F=src/code_sandbox_mcp/proxy_pin.json
+          F=src/sunaba/proxy_pin.json
 
           PYTHONPATH=src python3 scripts/update_proxy_pin.py \
             --repo "${REPO}" \

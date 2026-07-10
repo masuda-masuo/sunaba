@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from src.code_sandbox_mcp.edit_verify import (
+from src.sunaba.edit_verify import (
     _determine_lint_severity,
     _determine_scope,
     _parse_eslint_output,

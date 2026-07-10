@@ -5,8 +5,8 @@ import json
 import os
 from unittest.mock import MagicMock, patch
 
-from code_sandbox_mcp.security import MANAGED_LABEL, NAME_LABEL
-from code_sandbox_mcp.tools.container import (
+from sunaba.security import MANAGED_LABEL, NAME_LABEL
+from sunaba.tools.container import (
     sandbox_attach,
     sandbox_initialize,
     sandbox_list_containers,
@@ -64,10 +64,10 @@ def _make_client(containers: list[MagicMock]) -> MagicMock:
 class TestSandboxInitializeName:
     """sandbox_initialize(name=...)"""
 
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    @patch("code_sandbox_mcp.tools.container.build_secure_run_kwargs")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.build_secure_run_kwargs")
     def test_name_label_stored(
         self,
         mock_build: MagicMock,
@@ -96,10 +96,10 @@ class TestSandboxInitializeName:
         assert labels.get(NAME_LABEL) == "my-sandbox"
         assert "my-sandbox" in result
 
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    @patch("code_sandbox_mcp.tools.container.build_secure_run_kwargs")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.build_secure_run_kwargs")
     def test_name_collision_raises_error(
         self,
         mock_build: MagicMock,
@@ -121,10 +121,10 @@ class TestSandboxInitializeName:
         assert "my-sandbox" in result
         assert "already exists" in result
 
-    @patch("code_sandbox_mcp.tools.container.build_secure_run_kwargs")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.build_secure_run_kwargs")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
     def test_name_collision_stopped_container(
         self,
         mock_validate: MagicMock,
@@ -148,10 +148,10 @@ class TestSandboxInitializeName:
 
         assert not result.startswith("Error:")
 
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch("code_sandbox_mcp.tools.container._ensure_image")
-    @patch("code_sandbox_mcp.tools.container.validate_image_ref")
-    @patch("code_sandbox_mcp.tools.container.build_secure_run_kwargs")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.build_secure_run_kwargs")
     def test_name_collision_exact_id_match(
         self,
         mock_build: MagicMock,
@@ -176,7 +176,7 @@ class TestSandboxInitializeName:
 class TestSandboxListContainers:
     """sandbox_list_containers"""
 
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container._docker")
     def test_list_returns_managed_containers(
         self,
         mock_docker: MagicMock,
@@ -194,7 +194,7 @@ class TestSandboxListContainers:
         assert result["containers"][1]["container_id"] == "bbb222"
         assert result["containers"][1]["name"] == "beta"
 
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container._docker")
     def test_list_empty(
         self,
         mock_docker: MagicMock,
@@ -207,7 +207,7 @@ class TestSandboxListContainers:
         assert result["containers"] == []
         assert result["reaped_ids"] == []
 
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container._docker")
     def test_list_filters_by_managed_label(
         self,
         mock_docker: MagicMock,
@@ -223,7 +223,7 @@ class TestSandboxListContainers:
         assert call_filters["filters"]["label"] == f"{MANAGED_LABEL}=true"
         assert result["reaped_ids"] == []
 
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container._docker")
     def test_list_without_name(
         self,
         mock_docker: MagicMock,
@@ -241,10 +241,10 @@ class TestSandboxListContainers:
 class TestSandboxAttach:
     """sandbox_attach"""
 
-    @patch("code_sandbox_mcp.tools.container.checkpoint_list")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
-    @patch("code_sandbox_mcp.tools.container.resolve_git_root")
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container.checkpoint_list")
+    @patch("sunaba.tools.container.read_journal")
+    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container._docker")
     def test_attach_by_name(
         self,
         mock_docker: MagicMock,
@@ -270,10 +270,10 @@ class TestSandboxAttach:
         assert result["name"] == "my-container"
         assert result["match_type"] == "name"
 
-    @patch("code_sandbox_mcp.tools.container.checkpoint_list")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
-    @patch("code_sandbox_mcp.tools.container.resolve_git_root")
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container.checkpoint_list")
+    @patch("sunaba.tools.container.read_journal")
+    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container._docker")
     def test_attach_by_id_prefix(
         self,
         mock_docker: MagicMock,
@@ -294,7 +294,7 @@ class TestSandboxAttach:
         assert result["container_id"] == "abc123def456"
         assert result["match_type"] == "id"
 
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container._docker")
     def test_attach_not_found(
         self,
         mock_docker: MagicMock,
@@ -307,7 +307,7 @@ class TestSandboxAttach:
         assert result["found"] is False
         assert "No managed container" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container._docker")
     def test_attach_ambiguous_prefix(
         self,
         mock_docker: MagicMock,
@@ -323,10 +323,10 @@ class TestSandboxAttach:
         assert "Ambiguous" in result["error"]
         assert "abc111" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.container.checkpoint_list")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
-    @patch("code_sandbox_mcp.tools.container.resolve_git_root")
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container.checkpoint_list")
+    @patch("sunaba.tools.container.read_journal")
+    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container._docker")
     def test_attach_orientation_info(
         self,
         mock_docker: MagicMock,
@@ -353,10 +353,10 @@ class TestSandboxAttach:
         assert result["last_checkpoint"] == "checkpoint-1"
         assert result["journal_activity"] == 2
 
-    @patch("code_sandbox_mcp.tools.container.checkpoint_list")
-    @patch("code_sandbox_mcp.tools.container.read_journal")
-    @patch("code_sandbox_mcp.tools.container.resolve_git_root")
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container.checkpoint_list")
+    @patch("sunaba.tools.container.read_journal")
+    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container._docker")
     def test_attach_orientation_no_git(
         self,
         mock_docker: MagicMock,
@@ -380,8 +380,8 @@ class TestSandboxAttach:
 class TestListContainersIdleTime:
     """sandbox_list_containers with idle time (Issue #480)."""
 
-    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container._docker")
     def test_idle_seconds_in_output(
         self,
         mock_docker: MagicMock,
@@ -399,8 +399,8 @@ class TestListContainersIdleTime:
         assert "last_activity_ts" in entry
         assert entry["last_activity_ts"] == "2026-01-01T00:00:00+00:00"
 
-    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container._docker")
     def test_idle_none_when_no_activity(
         self,
         mock_docker: MagicMock,
@@ -421,32 +421,32 @@ class TestListContainersIdleTime:
 class TestGetContainerTTL:
     """_get_container_ttl_seconds (Issue #480)."""
 
-    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": "3600"})
+    @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"})
     def test_reads_env_var(self) -> None:
-        from code_sandbox_mcp.tools.container import _get_container_ttl_seconds
+        from sunaba.tools.container import _get_container_ttl_seconds
         assert _get_container_ttl_seconds() == 3600
 
-    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": ""})
+    @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": ""})
     def test_empty_env_returns_zero(self) -> None:
-        from code_sandbox_mcp.tools.container import _get_container_ttl_seconds
+        from sunaba.tools.container import _get_container_ttl_seconds
         assert _get_container_ttl_seconds() == 0
 
     @patch.dict(os.environ, {})
     def test_unset_env_returns_zero(self) -> None:
-        from code_sandbox_mcp.tools.container import _get_container_ttl_seconds
+        from sunaba.tools.container import _get_container_ttl_seconds
         assert _get_container_ttl_seconds() == 0
 
     @patch.dict(os.environ, {"CSB_CONTAINER_TTL_SECONDS": "7200"})
-    def test_deprecated_env_var(self) -> None:
-        from code_sandbox_mcp.tools.container import _get_container_ttl_seconds
-        assert _get_container_ttl_seconds() == 7200
+    def test_legacy_env_var_ignored(self) -> None:
+        from sunaba.tools.container import _get_container_ttl_seconds
+        assert _get_container_ttl_seconds() == 0
 
 
 class TestReapIdleContainers:
     """_reap_idle_containers and reap-on-list (Issue #480)."""
 
-    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
+    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container._docker")
     @patch.dict(os.environ, {}, clear=True)
     def test_noop_when_ttl_not_set(
         self,
@@ -454,21 +454,21 @@ class TestReapIdleContainers:
         mock_activity: MagicMock,
     ) -> None:
         """Reap is a no-op when TTL env var is not set."""
-        from code_sandbox_mcp.tools.container import _reap_idle_containers
+        from sunaba.tools.container import _reap_idle_containers
         result = _reap_idle_containers()
         assert result == []
         mock_docker.assert_not_called()
 
-    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
+    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container._docker")
+    @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
     def test_reaps_idle_container(
         self,
         mock_docker: MagicMock,
         mock_activity: MagicMock,
     ) -> None:
         """Container idle longer than TTL is stopped."""
-        from code_sandbox_mcp.tools.container import _reap_idle_containers
+        from sunaba.tools.container import _reap_idle_containers
 
         c = _make_container(container_id="idle-cid", name="idle")
         client = _make_client([c])
@@ -479,16 +479,16 @@ class TestReapIdleContainers:
         c.kill.assert_called_once()
         assert "idle-cid" in result
 
-    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
+    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container._docker")
+    @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
     def test_does_not_reap_active_container(
         self,
         mock_docker: MagicMock,
         mock_activity: MagicMock,
     ) -> None:
         """Container with recent activity is not stopped."""
-        from code_sandbox_mcp.tools.container import _reap_idle_containers
+        from sunaba.tools.container import _reap_idle_containers
 
         c = _make_container(container_id="active-cid", name="active")
         client = _make_client([c])
@@ -501,9 +501,9 @@ class TestReapIdleContainers:
         assert result == []
         c.kill.assert_not_called()
 
-    @patch("code_sandbox_mcp.tools.container.get_last_activity_per_container")
-    @patch("code_sandbox_mcp.tools.container._docker")
-    @patch.dict(os.environ, {"CODE_SANDBOX_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
+    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container._docker")
+    @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
     def test_list_reaps_idle_container(
         self,
         mock_docker: MagicMock,

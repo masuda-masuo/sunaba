@@ -12,13 +12,13 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from code_sandbox_mcp.journal import read_journal
+from sunaba.journal import read_journal
 
 # ---------------------------------------------------------------------------
 # Trace output directory
 # ---------------------------------------------------------------------------
 
-_TRACE_DIR: Path = Path.home() / ".code-sandbox-mcp" / "traces"
+_TRACE_DIR: Path = Path.home() / ".sunaba" / "traces"
 
 #: Max trace files to keep before cleaning old ones.
 _TRACE_MAX_FILES: int = 100

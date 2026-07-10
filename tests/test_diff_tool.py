@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from code_sandbox_mcp.tools.common import _parse_numstat
-from code_sandbox_mcp.tools.diff import (
+from sunaba.tools.common import _parse_numstat
+from sunaba.tools.diff import (
     _parse_name_status,
     diff_in_container,
 )
@@ -116,7 +116,7 @@ class TestDiffInContainer:
 
     def test_container_not_found(self):
         with patch(
-            "code_sandbox_mcp.tools.diff._docker"
+            "sunaba.tools.diff._docker"
         ) as mock_docker:
             mock_client = MagicMock()
             mock_client.containers.get.side_effect = Exception("not found")
@@ -130,13 +130,13 @@ class TestDiffInContainer:
         container.exec_run.return_value = (0, (b"", b""))
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container("abc123def456"))
 
@@ -163,13 +163,13 @@ class TestDiffInContainer:
         container.exec_run.side_effect = exec_side_effect
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container("abc123def456", base="main"))
 
@@ -195,13 +195,13 @@ class TestDiffInContainer:
         container.exec_run.side_effect = exec_side_effect
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container("abc123def456", base="main"))
 
@@ -228,13 +228,13 @@ class TestDiffInContainer:
         container.exec_run.side_effect = exec_side_effect
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container("abc123def456", base="main"))
 
@@ -260,13 +260,13 @@ class TestDiffInContainer:
         container.exec_run.side_effect = exec_side_effect
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container("abc123def456", base="main", raw=True))
 
@@ -290,13 +290,13 @@ class TestDiffInContainer:
         container.exec_run.side_effect = exec_side_effect
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container("abc123def456", base="main"))
 
@@ -312,13 +312,13 @@ class TestDiffInContainer:
         container.exec_run.side_effect = side_effects
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container("abc123def456"))
 
@@ -350,13 +350,13 @@ class TestDiffInContainer:
         container.exec_run.return_value = (0, (git_output.encode(), b""))
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container(
                 "abc123def456", base="main", path="foo.py"
@@ -391,13 +391,13 @@ class TestDiffInContainer:
         container.exec_run.return_value = (0, (git_output.encode(), b""))
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container(
                 "abc123def456", base="main", path="foo.py", offset=1, limit=1
@@ -414,13 +414,13 @@ class TestDiffInContainer:
         container.exec_run.return_value = (0, (b"", b""))
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container(
                 "abc123def456", base="main", path="unchanged.py"
@@ -434,13 +434,13 @@ class TestDiffInContainer:
         container.exec_run.return_value = (128, (b"fatal: not a git repository", b""))
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container("abc123def456", base="main"))
 
@@ -461,13 +461,13 @@ class TestDiffInContainer:
         container.exec_run.return_value = (0, (git_output.encode(), b""))
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container(
                 "abc123def456", base="main", path="foo.py"
@@ -483,13 +483,13 @@ class TestDiffInContainer:
         container.exec_run.return_value = (0, (git_output.encode(), b""))
 
         with patch(
-            "code_sandbox_mcp.tools.diff._docker",
+            "sunaba.tools.diff._docker",
             return_value=MagicMock(containers=MagicMock(get=MagicMock(return_value=container))),
         ), patch(
-            "code_sandbox_mcp.tools.diff.resolve_git_root",
+            "sunaba.tools.diff.resolve_git_root",
             return_value="/repo",
         ), patch(
-            "code_sandbox_mcp.tools.diff.record_tool_use",
+            "sunaba.tools.diff.record_tool_use",
         ):
             result = json.loads(diff_in_container(
                 "abc123def456", base="main", path="foo.py", raw=True

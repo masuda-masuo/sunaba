@@ -3,7 +3,7 @@
 Telemetry writes are unconditional; the five read tools
 (``sandbox_read_journal`` / ``sandbox_trace`` / ``sandbox_list_runs`` /
 ``sandbox_journal_path`` / ``sandbox_trace_dir``) are only registered
-when ``CODE_SANDBOX_OBSERVABILITY_TOOLS`` is set to a truthy value at import time.
+when ``SUNABA_OBSERVABILITY_TOOLS`` is set to a truthy value at import time.
 """
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ import os
 
 import pytest
 
-from code_sandbox_mcp import server
-from code_sandbox_mcp.server import OBSERVABILITY_TOOLS_ENV
+from sunaba import server
+from sunaba.server import OBSERVABILITY_TOOLS_ENV
 
 READ_TOOLS = {
     "sandbox_read_journal",

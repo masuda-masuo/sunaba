@@ -53,7 +53,7 @@ def load_image_pins() -> dict[str, str]:
     """
     try:
         raw = (
-            resources.files("code_sandbox_mcp")
+            resources.files("sunaba")
             .joinpath(_PINS_RESOURCE)
             .read_text(encoding="utf-8")
         )
@@ -110,7 +110,7 @@ PROXY_PIN_KEY: str = "proxy"
 
 #: Data file for the proxy pin, shipped alongside this module.  Unlike
 #: ``image_pins.json`` it may be *absent*: the egress proxy is default-on (can
-#: be disabled via ``CODE_SANDBOX_ENABLE_EGRESS_PROXY=false``) and the pin is
+#: be disabled via ``SUNABA_ENABLE_EGRESS_PROXY=false``) and the pin is
 #: bootstrapped by CI after the first GHCR push (#432), so a missing file is
 #: a valid pre-pin state that falls back to the locally built tag rather than
 #: an error.
@@ -139,7 +139,7 @@ def load_proxy_pin() -> str | None:
     """
     try:
         raw = (
-            resources.files("code_sandbox_mcp")
+            resources.files("sunaba")
             .joinpath(_PROXY_PINS_RESOURCE)
             .read_text(encoding="utf-8")
         )

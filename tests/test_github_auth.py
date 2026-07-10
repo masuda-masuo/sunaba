@@ -1,4 +1,4 @@
-"""Unit tests for code_sandbox_mcp.github_auth (issue #203, PR-A).
+"""Unit tests for sunaba.github_auth (issue #203, PR-A).
 
 httpx is mocked to verify installation-token issue / cache / refresh.
 The RS256 key is generated in-test. Backward-compat (no GitHub App env ->
@@ -15,8 +15,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from code_sandbox_mcp import github_auth
-from code_sandbox_mcp.github_auth import (
+from sunaba import github_auth
+from sunaba.github_auth import (
     AppTokenProvider,
     build_app_token_provider,
     setup_github_app_token,
@@ -192,7 +192,7 @@ def test_set_global_provider(clean_env, rsa_pem):
 
 
 def test_resolve_vcs_token_uses_global_provider(monkeypatch, clean_env, rsa_pem):
-    from code_sandbox_mcp.tools import vcs
+    from sunaba.tools import vcs
 
     clean_env.setenv("GITHUB_TOKEN", "ghp_static")
     provider = AppTokenProvider("123", rsa_pem, "456")
@@ -207,7 +207,7 @@ def test_resolve_vcs_token_uses_global_provider(monkeypatch, clean_env, rsa_pem)
 
 
 def test_resolve_vcs_token_falls_back_to_env_without_provider(clean_env):
-    from code_sandbox_mcp.tools import vcs
+    from sunaba.tools import vcs
 
     clean_env.setenv("GITHUB_TOKEN", "ghp_static")
     assert github_auth.get_global_provider() is None

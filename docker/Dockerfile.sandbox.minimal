@@ -3,7 +3,7 @@
 #
 # Code Sandbox MCP — 最小構成イメージ
 # 用途: 軽量・高速起動が優先の場合。lint/型検査 は入らない。
-# ビルド: docker build -f docker/Dockerfile.sandbox.minimal -t code-sandbox-mcp/sandbox:minimal .
+# ビルド: docker build -f docker/Dockerfile.sandbox.minimal -t sunaba/sandbox:minimal .
 
 FROM python:3.12-slim-bookworm
 

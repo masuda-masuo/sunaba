@@ -56,7 +56,7 @@ that runs this addon is built by
 lifecycle -- starting the sidecar, joining sandboxes to the internal network
 (the only egress route, #355/#358), and installing this proxy's CA into the
 sandbox trust store -- is handled host-side by
-:mod:`code_sandbox_mcp.proxy_lifecycle`.
+:mod:`sunaba.proxy_lifecycle`.
 """
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ API_HOST = "api.github.com"
 API_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 #: Environment variable holding a comma-separated owner/repo allowlist (#358).
-ALLOWED_REPOS_ENV = "CODE_SANDBOX_ALLOWED_REPOS"
+ALLOWED_REPOS_ENV = "SUNABA_ALLOWED_REPOS"
 
 #: Environment variable holding a comma-separated **destination-host**
 #: allowlist (#506).  This is orthogonal to :data:`ALLOWED_REPOS_ENV`, which
@@ -130,7 +130,7 @@ ALLOWED_REPOS_ENV = "CODE_SANDBOX_ALLOWED_REPOS"
 #: single value ``*`` disables destination-host containment entirely (any host
 #: passes), restoring the pre-#506 passthrough behaviour for operators who
 #: need it.
-ALLOWED_EGRESS_HOSTS_ENV = "CODE_SANDBOX_ALLOWED_EGRESS_HOSTS"
+ALLOWED_EGRESS_HOSTS_ENV = "SUNABA_ALLOWED_EGRESS_HOSTS"
 
 #: Sentinel in the egress-host allowlist meaning "allow any destination host".
 EGRESS_HOST_WILDCARD = "*"
@@ -160,23 +160,23 @@ DEFAULT_EGRESS_HOSTS: frozenset[str] = frozenset({
 #: (#356), which needs no sidecar configuration and never outlives its grant;
 #: this env var remains for operators who prefer a sidecar-held credential.
 #: Unset = no static injection.
-PROXY_TOKEN_ENV = "CODE_SANDBOX_PROXY_TOKEN"
+PROXY_TOKEN_ENV = "SUNABA_PROXY_TOKEN"
 
 #: TCP port for the internal authorization control API; unset = decision-only
 #: proxy (no grant can be opened, matching today's inert behaviour).
-CONTROL_PORT_ENV = "CODE_SANDBOX_PROXY_CONTROL_PORT"
+CONTROL_PORT_ENV = "SUNABA_PROXY_CONTROL_PORT"
 
 #: Bind address for the control API (default ``127.0.0.1``).  The sidecar
 #: (#358) sets ``0.0.0.0`` so the host can reach the port Docker publishes;
 #: a non-loopback bind **requires** the shared secret, because inside the
 #: sidecar the control port is reachable from the sandbox-facing Docker
 #: network and must never accept unauthenticated grant requests.
-CONTROL_HOST_ENV = "CODE_SANDBOX_PROXY_CONTROL_HOST"
+CONTROL_HOST_ENV = "SUNABA_PROXY_CONTROL_HOST"
 
 #: Shared secret authenticating control-API callers (#356 / #357).  ``publish``
 #: sends it in the ``X-Control-Token`` header; the sandbox container never sees
 #: it, so it cannot open its own push grant.
-CONTROL_SECRET_ENV = "CODE_SANDBOX_PROXY_CONTROL_SECRET"
+CONTROL_SECRET_ENV = "SUNABA_PROXY_CONTROL_SECRET"
 
 #: Request header carrying the control secret on ``/auth/*`` calls.
 CONTROL_TOKEN_HEADER = "X-Control-Token"
@@ -352,7 +352,7 @@ API_WRITE_BLOCK_HINT = (
 #: push/api hints above are irrelevant when the host itself is off-allowlist.
 EGRESS_HOST_BLOCK_HINT = (
     "The sandbox may only reach allowlisted hosts (GitHub and the package "
-    "registries by default); add the host to CODE_SANDBOX_ALLOWED_EGRESS_HOSTS "
+    "registries by default); add the host to SUNABA_ALLOWED_EGRESS_HOSTS "
     "if it is legitimately needed."
 )
 
@@ -666,7 +666,7 @@ class EgressGuard:
 
         For a push, a grant-scoped token for *repo* (handed over on
         ``/auth/allow``, #356) takes precedence over the static
-        ``CODE_SANDBOX_PROXY_TOKEN`` fallback.  For a fetch/clone
+        ``SUNABA_PROXY_TOKEN`` fallback.  For a fetch/clone
         (``is_fetch_request``), only an explicit read-grant token
         (``/auth/allow-read``, #419) is used -- there is no static fallback,
         since an always-on read credential would authenticate every clone the
@@ -968,14 +968,14 @@ class AuthControlServer:
 
 
 def allowed_repos_from_env(environ: dict[str, str] | None = None) -> set[str]:
-    """Parse the ``owner/repo`` allowlist from ``CODE_SANDBOX_ALLOWED_REPOS``."""
+    """Parse the ``owner/repo`` allowlist from ``SUNABA_ALLOWED_REPOS``."""
     env = os.environ if environ is None else environ
     raw = env.get(ALLOWED_REPOS_ENV, "")
     return {r.strip() for r in raw.split(",") if r.strip()}
 
 
 def allowed_egress_hosts_from_env(environ: dict[str, str] | None = None) -> set[str]:
-    """Parse the destination-host allowlist from ``CODE_SANDBOX_ALLOWED_EGRESS_HOSTS``.
+    """Parse the destination-host allowlist from ``SUNABA_ALLOWED_EGRESS_HOSTS``.
 
     Returns only the operator-supplied hosts (lower-cased); the built-in
     :data:`DEFAULT_EGRESS_HOSTS` are added by :class:`EgressGuard`, so an unset

@@ -17,7 +17,7 @@ import pytest
 def _mock_resolve_git_root() -> None:
     """Give VCS tools a deterministic git root."""
     with (
-        patch("code_sandbox_mcp.tools.vcs.resolve_git_root", side_effect=lambda c, wd=None: wd if wd is not None else "/home/sandbox"),
+        patch("sunaba.tools.vcs.resolve_git_root", side_effect=lambda c, wd=None: wd if wd is not None else "/home/sandbox"),
     ):
         yield
 

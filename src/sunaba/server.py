@@ -13,8 +13,8 @@ import time
 
 from fastmcp import FastMCP
 
-from code_sandbox_mcp.github_auth import set_global_provider, setup_github_app_token
-from code_sandbox_mcp.security import (
+from sunaba.github_auth import set_global_provider, setup_github_app_token
+from sunaba.security import (
     compute_default_limits,
     set_default_profile,
     validate_image_ref,
@@ -72,7 +72,7 @@ from .tools.verify import (
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-mcp = FastMCP("code-sandbox-mcp")
+mcp = FastMCP("sunaba")
 
 
 sandbox_exec = mcp.tool()(sandbox_exec)
@@ -127,19 +127,12 @@ verify_in_container = mcp.tool()(verify_in_container)
 # unconditional infrastructure, but the LLM-facing read surface stays off
 # the default tool list.  Aggregation workflows read the journal file
 # directly on the host instead.
-OBSERVABILITY_TOOLS_ENV = "CODE_SANDBOX_OBSERVABILITY_TOOLS"
+OBSERVABILITY_TOOLS_ENV = "SUNABA_OBSERVABILITY_TOOLS"
 
 
 def observability_tools_enabled() -> bool:
     """True when the journal/trace read tools should be registered."""
     val = os.environ.get(OBSERVABILITY_TOOLS_ENV)
-    if val is None:
-        val = os.environ.get("CSB_OBSERVABILITY_TOOLS")
-        if val is not None:
-            logger.warning(
-                "CSB_OBSERVABILITY_TOOLS is deprecated, "
-                "use CODE_SANDBOX_OBSERVABILITY_TOOLS instead"
-            )
     return val not in (None, "", "0")
 
 
@@ -183,13 +176,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--shiori-repos-path",
         type=str,
-        default=os.environ.get("CODE_SANDBOX_SHIORI_REPOS_PATH"),
+        default=os.environ.get("SUNABA_SHIORI_REPOS_PATH"),
         help=(
             "Host path to Shiori repos root (e.g. /data/repos). "
             "When set, sandbox_initialize and run_container_and_exec "
             "can use clone_repo to copy a pre-cloned repo into the "
             "container instead of a network git clone. "
-            "Also read from CODE_SANDBOX_SHIORI_REPOS_PATH env var."
+            "Also read from SUNABA_SHIORI_REPOS_PATH env var."
         ),
     )
     parser.add_argument(
@@ -354,7 +347,7 @@ def _start_image_prewarm(
             startup_event.set()
         return
 
-    from code_sandbox_mcp.tools.container import prewarm_default_image
+    from sunaba.tools.container import prewarm_default_image
 
     def _prewarm_loop() -> None:
         first = True
@@ -401,19 +394,11 @@ def main() -> None:
 
     from dataclasses import replace
 
-    from code_sandbox_mcp.security import _DEFAULT_CPU_PERIOD, DEFAULT_SECURITY_PROFILE
-    from code_sandbox_mcp.tools import container as _ct_mod
+    from sunaba.security import _DEFAULT_CPU_PERIOD, DEFAULT_SECURITY_PROFILE
+    from sunaba.tools import container as _ct_mod
     if args.default_image:
         validate_image_ref(args.default_image)
         _ct_mod._DEFAULT_IMAGE = args.default_image
-    if args.shiori_repos_path is None:
-        old_val = os.environ.get("SHIORI_REPOS_PATH")
-        if old_val is not None:
-            logger.warning(
-                "SHIORI_REPOS_PATH is deprecated, "
-                "use CODE_SANDBOX_SHIORI_REPOS_PATH instead"
-            )
-            args.shiori_repos_path = old_val
     if args.shiori_repos_path:
         _ct_mod._SHIORI_REPOS_PATH = args.shiori_repos_path
 
@@ -432,7 +417,7 @@ def main() -> None:
 
     # Configure notifications if webhook is set
     if args.webhook_url or args.failure_threshold != 5 or args.long_run_seconds != 300:
-        from code_sandbox_mcp.notify import configure
+        from sunaba.notify import configure
 
         configure(
             webhook_url=args.webhook_url,
@@ -443,7 +428,7 @@ def main() -> None:
     # Start dashboard if requested
     dashboard_started = False
     if args.dashboard_port > 0:
-        from code_sandbox_mcp.dashboard import start_dashboard
+        from sunaba.dashboard import start_dashboard
 
         msg = start_dashboard(host=args.dashboard_host, port=args.dashboard_port)
         dashboard_started = True
@@ -482,7 +467,7 @@ def main() -> None:
         # Stop the observability dashboard on shutdown so the background
         # HTTP server thread does not outlive the process (issue #345).
         if dashboard_started:
-            from code_sandbox_mcp.dashboard import stop_dashboard
+            from sunaba.dashboard import stop_dashboard
 
             logger.info(stop_dashboard())
 

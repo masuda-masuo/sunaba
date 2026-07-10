@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from code_sandbox_mcp.tools.vcs import sandbox_pr_review_write
+from sunaba.tools.vcs import sandbox_pr_review_write
 from tests.conftest import _decode, _make_client_mock
 
 
@@ -31,7 +31,7 @@ class TestSandboxPrReviewWriteValidation:
         assert "error" in result
         assert "PR number" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._docker")
     def test_container_not_found(self, mock_docker: MagicMock) -> None:
         mock_docker.return_value = _make_client_mock(MagicMock())
         from docker.errors import NotFound as DockerNotFound
@@ -67,7 +67,7 @@ class TestSandboxPrReviewWriteValidation:
         assert "error" in result
         assert "body" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._docker")
     def test_empty_comments_list_is_accepted(self, mock_docker: MagicMock) -> None:
         mock_docker.return_value = _make_client_mock(MagicMock())
         from docker.errors import NotFound as DockerNotFound
@@ -94,8 +94,8 @@ class TestSandboxPrReviewWriteExecute:
         "html_url": "https://github.com/owner/repo/pull/1#pullrequestreview-98765",
     }
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs._docker")
     def test_no_host_token_is_error(
         self,
         mock_docker: MagicMock,
@@ -109,9 +109,9 @@ class TestSandboxPrReviewWriteExecute:
         assert result["status"] == "error"
         assert "token" in result["error"].lower() or "host-side" in result["error"]
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_execute_approve_success(
         self,
         mock_record: MagicMock,
@@ -122,7 +122,7 @@ class TestSandboxPrReviewWriteExecute:
 
         with (
             patch(
-                "code_sandbox_mcp.tools.vcs._github_api_request",
+                "sunaba.tools.vcs._github_api_request",
                 side_effect=[self._PR_DATA, self._REVIEW_RESULT],
             ) as mock_api,
         ):
@@ -150,9 +150,9 @@ class TestSandboxPrReviewWriteExecute:
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["approved"] is True
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_execute_with_inline_comments(
         self,
         mock_record: MagicMock,
@@ -168,7 +168,7 @@ class TestSandboxPrReviewWriteExecute:
 
         with (
             patch(
-                "code_sandbox_mcp.tools.vcs._github_api_request",
+                "sunaba.tools.vcs._github_api_request",
                 side_effect=[self._PR_DATA, self._REVIEW_RESULT],
             ) as mock_api,
         ):
@@ -187,9 +187,9 @@ class TestSandboxPrReviewWriteExecute:
         assert payload["comments"] == comments
         assert mock_record.call_args.kwargs["approved"] is True
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_api_failure_records_denied_and_reports_error(
         self,
         mock_record: MagicMock,
@@ -199,7 +199,7 @@ class TestSandboxPrReviewWriteExecute:
         mock_docker.return_value = _make_client_mock(MagicMock())
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             side_effect=[
                 self._PR_DATA,
                 RuntimeError("GitHub API POST ... returned HTTP 422: validation error"),
@@ -214,9 +214,9 @@ class TestSandboxPrReviewWriteExecute:
         assert "422" in result["error"] or "validation" in result["error"]
         assert mock_record.call_args.kwargs["approved"] is False
 
-    @patch("code_sandbox_mcp.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
-    @patch("code_sandbox_mcp.tools.vcs._docker")
-    @patch("code_sandbox_mcp.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_pr_fetch_failure(
         self,
         mock_record: MagicMock,
@@ -226,7 +226,7 @@ class TestSandboxPrReviewWriteExecute:
         mock_docker.return_value = _make_client_mock(MagicMock())
 
         with patch(
-            "code_sandbox_mcp.tools.vcs._github_api_request",
+            "sunaba.tools.vcs._github_api_request",
             side_effect=RuntimeError("GitHub API GET /repos/owner/repo/pulls/1 returned HTTP 404: Not Found"),
         ):
             result = _decode(sandbox_pr_review_write(

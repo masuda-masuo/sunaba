@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.code_sandbox_mcp.edit_verify import (
+from src.sunaba.edit_verify import (
     read_file_lines,
 )
 
@@ -63,7 +63,7 @@ class TestReadFileLines:
     def test_limit_negative_one_reads_all_remaining(self, monkeypatch) -> None:
         """When limit=-1, reads all lines from offset to end."""
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify.read_file",
+            "src.sunaba.edit_verify.read_file",
             lambda _c, _p: "a\nb\nc\nd\ne",
         )
 
@@ -80,7 +80,7 @@ class TestReadFileLines:
     def test_limit_negative_one_reads_all_from_start(self, monkeypatch) -> None:
         """When limit=-1 and offset=0, reads the entire file."""
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify.read_file",
+            "src.sunaba.edit_verify.read_file",
             lambda _c, _p: "a\nb\nc",
         )
 

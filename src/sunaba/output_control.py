@@ -11,7 +11,7 @@ Provides:
 
 Usage::
 
-    from code_sandbox_mcp.output_control import (
+    from sunaba.output_control import (
         sanitize_output, compress_repeated_lines,
         truncate_output, paginate_output,
     )

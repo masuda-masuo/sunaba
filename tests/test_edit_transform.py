@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.code_sandbox_mcp.edit_verify import (
+from src.sunaba.edit_verify import (
     transform_file_in_container,
 )
 from tests.conftest import _FakeClient, _FakeContainer
@@ -31,7 +31,7 @@ class TestTransformFileInContainer:
     def test_applies_transform_and_returns_diff(self, tmp_path, monkeypatch) -> None:
         writes: list = []
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify.record_file_write",
+            "src.sunaba.edit_verify.record_file_write",
             lambda *a, **k: writes.append(a),
         )
         f = tmp_path / "x.py"
@@ -49,7 +49,7 @@ class TestTransformFileInContainer:
     def test_no_change_is_reported(self, tmp_path, monkeypatch) -> None:
         writes: list = []
         monkeypatch.setattr(
-            "src.code_sandbox_mcp.edit_verify.record_file_write",
+            "src.sunaba.edit_verify.record_file_write",
             lambda *a, **k: writes.append(a),
         )
         f = tmp_path / "x.py"

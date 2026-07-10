@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 class TestApplyPatchJournal:
     """Tests that apply_patch_to_file records journal entries (Issue #96)."""
 
-    @patch("code_sandbox_mcp.edit_verify.record_file_write")
+    @patch("sunaba.edit_verify.record_file_write")
     def test_apply_patch_records_journal(
         self, mock_record: MagicMock, tmp_path
     ) -> None:
@@ -16,7 +16,7 @@ class TestApplyPatchJournal:
         import io
         import sys
 
-        from code_sandbox_mcp.edit_verify import apply_patch_to_file
+        from sunaba.edit_verify import apply_patch_to_file
 
         real = tmp_path / "test.py"
         real.write_text("hello\n", encoding="utf-8", newline="")

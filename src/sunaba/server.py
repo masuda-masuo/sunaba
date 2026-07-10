@@ -133,13 +133,6 @@ OBSERVABILITY_TOOLS_ENV = "SUNABA_OBSERVABILITY_TOOLS"
 def observability_tools_enabled() -> bool:
     """True when the journal/trace read tools should be registered."""
     val = os.environ.get(OBSERVABILITY_TOOLS_ENV)
-    if val is None:
-        val = os.environ.get("CSB_OBSERVABILITY_TOOLS")
-        if val is not None:
-            logger.warning(
-                "CSB_OBSERVABILITY_TOOLS is deprecated, "
-                "use SUNABA_OBSERVABILITY_TOOLS instead"
-            )
     return val not in (None, "", "0")
 
 
@@ -406,14 +399,6 @@ def main() -> None:
     if args.default_image:
         validate_image_ref(args.default_image)
         _ct_mod._DEFAULT_IMAGE = args.default_image
-    if args.shiori_repos_path is None:
-        old_val = os.environ.get("SHIORI_REPOS_PATH")
-        if old_val is not None:
-            logger.warning(
-                "SHIORI_REPOS_PATH is deprecated, "
-                "use SUNABA_SHIORI_REPOS_PATH instead"
-            )
-            args.shiori_repos_path = old_val
     if args.shiori_repos_path:
         _ct_mod._SHIORI_REPOS_PATH = args.shiori_repos_path
 

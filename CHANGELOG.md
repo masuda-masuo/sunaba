@@ -38,6 +38,9 @@ a default.  See `docs/design.md` §15 for the decision, and #531 / #534.
   See **Migration** below -- several of these are *runtime* identities, so an
   upgrade that skips the migration steps silently loses track of existing
   containers or breaks the token chain.
+- **BREAKING**: legacy `CSB_*` / `SHIORI_REPOS_PATH` env-var fallbacks
+  removed — the rename already breaks every env var, so the
+  two-generations-old aliases go with it.
 - **BREAKING: egress proxy is on by default** (#509).  Opt out with
   `SUNABA_ENABLE_EGRESS_PROXY=false`.
 - **BREAKING: destination hosts are default-deny** (#506).  With the proxy on,
@@ -81,15 +84,21 @@ docker ps -aq --filter label=com.code-sandbox-mcp.managed | xargs -r docker rm -
 docker network rm code-sandbox-egress   2>/dev/null || true
 docker volume  rm code-sandbox-egress-certs 2>/dev/null || true   # CA is regenerated
 
-# 3. Token broker: the keyring entry is looked up by service name.
-#    Re-store the credential under "sunaba" or `mcp-token sunaba` finds nothing.
-mcp-token --store sunaba          # follow the prompt; verify with: mcp-token sunaba
+# 3. Token broker: mcp-token resolves the service via launcher.json, not by
+#    keyring service name.  Duplicate (or rename) the "code-sandbox-mcp"
+#    service entry to "sunaba" in launcher.json (next to the mcp-token
+#    binary, or $MCP_LAUNCHER_CONFIG).  The keystore entries are referenced
+#    by absolute key via env_keys and need no change.
+#    Verify with: mcp-token sunaba
 
 # 4. Host state: journal + traces. Move it, or past history stops being read.
-mv ~/.code-sandbox-mcp ~/.sunaba
+#    (Guarded: if the new server already ran once, ~/.sunaba exists and an
+#    unconditional mv would nest the old directory inside it.)
+[ -e ~/.sunaba ] || mv ~/.code-sandbox-mcp ~/.sunaba
 
-# 5. Rename the server key in your MCP client config, and any SUNABA_* env vars
-#    you set (mcpServers."code-sandbox-mcp" -> mcpServers."sunaba").
+# 5. Rename the server key in your MCP client config
+#    (mcpServers."code-sandbox-mcp" -> mcpServers."sunaba"), and rename any
+#    CODE_SANDBOX_* env vars you set to SUNABA_*.
 ```
 
 The old GHCR package (`ghcr.io/masuda-masuo/code-sandbox-mcp/*`) is left in

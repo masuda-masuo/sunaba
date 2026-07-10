@@ -106,13 +106,6 @@ def _cache_dir() -> Path:
     override = os.environ.get("SUNABA_TOKEN_BROKER_CACHE_DIR")
     if override:
         return Path(override)
-    override = os.environ.get("CSB_TOKEN_BROKER_CACHE_DIR")
-    if override:
-        logger.warning(
-            "CSB_TOKEN_BROKER_CACHE_DIR is deprecated, "
-            "use SUNABA_TOKEN_BROKER_CACHE_DIR instead"
-        )
-        return Path(override)
     return Path(platformdirs.user_cache_dir("sunaba")) / "bin"
 
 
@@ -187,12 +180,6 @@ def resolve_broker_binary(*, allow_download: bool = True) -> Path | None:
     if dest.exists() and _sha256_file(dest) == sha256:
         return dest
     if not allow_download or os.environ.get("SUNABA_TOKEN_BROKER_NO_DOWNLOAD"):
-        return None
-    if os.environ.get("CSB_TOKEN_BROKER_NO_DOWNLOAD"):
-        logger.warning(
-            "CSB_TOKEN_BROKER_NO_DOWNLOAD is deprecated, "
-            "use SUNABA_TOKEN_BROKER_NO_DOWNLOAD instead"
-        )
         return None
     try:
         _download_and_verify(asset_name, sha256, dest)

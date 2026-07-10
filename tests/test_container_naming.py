@@ -437,9 +437,9 @@ class TestGetContainerTTL:
         assert _get_container_ttl_seconds() == 0
 
     @patch.dict(os.environ, {"CSB_CONTAINER_TTL_SECONDS": "7200"})
-    def test_deprecated_env_var(self) -> None:
+    def test_legacy_env_var_ignored(self) -> None:
         from sunaba.tools.container import _get_container_ttl_seconds
-        assert _get_container_ttl_seconds() == 7200
+        assert _get_container_ttl_seconds() == 0
 
 
 class TestReapIdleContainers:

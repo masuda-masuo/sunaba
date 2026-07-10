@@ -128,7 +128,7 @@ The issue body, the source, and the diff never leave the container; the model on
 ## Quick start
 
 ```bash
-pip install git+https://github.com/masuda-masuo/sunaba@v1.0.0
+pip install git+https://github.com/masuda-masuo/sunaba@v0.8.0
 ```
 
 Minimal `claude_desktop_config.json`:
@@ -174,7 +174,7 @@ A few things that aren't obvious from the Quick start above and commonly trip up
 
 ```bash
 # Install (pinned to a released version, recommended)
-pip install git+https://github.com/masuda-masuo/sunaba@v1.0.0
+pip install git+https://github.com/masuda-masuo/sunaba@v0.8.0
 
 # Update to the latest commit on the default branch
 pip install --force-reinstall git+https://github.com/masuda-masuo/sunaba
@@ -411,7 +411,7 @@ The package is public on GitHub, so a plain HTTPS clone works without credential
 ```bash
 python -m venv /path/to/venv/sunaba
 /path/to/venv/sunaba/bin/pip install \
-    git+https://github.com/masuda-masuo/sunaba@v1.0.0
+    git+https://github.com/masuda-masuo/sunaba@v0.8.0
 ```
 
 **Phase 2 — Setup** (one-time, interactive)

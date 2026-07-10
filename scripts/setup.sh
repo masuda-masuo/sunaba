@@ -12,9 +12,12 @@
 #      Private Key file path) and registers them in the OS keystore via
 #      mcp-token register.
 #
-# The registered service name is "github" so that sunaba's
-# token broker (GITHUB_TOKEN_BROKER_SERVICE=sunaba → mcp-token
-# sunaba) reads these keys from the keystore automatically.
+# The credentials are registered under service name "github", i.e. as
+# mcp-token/github/* keys in the keystore.  That alone is not enough for
+# sunaba's token broker (GITHUB_TOKEN_BROKER_SERVICE=sunaba → mcp-token
+# sunaba): mcp-token resolves "sunaba" through launcher.json (next to the
+# mcp-token binary, or $MCP_LAUNCHER_CONFIG), so a "sunaba" service entry
+# whose env_keys reference these mcp-token/github/* keys must exist there.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

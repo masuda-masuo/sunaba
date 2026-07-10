@@ -123,7 +123,6 @@ _ORPHAN_GRACE_SECONDS: int = 600
 #: many seconds are automatically stopped by :func:`_reap_idle_containers`.
 #: Default 0 = disabled (no automatic idle reaping).
 _CONTAINER_TTL_ENV: str = "SUNABA_CONTAINER_TTL_SECONDS"
-_CONTAINER_TTL_ENV_DEPRECATED: str = "CSB_CONTAINER_TTL_SECONDS"
 
 #: How often the async ``sandbox_initialize`` emits a progress notification to
 #: keep the MCP/HTTP connection alive during slow setup (Issue #298).  Must be
@@ -1073,13 +1072,6 @@ def _get_container_ttl_seconds() -> int:
         (auto-reap disabled).
     """
     val = os.environ.get(_CONTAINER_TTL_ENV)
-    if val is None:
-        val = os.environ.get(_CONTAINER_TTL_ENV_DEPRECATED)
-        if val is not None:
-            logger.warning(
-                "%s is deprecated, use %s instead",
-                _CONTAINER_TTL_ENV_DEPRECATED, _CONTAINER_TTL_ENV,
-            )
     if val is None or val.strip() == "":
         return 0
     try:

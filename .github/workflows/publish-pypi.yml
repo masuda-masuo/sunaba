@@ -1,0 +1,59 @@
+name: Publish to PyPI
+
+# PyPI へ sunaba を公開する(#534 step 4)。
+#
+# 認証は PyPI の Trusted Publishing(OIDC)を使う — API トークンを GitHub 側に
+# 保存しない。事前に PyPI 側で pending publisher の登録が1回だけ必要:
+#   project=sunaba / owner=masuda-masuo / repo=sunaba /
+#   workflow=publish-pypi.yml / environment=pypi
+#
+# トリガーは release published(タグからのリリース作成で自動公開)と
+# workflow_dispatch(手動。v0.8.0 のようにリリース作成が先行した場合の後追い用)。
+# 同一バージョンの再アップロードは PyPI 側が拒否するので、二重発火しても
+# 上書き事故にはならない(ワークフローが赤くなるだけ)。
+#
+# build と publish をジョブ分割しているのは Trusted Publishing のガイドライン
+# どおり: id-token: write を持つジョブでビルド(=任意コード実行)をしない。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

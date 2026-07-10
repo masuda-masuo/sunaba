@@ -1,5 +1,5 @@
 {
-  "neutral": "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:daece8efc7d0636f43711f7a759245ffe9758df81e37bc7eb41e723d5fd161b8",
-  "python": "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:b137d8cbb2bfe09d5f5b13d81a8d01275c34a561e9b04b59295ed8c9f272dc02",
-  "go": "ghcr.io/masuda-masuo/code-sandbox-mcp/sandbox@sha256:960b60d57a6308cf7d6efaf372ac219cd3bbeff2e02d9e1a47225c674d050a48"
+  "neutral": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:331d950d1efc23e2f1639989a91070e0e34b2558fa3390fd9667b5ceb61d926a",
+  "python": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:f6a6df09d34e43a14adef50c5643dee79b65b8f4b10f3d01beb18f8d7d72b684",
+  "go": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:6dbb95d60bd235485562147ef160ee11dc4b731de61ce52e81bdb33fb325b2fb"
 }

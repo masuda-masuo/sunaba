@@ -976,3 +976,27 @@ def get_last_activity_per_container() -> dict[str, str]:
     for cid in seen_stopped:
         last_ts.pop(cid, None)
     return last_ts
+
+
+def get_run_id_per_container() -> dict[str, str]:
+    """Return the most recent ``run_id`` for each container (Issue #527).
+
+    Read from the journal rather than the in-memory ``_run_map``, which is
+    lost on server restart -- the containers the dashboard most wants to show
+    a trace link for are precisely the ones that outlived the process that
+    created them.  Containers with a ``stop`` entry are excluded, matching
+    :func:`get_last_activity_per_container`.
+    """
+    entries = read_journal()
+    run_ids: dict[str, str] = {}
+    for entry in entries:
+        cid = entry.get("container_id")
+        if not cid:
+            continue
+        if entry.get("operation") == "stop":
+            run_ids.pop(cid, None)
+            continue
+        run_id = entry.get("run_id")
+        if run_id:
+            run_ids[cid] = run_id
+    return run_ids

@@ -18,14 +18,78 @@ from urllib.parse import parse_qs, unquote, urlparse
 from sunaba.journal import (
     get_active_environments,
     get_journal_path,
+    get_run_id_per_container,
     get_runs,
     get_tool_usage,
     read_journal,
 )
+from sunaba.tools.container import list_managed_containers
 
 # ---------------------------------------------------------------------------
 # HTML template pages
 # ---------------------------------------------------------------------------
+
+#: Shared stylesheet.  Injected into the page templates as ``{style}`` rather
+#: than inlined in each one, so ``/`` and ``/containers`` cannot drift apart
+#: visually.  Because it is a *value* passed to ``str.format``, its braces are
+#: not format placeholders and need no doubling.
+_STYLE: str = """<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #0d1117; color: #c9d1d9; padding: 24px; }
+h1 { font-size: 20px; color: #58a6ff; margin-bottom: 8px; }
+.subtitle { color: #8b949e; font-size: 13px; margin-bottom: 16px; }
+nav { display: flex; gap: 16px; margin-bottom: 24px; }
+nav a { color: #58a6ff; font-size: 13px; text-decoration: none; }
+nav a:hover { text-decoration: underline; }
+nav a.active { color: #f0f6fc; font-weight: 600; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+.card h2 { font-size: 14px; color: #58a6ff; margin-bottom: 12px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
+.card .meta { font-size: 12px; color: #8b949e; margin-bottom: 4px; }
+.card .val { font-size: 24px; font-weight: 600; color: #f0f6fc; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.badge.ok { background: #1b3820; color: #7ee787; }
+.badge.err { background: #381620; color: #f97583; }
+.badge.boundary { background: #382a10; color: #ffa657; }
+.badge.svc-starting { background: #382a10; color: #ffa657; }
+.badge.svc-ready { background: #1b3820; color: #7ee787; }
+.badge.net-on { background: #1b3820; color: #7ee787; }
+.badge.net-off { background: #21262d; color: #8b949e; }
+.badge.net-unknown { background: #21262d; color: #484f58; }
+.badge.kind-proxy { background: #382a10; color: #ffa657; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #21262d; }
+th { color: #8b949e; font-weight: 600; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: #58a6ff; }
+.pass { color: #7ee787; }
+.fail { color: #f97583; }
+.mono { font-family: monospace; font-size: 11px; }
+.dim { color: #484f58; }
+.stale { color: #ffa657; font-weight: 600; }
+button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+button:hover { opacity: 0.8; }
+.empty { color: #484f58; font-style: italic; padding: 12px 0; }
+.bar-wrap { display: flex; align-items: center; gap: 6px; margin: 1px 0; font-size: 11px; }
+.bar-label { width: 90px; text-align: right; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { flex: 1; background: #21262d; border-radius: 3px; height: 14px; }
+.bar-fill { display: block; height: 100%; border-radius: 3px; background: #58a6ff; }
+.bar-num { width: 50px; text-align: right; color: #f0f6fc; font-family: monospace; }
+.filter-form { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.filter-form input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 3px 6px; font-size: 11px; border-radius: 4px; }
+.filter-form button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 3px 10px; font-size: 11px; border-radius: 4px; cursor: pointer; }
+.metric-row { margin-bottom: 6px; }
+.metric-label { color: #f0f6fc; }
+.metric-val { font-size: 18px; font-weight: 600; }
+.metric-note { font-size: 11px; color: #484f58; }
+details { font-size: 10px; color: #484f58; margin-top: 8px; }
+.section-header { font-size: 11px; color: #8b949e; margin-bottom: 2px; margin-top: 8px; }
+</style>"""
+
+_NAV: str = """<nav>
+  <a href="/" class="{home_cls}">Dashboard</a>
+  <a href="/containers" class="{containers_cls}">Containers</a>
+</nav>"""
 
 _DASHBOARD_HTML: str = """<!DOCTYPE html>
 <html lang="ja">
@@ -34,52 +98,12 @@ _DASHBOARD_HTML: str = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="10">
 <title>Code Sandbox MCP — Dashboard</title>
-<style>
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{ font-family: system-ui, sans-serif; background: #0d1117; color: #c9d1d9; padding: 24px; }}
-h1 {{ font-size: 20px; color: #58a6ff; margin-bottom: 8px; }}
-.subtitle {{ color: #8b949e; font-size: 13px; margin-bottom: 24px; }}
-.grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; margin-bottom: 24px; }}
-.card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }}
-.card h2 {{ font-size: 14px; color: #58a6ff; margin-bottom: 12px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }}
-.card .meta {{ font-size: 12px; color: #8b949e; margin-bottom: 4px; }}
-.card .val {{ font-size: 24px; font-weight: 600; color: #f0f6fc; }}
-.badge {{ display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }}
-.badge.ok {{ background: #1b3820; color: #7ee787; }}
-.badge.err {{ background: #381620; color: #f97583; }}
-.badge.boundary {{ background: #382a10; color: #ffa657; }}
-.badge.svc-starting {{ background: #382a10; color: #ffa657; }}
-.badge.svc-ready {{ background: #1b3820; color: #7ee787; }}
-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
-th, td {{ padding: 6px 10px; text-align: left; border-bottom: 1px solid #21262d; }}
-th {{ color: #8b949e; font-weight: 600; }}
-th.sortable {{ cursor: pointer; user-select: none; }}
-th.sortable:hover {{ color: #58a6ff; }}
-.pass {{ color: #7ee787; }}
-.fail {{ color: #f97583; }}
-.mono {{ font-family: monospace; font-size: 11px; }}
-button {{ background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }}
-button:hover {{ opacity: 0.8; }}
-.empty {{ color: #484f58; font-style: italic; padding: 12px 0; }}
-.bar-wrap {{ display: flex; align-items: center; gap: 6px; margin: 1px 0; font-size: 11px; }}
-.bar-label {{ width: 90px; text-align: right; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-.bar-track {{ flex: 1; background: #21262d; border-radius: 3px; height: 14px; }}
-.bar-fill {{ display: block; height: 100%; border-radius: 3px; background: #58a6ff; }}
-.bar-num {{ width: 50px; text-align: right; color: #f0f6fc; font-family: monospace; }}
-.filter-form {{ display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }}
-.filter-form input {{ background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 3px 6px; font-size: 11px; border-radius: 4px; }}
-.filter-form button {{ background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 3px 10px; font-size: 11px; border-radius: 4px; cursor: pointer; }}
-.metric-row {{ margin-bottom: 6px; }}
-.metric-label {{ color: #f0f6fc; }}
-.metric-val {{ font-size: 18px; font-weight: 600; }}
-.metric-note {{ font-size: 11px; color: #484f58; }}
-details {{ font-size: 10px; color: #484f58; margin-top: 8px; }}
-.section-header {{ font-size: 11px; color: #8b949e; margin-bottom: 2px; margin-top: 8px; }}
-</style>
+{style}
 </head>
 <body>
 <h1>Code Sandbox MCP</h1>
 <div class="subtitle">Observability Dashboard — localhost only — auto-refresh 10s</div>
+{nav}
 
 <div class="grid">
   <div class="card">
@@ -107,8 +131,6 @@ details {{ font-size: 10px; color: #484f58; margin-top: 8px; }}
   </div>
 
 </div>
-
-{active_environments}
 
 <h2 style="font-size: 16px; color: #8b949e; margin-bottom: 12px;">Recent Runs</h2>
 <table>
@@ -140,6 +162,53 @@ _RUN_ROW: str = """<tr>
   <td>
     <a href="/trace/{run_id}" style="color: #58a6ff; font-size: 11px;">HTML</a>
   </td>
+</tr>"""
+
+_CONTAINERS_HTML: str = """<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="10">
+<title>Code Sandbox MCP — Containers</title>
+{style}
+</head>
+<body>
+<h1>Containers</h1>
+<div class="subtitle">Live from Docker (managed containers) — auto-refresh 10s</div>
+{nav}
+
+{error}
+
+<table>
+<thead>
+<tr>
+  <th>Name / ID</th>
+  <th>Image</th>
+  <th>Status</th>
+  <th>Net</th>
+  <th>Started (UTC)</th>
+  <th>Idle</th>
+  <th>Run</th>
+</tr>
+</thead>
+<tbody>
+{rows}
+</tbody>
+</table>
+
+{sidecars}
+</body>
+</html>"""
+
+_CONTAINER_ROW: str = """<tr>
+  <td>{name}<div class="mono dim">{cid}</div></td>
+  <td class="mono">{image}</td>
+  <td>{status_cell}</td>
+  <td><span class="badge {net_cls}">{net}</span></td>
+  <td>{created}</td>
+  <td class="{idle_cls}">{idle}</td>
+  <td>{run}</td>
 </tr>"""
 
 _TRACE_HTML: str = """<!DOCTYPE html>
@@ -360,30 +429,167 @@ def _render_tool_usage_panel(
     )
 
 
-def _render_active_environments() -> str:
-    """Render active test environments section."""
-    environments = get_active_environments()
-    if not environments:
+#: Idle time past which a container is highlighted as probably forgotten.
+#: Three hours is well beyond a working session's natural pauses, and well
+#: short of the 21-hour strays that motivated Issue #527.
+_STALE_IDLE_SECONDS: float = 3 * 3600
+
+
+def _render_nav(active: str) -> str:
+    return _NAV.format(
+        home_cls="active" if active == "home" else "",
+        containers_cls="active" if active == "containers" else "",
+    )
+
+
+def _short_image(image: str) -> str:
+    """Collapse a pinned digest so the image column stays readable."""
+    if "@sha256:" in image:
+        return image.split("@sha256:")[0] + "@sha256:..."
+    return image
+
+
+def _fmt_duration(seconds: float | None) -> str:
+    """Render a duration compactly: ``45s`` / ``12m`` / ``21.3h``."""
+    if seconds is None:
+        return "—"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _render_status_cell(status: str, env: dict[str, Any] | None) -> str:
+    """Render the Docker status, plus the test-environment services if any.
+
+    The services come from the journal's ``test_environment`` records -- the
+    same source the old "Active Environments" panel used.  They stay on the
+    page, but now hang off the container that actually exists rather than
+    standing in for the container list (Issue #527).
+    """
+    status_cls = "ok" if status == "running" else "err"
+    cell = f'<span class="badge {status_cls}">{_escape(status)}</span>'
+    if not env:
+        return cell
+    env_status = env.get("environment_status", "unknown")
+    env_cls = "svc-ready" if env_status == "ready" else "svc-starting"
+    svc_names = ", ".join(s.get("name", "?") for s in env.get("services", []))
+    return (
+        f'{cell}'
+        f'<div style="margin-top:4px">'
+        f'<span class="badge {env_cls}">{_escape(env_status)}</span> '
+        f'<span class="dim">{_escape(svc_names)}</span>'
+        f'</div>'
+    )
+
+
+def _render_container_row(
+    c: dict[str, Any],
+    run_ids: dict[str, str],
+    envs: dict[str, dict[str, Any]],
+) -> str:
+    cid = c.get("container_id", "")
+    name = c.get("name")
+    allow_network = c.get("allow_network")
+    if allow_network is None:
+        net, net_cls = "?", "net-unknown"
+    elif allow_network:
+        net, net_cls = "on", "net-on"
+    else:
+        net, net_cls = "off", "net-off"
+
+    idle_seconds = c.get("idle_seconds")
+    idle_cls = (
+        "stale"
+        if idle_seconds is not None and idle_seconds >= _STALE_IDLE_SECONDS
+        else "dim"
+    )
+
+    # Journal and label timestamps are UTC ISO-8601; the column header says so,
+    # which buys room to drop the offset suffix.
+    created = (c.get("created_at") or "").replace("T", " ").replace("+00:00", "")
+    run_id = run_ids.get(cid)
+    run_cell = (
+        f'<a href="/trace/{_escape(run_id)}" style="color:#58a6ff">{_escape(run_id)}</a>'
+        if run_id
+        else '<span class="dim">—</span>'
+    )
+
+    return _CONTAINER_ROW.format(
+        name=_escape(name) if name else '<span class="dim">(unnamed)</span>',
+        cid=_escape(cid),
+        image=_escape(_short_image(str(c.get("image", "")))),
+        status_cell=_render_status_cell(str(c.get("status", "")), envs.get(cid)),
+        net=net,
+        net_cls=net_cls,
+        created=_escape(created) if created else '<span class="dim">—</span>',
+        idle=_fmt_duration(idle_seconds),
+        idle_cls=idle_cls,
+        run=run_cell,
+    )
+
+
+def _render_sidecars(sidecars: list[dict[str, Any]]) -> str:
+    """Render the egress-proxy sidecar(s) below the table, out of the way.
+
+    They are managed containers too, so they show up in the same Docker query,
+    but they are infrastructure rather than workspaces -- listing them beside
+    the sandboxes is what made the old view confusing.
+    """
+    if not sidecars:
         return ""
+    items = "".join(
+        f'<div class="meta">'
+        f'<span class="badge kind-proxy">proxy</span> '
+        f'<span class="mono">{_escape(s.get("container_id", ""))}</span> '
+        f'<span class="dim">{_escape(_short_image(str(s.get("image", ""))))}</span> '
+        f'({_escape(str(s.get("status", "")))})'
+        f'</div>'
+        for s in sidecars
+    )
+    return (
+        f'<div class="card" style="margin-top:24px">'
+        f'<h2>Sidecars</h2>{items}'
+        f'</div>'
+    )
 
-    rows: list[str] = []
-    for env in environments:
-        cid = _escape(env.get("container_id", ""))
-        status = _escape(env.get("environment_status", "unknown"))
-        status_cls = "svc-ready" if status == "ready" else "svc-starting"
-        services = env.get("services", [])
-        svc_names = ", ".join(s.get("name", "?") for s in services)
-        rows.append(f"""<div class="card" style="margin-bottom:8px">
-    <h2>Environment <span class="mono">{cid}</span> <span class="badge {status_cls}">{status}</span></h2>
-    <div class="meta">Services: {_escape(svc_names)}</div>
-</div>""")
 
-    return f"""<div class="grid">
-  <div class="card" style="grid-column: span 2;">
-    <h2>Active Environments</h2>
-    {"".join(rows)}
-  </div>
-</div>"""
+def _render_containers_page() -> str:
+    """Render the ``/containers`` page from Docker's own view of the world."""
+    containers, error = list_managed_containers()
+    run_ids = get_run_id_per_container()
+    envs = {
+        env.get("container_id", ""): env
+        for env in get_active_environments()
+    }
+
+    sandboxes = [c for c in containers if c.get("kind") != "proxy"]
+    sidecars = [c for c in containers if c.get("kind") == "proxy"]
+
+    # Most idle first: the containers someone forgot to stop are the whole
+    # reason this page exists, so they sort to the top.
+    sandboxes.sort(key=lambda c: c.get("idle_seconds") or 0.0, reverse=True)
+
+    rows = "\n".join(_render_container_row(c, run_ids, envs) for c in sandboxes)
+    if not rows:
+        rows = '<tr><td colspan="7" class="empty">No managed containers</td></tr>'
+
+    error_html = ""
+    if error is not None:
+        error_html = (
+            f'<div class="card" style="margin-bottom:16px">'
+            f'<span class="badge err">docker</span> {_escape(error)}'
+            f'</div>'
+        )
+
+    return _CONTAINERS_HTML.format(
+        style=_STYLE,
+        nav=_render_nav("containers"),
+        error=error_html,
+        rows=rows,
+        sidecars=_render_sidecars(sidecars),
+    )
 
 
 class _DashboardHandler(BaseHTTPRequestHandler):
@@ -414,6 +620,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
         if path == "/":
             self._serve_dashboard()
+        elif path == "/containers":
+            self._send_html(_render_containers_page())
         elif path == "/api/runs":
             self._serve_api_runs()
         elif path == "/api/journal":
@@ -466,9 +674,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         for r in runs[:20]:  # show last 20 runs
             status = r.get("status", "running")
             status_cls = "err" if status == "running" else "ok"
-            image_short = r.get("image", "unknown")
-            if "@sha256:" in image_short:
-                image_short = image_short.split("@sha256:")[0] + "@sha256:..."
+            image_short = _short_image(r.get("image", "unknown"))
             run_rows_parts.append(_RUN_ROW.format(
                 run_id=r["run_id"],
                 started=r.get("started", ""),
@@ -490,9 +696,9 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
         tool_usage_panel = _render_tool_usage_panel(tool_from, tool_to)
 
-        active_section = _render_active_environments()
-
         html_content = _DASHBOARD_HTML.format(
+            style=_STYLE,
+            nav=_render_nav("home"),
             total_runs=len(runs),
             total_ops=total_ops,
             boundary_count=boundary_count,
@@ -501,7 +707,6 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             journal_path=str(get_journal_path()),
             journal_entries=journal_entries,
             run_rows="\n".join(run_rows_parts) if run_rows_parts else '<tr><td colspan="7" class="empty">No runs recorded</td></tr>',
-            active_environments=active_section,
             tool_usage_panel=tool_usage_panel,
         )
         self._send_html(html_content)

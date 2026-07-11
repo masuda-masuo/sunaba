@@ -52,8 +52,12 @@ from sunaba.output_control import (
 from sunaba.proxy_client import authorized_read_grant
 from sunaba.security import (
     CREATED_AT_LABEL,
+    KIND_LABEL,
+    KIND_PROXY,
+    KIND_SANDBOX,
     MANAGED_LABEL,
     NAME_LABEL,
+    NETWORK_LABEL,
     _detect_host_resources,
     _parse_mem_to_mb,
     build_secure_run_kwargs,
@@ -988,6 +992,35 @@ def _age_seconds(iso_ts: str | None, now: datetime) -> float | None:
     return (now - created).total_seconds()
 
 
+def _label_network(labels: dict[str, str]) -> bool | None:
+    """Read ``NETWORK_LABEL`` back as a bool, or ``None`` when absent.
+
+    ``None`` means "this container predates the label" (Issue #527), which is
+    deliberately distinct from ``False`` -- we report the gap rather than
+    guessing a posture we cannot know.
+    """
+    raw = labels.get(NETWORK_LABEL)
+    if raw is None:
+        return None
+    return raw == "true"
+
+
+def _container_kind(labels: dict[str, str], docker_name: str | None) -> str:
+    """Classify a managed container as ``sandbox`` or ``proxy`` (Issue #527).
+
+    Falls back to the sidecar's fixed container name for containers created
+    before ``KIND_LABEL`` existed -- notably the long-lived egress proxy, which
+    has ``restart_policy=unless-stopped`` and so survives an upgrade unlabelled
+    until something recreates it.
+    """
+    kind = labels.get(KIND_LABEL)
+    if kind:
+        return kind
+    if docker_name == proxy_lifecycle.PROXY_CONTAINER_NAME:
+        return KIND_PROXY
+    return KIND_SANDBOX
+
+
 def _journal_container_status() -> dict[str, dict[str, Any]]:
     """Summarise per-container lifecycle status from the journal.
 
@@ -1163,8 +1196,14 @@ def sandbox_list_containers() -> str:
 
     - ``container_id`` (str): 12-character prefix
     - ``name`` (str | None): user-assigned name from ``sandbox_initialize(name=...)``
+    - ``kind`` (str): ``"sandbox"`` or ``"proxy"`` -- the egress-proxy sidecar
+      carries ``MANAGED_LABEL`` too, so it is listed but tagged, not hidden
+      (Issue #527).  Only ``kind="sandbox"`` entries are attachable.
     - ``image`` (str): image ref
     - ``status`` (str): Docker container status (``running`` / ``exited`` / etc.)
+    - ``allow_network`` (bool | None): whether the container was created with
+      network access, read from ``NETWORK_LABEL``.  ``None`` for containers
+      created before that label existed (Issue #527).
     - ``created_at`` (str | None): ISO-8601 timestamp from the creation label
     - ``age_seconds`` (float | None): approximate age in seconds
     - ``idle_seconds`` (float | None): seconds since last journal activity
@@ -1199,7 +1238,28 @@ def sandbox_list_containers() -> str:
     import json
 
     reaped_ids = _reap_idle_containers()
+    containers, error = list_managed_containers()
+    if error is not None:
+        return json.dumps({"containers": [], "error": error, "reaped_ids": reaped_ids})
 
+    return json.dumps({
+        "containers": containers,
+        "reaped_ids": reaped_ids,
+    }, ensure_ascii=False)
+
+
+def list_managed_containers() -> tuple[list[dict[str, Any]], str | None]:
+    """Return metadata for every managed container, plus an error message.
+
+    The read half of :func:`sandbox_list_containers`, split out so that
+    read-only consumers -- the dashboard's ``/containers`` page (Issue #527) --
+    can list containers without also *reaping* them: a page that auto-refreshes
+    every 10s must not quietly tear down containers as a side effect of being
+    looked at.
+
+    Returns ``(containers, None)`` on success, or ``([], message)`` when Docker
+    cannot be reached.
+    """
     client = _docker()
     try:
         containers = client.containers.list(
@@ -1207,7 +1267,7 @@ def sandbox_list_containers() -> str:
             filters={"label": f"{MANAGED_LABEL}=true"},
         )
     except Exception as e:
-        return json.dumps({"containers": [], "error": str(e), "reaped_ids": reaped_ids})
+        return [], str(e)
 
     last_activity = get_last_activity_per_container()
     now = datetime.now(timezone.utc)
@@ -1225,18 +1285,17 @@ def sandbox_list_containers() -> str:
         result.append({
             "container_id": cid,
             "name": name_val,
+            "kind": _container_kind(labels, getattr(c, "name", None)),
             "image": c.image.tags[0] if c.image.tags else str(c.image.short_id),
             "status": c.status,
+            "allow_network": _label_network(labels),
             "created_at": created_raw,
             "age_seconds": age,
             "idle_seconds": idle,
             "last_activity_ts": last_ts,
         })
 
-    return json.dumps({
-        "containers": result,
-        "reaped_ids": reaped_ids,
-    }, ensure_ascii=False)
+    return result, None
 
 
 def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:

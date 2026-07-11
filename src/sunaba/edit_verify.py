@@ -531,19 +531,24 @@ def _build_rg_args(
     offset: int = 0,
 ) -> list[str]:
     """Build ripgrep argument list."""
-    args = ["rg", "--json", "-n"]
+    args = ["rg", "-n"]
+    if output_mode == "content":
+        args.append("--json")
+    elif output_mode == "count":
+        args.append("--count-matches")
+    elif output_mode == "files_with_matches":
+        args.append("--files-with-matches")
     if ignore_case:
         args.append("-i")
     if glob:
         args.extend(["-g", glob])
     if context > 0:
         args.extend(["-C", str(context)])
-    if output_mode == "count":
-        args.append("--count-matches")
-    elif output_mode == "files_with_matches":
-        args.append("--files-with-matches")
     if max_results:
-        args.extend(["-m", str(max_results + 1)])
+        if output_mode == "files_with_matches":
+            args.extend(["-m", "1"])
+        else:
+            args.extend(["-m", str(max_results + 1)])
     if _needs_pcre2(pattern):
         args.append("-P")
     args.append(pattern)
@@ -615,7 +620,11 @@ def _search_lexical(
 
     stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
     raw = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    return _parse_rg_json(raw, max_results)
+    if output_mode == "content":
+        return _parse_rg_json(raw, max_results)
+    elif output_mode == "count":
+        return _parse_rg_count_output(raw, max_results)
+    return _parse_rg_files_output(raw, max_results)
 
 
 def _grep_fallback(
@@ -650,7 +659,11 @@ def _grep_fallback(
 
     stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
     raw = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    return _parse_grep_output(raw, max_results)
+    if output_mode == "content":
+        return _parse_grep_output(raw, max_results)
+    elif output_mode == "count":
+        return _parse_grep_count_output(raw, max_results)
+    return _parse_grep_files_output(raw, max_results)
 
 
 def _search_structural(
@@ -727,6 +740,69 @@ def _parse_rg_json(raw: str, max_results: int) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Parser: ripgrep --count-matches output (path:count per line)
+# ---------------------------------------------------------------------------
+
+
+def _parse_rg_count_output(raw: str, max_results: int) -> dict[str, Any]:
+    """Parse ripgrep ``--count-matches`` output (``path:count`` per line).
+
+    Returns dict with ``matches`` (list of ``{file, line, text}`` where
+    ``line=0`` and ``text`` is the count as string), ``shown``, ``total``,
+    ``truncated``, and optionally ``next_offset``.
+    """
+    results: list[dict[str, Any]] = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        idx = line.rfind(":")
+        if idx == -1:
+            continue
+        file_path = line[:idx]
+        count_str = line[idx + 1:]
+        results.append(
+            {
+                "file": file_path,
+                "line": 0,
+                "text": count_str,
+            }
+        )
+        if len(results) > max_results:
+            break
+    return _build_search_result(results, max_results)
+
+
+# ---------------------------------------------------------------------------
+# Parser: ripgrep --files-with-matches output (path per line)
+# ---------------------------------------------------------------------------
+
+
+def _parse_rg_files_output(raw: str, max_results: int) -> dict[str, Any]:
+    """Parse ripgrep ``--files-with-matches`` output (one path per line).
+
+    Returns dict with ``matches`` (list of ``{file, line, text}`` where
+    ``line=0`` and ``text=""``), ``shown``, ``total``, ``truncated``,
+    and optionally ``next_offset``.
+    """
+    results: list[dict[str, Any]] = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        results.append(
+            {
+                "file": line,
+                "line": 0,
+                "text": "",
+            }
+        )
+        if len(results) > max_results:
+            break
+    return _build_search_result(results, max_results)
+
+
+# ---------------------------------------------------------------------------
 # Parser: grep output
 # ---------------------------------------------------------------------------
 
@@ -751,6 +827,38 @@ def _parse_grep_output(raw: str, max_results: int) -> dict[str, Any]:
             if len(results) > max_results:
                 break
     return _build_search_result(results, max_results)
+
+
+# ---------------------------------------------------------------------------
+# Parser: grep -c output (file:count per line)
+# ---------------------------------------------------------------------------
+
+
+def _parse_grep_count_output(raw: str, max_results: int) -> dict[str, Any]:
+    """Parse ``grep -c`` output (``file:count`` per line).
+
+    Same format as ripgrep ``--count-matches``: ``path:count`` lines.
+    Returns dict with ``matches`` (list of ``{file, line, text}`` where
+    ``line=0`` and ``text`` is the count as string), ``shown``, ``total``,
+    ``truncated``, and optionally ``next_offset``.
+    """
+    return _parse_rg_count_output(raw, max_results)
+
+
+# ---------------------------------------------------------------------------
+# Parser: grep -l output (file per line)
+# ---------------------------------------------------------------------------
+
+
+def _parse_grep_files_output(raw: str, max_results: int) -> dict[str, Any]:
+    """Parse ``grep -l`` output (one file path per line).
+
+    Same format as ripgrep ``--files-with-matches``: one path per line.
+    Returns dict with ``matches`` (list of ``{file, line, text}`` where
+    ``line=0`` and ``text=""``), ``shown``, ``total``, ``truncated``,
+    and optionally ``next_offset``.
+    """
+    return _parse_rg_files_output(raw, max_results)
 
 
 # ---------------------------------------------------------------------------

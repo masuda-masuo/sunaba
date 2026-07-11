@@ -831,7 +831,23 @@ def sandbox_pr_review_write(
         )
     except RuntimeError as e:
         record_boundary_crossing(cid, "pr_review_write", f"{details} failed", approved=False)
-        return json.dumps({"status": "error", "error": str(e)})
+        err_msg = str(e)
+        _OWN_PR_INDICATORS = (
+            "can not request changes on your own",
+            "cannot request changes on your own",
+            "can not approve your own",
+            "cannot approve your own",
+        )
+        if event in ("REQUEST_CHANGES", "APPROVE") and any(i in err_msg.lower() for i in _OWN_PR_INDICATORS):
+            return json.dumps({
+                "status": "error",
+                "error": (
+                    "Cannot submit event={!r} on a pull request owned by the same GitHub App token. "
+                    "Use event=\"COMMENT\" instead, or have a different user review the PR. "
+                    "GitHub API: {}".format(event, err_msg)
+                ),
+            })
+        return json.dumps({"status": "error", "error": err_msg})
 
     record_boundary_crossing(cid, "pr_review_write", details, approved=True)
 
@@ -952,13 +968,16 @@ def _github_api_request(
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         parts: list[str] = []
+        raw_body = ""
         try:
-            body = json.loads(e.read().decode("utf-8", errors="replace"))
+            raw_body = e.read().decode("utf-8", errors="replace")
+            body = json.loads(raw_body)
             if body.get("message"):
                 parts.append(str(body["message"]))
             parts.extend(str(err.get("message", err)) for err in body.get("errors") or [])
         except Exception:  # noqa: BLE001 - the error body is diagnostics only
-            pass
+            if raw_body:
+                parts.append(f"raw body: {raw_body[:500]}")
         detail = f": {'; '.join(parts)}" if parts else ""
         raise RuntimeError(
             f"GitHub API {method} {path} returned HTTP {e.code}{detail}"

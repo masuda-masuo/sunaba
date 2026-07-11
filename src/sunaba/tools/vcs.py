@@ -743,6 +743,9 @@ def sandbox_pr_review_write(
         repo: Repository in ``\"owner/repo\"`` format.
         pr: PR number to review.
         event: ``\"APPROVE\"``, ``\"REQUEST_CHANGES\"``, or ``\"COMMENT\"``.
+            ``REQUEST_CHANGES`` and ``APPROVE`` fail with 422 when the
+            review is created by the same GitHub App token that owns the
+            PR; use ``COMMENT`` in that case.
         body: Optional review body text (default ``\"\"``).
         comments: Optional list of inline comment dicts, each with:
             - ``path`` (str): file path
@@ -949,7 +952,8 @@ def _github_api_request(
 
     Raises:
         RuntimeError: On an HTTP error (carrying GitHub's ``message`` /
-            ``errors`` when present) or an unreachable network.
+            ``errors`` when present; raw body as fallback when JSON
+            parsing fails) or an unreachable network.
     """
     import urllib.error
     import urllib.request

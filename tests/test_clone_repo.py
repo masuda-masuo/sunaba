@@ -12,7 +12,10 @@ from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProxyError
 from sunaba.tools.container import (
     _clone_repo_via_network,
     _clone_shiori_repo_to_container,
+    _shiori_preclone_exists,
+    _shiori_preclone_root,
     _validate_clone_repo,
+    warn_if_shiori_root_unusable,
 )
 
 
@@ -112,31 +115,33 @@ class TestCloneShioriRepoToContainer:
     def test_no_git_directory(self, tmp_path: Path) -> None:
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
-        clone_dir = repos_root / "owner" / "repo"
+        clone_dir = repos_root / "owner__repo"
         clone_dir.mkdir(parents=True)
         (clone_dir / "README.md").write_text("hello")
         with patch(
             "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
         ):
-            with pytest.raises(ValueError, match="no .git directory"):
+            with pytest.raises(ValueError, match="not found"):
                 _clone_shiori_repo_to_container(
                     MagicMock(), "abc123", "owner/repo", "/tmp/repo"
                 )
 
-    def test_successful_copy_and_unshallow(self, tmp_path: Path) -> None:
+    def test_successful_copy_shallow_repo_unshallowed(self, tmp_path: Path) -> None:
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
-        clone_dir = repos_root / "owner" / "repo"
+        clone_dir = repos_root / "owner__repo"
         clone_dir.mkdir(parents=True)
         (clone_dir / ".git").mkdir()
         (clone_dir / "README.md").write_text("hello")
 
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
-        mock_container.exec_run.return_value = (
-            0,
-            (b"remote: Enumerating objects: 42, done.\n", b""),
-        )
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),        # chown
+            (0, (b"", b"")),        # clone meta write
+            (0, (b"true\n", b"")),  # shallow probe
+            (0, (b"remote: Enumerating objects: 42, done.\n", b"")),  # unshallow
+        ]
 
         with patch(
             "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
@@ -148,7 +153,39 @@ class TestCloneShioriRepoToContainer:
         assert "Copied Shiori clone" in result
         assert "/tmp/repo/repo" in result
         mock_container.put_archive.assert_called_once()
+        assert mock_container.exec_run.call_count == 4
+
+    def test_nonshallow_repo_skips_unshallow(
+            self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Issue #532: a full clone must not attempt (nor warn about) unshallow."""
+        import logging
+        caplog.set_level(logging.INFO)
+        repos_root = tmp_path / "repos"
+        repos_root.mkdir()
+        clone_dir = repos_root / "owner__repo"
+        clone_dir.mkdir(parents=True)
+        (clone_dir / ".git").mkdir()
+        (clone_dir / "README.md").write_text("hello")
+
+        mock_container = MagicMock()
+        mock_container.put_archive.return_value = True
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),         # chown
+            (0, (b"", b"")),         # clone meta write
+            (0, (b"false\n", b"")),  # shallow probe: not shallow
+        ]
+
+        with patch(
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+        ):
+            result = _clone_shiori_repo_to_container(
+                mock_container, "abc123", "owner/repo", "/tmp/repo"
+            )
+
+        assert "Copied Shiori clone" in result
         assert mock_container.exec_run.call_count == 3
+        assert "unshallow" not in caplog.text
 
     def test_unshallow_fails_but_copy_succeeds(
             self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
@@ -157,17 +194,19 @@ class TestCloneShioriRepoToContainer:
         caplog.set_level(logging.WARNING)
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
-        clone_dir = repos_root / "owner" / "repo"
+        clone_dir = repos_root / "owner__repo"
         clone_dir.mkdir(parents=True)
         (clone_dir / ".git").mkdir()
         (clone_dir / "README.md").write_text("hello")
 
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
-        mock_container.exec_run.return_value = (
-            1,
-            (b"fatal: --unshallow on a complete repository does not make sense\n", b""),
-        )
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),        # chown
+            (0, (b"", b"")),        # clone meta write
+            (0, (b"true\n", b"")),  # shallow probe: shallow
+            (1, (b"fatal: unable to fetch\n", b"")),  # unshallow fails
+        ]
 
         with patch(
             "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
@@ -183,7 +222,7 @@ class TestCloneShioriRepoToContainer:
     def test_unshallow_error_caught(self, tmp_path: Path) -> None:
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
-        clone_dir = repos_root / "owner" / "repo"
+        clone_dir = repos_root / "owner__repo"
         clone_dir.mkdir(parents=True)
         (clone_dir / ".git").mkdir()
 
@@ -207,7 +246,7 @@ class TestCloneShioriRepoToContainer:
 
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
-        clone_dir = repos_root / "owner" / "repo"
+        clone_dir = repos_root / "owner__repo"
         clone_dir.mkdir(parents=True)
         (clone_dir / ".git").mkdir()
 
@@ -231,17 +270,14 @@ class TestCloneShioriRepoToContainer:
     def test_repo_name_in_path(self, tmp_path: Path) -> None:
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
-        clone_dir = repos_root / "owner" / "myrepo"
+        clone_dir = repos_root / "owner__myrepo"
         clone_dir.mkdir(parents=True)
         (clone_dir / ".git").mkdir()
         (clone_dir / "README.md").write_text("hello")
 
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
-        mock_container.exec_run.return_value = (
-            0,
-            (b"remote: Enumerating objects: 42, done.\n", b""),
-        )
+        mock_container.exec_run.return_value = (0, (b"false\n", b""))
 
         with patch(
             "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
@@ -253,6 +289,124 @@ class TestCloneShioriRepoToContainer:
         assert "Copied Shiori clone" in result
         assert "/tmp/repo/myrepo" in result
         mock_container.put_archive.assert_called_once()
+
+
+class TestShioriPrecloneRoot:
+    """Issue #532: single pre-clone resolver -- flat layout, never raises."""
+
+    def test_flat_layout_hit(self, tmp_path: Path) -> None:
+        clone_dir = tmp_path / "owner__repo"
+        clone_dir.mkdir()
+        (clone_dir / ".git").mkdir()
+        with patch("sunaba.tools.container._SHIORI_REPOS_PATH", str(tmp_path)):
+            assert _shiori_preclone_root("owner/repo") == clone_dir.resolve()
+            assert _shiori_preclone_exists("owner/repo") is True
+
+    def test_nested_legacy_layout_not_recognized(self, tmp_path: Path) -> None:
+        """The phantom <owner>/<repo> nested layout must NOT be accepted."""
+        clone_dir = tmp_path / "owner" / "repo"
+        clone_dir.mkdir(parents=True)
+        (clone_dir / ".git").mkdir()
+        with patch("sunaba.tools.container._SHIORI_REPOS_PATH", str(tmp_path)):
+            assert _shiori_preclone_root("owner/repo") is None
+            assert _shiori_preclone_exists("owner/repo") is False
+
+    def test_env_unset_returns_none(self) -> None:
+        with patch("sunaba.tools.container._SHIORI_REPOS_PATH", None):
+            assert _shiori_preclone_root("owner/repo") is None
+
+    def test_malformed_repo_returns_none(self, tmp_path: Path) -> None:
+        with patch("sunaba.tools.container._SHIORI_REPOS_PATH", str(tmp_path)):
+            assert _shiori_preclone_root("not-a-repo-spec") is None
+
+    def test_absent_preclone_logs_info(
+            self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+        caplog.set_level(logging.INFO)
+        with patch("sunaba.tools.container._SHIORI_REPOS_PATH", str(tmp_path)):
+            assert _shiori_preclone_root("owner/repo") is None
+        assert "not found" in caplog.text
+
+    def test_oserror_returns_none_with_warning(
+            self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """EACCES during the probe degrades to None (network fallback), no raise."""
+        import logging
+        caplog.set_level(logging.WARNING)
+        with patch("sunaba.tools.container._SHIORI_REPOS_PATH", str(tmp_path)):
+            with patch.object(
+                Path, "is_dir",
+                side_effect=PermissionError(13, "Permission denied"),
+            ):
+                assert _shiori_preclone_root("owner/repo") is None
+                assert _shiori_preclone_exists("owner/repo") is False
+        assert "Shiori pre-clone check for owner/repo failed" in caplog.text
+
+    def test_oserror_falls_back_to_network_clone(self, tmp_path: Path) -> None:
+        """End-to-end (Issue #532): EACCES on the probe -> network fallback path."""
+        from sunaba.tools.container import _try_clone_into_container
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"")
+        with patch("sunaba.tools.container._SHIORI_REPOS_PATH", str(tmp_path)):
+            with patch.object(
+                Path, "is_dir",
+                side_effect=PermissionError(13, "Permission denied"),
+            ):
+                with patch(
+                    "sunaba.tools.container._clone_repo_via_network",
+                    return_value="Cloned owner/repo via network",
+                ) as mock_net:
+                    res = _try_clone_into_container(
+                        container, "abc123def456", "owner/repo", "/tmp/repo"
+                    )
+        assert res.error is None
+        mock_net.assert_called_once()
+
+
+class TestWarnIfShioriRootUnusable:
+    """Issue #532: startup sanity check for a configured-but-unusable root."""
+
+    def test_env_unset_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+        caplog.set_level(logging.WARNING)
+        with patch("sunaba.tools.container._SHIORI_REPOS_PATH", None):
+            warn_if_shiori_root_unusable()
+        assert "Shiori repos root" not in caplog.text
+
+    def test_usable_root_no_warning(
+            self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+        caplog.set_level(logging.WARNING)
+        with patch("sunaba.tools.container._SHIORI_REPOS_PATH", str(tmp_path)):
+            warn_if_shiori_root_unusable()
+        assert "Shiori repos root" not in caplog.text
+
+    def test_missing_root_warns(
+            self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+        caplog.set_level(logging.WARNING)
+        with patch(
+            "sunaba.tools.container._SHIORI_REPOS_PATH",
+            str(tmp_path / "nonexistent"),
+        ):
+            warn_if_shiori_root_unusable()
+        assert "not a directory" in caplog.text
+
+    def test_unreadable_root_warns(
+            self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+        caplog.set_level(logging.WARNING)
+        with patch("sunaba.tools.container._SHIORI_REPOS_PATH", str(tmp_path)):
+            with patch(
+                "sunaba.tools.container.os.listdir",
+                side_effect=PermissionError(13, "Permission denied"),
+            ):
+                warn_if_shiori_root_unusable()
+        assert "not readable" in caplog.text
 
 
 def _make_container(exec_returns):

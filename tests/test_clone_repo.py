@@ -137,6 +137,7 @@ class TestCloneShioriRepoToContainer:
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
         mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),        # mkdir clone_dest
             (0, (b"", b"")),        # chown
             (0, (b"", b"")),        # clone meta write
             (0, (b"true\n", b"")),  # shallow probe
@@ -153,7 +154,7 @@ class TestCloneShioriRepoToContainer:
         assert "Copied Shiori clone" in result
         assert "/tmp/repo/repo" in result
         mock_container.put_archive.assert_called_once()
-        assert mock_container.exec_run.call_count == 4
+        assert mock_container.exec_run.call_count == 5
 
     def test_nonshallow_repo_skips_unshallow(
             self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
@@ -171,6 +172,7 @@ class TestCloneShioriRepoToContainer:
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
         mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),         # mkdir clone_dest
             (0, (b"", b"")),         # chown
             (0, (b"", b"")),         # clone meta write
             (0, (b"false\n", b"")),  # shallow probe: not shallow
@@ -184,7 +186,7 @@ class TestCloneShioriRepoToContainer:
             )
 
         assert "Copied Shiori clone" in result
-        assert mock_container.exec_run.call_count == 3
+        assert mock_container.exec_run.call_count == 4
         assert "unshallow" not in caplog.text
 
     def test_unshallow_fails_but_copy_succeeds(
@@ -202,6 +204,7 @@ class TestCloneShioriRepoToContainer:
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
         mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),        # mkdir clone_dest
             (0, (b"", b"")),        # chown
             (0, (b"", b"")),        # clone meta write
             (0, (b"true\n", b"")),  # shallow probe: shallow
@@ -228,7 +231,12 @@ class TestCloneShioriRepoToContainer:
 
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
-        mock_container.exec_run.side_effect = Exception("network error")
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),  # mkdir clone_dest
+            Exception("network error"),  # chown (caught)
+            Exception("network error"),  # clone meta write (caught)
+            Exception("network error"),  # shallow probe (caught)
+        ]
 
         with patch(
             "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
@@ -255,6 +263,7 @@ class TestCloneShioriRepoToContainer:
         mock_response.reason = "Internal Server Error"
 
         mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, b"")  # mkdir clone_dest
         mock_container.put_archive.side_effect = APIError(
             "500 Server Error", mock_response, explanation="failed"
         )
@@ -266,6 +275,52 @@ class TestCloneShioriRepoToContainer:
                 _clone_shiori_repo_to_container(
                     mock_container, "abc123", "owner/repo", "/tmp/repo"
                 )
+
+    def test_mkdir_dest_failure_raises(self, tmp_path: Path) -> None:
+        """#532 follow-up: failing to create clone_dest must fail the copy."""
+        repos_root = tmp_path / "repos"
+        repos_root.mkdir()
+        clone_dir = repos_root / "owner__repo"
+        clone_dir.mkdir(parents=True)
+        (clone_dir / ".git").mkdir()
+
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (1, b"mkdir: read-only file system")
+
+        with patch(
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+        ):
+            with pytest.raises(RuntimeError, match="Failed to create /tmp/repo"):
+                _clone_shiori_repo_to_container(
+                    mock_container, "abc123", "owner/repo", "/tmp/repo"
+                )
+        mock_container.put_archive.assert_not_called()
+
+    def test_mkdir_dest_before_put_archive(self, tmp_path: Path) -> None:
+        """#532 follow-up: clone_dest is created before put_archive, which
+        does not create missing destination directories itself."""
+        repos_root = tmp_path / "repos"
+        repos_root.mkdir()
+        clone_dir = repos_root / "owner__repo"
+        clone_dir.mkdir(parents=True)
+        (clone_dir / ".git").mkdir()
+        (clone_dir / "README.md").write_text("hello")
+
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"false\n", b""))
+        mock_container.put_archive.return_value = True
+
+        with patch(
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+        ):
+            _clone_shiori_repo_to_container(
+                mock_container, "abc123", "owner/repo", "/tmp/repo"
+            )
+
+        first_exec = mock_container.exec_run.call_args_list[0]
+        assert first_exec.args[0] == ["mkdir", "-p", "/tmp/repo"]
+        names = [name for name, _args, _kw in mock_container.method_calls]
+        assert names.index("exec_run") < names.index("put_archive")
 
     def test_repo_name_in_path(self, tmp_path: Path) -> None:
         repos_root = tmp_path / "repos"

@@ -401,6 +401,9 @@ def main() -> None:
         _ct_mod._DEFAULT_IMAGE = args.default_image
     if args.shiori_repos_path:
         _ct_mod._SHIORI_REPOS_PATH = args.shiori_repos_path
+        # One-shot sanity check (Issue #532): a configured-but-unusable root
+        # would otherwise degrade silently to per-call network fallbacks.
+        _ct_mod.warn_if_shiori_root_unusable()
 
     # Compute host-adjusted default limits (Issue #201)
     mem_limit_str, cpu_count = compute_default_limits(

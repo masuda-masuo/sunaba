@@ -1488,6 +1488,8 @@ def sandbox_initialize(
 
     Args:
         image: Docker image to use (e.g. ``python@sha256:...``).
+               Variant aliases ``\"neutral\"``, ``\"python\"``, and ``\"go\"``
+               resolve to the pinned GHCR digest images (Issue #545).
                Defaults to the image specified
                via the ``--default-image`` CLI argument in the server config.
         allow_network: Whether to allow network access (default ``False``).
@@ -1610,6 +1612,8 @@ def sandbox_initialize(
         env.update(proxy_lifecycle.sandbox_proxy_env(proxy_runtime))
 
     try:
+        # Resolve variant aliases ("neutral", "python", "go") to pinned digests (Issue #545)
+        resolved = _image_pins.get(resolved, resolved)
         resolved = _resolve_image_ref(resolved)
         validate_image_ref(resolved)
     except ValueError as e:
@@ -1975,6 +1979,8 @@ def run_container_and_exec(
 
     Args:
         image: Docker image to use (``image@sha256:...``).
+               Variant aliases ``\"neutral\"``, ``\"python\"``, and ``\"go\"``
+               resolve to the pinned GHCR digest images (Issue #545).
         commands: List of shell commands to execute sequentially.
                   Must not be ``None`` or empty.
         verbose: Output verbosity:
@@ -2096,6 +2102,8 @@ def run_container_and_exec(
 
     # --- Start container ---
     try:
+        # Resolve variant aliases ("neutral", "python", "go") to pinned digests (Issue #545)
+        resolved = _image_pins.get(resolved, resolved)
         resolved = _resolve_image_ref(resolved)
         validate_image_ref(resolved)
         profile = replace(get_default_profile(), allow_network=allow_network)

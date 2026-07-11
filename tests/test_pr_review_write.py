@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from sunaba.tools.vcs import sandbox_pr_review_write
+from sunaba.tools.vcs import _github_api_request, sandbox_pr_review_write
 from tests.conftest import _decode, _make_client_mock
 
 
@@ -217,6 +217,96 @@ class TestSandboxPrReviewWriteExecute:
     @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.vcs.record_boundary_crossing")
+    def test_own_pr_request_changes_gives_actionable_error(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+    ) -> None:
+        mock_docker.return_value = _make_client_mock(MagicMock())
+
+        with patch(
+            "sunaba.tools.vcs._github_api_request",
+            side_effect=[
+                self._PR_DATA,
+                RuntimeError(
+                    "GitHub API POST /repos/owner/repo/pulls/1/reviews "
+                    "returned HTTP 422: Can not request changes on your own pull request"
+                ),
+            ],
+        ):
+            result = _decode(sandbox_pr_review_write(
+                container_id="abc123def456", repo="owner/repo", pr=1,
+                event="REQUEST_CHANGES",
+            ))
+
+        assert result["status"] == "error"
+        assert "COMMENT" in result["error"]
+        assert "Can not request changes" in result["error"]
+
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    def test_own_pr_approve_gives_actionable_error(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+    ) -> None:
+        mock_docker.return_value = _make_client_mock(MagicMock())
+
+        with patch(
+            "sunaba.tools.vcs._github_api_request",
+            side_effect=[
+                self._PR_DATA,
+                RuntimeError(
+                    "GitHub API POST /repos/owner/repo/pulls/1/reviews "
+                    "returned HTTP 422: Can not approve your own pull request"
+                ),
+            ],
+        ):
+            result = _decode(sandbox_pr_review_write(
+                container_id="abc123def456", repo="owner/repo", pr=1,
+                event="APPROVE",
+            ))
+
+        assert result["status"] == "error"
+        assert "COMMENT" in result["error"]
+        assert "Can not approve" in result["error"]
+
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    def test_own_pr_comment_passes_through(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+    ) -> None:
+        mock_docker.return_value = _make_client_mock(MagicMock())
+
+        with patch(
+            "sunaba.tools.vcs._github_api_request",
+            side_effect=[
+                self._PR_DATA,
+                RuntimeError(
+                    "GitHub API POST /repos/owner/repo/pulls/1/reviews "
+                    "returned HTTP 422: some other error"
+                ),
+            ],
+        ):
+            result = _decode(sandbox_pr_review_write(
+                container_id="abc123def456", repo="owner/repo", pr=1,
+                event="COMMENT",
+            ))
+
+        assert result["status"] == "error"
+        assert "422" in result["error"]
+        assert "COMMENT" not in result["error"]
+
+    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_pr_fetch_failure(
         self,
         mock_record: MagicMock,
@@ -237,3 +327,103 @@ class TestSandboxPrReviewWriteExecute:
         assert result["status"] == "error"
         assert "404" in result["error"] or "Not Found" in result["error"]
         assert mock_record.call_args.kwargs["approved"] is False
+
+
+class TestGithubApiRequest:
+    """Direct tests for _github_api_request error handling."""
+
+    def test_raw_body_fallback_on_non_json_response(self) -> None:
+        """Non-JSON error body should include raw body in RuntimeError."""
+        import http.client
+        import io
+        import urllib.error
+
+        fp = io.BytesIO(b"<html>rate limit exceeded</html>")
+        exc = urllib.error.HTTPError(
+            url="https://api.github.com/repos/owner/repo",
+            code=403,
+            msg="Forbidden",
+            hdrs=http.client.HTTPMessage(),
+            fp=fp,
+        )
+
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=exc,
+        ):
+            try:
+                _github_api_request("/repos/owner/repo", "tok")
+            except RuntimeError as e:
+                err = str(e)
+                assert "raw body: <html>rate limit exceeded</html>" in err
+            else:
+                msg = "Expected RuntimeError"
+                raise AssertionError(msg)
+
+    def test_parsed_message_included(self) -> None:
+        """JSON error body with 'message' should include it in RuntimeError."""
+        import http.client
+        import io
+        import json
+        import urllib.error
+
+        body = json.dumps({"message": "Not Found", "documentation_url": "..."})
+        fp = io.BytesIO(body.encode("utf-8"))
+        exc = urllib.error.HTTPError(
+            url="https://api.github.com/repos/owner/repo",
+            code=404,
+            msg="Not Found",
+            hdrs=http.client.HTTPMessage(),
+            fp=fp,
+        )
+
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=exc,
+        ):
+            try:
+                _github_api_request("/repos/owner/repo", "tok")
+            except RuntimeError as e:
+                assert "Not Found" in str(e)
+                assert "documentation_url" not in str(e)
+            else:
+                msg = "Expected RuntimeError"
+                raise AssertionError(msg)
+
+    def test_parsed_errors_included(self) -> None:
+        """JSON error body with 'errors' array should include each message."""
+        import http.client
+        import io
+        import json
+        import urllib.error
+
+        body = json.dumps({
+            "message": "Validation Failed",
+            "errors": [
+                {"resource": "PullRequestReview", "code": "custom",
+                 "message": "Can not request changes on your own pull request"},
+            ],
+        })
+        fp = io.BytesIO(body.encode("utf-8"))
+        exc = urllib.error.HTTPError(
+            url="https://api.github.com/repos/owner/repo/pulls/1/reviews",
+            code=422,
+            msg="Unprocessable Entity",
+            hdrs=http.client.HTTPMessage(),
+            fp=fp,
+        )
+
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=exc,
+        ):
+            try:
+                _github_api_request("/repos/owner/repo/pulls/1/reviews", "tok",
+                                    method="POST", payload={"event": "APPROVE"})
+            except RuntimeError as e:
+                err = str(e)
+                assert "Validation Failed" in err
+                assert "Can not request changes" in err
+            else:
+                msg = "Expected RuntimeError"
+                raise AssertionError(msg)

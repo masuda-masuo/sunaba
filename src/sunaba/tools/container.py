@@ -34,6 +34,7 @@ from sunaba.journal import (
     record_initialize,
     record_initialize_complete,
     record_stop,
+    record_tool_use,
     set_session_label,
 )
 from sunaba.journal import (
@@ -1382,11 +1383,26 @@ def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
         "match_type": match_type,
     }
 
+    # Attach is where a different session (or a different model) picks up an
+    # existing container, so the hand-off itself has to be in the journal --
+    # otherwise §9.1's audit trail has entries on both sides of the switch and
+    # nothing marking the switch.  A session_label swap is recorded with the
+    # label it replaced: the label alone only ever rides along on *subsequent*
+    # entries, so without this the boundary between two labelled runs cannot be
+    # recovered from the journal (#554).
+    attach_params: dict[str, Any] = {"name_or_id": name_or_id, "match_type": match_type}
     if session_label is not None:
+        previous_label = get_session_label(cid)
+        if previous_label != session_label:
+            attach_params["previous_session_label"] = previous_label
         set_session_label(cid, session_label)
     current_label = get_session_label(cid)
     if current_label is not None:
         result["session_label"] = current_label
+
+    # Recorded before the git orientation below, which shells into the
+    # container and may fail: the hand-off must not be lost along with it.
+    record_tool_use(cid, "sandbox_attach", attach_params)
 
     # --- Git orientation ---
     try:

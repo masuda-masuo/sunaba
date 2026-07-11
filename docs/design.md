@@ -346,10 +346,12 @@ else:
 | `sandbox_trace_dir` | （なし） | — | 読取専用・opt-in（#460） |
 | `sandbox_issue_write` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write、一発実行） |
 | `sandbox_pr_review_write` | `record_boundary_crossing` | `boundary_crossing` | 境界越え（write）。§14 レビューフローの投稿口 |
-| `sandbox_list_containers` | （なし） | — | 読取専用オリエンテーション（#478）。下記の注を参照 |
-| `sandbox_attach` | （なし） | — | 読取専用オリエンテーション（#478）。下記の注を参照 |
+| `sandbox_attach` | `record_tool_use` | `tool_use` | #554 で追加。セッションの引き継ぎ点そのもの |
+| `sandbox_list_containers` | （なし） | — | `container_id` 引数を持たない（下記） |
 
-`sandbox_list_containers` / `sandbox_attach` は #478（コンテナ共有）で追加されたオリエンテーション系で、境界を越えず、コンテナの状態も変えない（`sandbox_attach` の `session_label` は以降の記録に載る）。現状ジャーナルに記録していないが、これは observability 5ツールのような**明示的な非計装の判断が文書化されていない**まま実装された結果であり、§9.1 冒頭の「すべてのツールは記録しなければならない」に対する未整理の例外である。記録を足すか、非計装を意図として明記するかは別途決める。
+`sandbox_attach` は #478（コンテナ共有）の入口 —— **別セッション・別モデルが既存コンテナに接続してくる地点**である。ここが記録されないと、切り替わりの前後に操作エントリが並ぶだけで、**切り替わり自体を示すものが何もない**。`session_label`（#479）も同様で、ラベルは以降のエントリに付随するだけなので、記録が無ければラベル A の操作列とラベル B の操作列の境界を journal から復元できない。そのため `sandbox_attach` は `record_tool_use` を記録し、ラベルを張り替えた場合は `previous_session_label` を params に残す（#554）。
+
+`sandbox_list_containers` は非計装。理由は「読取専用だから」**ではない**（`checkpoint_list` / `read_file_range` / `list_files` は読取専用でも記録する）。`container_id` 引数を持たない全体クエリであり、run_id はコンテナ単位で採番される（`get_or_create_run_id(container_id)`）ため、記録するには container に紐づかないイベントという新概念が要る。これは `sandbox_journal_path` / `sandbox_trace_dir` を非計装にしているのと同一の根拠である。
 
 読取専用の journal/trace 5ツールは `SUNABA_OBSERVABILITY_TOOLS=1` のときだけ登録される（#460）。記録側（`record_*`）は無条件で動く基盤であり、集計はホスト側で journal.log を直読みすれば足りる。この5ツールは意図的に非計装（#454）: デフォルト無効の観測用デバッグ面であり、journal の読み取りを journal に書くのは自己言及ノイズになる（`sandbox_journal_path` / `sandbox_trace_dir` は container_id 引数自体を持たない）。
 

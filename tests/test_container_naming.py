@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from sunaba.journal import set_session_label
 from sunaba.security import MANAGED_LABEL, NAME_LABEL
 from sunaba.tools.container import (
     sandbox_attach,
@@ -375,6 +379,120 @@ class TestSandboxAttach:
         result = json.loads(sandbox_attach("no-git"))
         assert result["found"] is True
         assert "git" not in result
+
+
+class TestSandboxAttachJournal:
+    """#554: attach is the session hand-off, so it must be in the journal.
+
+    Without an entry of its own, the journal shows operations on both sides of
+    a session switch and nothing marking the switch itself -- and a
+    ``session_label`` swap leaves no trace at all, since the label only ever
+    rides along on *subsequent* entries.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_session_label(self) -> Iterator[None]:
+        # The label map is process-global, so a label set here would otherwise
+        # leak into whichever test runs next and show up as a bogus
+        # `previous_session_label`.
+        yield
+        set_session_label("abc123def456", None)
+
+    @staticmethod
+    def _attach(mock_docker: MagicMock, mock_git_root: MagicMock,
+                mock_journal: MagicMock, mock_cp: MagicMock,
+                name: str = "my-container") -> None:
+        client = _make_client([_make_container(name=name)])
+        mock_docker.return_value = client
+        mock_git_root.return_value = None
+        mock_journal.return_value = []
+        mock_cp.return_value = json.dumps({"checkpoints": []})
+
+    @patch("sunaba.tools.container.record_tool_use")
+    @patch("sunaba.tools.container.checkpoint_list")
+    @patch("sunaba.tools.container.read_journal")
+    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container._docker")
+    def test_attach_is_journaled(
+        self,
+        mock_docker: MagicMock,
+        mock_git_root: MagicMock,
+        mock_journal: MagicMock,
+        mock_cp: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        self._attach(mock_docker, mock_git_root, mock_journal, mock_cp)
+
+        sandbox_attach("my-container")
+
+        mock_record.assert_called_once_with(
+            "abc123def456",
+            "sandbox_attach",
+            {"name_or_id": "my-container", "match_type": "name"},
+        )
+
+    @patch("sunaba.tools.container.record_tool_use")
+    @patch("sunaba.tools.container.checkpoint_list")
+    @patch("sunaba.tools.container.read_journal")
+    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container._docker")
+    def test_session_label_swap_records_the_label_it_replaced(
+        self,
+        mock_docker: MagicMock,
+        mock_git_root: MagicMock,
+        mock_journal: MagicMock,
+        mock_cp: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        # The entry carries the *new* label (record_tool_use attaches it), so
+        # the outgoing one has to be in params or the boundary between two
+        # labelled runs is unrecoverable.
+        self._attach(mock_docker, mock_git_root, mock_journal, mock_cp)
+
+        sandbox_attach("my-container", session_label="session-a")
+        sandbox_attach("my-container", session_label="session-b")
+
+        params = mock_record.call_args_list[-1].args[2]
+        assert params["previous_session_label"] == "session-a"
+
+    @patch("sunaba.tools.container.record_tool_use")
+    @patch("sunaba.tools.container.checkpoint_list")
+    @patch("sunaba.tools.container.read_journal")
+    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container._docker")
+    def test_attach_without_label_change_omits_previous_label(
+        self,
+        mock_docker: MagicMock,
+        mock_git_root: MagicMock,
+        mock_journal: MagicMock,
+        mock_cp: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        # Re-attaching within the same session is not a hand-off; a
+        # `previous_session_label` here would be noise, not signal.
+        self._attach(mock_docker, mock_git_root, mock_journal, mock_cp)
+
+        sandbox_attach("my-container", session_label="session-a")
+        sandbox_attach("my-container")
+
+        params = mock_record.call_args_list[-1].args[2]
+        assert "previous_session_label" not in params
+
+    @patch("sunaba.tools.container.record_tool_use")
+    @patch("sunaba.tools.container._docker")
+    def test_failed_attach_is_not_journaled(
+        self,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        # Nothing was attached, so there is no hand-off and no container to
+        # attribute the entry to.
+        mock_docker.return_value = _make_client([])
+
+        result = json.loads(sandbox_attach("nope"))
+
+        assert result["found"] is False
+        mock_record.assert_not_called()
 
 
 class TestListContainersIdleTime:

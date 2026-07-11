@@ -529,13 +529,14 @@ class TestCloneRepoTransportSelection:
 class TestCloneRepoToolReadGrantJournal:
     """#421: clone_repo tool journals the proxy read-grant's outcome."""
 
+    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.vcs.record_boundary_crossing")
     @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
     @patch("sunaba.tools.vcs.proxy_configured", return_value=True)
     @patch("sunaba.tools.vcs.authorized_read_grant")
     def test_success_records_proxy_read_grant_flag(
-        self, _mock_grant, _mock_proxy, _mock_token, mock_record, mock_docker
+        self, _mock_grant, _mock_proxy, _mock_token, mock_record, mock_docker, _mock_ensure
     ) -> None:
         container = _make_container([
             (1, b"", b"gh: not logged in\n"),  # gh auth setup-git fails -> anonymous
@@ -554,13 +555,14 @@ class TestCloneRepoToolReadGrantJournal:
             approved=True,
         )
 
+    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.vcs.record_boundary_crossing")
     @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
     @patch("sunaba.tools.vcs.proxy_configured", return_value=True)
     @patch("sunaba.tools.vcs.authorized_read_grant")
     def test_failure_is_journaled_with_approved_false(
-        self, _mock_grant, _mock_proxy, _mock_token, mock_record, mock_docker
+        self, _mock_grant, _mock_proxy, _mock_token, mock_record, mock_docker, _mock_ensure
     ) -> None:
         container = _make_container([
             (1, b"", b"gh: not logged in\n"),

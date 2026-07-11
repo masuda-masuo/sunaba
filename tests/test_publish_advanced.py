@@ -354,6 +354,7 @@ class TestPublishProxiedCredentialRouting:
     def _env_of(call) -> dict | None:
         return call.kwargs.get("environment")
 
+    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
     @patch("sunaba.tools.vcs.authorized_push_grant")
     @patch("sunaba.tools.vcs.proxy_configured", return_value=True)
     @patch("sunaba.tools.vcs._resolve_vcs_token")
@@ -366,6 +367,7 @@ class TestPublishProxiedCredentialRouting:
         mock_resolve: MagicMock,
         mock_proxied: MagicMock,
         mock_grant: MagicMock,
+        mock_ensure: MagicMock,
     ) -> None:
         mock_resolve.return_value = "ghs_lazytoken"
 
@@ -390,6 +392,7 @@ class TestPublishProxiedCredentialRouting:
         assert calls  # sanity
         assert all(self._env_of(c) is None for c in calls)
 
+    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
     @patch("sunaba.tools.vcs.authorized_push_grant")
     @patch("sunaba.tools.vcs.proxy_configured", return_value=True)
     @patch("sunaba.tools.vcs._resolve_vcs_token")
@@ -402,6 +405,7 @@ class TestPublishProxiedCredentialRouting:
         mock_resolve: MagicMock,
         mock_proxied: MagicMock,
         mock_grant: MagicMock,
+        mock_ensure: MagicMock,
     ) -> None:
         """PR creation is host-side (#360): no exec ever carries a token."""
         mock_resolve.return_value = "ghs_lazytoken"

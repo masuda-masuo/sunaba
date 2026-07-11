@@ -160,6 +160,13 @@ _FINGERPRINT_POLL_INTERVAL_SECONDS = 0.25
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "off", "no"})
 
+#: Config the sidecar reads *once*, at startup, from the env it was created
+#: with.  Drift between these and the current host env is what
+#: :func:`_recreate_reason` looks for (#533): the guard bakes the allowlists
+#: into itself when it boots, so a running sidecar silently keeps enforcing
+#: whatever was configured when it started.
+_SIDECAR_CONFIG_ENV_KEYS = (ALLOWED_REPOS_ENV, ALLOWED_EGRESS_HOSTS_ENV, PROXY_TOKEN_ENV)
+
 
 class EgressProxyError(RuntimeError):
     """The egress proxy is enabled but could not be started or wired up.
@@ -211,11 +218,13 @@ def ensure_egress_proxy(
     ``from_env`` -- and therefore ``publish``'s push grant (#357) -- picks
     them up with no further configuration.
 
-    Note: the allowlist/token env vars are baked into the sidecar at creation;
-    changing them on the host requires removing the sidecar container so the
-    next call recreates it.  Recreation is safe for running sandboxes: the CA
+    The allowlist/token env vars are baked into the sidecar at creation and
+    read once by the guard at startup, so a sidecar that is still running
+    would otherwise keep enforcing a stale config.  This call therefore
+    reconciles: a reused sidecar whose baked config no longer matches the host
+    env is recreated (#533).  Recreation is safe for running sandboxes: the CA
     lives in the :data:`CERTS_VOLUME_NAME` named volume and stays the same
-    (#400).
+    (#400), and the new sidecar rejoins the network under the same alias.
 
     Raises:
         EgressProxyError: When the sidecar cannot be started or its CA does
@@ -225,24 +234,19 @@ def ensure_egress_proxy(
     try:
         network = _ensure_network(client)
         container = _find_proxy_container(client)
-        if container is not None and container.status != "running":
-            logger.info("Removing exited egress-proxy container %s", container.id[:12])
-            container.remove(force=True)
-            container = None
-        if container is None:
+        secret = _recover_secret(container) if container is not None else None
+        if container is not None:
+            reason = _recreate_reason(container, secret, source)
+            if reason is not None:
+                logger.info(
+                    "Recreating egress-proxy container %s (%s)", container.id[:12], reason
+                )
+                container.remove(force=True)
+                container = None
+                secret = None
+        if container is None or secret is None:
             secret = source.get(CONTROL_SECRET_ENV) or secrets.token_hex(32)
             container = _start_proxy_container(client, network, secret, source)
-        else:
-            recovered = _recover_secret(container)
-            if recovered is None:
-                # A sidecar whose secret we cannot recover is unusable for
-                # publish's push grant -- recreate it with a known secret.
-                logger.info("Recreating egress-proxy container (secret not recoverable)")
-                container.remove(force=True)
-                secret = source.get(CONTROL_SECRET_ENV) or secrets.token_hex(32)
-                container = _start_proxy_container(client, network, secret, source)
-            else:
-                secret = recovered
         ca_pem = _wait_for_ca(container)
     except EgressProxyError:
         raise
@@ -474,7 +478,7 @@ def _start_proxy_container(
         CONTROL_HOST_ENV: "0.0.0.0",
         CONTROL_SECRET_ENV: secret,
     }
-    for key in (ALLOWED_REPOS_ENV, ALLOWED_EGRESS_HOSTS_ENV, PROXY_TOKEN_ENV):
+    for key in _SIDECAR_CONFIG_ENV_KEYS:
         value = source.get(key)
         if value:
             proxy_env[key] = value
@@ -520,22 +524,70 @@ def _published_control_port(container: Any, source: MutableMapping[str, str]) ->
     return _control_host_port(source)
 
 
-def _recover_secret(container: Any) -> str | None:
-    """Read the control secret back from a running sidecar's own env.
+def _container_env(container: Any) -> dict[str, str]:
+    """Read a container's baked env back out of ``docker inspect``.
 
     ``docker inspect`` already exposes the container's env to anyone with
     Docker access, so this adds no exposure beyond what starting the sidecar
-    with the secret already implies -- and none of it is sandbox-visible.
+    with those values already implies -- and none of it is sandbox-visible.
 
     Read via ``attrs`` (inspect) rather than ``exec_run(["printenv", ...])``
     deliberately: inspect works even when the container has no exec-able
     state, and mirrors how :func:`_published_control_port` recovers the port.
     """
+    env: dict[str, str] = {}
     for item in (container.attrs.get("Config") or {}).get("Env") or []:
-        key, _, value = item.partition("=")
-        if key == CONTROL_SECRET_ENV and value:
-            return value
+        key, sep, value = item.partition("=")
+        if sep:
+            env[key] = value
+    return env
+
+
+def _recover_secret(container: Any) -> str | None:
+    """Read the control secret back from an existing sidecar's own env."""
+    return _container_env(container).get(CONTROL_SECRET_ENV) or None
+
+
+def _recreate_reason(
+    container: Any,
+    secret: str | None,
+    source: MutableMapping[str, str],
+) -> str | None:
+    """Why the existing sidecar cannot be reused, or ``None`` to reuse it."""
+    if container.status != "running":
+        return f"container is {container.status}"
+    if secret is None:
+        # Unusable for publish's push grant, which needs the control secret.
+        return "control secret not recoverable"
+    drifted = _config_drift(container, source)
+    if drifted:
+        return "config changed: " + ", ".join(drifted)
     return None
+
+
+def _config_drift(container: Any, source: MutableMapping[str, str]) -> list[str]:
+    """Return the config keys on which the running sidecar is out of date (#533).
+
+    The sidecar's guard reads the allowlists and push token from its env once,
+    at startup, and ``restart_policy=unless-stopped`` keeps it alive across
+    both a server and a Docker daemon restart -- so without this check,
+    changing ``SUNABA_ALLOWED_REPOS`` on the host appeared to do nothing and
+    ``publish`` kept failing closed against the old allowlist.
+
+    Comparing the *inspected* env against the current one needs no bookkeeping
+    on the container (no config-hash label), and so also works for sidecars
+    left behind by versions that predate this check.
+    """
+    baked = _container_env(container)
+    drifted = [
+        key for key in _SIDECAR_CONFIG_ENV_KEYS if baked.get(key, "") != (source.get(key) or "")
+    ]
+    # The published port is baked in the same way -- :func:`_published_control_port`
+    # lets the container's binding win precisely because it cannot be changed in
+    # place -- so a port change belongs on the same recreation path.
+    if _published_control_port(container, source) != _control_host_port(source):
+        drifted.append(CONTROL_HOST_PORT_ENV)
+    return drifted
 
 
 def _wait_for_ca(

@@ -39,16 +39,30 @@ def _fresh_client() -> tuple[MagicMock, MagicMock, MagicMock]:
     return client, network, proxy_container
 
 
-def _running_sidecar(secret: str | None) -> MagicMock:
-    """Mock of an already-running sidecar container."""
+def _running_sidecar(
+    secret: str | None,
+    *,
+    host_port: str = "8768",
+    baked: dict[str, str] | None = None,
+) -> MagicMock:
+    """Mock of an already-running sidecar container.
+
+    *baked* is the config (allowlists / push token) it was created with, as
+    ``ensure_egress_proxy`` reads it back out of ``docker inspect``.  The
+    defaults -- no config, the default published port -- match an
+    ``ensure_egress_proxy(env={})`` call, so tests that are not about config
+    drift (#533) see a clean reuse.
+    """
     container = MagicMock()
     container.status = "running"
     container.id = "a" * 64
-    env = [f"{CONTROL_SECRET_ENV}={secret}"] if secret else []
+    env = dict(baked or {})
+    if secret:
+        env[CONTROL_SECRET_ENV] = secret
     container.attrs = {
-        "Config": {"Env": env},
+        "Config": {"Env": [f"{k}={v}" for k, v in env.items()]},
         "HostConfig": {
-            "PortBindings": {"9099/tcp": [{"HostIp": "127.0.0.1", "HostPort": "9999"}]}
+            "PortBindings": {"9099/tcp": [{"HostIp": "127.0.0.1", "HostPort": host_port}]}
         },
     }
     container.exec_run.return_value = (0, CA_PEM)
@@ -251,8 +265,20 @@ class TestEnsureEgressProxyReuse:
         runtime = pl.ensure_egress_proxy(client, env=env)
         client.containers.run.assert_not_called()
         assert env[CONTROL_SECRET_ENV] == "known-secret"
-        # Published port recovered from the surviving container, not the env.
-        assert runtime.control_url == "http://127.0.0.1:9999"
+        assert runtime.control_url == "http://127.0.0.1:8768"
+
+    def test_reused_sidecar_control_url_comes_from_its_own_binding(self) -> None:
+        # The published port is read back from the container rather than
+        # re-derived from the env, so a sidecar surviving a server restart
+        # stays reachable at the port it actually listens on.
+        client, _, _ = _fresh_client()
+        existing = _running_sidecar(secret="known-secret", host_port="9001")
+        client.containers.get.side_effect = None
+        client.containers.get.return_value = existing
+
+        runtime = pl.ensure_egress_proxy(client, env={pl.CONTROL_HOST_PORT_ENV: "9001"})
+        client.containers.run.assert_not_called()
+        assert runtime.control_url == "http://127.0.0.1:9001"
 
     def test_replaces_exited_sidecar(self) -> None:
         client, _, _ = _fresh_client()
@@ -274,6 +300,91 @@ class TestEnsureEgressProxyReuse:
         pl.ensure_egress_proxy(client, env={})
         existing.remove.assert_called_once_with(force=True)
         client.containers.run.assert_called_once()
+
+
+class TestSidecarConfigDrift:
+    """#533: a sidecar baked with a now-stale config is recreated, not reused.
+
+    The guard reads its allowlists once, at sidecar startup, so reusing a
+    sidecar whose env no longer matches the host's silently keeps enforcing
+    the old config -- and ``unless-stopped`` means it outlives both a server
+    and a daemon restart, leaving no reflection path short of removing the
+    container by hand.
+    """
+
+    _BAKED = {
+        ALLOWED_REPOS_ENV: "owner/old",
+        ALLOWED_EGRESS_HOSTS_ENV: "old.example.com",
+        PROXY_TOKEN_ENV: "old-token",
+    }
+
+    def _with_existing(self, **kwargs: object) -> tuple[MagicMock, MagicMock, MagicMock]:
+        client, network, fresh = _fresh_client()
+        existing = _running_sidecar(secret="known-secret", **kwargs)  # type: ignore[arg-type]
+        client.containers.get.side_effect = None
+        client.containers.get.return_value = existing
+        return client, existing, fresh
+
+    def test_unchanged_config_reuses_sidecar(self) -> None:
+        client, existing, _ = self._with_existing(baked=dict(self._BAKED))
+        pl.ensure_egress_proxy(client, env=dict(self._BAKED))
+        existing.remove.assert_not_called()
+        client.containers.run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("key", "new_value"),
+        [
+            (ALLOWED_REPOS_ENV, "owner/old,owner/new"),
+            (ALLOWED_EGRESS_HOSTS_ENV, "old.example.com,proxy.golang.org"),
+            (PROXY_TOKEN_ENV, "rotated-token"),
+        ],
+    )
+    def test_changed_config_recreates_sidecar(self, key: str, new_value: str) -> None:
+        client, existing, fresh = self._with_existing(baked=dict(self._BAKED))
+        env = dict(self._BAKED) | {key: new_value}
+
+        pl.ensure_egress_proxy(client, env=env)
+
+        existing.remove.assert_called_once_with(force=True)
+        proxy_env = client.containers.run.call_args.kwargs["environment"]
+        assert proxy_env[key] == new_value
+
+    def test_cleared_config_recreates_sidecar(self) -> None:
+        # Removing a repo from the allowlist must take effect too -- otherwise
+        # the sidecar keeps authorizing pushes the operator just revoked.
+        client, existing, _ = self._with_existing(baked={ALLOWED_REPOS_ENV: "owner/old"})
+
+        pl.ensure_egress_proxy(client, env={})
+
+        existing.remove.assert_called_once_with(force=True)
+        proxy_env = client.containers.run.call_args.kwargs["environment"]
+        assert ALLOWED_REPOS_ENV not in proxy_env
+
+    def test_changed_control_port_recreates_sidecar(self) -> None:
+        # The published port is baked in the same way and cannot be rebound in
+        # place, so it belongs on the same recreation path.
+        client, existing, _ = self._with_existing(host_port="8768")
+
+        pl.ensure_egress_proxy(client, env={pl.CONTROL_HOST_PORT_ENV: "8750"})
+
+        existing.remove.assert_called_once_with(force=True)
+        assert client.containers.run.call_args.kwargs["ports"] == {
+            "9099/tcp": ("127.0.0.1", 8750)
+        }
+
+    def test_control_secret_is_recovered_not_compared(self) -> None:
+        # The secret is the one piece of sidecar env we adopt *from* the
+        # container rather than impose on it, so a differing value in this
+        # process's env is not drift -- recreating on it would throw away a
+        # perfectly good sidecar on every server restart that minted a new one.
+        client, existing, _ = self._with_existing()
+
+        env = {CONTROL_SECRET_ENV: "a-different-secret"}
+        pl.ensure_egress_proxy(client, env=env)
+
+        existing.remove.assert_not_called()
+        client.containers.run.assert_not_called()
+        assert env[CONTROL_SECRET_ENV] == "known-secret"
 
 
 class TestWaitForCA:

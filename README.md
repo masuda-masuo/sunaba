@@ -551,6 +551,8 @@ SUNABA_ALLOWED_EGRESS_HOSTS="mirror.internal, .example.com"
 - An entry beginning with `.` matches that domain and its subdomains (`.example.com` → both `example.com` and `a.example.com`).
 - The single value `*` disables destination-host containment entirely (any host passes), restoring the pre-containment passthrough behaviour for operators who need it.
 
+**Applying a change** — the proxy runs as a long-lived sidecar container (`sunaba-egress-proxy`) that reads these variables once, at its own startup. You do not need to restart or remove it by hand: the next `sandbox_initialize`, `clone_repo`, or `publish` compares the sidecar's baked-in configuration against the current environment and recreates it when they differ ([#533](https://github.com/masuda-masuo/sunaba/issues/533)). Recreation does not disturb running sandboxes — the proxy CA is persisted in a named volume and stays the same ([#400](https://github.com/masuda-masuo/sunaba/issues/400)).
+
 ## Observability
 
 The server maintains an append-only execution journal at `~/.sunaba/journal.log`. Every container lifecycle event (initialize, exec, stop) and boundary-crossing operation is recorded with timestamps and run IDs.

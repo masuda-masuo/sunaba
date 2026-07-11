@@ -1,8 +1,12 @@
 """Local web dashboard for observability (§9).
 
-Serves a read-mostly, auto-refreshing HTML dashboard on localhost
-that shows running containers, run history, pass/fail counts,
-resource usage.
+Serves an auto-refreshing HTML dashboard on localhost that shows running
+containers, run history, pass/fail counts, resource usage.
+
+``/`` and ``/trace/*`` are read-only observation.  ``/containers`` is a
+control plane: it can stop a container (Issue #528).  That one POST is why
+this module carries a CSRF token and a Host allowlist -- see
+:func:`_check_control_request`.
 
 Uses Python's built-in ``http.server`` — no external dependencies.
 """
@@ -10,8 +14,9 @@ from __future__ import annotations
 
 import html as _html
 import json
+import secrets
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -23,7 +28,19 @@ from sunaba.journal import (
     get_tool_usage,
     read_journal,
 )
-from sunaba.tools.container import list_managed_containers
+from sunaba.security import KIND_PROXY, KIND_SANDBOX
+from sunaba.tools.container import list_managed_containers, sandbox_stop
+
+#: Per-process CSRF token, embedded in every Stop form and required on POST.
+#: The same-origin policy keeps a hostile page from reading it out of the
+#: dashboard, which is what makes it a defence rather than decoration.
+_CSRF_TOKEN: str = secrets.token_urlsafe(32)
+
+#: Hosts the control plane will accept a POST for.  A page on the open web can
+#: resolve its own domain to 127.0.0.1 (DNS rebinding) and then talk to this
+#: server as same-origin; pinning the Host header shuts that door, since the
+#: rebound request still carries the attacker's hostname.
+_ALLOWED_CONTROL_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "[::1]"})
 
 # ---------------------------------------------------------------------------
 # HTML template pages
@@ -69,6 +86,8 @@ th.sortable:hover { color: #58a6ff; }
 .stale { color: #ffa657; font-weight: 600; }
 button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 button:hover { opacity: 0.8; }
+button.danger { background: #21262d; border-color: #6e2c35; color: #f97583; padding: 3px 10px; font-size: 11px; }
+button.danger:hover { background: #381620; opacity: 1; }
 .empty { color: #484f58; font-style: italic; padding: 12px 0; }
 .bar-wrap { display: flex; align-items: center; gap: 6px; margin: 1px 0; font-size: 11px; }
 .bar-label { width: 90px; text-align: right; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -190,6 +209,7 @@ _CONTAINERS_HTML: str = """<!DOCTYPE html>
   <th>Started (UTC)</th>
   <th>Idle</th>
   <th>Run</th>
+  <th></th>
 </tr>
 </thead>
 <tbody>
@@ -209,7 +229,47 @@ _CONTAINER_ROW: str = """<tr>
   <td>{created}</td>
   <td class="{idle_cls}">{idle}</td>
   <td>{run}</td>
+  <td>
+    <form method="post" action="/containers/stop">
+      <input type="hidden" name="csrf" value="{csrf}">
+      <input type="hidden" name="container_id" value="{cid}">
+      <button type="submit" class="danger">Stop</button>
+    </form>
+  </td>
 </tr>"""
+
+#: Shown only when there is something to say.  A container with nothing
+#: unpushed is stopped on the first click: an "are you sure?" with no content
+#: is ceremony, and ceremony is what teaches people to click through warnings
+#: (Issue #528).
+_STOP_CONFIRM_HTML: str = """<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Sandbox MCP — Stop {cid}?</title>
+{style}
+</head>
+<body>
+<h1>Stop container?</h1>
+<div class="subtitle">{cid}</div>
+{nav}
+
+<div class="card" style="max-width:640px">
+  <h2><span class="badge boundary">warning</span> Unpushed work</h2>
+  <div class="meta" style="margin-bottom:16px">{warning}</div>
+  <div style="display:flex; gap:12px; align-items:center">
+    <form method="post" action="/containers/stop">
+      <input type="hidden" name="csrf" value="{csrf}">
+      <input type="hidden" name="container_id" value="{cid}">
+      <input type="hidden" name="force" value="true">
+      <button type="submit" class="danger">Stop anyway</button>
+    </form>
+    <a href="/containers" style="color:#58a6ff; font-size:12px">Cancel</a>
+  </div>
+</div>
+</body>
+</html>"""
 
 _TRACE_HTML: str = """<!DOCTYPE html>
 <html lang="ja">
@@ -527,6 +587,7 @@ def _render_container_row(
         idle=_fmt_duration(idle_seconds),
         idle_cls=idle_cls,
         run=run_cell,
+        csrf=_escape(_CSRF_TOKEN),
     )
 
 
@@ -555,8 +616,58 @@ def _render_sidecars(sidecars: list[dict[str, Any]]) -> str:
     )
 
 
-def _render_containers_page() -> str:
-    """Render the ``/containers`` page from Docker's own view of the world."""
+def _host_allowed(hostname: str) -> bool:
+    """Whether a control-plane POST claiming *hostname* may be trusted.
+
+    The Host pin exists to defeat DNS rebinding, which is only a threat while
+    the dashboard sits on an address the open web cannot route to.  An operator
+    who passed ``--dashboard-host`` a non-loopback address has deliberately
+    published it and may reach it under any hostname, so pinning there would
+    only break their Stop button; the CSRF token still guards them.
+    """
+    if _dashboard_host not in _ALLOWED_CONTROL_HOSTS:
+        return True
+    return hostname in _ALLOWED_CONTROL_HOSTS
+
+
+def _strip_error_prefix(message: str) -> str:
+    """Drop the ``Error:`` prefix the tool layer adds for its LLM caller.
+
+    The page says "error" in a badge next to it, so the word is redundant here.
+    """
+    return message.removeprefix("Error: ")
+
+
+def _render_stop_confirm(container_id: str, warning: str) -> str:
+    """Render the confirmation for a container with unpushed work (Issue #528).
+
+    The warning is ``sandbox_stop``'s own, passed through rather than replaced
+    by a generic prompt: what makes a confirmation worth reading is that it
+    tells you something you did not already know.
+    """
+    # "Use force=True to override" is the tool telling an LLM about its own
+    # parameter; on this page the override is the button underneath.  The part
+    # that matters -- how much unpushed work is at stake -- is kept verbatim.
+    detail = _strip_error_prefix(warning).replace(
+        "Use force=True to override.", ""
+    ).strip()
+    return _STOP_CONFIRM_HTML.format(
+        style=_STYLE,
+        nav=_render_nav("containers"),
+        cid=_escape(container_id),
+        warning=_escape(detail),
+        csrf=_escape(_CSRF_TOKEN),
+    )
+
+
+def _render_containers_page(failed_stop: str | None = None) -> str:
+    """Render the ``/containers`` page from Docker's own view of the world.
+
+    *failed_stop* is a stop that could not be carried out.  Both it and a
+    Docker-level listing failure are errors, which is why they share one banner
+    and both have their ``Error:`` prefix stripped -- the banner is never used
+    for anything that isn't a failure.
+    """
     containers, error = list_managed_containers()
     run_ids = get_run_id_per_container()
     envs = {
@@ -564,8 +675,8 @@ def _render_containers_page() -> str:
         for env in get_active_environments()
     }
 
-    sandboxes = [c for c in containers if c.get("kind") != "proxy"]
-    sidecars = [c for c in containers if c.get("kind") == "proxy"]
+    sandboxes = [c for c in containers if c.get("kind") != KIND_PROXY]
+    sidecars = [c for c in containers if c.get("kind") == KIND_PROXY]
 
     # Most idle first: the containers someone forgot to stop are the whole
     # reason this page exists, so they sort to the top.
@@ -573,13 +684,15 @@ def _render_containers_page() -> str:
 
     rows = "\n".join(_render_container_row(c, run_ids, envs) for c in sandboxes)
     if not rows:
-        rows = '<tr><td colspan="7" class="empty">No managed containers</td></tr>'
+        rows = '<tr><td colspan="8" class="empty">No managed containers</td></tr>'
 
+    banner = error if error is not None else failed_stop
     error_html = ""
-    if error is not None:
+    if banner is not None:
         error_html = (
             f'<div class="card" style="margin-bottom:16px">'
-            f'<span class="badge err">docker</span> {_escape(error)}'
+            f'<span class="badge err">error</span> '
+            f'{_escape(_strip_error_prefix(banner))}'
             f'</div>'
         )
 
@@ -632,6 +745,86 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._serve_trace(path)
         else:
             self.send_error(404)
+
+    def do_POST(self) -> None:
+        path = self.path.split("?")[0]
+        if path != "/containers/stop":
+            self.send_error(404)
+            return
+
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        fields = parse_qs(body)
+
+        denied = self._check_control_request(fields)
+        if denied is not None:
+            self.send_error(403, denied)
+            return
+
+        container_id = (fields.get("container_id") or [""])[0]
+        if not container_id:
+            self.send_error(400, "container_id required")
+            return
+
+        force = (fields.get("force") or [""])[0] == "true"
+        self._stop_container(container_id, force=force)
+
+    def _check_control_request(self, fields: dict[str, list[str]]) -> str | None:
+        """Return a refusal reason for an untrusted POST, or ``None`` to allow.
+
+        Two gates, both cheap:
+
+        * **Host** — the bind address is 127.0.0.1, but a page on the open web
+          can point its own domain at 127.0.0.1 (DNS rebinding) and reach us as
+          same-origin.  Such a request still carries the attacker's hostname in
+          ``Host``, so pinning it to loopback names shuts that door.
+        * **CSRF token** — same-origin policy stops a hostile page from reading
+          the token out of the dashboard, so requiring it on POST means only
+          the real page can drive the control plane.
+        """
+        host = self.headers.get("Host", "")
+        hostname = (
+            host.split("]")[0] + "]" if host.startswith("[") else host.split(":")[0]
+        )
+        if not _host_allowed(hostname):
+            return "control plane is loopback-only"
+
+        token = (fields.get("csrf") or [""])[0]
+        if not secrets.compare_digest(token, _CSRF_TOKEN):
+            return "CSRF token mismatch"
+        return None
+
+    def _stop_container(self, container_id: str, *, force: bool) -> None:
+        # Allowlist, not denylist: this endpoint may stop a container only
+        # while Docker still lists it as a sandbox.  The list is a snapshot and
+        # the world can move under it, so the question is which way the race
+        # should fail -- and "refuse a stop the user can retry" beats "kill the
+        # egress proxy every sandbox is sharing" (which restart_policy would
+        # bring back anyway, having cut every live container's network on the
+        # way).  A denylist fails the other way for any id the snapshot missed.
+        containers, _ = list_managed_containers()
+        kinds = {c.get("container_id"): c.get("kind") for c in containers}
+        if kinds.get(container_id) != KIND_SANDBOX:
+            self.send_error(400, f"{container_id} is not a listed sandbox container")
+            return
+
+        result = sandbox_stop(container_id, force=force)
+
+        if result.startswith("Error:") and "unpushed checkpoint" in result:
+            self._send_html(_render_stop_confirm(container_id, result))
+            return
+        if result.startswith("Error:"):
+            self._send_html(_render_containers_page(failed_stop=result), code=500)
+            return
+
+        # POST/redirect/GET: a browser refresh must not re-fire the stop.
+        self._send_redirect("/containers")
+
+    def _send_redirect(self, location: str) -> None:
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _serve_api_tool_usage(self) -> None:
         qs = ""
@@ -831,7 +1024,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 
-_dashboard_server: HTTPServer | None = None
+_dashboard_server: ThreadingHTTPServer | None = None
 _dashboard_thread: threading.Thread | None = None
 _dashboard_host: str = "127.0.0.1"
 _dashboard_port: int = 8751
@@ -843,6 +1036,12 @@ def start_dashboard(host: str = "127.0.0.1", port: int = 8751) -> str:
     When *port* is 0, the OS assigns a free ephemeral port.
     Use :func:`get_dashboard_url` to retrieve the actual bound address.
 
+    Threading (Issue #528): stopping a container takes a Docker round trip, and
+    on a single-threaded server that request would stall every page load behind
+    it -- including the ``/containers`` page the user is watching for the
+    result.  ``ThreadingHTTPServer`` uses daemon threads, so shutdown behaviour
+    is unchanged.
+
     Returns a status message.
     """
     global _dashboard_server, _dashboard_thread, _dashboard_host, _dashboard_port
@@ -851,7 +1050,7 @@ def start_dashboard(host: str = "127.0.0.1", port: int = 8751) -> str:
         return f"Dashboard already running on http://{_dashboard_host}:{_dashboard_port}"
 
     _dashboard_host = host
-    _dashboard_server = HTTPServer((host, port), _DashboardHandler)
+    _dashboard_server = ThreadingHTTPServer((host, port), _DashboardHandler)
     _dashboard_port = _dashboard_server.server_address[1]
     _dashboard_thread = threading.Thread(
         target=_dashboard_server.serve_forever,

@@ -16,7 +16,7 @@ from sunaba.proxy import (
     PROXY_TOKEN_ENV,
 )
 from sunaba.proxy_client import CONTROL_URL_ENV
-from sunaba.security import MANAGED_LABEL
+from sunaba.security import KIND_LABEL, KIND_PROXY, MANAGED_LABEL
 
 CA_PEM = b"-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
 
@@ -130,7 +130,9 @@ class TestEnsureEgressProxyFresh:
         assert proxy_env[CONTROL_HOST_ENV] == "0.0.0.0"
         assert proxy_env[CONTROL_SECRET_ENV]  # generated, non-empty
         assert run_kwargs["ports"] == {"9099/tcp": ("127.0.0.1", 8768)}
-        assert run_kwargs["labels"] == {MANAGED_LABEL: "true"}
+        # kind=proxy so the sidecar is distinguishable from a sandbox in
+        # sandbox_list_containers (Issue #527) -- both carry MANAGED_LABEL.
+        assert run_kwargs["labels"] == {MANAGED_LABEL: "true", KIND_LABEL: KIND_PROXY}
         network.connect.assert_called_once_with(container, aliases=[pl.PROXY_NETWORK_ALIAS])
 
         assert runtime.network_name == pl.EGRESS_NETWORK_NAME

@@ -34,6 +34,29 @@ CREATED_AT_LABEL: str = "com.sunaba.created_at"
 #: ``CREATED_AT_LABEL`` so it survives server restarts.
 NAME_LABEL: str = "com.sunaba.name"
 
+#: Docker label recording whether the container was created with
+#: ``allow_network=True`` (Issue #527).  Stamped by
+#: :func:`build_secure_run_kwargs` from ``profile.allow_network`` -- the very
+#: value that decides ``network_mode`` -- so the label cannot drift from the
+#: container's actual posture, and reading it back needs no journal join.
+#: Containers created before this label existed carry no value, which reads
+#: back as ``None`` (unknown) rather than a guess.
+NETWORK_LABEL: str = "com.sunaba.network"
+
+#: Docker label carrying the container's kind (Issue #527).  The egress-proxy
+#: sidecar and the sandboxes both carry ``MANAGED_LABEL``, so without a kind
+#: the sidecar shows up in ``sandbox_list_containers`` as just another
+#: container -- nameless, with no creation time.  Sandboxes are stamped by
+#: :func:`build_secure_run_kwargs`; the sidecar (which bypasses it) is stamped
+#: at its own ``containers.run`` in ``proxy_lifecycle``.
+KIND_LABEL: str = "com.sunaba.kind"
+
+#: Value of :data:`KIND_LABEL` for sandbox containers.
+KIND_SANDBOX: str = "sandbox"
+
+#: Value of :data:`KIND_LABEL` for the egress-proxy sidecar.
+KIND_PROXY: str = "proxy"
+
 #: Dangerous socket paths that must not be mounted into containers.
 #: Mounting the Docker socket grants equivalent root access to the host
 #: Docker daemon, allowing container escape and host compromise.
@@ -378,8 +401,15 @@ def build_secure_run_kwargs(
     # 7. Management label (Issue #298): stamp every container we create so
     # cleanup tooling can safely identify our own containers.  Caller-supplied
     # labels (e.g. created_at from sandbox_initialize) are preserved.
+    #
+    # The kind and network labels (Issue #527) are stamped here rather than at
+    # the call sites because both sandbox-creating paths (sandbox_initialize
+    # and run_container_and_exec) funnel through this function, and
+    # profile.allow_network is decided just above in step 6.
     labels = dict(result.get("labels") or {})
     labels[MANAGED_LABEL] = "true"
+    labels[KIND_LABEL] = KIND_SANDBOX
+    labels[NETWORK_LABEL] = "true" if profile.allow_network else "false"
     result["labels"] = labels
 
     return result

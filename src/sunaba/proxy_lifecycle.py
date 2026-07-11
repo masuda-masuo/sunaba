@@ -56,7 +56,7 @@ from sunaba.proxy_client import (
     ProxyControlConfig,
     fetch_proxy_fingerprint,
 )
-from sunaba.security import MANAGED_LABEL
+from sunaba.security import KIND_LABEL, KIND_PROXY, MANAGED_LABEL
 
 logger = logging.getLogger(__name__)
 
@@ -488,7 +488,7 @@ def _start_proxy_container(
         detach=True,
         name=PROXY_CONTAINER_NAME,
         environment=proxy_env,
-        labels={MANAGED_LABEL: "true"},
+        labels={MANAGED_LABEL: "true", KIND_LABEL: KIND_PROXY},
         volumes={CERTS_VOLUME_NAME: {"bind": _CERTS_DIR_IN_PROXY, "mode": "rw"}},
         ports={f"{_CONTROL_PORT}/tcp": ("127.0.0.1", _control_host_port(source))},
         # unless-stopped (not always): it still auto-starts after a daemon

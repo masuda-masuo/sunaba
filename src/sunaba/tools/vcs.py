@@ -1030,24 +1030,28 @@ def _create_pr_via_api(
     return url
 
 
-def _ensure_proxy_env_fresh(client: Any) -> str | None:
-    """Recover the egress-proxy control env vars if a server restart lost them (#428).
+def _ensure_proxy_ready(client: Any) -> str | None:
+    """Reconcile the egress-proxy sidecar before a grant is opened against it.
 
-    ``ensure_egress_proxy`` exports ``SUNABA_PROXY_CONTROL_URL/SECRET``
-    into this process's environment, but only ``sandbox_initialize`` calls
-    it today. A restart of the MCP server process wipes those *dynamic* env
-    vars while the sidecar -- and a pre-existing container's proxied network
-    -- keep running, so ``publish``/``clone_repo`` operating on such a
-    container would otherwise see ``proxy_configured()`` as ``False`` and
-    silently skip opening an authorization grant, even though the sidecar
-    still enforces one. Re-running ``ensure_egress_proxy`` is idempotent and
-    recovers the running sidecar's secret via ``docker inspect`` (no
-    recreation) whenever the sidecar is already up.
+    ``ensure_egress_proxy`` is idempotent and cheap on the happy path (a
+    ``docker inspect`` of the running sidecar), so ``publish``/``clone_repo``
+    simply re-run it rather than inferring the sidecar's state:
 
-    Returns an error string on failure (caller must fail closed), or
-    ``None`` when the env is already fresh or the proxy is off.
+    - It re-exports ``SUNABA_PROXY_CONTROL_URL/SECRET`` into this process,
+      which a server restart wipes even though the sidecar and a pre-existing
+      container's proxied network keep running (#428).  Without this the
+      caller would see ``proxy_configured()`` as ``False`` and silently skip
+      the authorization grant that the sidecar still enforces.
+    - It recreates a sidecar that is gone, exited, or baked with a config the
+      host has since changed (#533).  Keying off the env vars alone -- as this
+      used to -- meant a removed sidecar left ``publish`` reporting
+      ``control API unreachable`` for the rest of the session, since the stale
+      env made the proxy *look* configured.
+
+    Returns an error string on failure (caller must fail closed), or ``None``
+    when the sidecar is ready or the proxy is off.
     """
-    if not proxy_lifecycle.egress_proxy_enabled() or proxy_configured():
+    if not proxy_lifecycle.egress_proxy_enabled():
         return None
     try:
         proxy_lifecycle.ensure_egress_proxy(client)
@@ -1189,7 +1193,7 @@ Returns:
     # Recover the proxy control env before touching the container's git
     # state (#428): a stale/missing control env would make the push fail
     # closed, so surface it up front rather than mid-operation.
-    proxy_err = _ensure_proxy_env_fresh(client)
+    proxy_err = _ensure_proxy_ready(client)
     if proxy_err:
         return json.dumps({"status": "error", "step": "egress_proxy", "error": proxy_err})
 
@@ -1602,7 +1606,7 @@ def clone_repo(
     # Recover the proxy control env vars before anything else touches the
     # container, so a lost-env failure (#428) is reported without a wasted
     # exec and fails closed as early as possible.
-    proxy_err = _ensure_proxy_env_fresh(client)
+    proxy_err = _ensure_proxy_ready(client)
     if proxy_err:
         return json.dumps({"status": "error", "error": proxy_err})
 

@@ -159,6 +159,45 @@ class TestPublish:
         assert "sidecar unreachable" in result["error"]
         container.exec_run.assert_not_called()
 
+    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    def test_reconciles_sidecar_even_when_proxy_env_is_present(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_ensure_proxy: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#533: proxy env in this process is not proof the sidecar is usable.
+
+        ``publish`` used to skip ``ensure_egress_proxy`` whenever the control
+        URL/secret were already exported, so a sidecar that had been removed --
+        or baked with an allowlist the operator has since changed -- was never
+        reconciled: the grant then failed against a sidecar that was gone or
+        stale, for the rest of the session.
+        """
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "true")
+        monkeypatch.setenv(CONTROL_URL_ENV, "http://127.0.0.1:8768")
+        monkeypatch.setenv(CONTROL_SECRET_ENV, "stale-secret")
+
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        with patch("sunaba.tools.vcs.authorized_push_grant") as mock_grant:
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix issue",
+                working_dir="/root/repo",
+            ))
+
+        assert result["status"] == "pushed"
+        mock_ensure_proxy.assert_called_once_with(client)
+        mock_grant.assert_called_once()
+
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_successful_push_with_pr(

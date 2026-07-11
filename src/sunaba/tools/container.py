@@ -471,6 +471,15 @@ def _clone_shiori_repo_to_container(
         clone_dest,
     )
 
+    # put_archive does not create the destination directory, and on this
+    # copy path nothing else does (the network path relies on git clone to
+    # create it) -- a fresh container has no clone_dest yet (#532).
+    mkdir_exit, _ = container.exec_run(["mkdir", "-p", clone_dest])
+    if mkdir_exit != 0:
+        raise RuntimeError(
+            f"Failed to create {clone_dest} in container {container_id[:12]}"
+        )
+
     # -- Copy via put_archive (same mechanism as copy_project) --
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar")
 

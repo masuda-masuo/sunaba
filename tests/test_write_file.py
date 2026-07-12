@@ -1107,3 +1107,134 @@ class TestPosixpathFix:
         assert parent_dir == "/tmp/repo/src", (
             f"put_archive parent_dir should be forward-slash path, got: {parent_dir!r}"
         )
+
+
+class TestTrailingNewlinePreservation:
+    """The file's trailing newline survives partial edits (#570).
+
+    Every other line-range test in this file happens to pass
+    ``file_contents`` that already ends in ``\n``, which is exactly what a
+    real caller does *not* do: asked to replace line 3 with ``CCC`` you
+    write ``"CCC"``.  The final newline is a property of the file, not of
+    the snippet, so it must be restored from the existing content.
+    """
+
+    def _mock_container_with_file(
+        self, mock_docker: MagicMock, content: str,
+    ) -> MagicMock:
+        content_bytes = content.encode("utf-8") if content else b""
+        mock_container = MagicMock()
+        mock_container.exec_run.side_effect = _exec_run_for(content_bytes)
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        return mock_container
+
+    @patch("sunaba.tools.file._docker")
+    def test_last_line_replacement_keeps_trailing_newline(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        mock_container = self._mock_container_with_file(
+            mock_docker, "aaa\nbbb\nccc\n",
+        )
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="t.txt",
+            file_contents="CCC",
+            dest_dir="/root",
+            start_line=3,
+            end_line=3,
+        )
+        assert "Error" not in result
+        assert _get_written_content(mock_container) == "aaa\nbbb\nCCC\n"
+
+    @patch("sunaba.tools.file._docker")
+    def test_middle_line_replacement_keeps_trailing_newline(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        mock_container = self._mock_container_with_file(
+            mock_docker, "aaa\nbbb\nccc\n",
+        )
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="t.txt",
+            file_contents="BBB",
+            dest_dir="/root",
+            start_line=2,
+            end_line=2,
+        )
+        assert "Error" not in result
+        assert _get_written_content(mock_container) == "aaa\nBBB\nccc\n"
+
+    @patch("sunaba.tools.file._docker")
+    def test_file_without_trailing_newline_stays_without(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        mock_container = self._mock_container_with_file(
+            mock_docker, "aaa\nbbb\nccc",
+        )
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="t.txt",
+            file_contents="BBB",
+            dest_dir="/root",
+            start_line=2,
+            end_line=2,
+        )
+        assert "Error" not in result
+        assert _get_written_content(mock_container) == "aaa\nBBB\nccc"
+
+    @patch("sunaba.tools.file._docker")
+    def test_snippet_newline_can_add_a_missing_final_newline(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """An explicit trailing "\n" in the snippet still forces one."""
+        mock_container = self._mock_container_with_file(
+            mock_docker, "aaa\nbbb\nccc",
+        )
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="t.txt",
+            file_contents="CCC\n",
+            dest_dir="/root",
+            start_line=3,
+            end_line=3,
+        )
+        assert "Error" not in result
+        assert _get_written_content(mock_container) == "aaa\nbbb\nCCC\n"
+
+    @patch("sunaba.tools.file._docker")
+    def test_append_keeps_trailing_newline(self, mock_docker: MagicMock) -> None:
+        mock_container = self._mock_container_with_file(
+            mock_docker, "aaa\nbbb\n",
+        )
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="t.txt",
+            file_contents="ccc",
+            dest_dir="/root",
+            append=True,
+        )
+        assert "Error" not in result
+        assert _get_written_content(mock_container) == "aaa\nbbb\nccc\n"
+
+    @patch("sunaba.tools.file._docker")
+    def test_append_to_file_without_trailing_newline_stays_without(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        mock_container = self._mock_container_with_file(mock_docker, "aaa\nbbb")
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="t.txt",
+            file_contents="ccc",
+            dest_dir="/root",
+            append=True,
+        )
+        assert "Error" not in result
+        assert _get_written_content(mock_container) == "aaa\nbbb\nccc"

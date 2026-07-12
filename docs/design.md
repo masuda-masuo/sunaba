@@ -176,16 +176,16 @@ Tool-specific fields (such as `gate_passed` in `verify_in_container`) may be inc
 
 ## 7. Transport Options (Timeout Mitigation)
 
-> Problem: Standard `stdio` transport is capped at a ~60-second timeout by many MCP clients. Operations like pulling base images, compiling builds, or copying large repositories can exceed this limit.
+> Problem: Standard `stdio` transport is capped at a ~60-second timeout by many MCP clients. Operations like pulling base images, compiling test runs, or copying repositories can exceed this limit.
 
-We resolve this by using HTTP-based transport options supported by FastMCP:
+We resolve this by using HTTP-based transport options (such as `streamable-http`) under a background systemd user service, which prevents client timeouts during slow operations.
 
-| Transport | Timeout | Characteristics |
+| Transport | Recommended for | Characteristics |
 |---|---|---|
-| `stdio` (default) | ~60s | Simple, supported by all clients. |
-| `sse` (recommended)| None | Server-Sent Events over HTTP. Prevents client timeouts. |
-| `http` | None | Stateless HTTP transport. |
-| `streamable-http` | None | Bidirectional streaming transport. |
+| `streamable-http` (Recommended) | Production / WSL2 | Binds to localhost. Supports bidirectional streaming and prevents client timeouts natively. |
+| `sse` | Alternative daemon | Server-Sent Events over HTTP. |
+| `http` | Alternative daemon | Stateless HTTP transport. |
+| `stdio` | Local Debugging only | Standard I/O. Subject to client-side timeouts during slow setup phases. |
 
 ---
 

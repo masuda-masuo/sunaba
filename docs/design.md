@@ -70,17 +70,12 @@ We avoid generic "confirm dangerous command" interactive prompts. Instead, we en
 *   Arbitrary commands running inside the container are not gated, but they are fully logged in the journal (§8) for auditing.
 
 ### 2.3 Egress Proxy (The Core Guard)
-We enforce network containment at the proxy layer using three orthogonal layers:
+The structural security of the sandbox boundary relies on an Egress Proxy sidecar container that intercepts and gates all outgoing network requests. It enforces:
+1.  **Path Containment**: Direct IP/TCP connection blocking (forcing HTTP proxy traversal).
+2.  **Destination Allowlist (Default-Deny)**: Restricting external domains.
+3.  **Write Allowlist**: Preventing unauthorized Git pushes or VCS writes.
 
-| Layer | Enforcement | Implementation | Configuration |
-|---|---|---|---|
-| **① Path Containment** | Blocks non-HTTP egress (SSH, raw TCP, direct IPs). The container resides on an internal network; the only exit path is the HTTP(S) proxy. | Internal Docker network + sidecar container | Enforced always |
-| **② Destination Default-Deny** | Blocks access to hosts not on the allowlist (e.g. `curl https://attacker.com` returns `403`). | `EgressGuard.decide_host()` in the proxy | `SUNABA_ALLOWED_EGRESS_HOSTS` (adds to built-in defaults; `*` disables containment) |
-| **③ Write Allowlist** | Blocks pushes or write operations to repositories not on the allowlist, even if GitHub is reachable. | Push/Write authorization windows in the proxy | `SUNABA_ALLOWED_REPOS` (comma-separated list of `owner/repo`) |
-
-*   **Default-On / Fail-Closed (#509)**: The egress proxy is **enabled by default** for all sessions initialized with `allow_network=True`. Opting out requires setting `SUNABA_ENABLE_EGRESS_PROXY=false`. If the proxy sidecar fails to initialize, `sandbox_initialize` fails (fail-closed) to prevent silent network leaks.
-*   **Configuration Updates (#533)**: The proxy sidecar reads configurations on startup. `ensure_egress_proxy()` inspects the active sidecar via `docker inspect` and automatically recreates it if configurations change. The CA is persisted in a named volume (#400) to prevent breaking running sandboxes during recreation.
-*   **Limitations**: The destination allowlist (Layer ②) does not block exfiltration through allowed hosts (e.g., writing secrets to an issue description on a permitted repository) or DNS/SNI side channels. It serves as a barrier against arbitrary egress, not a complete information-flow boundary.
+For detailed information on the proxy architecture, CA certificate volume management, error messages, and network isolation configurations, see the dedicated [Security & Network Containment](security.md) documentation.
 
 ---
 
@@ -200,12 +195,11 @@ Because arbitrary commands running inside the container are ephemeral, we do not
 
 ---
 
-## 9. Human Observability
+## 9. Human Observability & Auditing
 
-*   **Append-Only Journal**: Natural language logs are saved to `~/.sunaba/journal.log`. Track events in real-time using `tail -f`. The log automatically rotates to `journal.log.1` when it reaches 100 MB, capping disk usage at ~200 MB.
-*   **Replay Traces**: HTML and JSON execution traces are saved to `~/.sunaba/traces/` (retains up to 100 traces).
-*   **Web Dashboard**: A read-only local dashboard runs at `http://127.0.0.1:8751` to monitor active containers and test history.
-*   **Push Notifications**: real-time alerts are sent via OS notifications (`notify-send`, `osascript`, PowerShell toast) or Webhooks for boundary-crossing operations, consecutive failures, or long-running commands.
+The principal safety net shifts from pre-execution approval to post-hoc auditing. Sunaba provides an append-only journal, replay traces, a local web dashboard, and real-time push alerts to facilitate easy human review.
+
+For complete setup guides, log rotation policies, dashboard CLI flags, and notification triggers, see the dedicated [Observability & Dashboard](observability.md) documentation.
 
 ### 9.1 Logging Matrix (#359)
 Every tool must record its operations in the journal:
@@ -265,14 +259,9 @@ To support persistent connections when running under systemd services, tokens ar
 
 ## 12. Sandbox Docker Images
 
-Image management is decoupled into distinct variants. Language tools are selected dynamically based on project files:
+Sandbox image variants allow language toolchains to be decoupled from a single monolithic parent image. The server dynamically selects the appropriate variant by scanning project markers.
 
-| Image Tag | Layer Pattern | Target Use Case |
-|---|---|---|
-| `sandbox:base` | Base tools only | Generic workspaces; fallback for unknown setups. |
-| `sandbox:python` | Base + Python + Node.js | Python and mixed JS/TS projects. |
-| `sandbox:go` | Base + Go | Go projects. |
-| `sandbox:minimal` | Lightweight Python | Fast-starting minimal sandbox. |
+For details on the image layer hierarchy, pinned digests, and language detection rules, see the dedicated [Sandbox Images](sandbox_image.md) and [Multi-Language Support Design](design_multilang_support.md) documents.
 
 ---
 

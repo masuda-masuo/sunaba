@@ -40,7 +40,7 @@ Create a Python virtual environment and install the package:
 ```bash
 python -m venv ~/.local/share/sunaba-venv
 ~/.local/share/sunaba-venv/bin/pip install \
-    git+https://github.com/masuda-masuo/sunaba@v0.8.0
+    git+https://github.com/masuda-masuo/sunaba@v0.9.0
 ```
 
 ### Phase 2: Setup (Interactive Keyring Registration)

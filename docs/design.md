@@ -187,6 +187,8 @@ We resolve this by using HTTP-based transport options (such as `streamable-http`
 | `http` | Alternative daemon | Stateless HTTP transport. |
 | `stdio` | Local Debugging only | Standard I/O. Subject to client-side timeouts during slow setup phases. |
 
+For detailed instructions on deploying the server on headless GCE instances or VM nodes, simulating DBus sessions, and forwarding remote loopback ports, see the dedicated [Headless VM & CI/CD Deployment Guide](headless_setup.md).
+
 ---
 
 ## 8. Post-Hoc Audit (Safety Net)
@@ -254,6 +256,8 @@ To support persistent connections when running under systemd services, tokens ar
 | **Token Broker** | `token_broker.py` | Requests tokens via a local secure broker binary (#235). |
 
 *   **Resolution Order**: Resolves credentials in the order: **Token Broker → GitHub App → Static PAT**.
+
+For in-depth explanations on key-rotation threads, host-to-proxy credential injection windows, and automatic output token scrubbing, see the dedicated [VCS Authentication & Token Lifecycle](auth_flow.md) document.
 
 ---
 

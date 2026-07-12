@@ -1,4 +1,4 @@
-# Code Sandbox MCP — Design Policy & Feature Roadmap
+# Sunaba — Design Policy & Feature Roadmap
 
 > Position: This is not just an "MCP for managing Docker", but an infrastructure where an AI can safely execute test, verify, and publish workflows using minimal context.
 > The primary focus is not on increasing features, but on suppressing token consumption, preserving reasoning accuracy, and retaining final human audit control.
@@ -90,7 +90,7 @@ We optimize token efficiency across the edit-verify loop using three techniques:
 
 ### 3.2 Returning Diffs Instead of Full Files
 *   **Failure Compression**: Identical errors are grouped and compressed (`compress_failures`).
-*   **Result Cache**: The execution result cache was removed in v1.0 (#457) as it led to cache-freshness bugs under default-deny policies.
+*   **Result Cache**: The execution result cache was removed (#457) as it led to cache-freshness bugs under default-deny policies.
 *   **VCS Push Summary**: Code changes pushed via `publish` are summarized; raw diffs are not sent back to the LLM unless requested.
 
 ### 3.3 Log De-noising
@@ -101,6 +101,50 @@ We optimize token efficiency across the edit-verify loop using three techniques:
 ### 3.4 Auxiliary Mechanisms
 *   **Token Budget Parameters**: `max_output_tokens` truncates outputs to fit budget constraints, appending a pagination token.
 *   **Batch Commands**: Allows executing `[cmd1, cmd2, cmd3]` in a single round-trip.
+
+### 3.5 Tool Descriptions: Map, Contract, Nudge (#550)
+
+Tool descriptions are resident context: they are sent on every request, for
+every tool, whether or not the tool is called.  They had grown to ~34KB because
+each docstring re-taught the whole workflow ("call `verify_in_container` before
+`publish`...") to an agent that had already read the same sentence in the twenty
+tools above it.  The fix is not shorter prose but assigning each layer one job,
+so that no fact is stated twice:
+
+| Layer | Answers | Sent | Cost |
+|---|---|---|---|
+| **Map** — server `instructions` | "How do these tools fit together?" | Once per session | Paid once |
+| **Contract** — tool docstrings | "How do I call *this* tool, and how does it fail?" | Every request | Paid per turn |
+| **Nudge** — `recommended_next_action` | "You are about to do the wrong thing *right now*." | Only on contradiction | Paid on error |
+
+*   **The map is the `instructions` field.** The cross-tool workflow (init →
+    explore → edit → verify → publish, and which dedicated tool replaces which
+    raw shell command) is stated once, at the server level.  Budget: under 2KB
+    UTF-8 — Claude Code truncates tool descriptions at 2KB, and instructions get
+    roughly one screenful of attention.
+*   **Docstrings state the interface contract, not the workflow.** Arguments,
+    side effects, mutually exclusive modes, and failure behavior — the things
+    that are true of the tool in isolation and cannot be derived from the map.
+    A docstring must not restate the workflow, because the map already carries
+    it.  Total description weight drops from ~34KB to ~16KB.
+*   **Nudges fire only on contradiction.** The server knows runtime state the
+    agent cannot see: whether a container still exists, whether the verify gate
+    ever passed for it in this session (`verify_state.py`).  When an action
+    contradicts that state, the result carries an advisory
+    `recommended_next_action` field — a missing container points at
+    `sandbox_initialize`, a `publish` with no recorded verify pass points at
+    `verify_in_container`.  Journal analysis behind #550 showed that
+    unconditional nudges are mostly noise, so they fire only on contradiction,
+    and they never block: the nudge is a hint, and the gate is the gate.
+
+**Constraint worth knowing before editing a docstring:** FastMCP drops
+everything from the `Args:` line onward when it builds the visible tool
+description.  Any contract the model must see has to appear *before* the `Args:`
+block, or it is written for nobody.
+
+The verify-state map is deliberately process-local and in-memory: every consumer
+is advisory, so a record lost on restart degrades to a missing hint, never to a
+false block.
 
 ---
 
@@ -224,7 +268,7 @@ Every tool must record its operations in the journal:
 ---
 
 ## 10. Multi-Service Test Environments
-Multi-service orchestration helper commands were removed in v1.0 (#438) as they were unused. Running `docker compose` inside the container is blocked by our static guardrails because `/var/run/docker.sock` is not mounted. Multi-service integration testing remains out of scope.
+Multi-service orchestration helper commands were removed (#438) as they were unused. Running `docker compose` inside the container is blocked by our static guardrails because `/var/run/docker.sock` is not mounted. Multi-service integration testing remains out of scope.
 
 ---
 

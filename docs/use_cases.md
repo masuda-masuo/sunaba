@@ -94,3 +94,17 @@ While we can check out PR branches using `pr=N`, there is no tool to fetch PR re
 The documentation exposed to the AI client models via MCP tool descriptions and schema contracts is highly mature:
 *   Tool docstrings clearly document execution boundaries, parameters, and intent.
 *   Error responses conform to a unified `{status: "error", error: "..."}` shape, making it easy for the AI model to parse and recover from exceptions.
+
+---
+
+## 6. Recommended Actions (Remaining Tasks)
+
+*Note: Historical P1/P2 recommendations from this document have been resolved in #493–#496. The following are the remaining unresolved actions.*
+
+| Priority | Action Item | Category |
+|---|---|---|
+| **P3** | Investigate implementing `pr_view` (a tool to fetch and display PR review comments) (§3.4). | Feature |
+| **P3** | Document client-specific configurations, host permission reduction procedures, and environment variables (§4.2). | Documentation |
+| — | Wire Go linters (e.g., `golangci-lint`) and `go vet` into `lint_in_container` / `type_check_in_container` (§3.6). | Feature |
+| — | Document the limitation on local-only project round-trips in the `README.md` "Known Limitations" section (§3.2). | Documentation |
+| — | Add a step-by-step setup progression guide (from tokenless to full resident setup) (§4.2). | Documentation |

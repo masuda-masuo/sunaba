@@ -6,6 +6,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 The compatibility policy (what counts as a breaking change) is described in
 [README.md#compatibility-policy](README.md#compatibility-policy).
 
+## [0.9.0] - 2026-07-12
+
+### Added
+
+- Tool results can carry an advisory `recommended_next_action` nudge, emitted
+  only when the state warrants it -- e.g. a call against a container that no
+  longer exists points at `sandbox_initialize` (#550).
+- Dashboard: the container list is backed by Docker labels and split out into
+  its own `/containers` page (#527), with a per-container Stop button (#528).
+- `sandbox_attach` is recorded in the journal, so a session hand-off leaves a
+  trace instead of appearing as two unrelated runs of operations (#554).
+- `publish-pypi.yml`: releases publish `sunaba` to PyPI automatically, via
+  Trusted Publishing (OIDC -- no API token is stored on the GitHub side),
+  triggered by `release: published` (#534).  The workflow merged after v0.8.0
+  was tagged, so 0.8.0 was pushed to PyPI by a manual `workflow_dispatch`;
+  0.9.0 is the first release published by its own tag.
+
+### Changed
+
+- The MCP server now ships an `instructions` block describing the sandbox
+  workflow, and tool docstrings state their interface contract instead of
+  restating that workflow (#550).  Total tool-description weight drops from
+  ~34KB to ~16KB.
+- Image pins moved to `ghcr.io/masuda-masuo/sunaba/*` for both the sandbox
+  variants (#313) and the proxy sidecar (#432).  This closes the loose end
+  0.8.0 left open: the pins still pointed at the pre-rename GHCR package path.
+- The egress-proxy sidecar is recreated when its baked-in config goes stale,
+  instead of being reused with an outdated allowlist (#551).
+- shiori pre-clone resolution is consolidated behind one code path: a flat
+  `owner__repo` layout, an EACCES fallback, conditional unshallow, and a
+  startup sanity check (#532).
+
+### Fixed
+
+- `sandbox_initialize` did not resolve the variant aliases `python` / `go` /
+  `neutral` to their pinned digests (#545).
+- `write_file_sandbox` dropped the file's trailing newline on line-range
+  replacement and on append (#570).
+- The shiori pre-clone copy path: `clone_dest` was not created before
+  `put_archive`, the copied tree stayed root-owned rather than being chowned to
+  the default exec user (#532), and the copy filter stripped `.env` templates
+  (#561).
+- `sandbox_pr_review_write` swallowed the GitHub 422 response body, hiding why
+  a review was rejected (#537).
+- `sunaba.service` listened on a port other than the documented default 8750
+  (#544).
+
+### Internal
+
+- Docs: the README is restructured with detail delegated to sub-docs (#563),
+  the Japanese design docs are translated to English (#565, #566), design.md
+  reflects the egress-proxy default-on posture and a contradicting README claim
+  is removed (#553), and usecases.md is refreshed (#530).
+- Integration tests for the search pipeline (#548).
+
+Upgrading from 0.8.0 needs no migration steps: no state directory, env var, or
+Docker label changes name in this release.
+
 ## [0.8.0] - 2026-07-10
 
 The project is renamed **code-sandbox-mcp -> sunaba** and versioning restarts

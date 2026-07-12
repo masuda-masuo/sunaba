@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from docker.errors import NotFound
 
 from sunaba.journal import record_tool_use
-from sunaba.tools.common import _docker, _parse_numstat
+from sunaba.tools.common import _docker, _parse_numstat, container_not_found_error
 from sunaba.tools.vcs import resolve_git_root
 
 #: Path inside the container for clone/PR metadata (also referenced by
@@ -99,7 +99,7 @@ def diff_in_container(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 

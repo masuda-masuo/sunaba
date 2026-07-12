@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 from docker.errors import NotFound
 
+from sunaba.tools.common import CONTAINER_NOT_FOUND_NEXT_ACTION
 from sunaba.tools.file import (
     transform_file,
 )
@@ -210,7 +211,11 @@ class TestSearchInContainer:
         result = json.loads(
             search_in_container(container_id="abc123", pattern="foo")
         )
-        assert result == {"status": "error", "error": "Container abc123 not found"}
+        assert result == {
+            "status": "error",
+            "error": "Container abc123 not found",
+            "recommended_next_action": CONTAINER_NOT_FOUND_NEXT_ACTION,
+        }
 
     @patch("sunaba.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
@@ -291,7 +296,11 @@ class TestLintInContainer:
         result = json.loads(
             lint_in_container(container_id="abc123", file_path="/tmp/f.py")
         )
-        assert result == {"status": "error", "error": "Container abc123 not found"}
+        assert result == {
+            "status": "error",
+            "error": "Container abc123 not found",
+            "recommended_next_action": CONTAINER_NOT_FOUND_NEXT_ACTION,
+        }
 
     @patch("sunaba.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:
@@ -469,7 +478,11 @@ class TestTypeCheckInContainer:
         result = json.loads(
             type_check_in_container(container_id="abc123", file_path="/tmp/f.py")
         )
-        assert result == {"status": "error", "error": "Container abc123 not found"}
+        assert result == {
+            "status": "error",
+            "error": "Container abc123 not found",
+            "recommended_next_action": CONTAINER_NOT_FOUND_NEXT_ACTION,
+        }
 
     @patch("sunaba.tools.verify._docker")
     def test_docker_error(self, mock_docker: MagicMock) -> None:

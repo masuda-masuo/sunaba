@@ -24,7 +24,7 @@ from sunaba.edit_verify import (
 )
 from sunaba.journal import record_copy, record_tool_use
 from sunaba.output_control import paginate_output, truncate_output
-from sunaba.tools.common import _docker
+from sunaba.tools.common import _docker, container_not_found_error
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -530,7 +530,7 @@ def read_file_range(
     try:
         _ = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -595,7 +595,7 @@ def list_files(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -690,9 +690,7 @@ def transform_file(
     try:
         _ = client.containers.get(container_id)
     except NotFound:
-        return json.dumps(
-            {"status": "error", "error": f"container {container_id[:12]} not found"}
-        )
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 

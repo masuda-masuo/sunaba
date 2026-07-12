@@ -243,6 +243,7 @@ def write_file_sandbox(
     Edit modes are mutually exclusive; with none given the file is
     fully overwritten.  Line-range: start_line[/end_line], 1-indexed
     inclusive.  Append: append=True.  String replace: old_str.
+    Line-range and append keep the file's trailing newline as it was.
 
     old_str contract: multiple matches are rejected with their line
     numbers (add context, retry); an inexact match retries with
@@ -309,6 +310,9 @@ def write_file_sandbox(
         if append:
             sep = "\n" if existing else ""
             content = existing.rstrip("\n") + sep + file_contents
+            # rstrip() would also swallow the file's final newline (#570).
+            if existing.endswith("\n") and not content.endswith("\n"):
+                content += "\n"
         elif old_str is not None:
             # 1. Exact match with uniqueness check
             exact_matches = _find_all_matches(existing, old_str)
@@ -345,7 +349,11 @@ def write_file_sandbox(
             new_lines = file_contents.splitlines()
             content_lines = existing_lines[:start] + new_lines + existing_lines[end:]
             content = "\n".join(content_lines)
-            if file_contents.endswith("\n"):
+            # The trailing newline belongs to the file, not to the replacement
+            # snippet: splitlines() drops it, so restore it from *existing*
+            # (#570).  A snippet that ends in "\n" still forces one, so a file
+            # that lacked the final newline can gain it deliberately.
+            if existing.endswith("\n") or file_contents.endswith("\n"):
                 content += "\n"
 
     try:

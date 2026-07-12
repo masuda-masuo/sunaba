@@ -115,3 +115,31 @@ Every validation layer (lint, type check, test) must return a structured status 
 If language detection returns `go` but the container is running `sandbox:python` (which lacks the Go toolchain), executing Go verification returns `not_available`. The strict validation gate fails with a clear message: `"detected go / this image has no go toolchain; re-initialize with sandbox:go"`.
 
 Auto-detection occurs **on the host side prior to container startup** (via Shiori clones or GitHub API scans) so the correct image is selected at initialization (`sandbox_initialize`). If a mismatch occurs (e.g., custom override is set incorrectly), the loud-failure contract prevents publishing.
+
+---
+
+## 8. Migration & File Alignment
+
+*   **Dockerfile Splitting**: Split `docker/Dockerfile.sandbox` (the legacy monolithic Python-only image) into `Dockerfile.base` and `Dockerfile.python`. 
+    *   Ruff, Pyright, and pytest are moved to the Python backend layer.
+    *   Standard CLI utilities, Python, and the **Node runtime** are placed in the base layer.
+    *   Legacy monolithic files and workflows are removed (#313).
+*   `docker/Dockerfile.sandbox.minimal` remains unchanged and is preserved as `sandbox:minimal`.
+*   **CI Compilation Pipeline**: Base image builds ➔ determines base digest pin ➔ child variant images are compiled targeting the specific base digest ➔ all variants are published using `@sha256` digests. The `build-sandbox-variants.yml` workflow automatically creates PRs to update the `_NEUTRAL_IMAGE`, `_PYTHON_IMAGE`, and `_GO_IMAGE` digest constants inside `src/sunaba/tools/container.py` (#313).
+
+---
+
+## 9. Implementation Sequence
+
+1.  **Image Layer Refactor & Node Integration**: Implement `Dockerfile.base`, `Dockerfile.python`, `Dockerfile.go`, and configure the CI workflows to build them.
+2.  **Edit/Verify Subsystem Refactoring**: Implement the structured status envelope (§4) and language dispatch logic (§3), unifying duplicate execution runner branches.
+3.  **Dedicated Detection Module**: Implement language detection rules (§3) inside a standalone helper module.
+4.  **Language-Specific Semgrep Rules & Health Checks**: Configure Semgrep configuration flags by language and update health checks (§5.6).
+
+---
+
+## 10. Non-Goals (Out of Scope)
+
+*   **Additional Languages (Java, Ruby, Rust, etc.)**: Suspended for v1.0. Support is restricted to Python, JS/TS, and Go. Additional compilers can be introduced in subsequent backend layers.
+*   **On-Demand Runtime Installation**: Installing tools at runtime (e.g. `apt-get` or `npm install`) is rejected due to default-off network postures (§2), verification timeouts, and execution reproducibility constraints. Support for new runtimes must be handled using variant Docker images.
+*   **Persistent Snapshots & Custom Networking**: Deferred in alignment with core design policies.

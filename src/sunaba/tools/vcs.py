@@ -609,17 +609,6 @@ def sandbox_issue_write(
     token ever needs to reach the container, and the call does not depend on
     the container having network access at all.
 
-    .. rubric:: Use when
-
-    - Creating a new GitHub issue from inside a sandbox session
-    - Adding a comment to an existing issue or PR (the issue-comment API
-      covers both)
-
-    .. rubric:: Don't use when
-
-    - **Reading an issue** -- use :func:`issue_view` instead (it is read-only)
-    - **Pushing code or creating a PR** -- use :func:`publish` instead
-
     Args:
         container_id: 12-character container ID prefix.  Used for the
             journal trail, exactly like :func:`publish`; the container's own
@@ -723,18 +712,6 @@ def sandbox_pr_review_write(
     directly from the host process, so no token ever reaches the container.
     Creates a review with optional inline comments and submits it in a single
     API call.
-
-    .. rubric:: Use when
-
-    - Submitting a PR review (approve, request changes, or comment) from
-      inside a sandbox session
-    - Adding inline code review comments alongside the review body
-
-    .. rubric:: Don't use when
-
-    - **Managing review threads** (resolve/unresolve) -- use GitHub MCP
-    - **Commenting on an issue or PR** without a review -- use
-      :func:`sandbox_issue_write` with ``method="comment"`` instead
 
     Args:
         container_id: 12-character container ID prefix.  Used for the
@@ -1099,26 +1076,6 @@ needs to reach the container: the push credential is resolved host-side
 at call time (Issue #347) and — with the egress proxy configured (#356)
 — injected by the proxy into the authorized push only, so the container
 never holds it.  PR creation likewise runs host-side (#360).
-
-.. rubric:: Use when
-
-- **Pushing changes** to a remote branch as the final step of the edit → verify → publish workflow
-- **Creating a PR** from the pushed branch (use ``create_pr=True``)
-- Squashing multiple local checkpoints into a single commit on push
-
-.. rubric:: Don't use when
-
-- **Running verification** — use :func:`verify_in_container` first; ``publish`` does not verify
-- **Local-only save points** — use :func:`checkpoint` instead (no network, no push)
-
-.. rubric:: Prefer over
-
-- Prefer over manual ``git push`` in ``sandbox_exec`` (the push credential helper is pre-configured)
-
-.. rubric:: Fallback
-
-- If ``git push`` fails (token permissions), the GitHub Objects API transport is tried automatically
-- If the API transport also fails, check that a host-side token is available (``GITHUB_TOKEN`` / broker)
 
 Args:
     container_id: 12-character container ID prefix.
@@ -1538,32 +1495,6 @@ def clone_repo(
     network layer -- the container's own env and any ``gh``
     credential-helper state stay untouched.
 
-    .. hint::
-
-       To avoid the two-step "init → clone" workflow, use
-       :func:`sandbox_initialize` with ``clone_repo`` — it starts
-       the container and copies a pre-cloned Shiori repo in one call.
-
-    .. rubric:: Use when
-
-    - You already have a running container and need to clone an additional repository
-    - You need to clone a specific branch (``branch`` parameter)
-
-    .. rubric:: Don't use when
-
-    - **Starting a new container** — use :func:`sandbox_initialize` with ``clone_repo`` instead (one-step init + clone)
-    - **Cloning a PR branch** — use :func:`sandbox_initialize` with ``pr=N`` instead (auto network + token)
-    - **One-shot workflows** — use :func:`run_container_and_exec` with ``clone_repo`` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec`` + ``gh repo clone`` (the proxy read-authorization grant handles private-repo auth, #419)
-    - Prefer over ``clone_repo`` when starting a new container — use ``sandbox_initialize(clone_repo=...)`` instead
-
-    .. rubric:: Fallback
-
-    - If a private clone fails, ensure the egress proxy has a host-resolvable token (broker / ``GITHUB_TOKEN``) for the read-authorization grant (#419)
-
     Args:
         container_id: 12-character container ID prefix.
         repo: Repository in ``"owner/repo"`` format.
@@ -1576,9 +1507,6 @@ def clone_repo(
         JSON string with ``status``, ``repo``, ``clone_path``, and
         ``branch``.  On error returns an ``error`` field.
 
-    See also:
-        :func:`sandbox_initialize` — one-step init + clone with
-        ``clone_repo`` parameter.
     """
     client = _docker()
     try:

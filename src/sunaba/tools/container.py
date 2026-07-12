@@ -1319,21 +1319,6 @@ def sandbox_list_containers() -> str:
     Use this to discover existing containers across sessions, especially
     when the server restarts and the in-memory registry is lost (Issue #478).
 
-    .. rubric:: Use when
-
-    - Finding a container by name across sessions
-    - Checking what containers are still alive before starting a new one
-    - Preparing to call :func:`sandbox_attach` with a name or ID
-
-    .. rubric:: Don't use when
-
-    - You already know the container ID — use :func:`sandbox_attach` directly
-    - Inspecting journal history — use :func:`sandbox_read_journal` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec docker ps`` (structured JSON, filters to managed containers)
-
     Returns:
         JSON string with a ``containers`` array.  When
         :envvar:`SUNABA_CONTAINER_TTL_SECONDS` is set, idle
@@ -1446,27 +1431,6 @@ def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
     The orientation summary lets a cold session (or a cheap model) pick up
     where a previous session left off without re-reading the entire context
     (Issue #478).
-
-    .. rubric:: Use when
-
-    - Reconnecting to a named container from a different session
-    - Quickly assessing a container's state without running shell commands
-    - Picking up work after a server restart
-
-    .. rubric:: Don't use when
-
-    - Starting a new container — use :func:`sandbox_initialize` instead
-    - Running commands on an already-attached container — use :func:`sandbox_exec`
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec`` for orientation (structured summary, no shell)
-    - Prefer over manual ``docker ps`` filtering
-
-    Args:
-        name_or_id: A user-assigned container name (from
-            ``sandbox_initialize(name=...)``) or a 12-character (or longer)
-            container ID prefix.
 
     Returns:
         JSON string with the orientation summary.
@@ -1643,29 +1607,6 @@ def sandbox_initialize(
     :func:`clone_repo` call.  For a full one-shot workflow with commands,
     use :func:`run_container_and_exec` which wraps init/exec/stop.
 
-    .. rubric:: Use when
-
-    - Starting a new sandbox container for interactive/iterative work
-    - Starting a container with a cloned repo via ``clone_repo``
-    - Starting a container with a PR checked out via ``pr=N``
-    - When you need a persistent container that stays alive across multiple tool calls
-
-    .. rubric:: Don't use when
-
-    - **One-shot command execution** — use :func:`run_container_and_exec` instead
-    - **Cloning into an existing container** — use :func:`clone_repo` instead
-    - **Reading file content** — use :func:`read_file_range` instead (no container needed for reading)
-
-    .. rubric:: Prefer over
-
-    - Prefer over :func:`run_container_and_exec` when you need an interactive/persistent container
-    - Prefer over separate ``clone_repo`` call — use ``clone_repo`` parameter for one-step init+clone
-
-    .. rubric:: Fallback
-
-    - For one-shot workflows use :func:`run_container_and_exec`
-    - For cloning after init use :func:`clone_repo`
-
     Args:
         image: Docker image to use (e.g. ``python@sha256:...``).
                Variant aliases ``\"neutral\"``, ``\"python\"``, and ``\"go\"``
@@ -1740,9 +1681,6 @@ def sandbox_initialize(
         If *pr* is specified, a message about the PR branch setup
         is appended.
 
-    See also:
-        :func:`run_container_and_exec` — one-shot init + exec + stop.
-        :func:`clone_repo` — clone after container is running.
     """
     # Opportunistic GC (Issue #298): clean up any containers orphaned by a
     # previously timed-out init before creating a new one.  Best-effort —
@@ -2134,28 +2072,6 @@ def run_container_and_exec(
     Output is sanitized (ANSI codes, ``\r`` progress bars, timestamps
     removed, VCS token values masked) and consecutive repeated lines
     are compressed (``[×N] content``).
-
-    .. rubric:: Use when
-
-    - Running a single command or script in a throwaway container
-    - Lightweight one-shot workflows (init → run → cleanup)
-    - Testing or validation that needs a fresh environment each time
-
-    .. rubric:: Don't use when
-
-    - **Interactive/persistent work** — use :func:`sandbox_initialize` instead
-    - **File reading** — use :func:`read_file_range` instead (no container needed)
-    - **Multiple sequential commands with inspection** — use :func:`sandbox_initialize` + :func:`sandbox_exec` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over :func:`sandbox_initialize` + :func:`sandbox_exec` + :func:`sandbox_stop` for simple one-shots
-    - Prefer over writing temporary shell scripts for single commands
-
-    .. rubric:: Fallback
-
-    - For persistent containers use :func:`sandbox_initialize`
-    - For complex multi-step workflows use :func:`sandbox_initialize` + multiple :func:`sandbox_exec` calls
 
     Args:
         image: Docker image to use (``image@sha256:...``).

@@ -66,24 +66,6 @@ def package_install(
     logs.  This is the recommended way to install Python packages inside
     the container.
 
-    .. rubric:: Use when
-
-    - Installing Python packages inside an active sandbox container
-    - Installing a package from PyPI, a VCS URL, or a local path
-    - Installing with extras, constraints, or upgrade
-    - Editable installs (``pip install -e .``) of a local project
-
-    .. rubric:: Don't use when
-
-    - **Installing OS packages** — use :func:`sandbox_exec` with ``apt-get`` or ``apk`` instead
-    - **Installing dev dependencies during container init** — use ``pip_extras`` parameter on :func:`sandbox_initialize` instead
-    - **Running arbitrary shell commands** — use :func:`sandbox_exec` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec pip install ...`` when you need structured output
-    - Prefer over ``sandbox_exec`` for package installation (token-efficient)
-
     Args:
         container_id: 12-character container ID prefix.
         packages: Package name(s) to install.  Can be a single string

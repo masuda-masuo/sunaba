@@ -41,11 +41,6 @@ def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
     Returns:
         Success message or error description.
 
-    See also:
-        :func:`write_file_sandbox` — full overwrite / line-range /
-        append / string-replace modes (recommended for AI edits).
-        :func:`transform_file` — imperative edits (bulk / structural /
-        computed).
     """
     client = _docker()
     try:
@@ -80,28 +75,6 @@ def search_in_container(
 
     **Structural** mode uses ``ast-grep`` (``sg``) for AST-aware search
     that ignores whitespace/formatting differences.
-
-    .. rubric:: Use when
-
-    - Searching for text patterns across files inside the container
-    - Finding function definitions, imports, or specific code patterns
-    - AST-aware search via *structural* mode (ignores whitespace/formatting)
-
-    .. rubric:: Don't use when
-
-    - **Reading file content** — use :func:`read_file_range` instead
-    - **Listing files** — use :func:`list_files` instead
-    - **Running shell commands** — use :func:`sandbox_exec` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec grep`` for text search (structured JSON response, language-aware fallback)
-
-    .. rubric:: Fallback
-
-    - If ripgrep/ast-grep is not installed, falls back to POSIX ``grep`` automatically
-    - For file content reading use :func:`read_file_range`
-    - For directory listing use :func:`list_files`
 
     Args:
         container_id: 12-character container ID prefix.
@@ -176,27 +149,6 @@ def lint_in_container(container_id: str, file_path: str, fix: bool = False) -> s
     - ``.py`` → ``ruff check`` (falls back to ``pylint``; pylint has no autofix)
     - ``.js``, ``.ts``, ``.jsx``, ``.tsx`` → ``eslint``
 
-    .. rubric:: Use when
-
-    - Checking code quality during the edit loop
-    - Detecting unused imports, syntax errors, and style violations
-    - **Auto-fixing** import ordering / unused imports / style (pass ``fix=True``)
-
-    .. rubric:: Don't use when
-
-    - **Type checking** — use :func:`type_check_in_container` instead
-    - **Running tests** — use :func:`verify_in_container` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec ruff check`` (structured JSON response)
-    - Prefer ``fix=True`` over ``sandbox_exec ruff check --fix`` for autofixes
-
-    .. rubric:: Fallback
-
-    - For type checking use :func:`type_check_in_container`
-    - For full pre-publish gate use :func:`verify_in_container`
-
     Args:
         container_id: 12-character container ID prefix.
         file_path: Path to the file inside the container.
@@ -240,25 +192,6 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
     Supported:
     - ``.py`` → ``pyright``
     - ``.ts``, ``.tsx`` → ``tsc --noEmit``
-
-    .. rubric:: Use when
-
-    - Checking type correctness during the edit loop
-    - Catching type errors before running tests
-
-    .. rubric:: Don't use when
-
-    - **Lint checking** — use :func:`lint_in_container` instead
-    - **Running tests** — use :func:`verify_in_container` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec pyright`` (structured JSON response)
-
-    .. rubric:: Fallback
-
-    - For lint checking use :func:`lint_in_container`
-    - For full pre-publish gate use :func:`verify_in_container`
 
     Args:
         container_id: 12-character container ID prefix.
@@ -327,9 +260,6 @@ def verify_in_container(
     (e.g. the lint/type-free ``:minimal`` image) set
     ``lint_type_incomplete`` rather than failing the gate.
 
-    :func:`lint_in_container` / :func:`type_check_in_container` remain
-    available as standalone single-file checks during the edit loop.
-
     Returns a structured diff summary (``git diff --numstat`` + ``git diff --name-status``) so the LLM can
     present changes to the user before calling :func:`publish`.
 
@@ -338,27 +268,6 @@ def verify_in_container(
        This diff summary includes **test outcomes** (gate_passed,
        test counts), so the LLM can review what will be pushed before
        calling :func:`publish` (which executes in a single step).
-
-    .. rubric:: Use when
-
-    - **Pre-publish test gate** — run as the final step before calling :func:`publish`
-    - Running the **full test suite** after making changes
-    - Running **filtered tests first** (via *test_filter*), then auto-fallback to the full suite
-
-    .. rubric:: Don't use when
-
-    - **A single-file lint/type check during editing** — use :func:`lint_in_container` / :func:`type_check_in_container` (verify runs the project-wide gate)
-    - **Single specific test file only** — use ``sandbox_exec`` + the appropriate test runner instead (see refactoring rules)
-
-    .. rubric:: Prefer over
-
-    - Prefer over individual ``python -m pytest`` calls for the final pre-publish gate
-    - Prefer over manual ``git diff --numstat`` — the structured diff summary is included automatically
-
-    .. rubric:: Fallback
-
-    - If pytest is not available in the container, use ``sandbox_exec`` with the appropriate test runner
-    - For lint/type-check during editing, use :func:`lint_in_container` / :func:`type_check_in_container`
 
     Args:
         container_id: 12-character container ID prefix.

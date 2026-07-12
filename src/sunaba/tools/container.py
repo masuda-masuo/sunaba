@@ -146,6 +146,13 @@ _SENSITIVE_FILE_BASENAMES: frozenset[str] = frozenset(
     }
 )
 
+#: ``.env.*`` names that carry no secrets by convention.  Filtering them
+#: away deletes tracked files from the copied tree, so the checkout starts
+#: dirty and the deletion can leak into commits (#561).
+_ENV_TEMPLATE_BASENAMES: frozenset[str] = frozenset(
+    {".env.example", ".env.sample", ".env.template"}
+)
+
 
 def _resolve_image_ref(image: str) -> str:
     """Resolve a tag-based image reference to a digest-based one.
@@ -487,7 +494,7 @@ def _clone_shiori_repo_to_container(
         name = Path(tarinfo.name).name
         if name in _SENSITIVE_FILE_BASENAMES:
             return None
-        if name.startswith(".env."):
+        if name.startswith(".env.") and name not in _ENV_TEMPLATE_BASENAMES:
             return None
         if "/.ssh/" in tarinfo.name:
             return None

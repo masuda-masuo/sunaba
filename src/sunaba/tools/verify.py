@@ -15,8 +15,9 @@ from sunaba.edit_verify import (
     type_check_file,
 )
 from sunaba.journal import record_tool_use
-from sunaba.tools.common import _docker
+from sunaba.tools.common import _docker, container_not_found_error
 from sunaba.tools.vcs import resolve_git_root
+from sunaba.verify_state import record_verify_success
 
 
 def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
@@ -123,7 +124,7 @@ def search_in_container(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -211,7 +212,7 @@ def lint_in_container(container_id: str, file_path: str, fix: bool = False) -> s
     try:
         client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -271,7 +272,7 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
     try:
         client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -426,11 +427,7 @@ def verify_in_container(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({
-            "status": "error",
-            "gate_passed": False,
-            "error": f"Container {container_id[:12]} not found",
-        })
+        return container_not_found_error(container_id, gate_passed=False)
     except Exception as e:
         return json.dumps({
             "status": "error",
@@ -695,6 +692,7 @@ def verify_in_container(
         result["tests"]["full"] = {"status": "no_tests", "error": "no languages detected"}
         result["gate_pass_reason"] = "no languages detected \u2014 gate passes"
         result["gate_passed"] = True
+        record_verify_success(container_id)
         return json.dumps(result)
     elif len(detected.languages) == 1:
         lang = list(detected.languages)[0]
@@ -773,4 +771,8 @@ def verify_in_container(
                 result["gate_pass_reason"] = "no tests found \u2014 gate passes"
                 result["gate_passed"] = True
 
+    # Track full-gate success for state-conditioned nudges (Issue #550):
+    # publish warns when called without a recorded verify success.
+    if result["gate_passed"]:
+        record_verify_success(container_id)
     return json.dumps(result)

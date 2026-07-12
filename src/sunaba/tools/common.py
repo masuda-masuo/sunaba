@@ -121,6 +121,32 @@ def _docker(timeout: float | None = None) -> Any:
     return docker.from_env()
 
 
+#: Nudge attached to "container not found" errors (Issue #550): for an
+#: agent operating without instruction files, the error response is the
+#: only channel that can point to the right first move, so the shared
+#: payload carries a ``recommended_next_action`` field.  Advisory only.
+CONTAINER_NOT_FOUND_NEXT_ACTION = (
+    "sandbox_list_containers to find running containers, "
+    "or sandbox_initialize to start one"
+)
+
+
+def container_not_found_error(container_id: str, **extra: Any) -> str:
+    """Return the shared JSON error payload for a missing container.
+
+    Carries a ``recommended_next_action`` nudge (advisory, Issue #550).
+    *extra* fields are merged into the payload so callers can keep
+    tool-specific keys (e.g. ``gate_passed=False`` for verify).
+    """
+    payload: dict[str, Any] = {
+        "status": "error",
+        "error": f"Container {container_id[:12]} not found",
+        "recommended_next_action": CONTAINER_NOT_FOUND_NEXT_ACTION,
+    }
+    payload.update(extra)
+    return json.dumps(payload)
+
+
 #: Warning appended to a clone result when the repo was cloned *without* a
 #: VCS token.  The clone itself is anonymous (public repos only, read-only
 #: working tree), but ``publish`` no longer requires the token to have been

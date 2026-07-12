@@ -23,7 +23,12 @@ from sunaba.output_control import (
     truncate_by_tokens,
     truncate_output,
 )
-from sunaba.tools.common import RECOVERY_DOCKER_TIMEOUT, _coerce_list_arg, _docker
+from sunaba.tools.common import (
+    RECOVERY_DOCKER_TIMEOUT,
+    _coerce_list_arg,
+    _docker,
+    container_not_found_error,
+)
 
 
 def sandbox_exec(
@@ -151,7 +156,7 @@ def sandbox_exec(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -374,7 +379,7 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 

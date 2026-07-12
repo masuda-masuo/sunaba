@@ -25,7 +25,9 @@ from sunaba.tools.common import (
     CLONE_NO_TOKEN_WARNING,
     _build_clone_command,
     _docker,
+    container_not_found_error,
 )
+from sunaba.verify_state import has_verify_success
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +275,7 @@ def checkpoint(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -351,7 +353,7 @@ def checkpoint_list(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -432,7 +434,7 @@ def checkpoint_restore(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -524,7 +526,7 @@ def issue_view(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -652,7 +654,7 @@ def sandbox_issue_write(
     try:
         client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -790,7 +792,7 @@ def sandbox_pr_review_write(
     try:
         client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -1151,12 +1153,27 @@ Returns:
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
     cid = container_id[:12]
     working_dir = resolve_git_root(container, working_dir)
+
+    # State-conditioned nudge (Issue #550): when no successful
+    # verify_in_container is recorded for this container in this server
+    # session, every outcome of this call carries an advisory warning.
+    # Never blocks -- publish proceeds exactly as before.
+    verified = has_verify_success(cid)
+
+    def _finish(payload: dict[str, Any]) -> str:
+        if not verified:
+            payload["warning"] = (
+                "no successful verify_in_container recorded for this "
+                "container in this server session"
+            )
+            payload["recommended_next_action"] = "verify_in_container"
+        return json.dumps(payload)
 
     # Helper: run a shell command in the container in working_dir.
     # *env* carries a lazily-injected VCS token (Issue #347) for the push /
@@ -1195,7 +1212,7 @@ Returns:
     # closed, so surface it up front rather than mid-operation.
     proxy_err = _ensure_proxy_ready(client)
     if proxy_err:
-        return json.dumps({"status": "error", "step": "egress_proxy", "error": proxy_err})
+        return _finish({"status": "error", "step": "egress_proxy", "error": proxy_err})
 
     # --- Git branch check/create ---
     _run(f"git checkout -b {shlex.quote(branch)} 2>/dev/null || git checkout {shlex.quote(branch)}")
@@ -1203,7 +1220,7 @@ Returns:
     # --- Git add / commit ---
     add_ec, add_out, add_err = _run("git add -A")
     if add_ec != 0:
-        return json.dumps({
+        return _finish({
             "status": "error",
             "step": "git_add",
             "error": add_err or add_out,
@@ -1216,14 +1233,14 @@ Returns:
         if unpushed_ec == 0 and unpushed_out.strip():
             reset_ec, reset_out, reset_err = _run("git reset --soft @{u}")
             if reset_ec != 0:
-                return json.dumps({
+                return _finish({
                     "status": "error",
                     "step": "squash_reset",
                     "error": reset_err or reset_out,
                 })
             readd_ec, readd_out, readd_err = _run("git add -A")
             if readd_ec != 0:
-                return json.dumps({
+                return _finish({
                     "status": "error",
                     "step": "squash_readd",
                     "error": readd_err or readd_out,
@@ -1244,7 +1261,7 @@ Returns:
         if "nothing to commit" in (commit_out + commit_err).lower():
             pass
         else:
-            return json.dumps({
+            return _finish({
                 "status": "error",
                 "step": "git_commit",
                 "error": commit_err or commit_out,
@@ -1307,7 +1324,7 @@ Returns:
                         f"repo={repo} branch={branch} push_blocked_by_egress_proxy",
                         approved=False,
                     )
-                    return json.dumps({
+                    return _finish({
                         "status": "error",
                         "step": "git_push",
                         "error": push_err or push_out,
@@ -1333,7 +1350,7 @@ Returns:
                         f"repo={repo} branch={branch} push_failed transport=both",
                         approved=False,
                     )
-                    return json.dumps({
+                    return _finish({
                         "status": "error",
                         "step": "git_push",
                         "error": push_err or push_out,
@@ -1346,7 +1363,7 @@ Returns:
             f"repo={repo} branch={branch} proxy_auth_failed",
             approved=False,
         )
-        return json.dumps({
+        return _finish({
             "status": "error",
             "step": "proxy_auth",
             "error": str(exc),
@@ -1416,7 +1433,7 @@ Returns:
                 f"repo={repo} branch={branch} sha={sha} pr_create_failed",
                 approved=True,
             )
-            return json.dumps({
+            return _finish({
                 "status": "pushed",
                 "branch": branch,
                 "sha": sha,
@@ -1442,8 +1459,13 @@ Returns:
     }
     if pr_url:
         result["pr_url"] = pr_url
+    if not create_pr:
+        result["note"] = (
+            "pushed only -- no PR was created. Pass create_pr=True to open "
+            "one, or the branch may already have an open PR."
+        )
 
-    return json.dumps(result)
+    return _finish(result)
 
 
 # ---------------------------------------------------------------------------
@@ -1584,7 +1606,7 @@ def clone_repo(
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return json.dumps({"status": "error", "error": f"Container {container_id[:12]} not found"})
+        return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 

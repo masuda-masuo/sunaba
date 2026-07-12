@@ -72,7 +72,23 @@ from .tools.verify import (
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-mcp = FastMCP("sunaba")
+# Server-level workflow map (Issue #550).  Docstrings stay focused on each
+# tool's interface contract (arguments, side effects, failure modes); the
+# cross-tool workflow lives here, sent once per session via the MCP
+# ``instructions`` field.  Keep this under 2048 bytes UTF-8 (Claude Code
+# truncates tool descriptions at 2 KB; instructions get one screenful too).
+SERVER_INSTRUCTIONS = """\
+sunaba: Docker-sandboxed dev workflow. All tools take the container_id returned by sandbox_initialize. Typical flow:
+1. INIT: sandbox_initialize(clone_repo="owner/repo") clones + installs deps in one call; pr=N checks out a PR branch instead. run_container_and_exec wraps init/exec/stop for one-shot runs; sandbox_attach reconnects to a running container; sandbox_stop cleans up.
+2. EXPLORE: search_in_container (grep), read_file_range (cat/head), list_files (ls/find).
+3. EDIT: write_file_sandbox (full write or exact string replace), transform_file (Python transform for complex edits). checkpoint() = local commit savepoint, no push, use freely; checkpoint_restore rolls back; checkpoint_list lists them.
+4. VERIFY: verify_in_container is the pre-publish gate (tests + lint + type in one call; test_filter runs a fast subset first, then the full suite automatically). lint_in_container / type_check_in_container run individual single-file checks. diff_in_container reviews pending changes before pushing.
+5. PUBLISH: publish(create_pr=True) stages, commits, pushes and opens the PR in one call. It does NOT verify -- run verify_in_container first. checkpoint is local-only; publish is the only network exit. Credentials are resolved host-side; never handle tokens in the container.
+Issue/PR ops: issue_view (read), sandbox_issue_write (create/comment), sandbox_pr_review_write (formal reviews).
+Prefer dedicated tools over raw sandbox_exec: grep->search_in_container, cat->read_file_range, sed->write_file_sandbox/transform_file, pip->package_install, pytest/ruff/pyright->verify/lint/type_check_in_container, git push/gh pr->publish.
+"""
+
+mcp = FastMCP("sunaba", instructions=SERVER_INSTRUCTIONS)
 
 
 sandbox_exec = mcp.tool()(sandbox_exec)

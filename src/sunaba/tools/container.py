@@ -1292,53 +1292,22 @@ def _find_containers_by_name(client, name: str) -> list[str]:
     return [c.id[:12] for c in containers if c.status == "running"]
 
 
+# Label-based discovery survives server restarts (#478); the egress-proxy
+# sidecar carries MANAGED_LABEL too, so it is listed but tagged (#527).
 def sandbox_list_containers() -> str:
     """List all managed sandbox containers with metadata.
 
-    Discovers containers via the ``MANAGED_LABEL`` Docker label so the
-    list is accurate even after a server restart.  Returns a JSON array
-    of container summaries, each with:
-
-    - ``container_id`` (str): 12-character prefix
-    - ``name`` (str | None): user-assigned name from ``sandbox_initialize(name=...)``
-    - ``kind`` (str): ``"sandbox"`` or ``"proxy"`` -- the egress-proxy sidecar
-      carries ``MANAGED_LABEL`` too, so it is listed but tagged, not hidden
-      (Issue #527).  Only ``kind="sandbox"`` entries are attachable.
-    - ``image`` (str): image ref
-    - ``status`` (str): Docker container status (``running`` / ``exited`` / etc.)
-    - ``allow_network`` (bool | None): whether the container was created with
-      network access, read from ``NETWORK_LABEL``.  ``None`` for containers
-      created before that label existed (Issue #527).
-    - ``created_at`` (str | None): ISO-8601 timestamp from the creation label
-    - ``age_seconds`` (float | None): approximate age in seconds
-    - ``idle_seconds`` (float | None): seconds since last journal activity
-      for this container (``None`` when the journal has no entries)
-    - ``last_activity_ts`` (str | None): ISO-8601 timestamp of the most
-      recent journal entry for this container
-
-    Use this to discover existing containers across sessions, especially
-    when the server restarts and the in-memory registry is lost (Issue #478).
-
-    .. rubric:: Use when
-
-    - Finding a container by name across sessions
-    - Checking what containers are still alive before starting a new one
-    - Preparing to call :func:`sandbox_attach` with a name or ID
-
-    .. rubric:: Don't use when
-
-    - You already know the container ID — use :func:`sandbox_attach` directly
-    - Inspecting journal history — use :func:`sandbox_read_journal` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec docker ps`` (structured JSON, filters to managed containers)
+    Discovery is Docker-label based, so it works across server
+    restarts; use it to find existing containers before starting a new
+    one.  The egress-proxy sidecar is listed with kind='proxy'; only
+    kind='sandbox' entries are attachable.  When a container TTL is
+    configured, idle containers are reaped first and reported in
+    reaped_ids.
 
     Returns:
-        JSON string with a ``containers`` array.  When
-        :envvar:`SUNABA_CONTAINER_TTL_SECONDS` is set, idle
-        containers are automatically stopped before listing, and
-        the ``reaped_ids`` field reports which containers were removed.
+        JSON containers array: container_id, name, kind, image, status,
+        allow_network, created_at, age_seconds, idle_seconds,
+        last_activity_ts; plus reaped_ids when reaping ran.
     """
     import json
 
@@ -1446,27 +1415,6 @@ def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
     The orientation summary lets a cold session (or a cheap model) pick up
     where a previous session left off without re-reading the entire context
     (Issue #478).
-
-    .. rubric:: Use when
-
-    - Reconnecting to a named container from a different session
-    - Quickly assessing a container's state without running shell commands
-    - Picking up work after a server restart
-
-    .. rubric:: Don't use when
-
-    - Starting a new container — use :func:`sandbox_initialize` instead
-    - Running commands on an already-attached container — use :func:`sandbox_exec`
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec`` for orientation (structured summary, no shell)
-    - Prefer over manual ``docker ps`` filtering
-
-    Args:
-        name_or_id: A user-assigned container name (from
-            ``sandbox_initialize(name=...)``) or a 12-character (or longer)
-            container ID prefix.
 
     Returns:
         JSON string with the orientation summary.
@@ -1643,29 +1591,6 @@ def sandbox_initialize(
     :func:`clone_repo` call.  For a full one-shot workflow with commands,
     use :func:`run_container_and_exec` which wraps init/exec/stop.
 
-    .. rubric:: Use when
-
-    - Starting a new sandbox container for interactive/iterative work
-    - Starting a container with a cloned repo via ``clone_repo``
-    - Starting a container with a PR checked out via ``pr=N``
-    - When you need a persistent container that stays alive across multiple tool calls
-
-    .. rubric:: Don't use when
-
-    - **One-shot command execution** — use :func:`run_container_and_exec` instead
-    - **Cloning into an existing container** — use :func:`clone_repo` instead
-    - **Reading file content** — use :func:`read_file_range` instead (no container needed for reading)
-
-    .. rubric:: Prefer over
-
-    - Prefer over :func:`run_container_and_exec` when you need an interactive/persistent container
-    - Prefer over separate ``clone_repo`` call — use ``clone_repo`` parameter for one-step init+clone
-
-    .. rubric:: Fallback
-
-    - For one-shot workflows use :func:`run_container_and_exec`
-    - For cloning after init use :func:`clone_repo`
-
     Args:
         image: Docker image to use (e.g. ``python@sha256:...``).
                Variant aliases ``\"neutral\"``, ``\"python\"``, and ``\"go\"``
@@ -1740,9 +1665,6 @@ def sandbox_initialize(
         If *pr* is specified, a message about the PR branch setup
         is appended.
 
-    See also:
-        :func:`run_container_and_exec` — one-shot init + exec + stop.
-        :func:`clone_repo` — clone after container is running.
     """
     # Opportunistic GC (Issue #298): clean up any containers orphaned by a
     # previously timed-out init before creating a new one.  Best-effort —
@@ -1957,6 +1879,12 @@ def sandbox_initialize(
     return cid + clone_msg + pr_msg + image_msg + name_msg
 
 
+# Async wrapper around sandbox_initialize: the sync work runs in a thread
+# pool while progress notifications keep MCP/HTTP alive (#298 orphan fix).
+# ctx is FastMCP-injected; None (tests) runs inline.  Full per-parameter
+# docs live on sandbox_initialize.  Private-repo pr=/clone_repo auth rides
+# the egress-proxy read grant (#403/#419); push credentials stay host-side
+# via publish (#347).
 async def sandbox_initialize_tool(
     image: str | None = None,
     allow_network: bool = False,
@@ -1972,38 +1900,34 @@ async def sandbox_initialize_tool(
     session_label: str | None = None,
     ctx: Context | None = None,
 ) -> str:
-    """Start a new Docker sandbox container (async MCP entry point).
+    """Start a new Docker sandbox container.
 
-    Thin async wrapper around :func:`sandbox_initialize`.  The slow setup
-    phases (image pull, repo clone, pip install, PR checkout) can run for
-    minutes, which previously tripped the MCP/HTTP request timeout and left
-    the container orphaned (Issue #298).  To prevent that, the synchronous
-    work runs in a thread pool while this coroutine emits a progress
-    notification every :data:`_PROGRESS_INTERVAL_SECONDS`, keeping the
-    connection alive so the real ``container_id`` is always returned.
+    Returns the container_id used by every other tool.  Slow setup
+    phases (image pull, clone, pip install, PR checkout) can run for
+    minutes; progress notifications keep the connection alive, so wait
+    for the real result.
 
-    *ctx* is injected by FastMCP.  When it is ``None`` (e.g. direct calls in
-    tests) the work runs inline with no progress notifications — identical
-    behaviour to calling :func:`sandbox_initialize` directly.  All other
-    parameters are forwarded verbatim; see :func:`sandbox_initialize` for the
-    full per-parameter docs (this wrapper's own docstring is what MCP
-    clients actually see, since the inner function is never registered as a
-    tool -- callers should not need to open the source to learn this).
+    Args:
+        image: Docker image, or alias 'neutral'/'python'/'go' (pinned digests).
+        allow_network: Enable network access. Required for pip install,
+            network clones, and publish.
+        clone_repo: 'owner/name' copied from host pre-clones when available,
+            else cloned over the network (auto-enables allow_network;
+            private repos authenticate host-side, no token in container).
+        clone_dest: Parent dir; the repo lands in {clone_dest}/{repo_name}.
+        repo: 'owner/name'; required with pr.
+        pr: PR number to clone and check out (implies allow_network;
+            anonymous checkout, no token enters the container).
+        pip_extras: Extras for dev install, e.g. '[dev]'. None skips pip
+            install; also auto-skipped without network.
+        pip_args: Extra pip arguments; ignored when pip_extras is None.
+        mem_limit: Container memory limit (e.g. '2g').
+        cpus: CPU quota.
+        name: Container name, resolvable later via sandbox_attach.
+        session_label: Session tag recorded in the journal.
 
-    ``session_label`` is forwarded to :func:`sandbox_initialize` \u2014 see its
-    docstring for details.
-
-    **Private-repo note (``pr=`` and** ``clone_repo`` **on a private
-    repository):** under the egress proxy (#403), ``pr=N`` resolves the PR
-    head ref host-side and checks it out *anonymously* inside the
-    container.  This works for public repos with no further setup; for a
-    private repo, the same read-authorization grant (#419) that
-    ``clone_repo`` uses is opened for the anonymous clone + checkout too,
-    so ``pr=N`` alone is enough -- the egress proxy just needs to be
-    configured with a host-resolvable token (broker / ``GITHUB_TOKEN``)
-    for the grant to authenticate; pushes and PR creation go through
-    :func:`publish`, which resolves the token host-side, so the container
-    never needs a credential of its own.
+    Returns:
+        Container ID prefix plus clone/checkout summary.
     """
     def _work() -> str:
         return sandbox_initialize(
@@ -2108,6 +2032,9 @@ def sandbox_stop(
     return f"Container {cid} stopped and removed"
 
 
+# Convenience wrapper over sandbox_initialize -> sandbox_exec -> sandbox_stop.
+# Image aliases resolve to pinned GHCR digests (#545); private clone_repo/pr=
+# checkout rides the egress-proxy read grant (#403/#419); session_label is #479.
 def run_container_and_exec(
     image: str | None = None,
     commands: Annotated[list[str], BeforeValidator(_coerce_list_arg)] | None = None,
@@ -2126,114 +2053,39 @@ def run_container_and_exec(
     max_output_tokens: int = 0,
     session_label: str | None = None,
 ) -> str:
-    """Start a container, execute commands, then remove it (one-shot).
+    """One-shot: start a container, run commands, then remove it.
 
-    This is a convenience wrapper around:
-    :func:`sandbox_initialize` → :func:`sandbox_exec` → :func:`sandbox_stop`.
-
-    Output is sanitized (ANSI codes, ``\r`` progress bars, timestamps
-    removed, VCS token values masked) and consecutive repeated lines
-    are compressed (``[×N] content``).
-
-    .. rubric:: Use when
-
-    - Running a single command or script in a throwaway container
-    - Lightweight one-shot workflows (init → run → cleanup)
-    - Testing or validation that needs a fresh environment each time
-
-    .. rubric:: Don't use when
-
-    - **Interactive/persistent work** — use :func:`sandbox_initialize` instead
-    - **File reading** — use :func:`read_file_range` instead (no container needed)
-    - **Multiple sequential commands with inspection** — use :func:`sandbox_initialize` + :func:`sandbox_exec` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over :func:`sandbox_initialize` + :func:`sandbox_exec` + :func:`sandbox_stop` for simple one-shots
-    - Prefer over writing temporary shell scripts for single commands
-
-    .. rubric:: Fallback
-
-    - For persistent containers use :func:`sandbox_initialize`
-    - For complex multi-step workflows use :func:`sandbox_initialize` + multiple :func:`sandbox_exec` calls
+    Equivalent to sandbox_initialize -> sandbox_exec -> sandbox_stop.
+    Output is sanitized (ANSI/CR/timestamps stripped, token values
+    masked) and consecutive repeated lines are compressed.
 
     Args:
-        image: Docker image to use (``image@sha256:...``).
-               Variant aliases ``\"neutral\"``, ``\"python\"``, and ``\"go\"``
-               resolve to the pinned GHCR digest images (Issue #545).
-        commands: List of shell commands to execute sequentially.
-                  Must not be ``None`` or empty.
-        verbose: Output verbosity:
-
-            - ``"error_only"``: Show output only on failure.
-            - ``"summary"``: Show first/last lines with omission notice.
-            - ``"full"``: Show all output.
-        max_lines: Maximum lines to show in summary/error_only mode.
-        offset: Line offset for paging (0-indexed).  Use with *limit*
-            to paginate through the output.
-        limit: Maximum lines per page.
-        allow_network: Whether to allow network access (default ``False``).
-               Set to ``True`` for VCS operations (git/gh) that need to
-               reach GitHub API.
-        clone_repo: Optional ``owner/name`` repository to copy from the
-               Shiori pre-cloned repos on the host into the container.
-               Uses the host path configured via ``--shiori-repos-path``
-               (default: ``None`` = no clone copy).  When Shiori is not
-               configured, falls back to ``gh repo clone`` over the
-               network (``allow_network`` is auto-enabled).  A *private*
-               repo clones transparently too: the egress proxy opens a
-               read-authorization grant (#419) authenticated with a
-               host-resolved token, so no credential enters the container.
-        clone_dest: Destination directory in the container for the
-               cloned repository (default: ``/tmp/repo``).
-               The actual path will be ``{clone_dest}/{repo_name}`` where *repo_name* is derived from *clone_repo* or *repo*.
-        repo: Repository in ``"owner/name"`` format.
-               Required when *pr* is specified.
-        pr: Pull request number to clone and check out.
-               When set, implicitly enables ``allow_network=True``,
-               clones the repository
-               inside the container, checks out the PR head branch,
-               and installs dev dependencies.  Under the egress proxy
-               (#403) this checkout is anonymous: the PR head ref is
-               resolved host-side and the container never receives a
-               token.  This works for public repos with no further
-               setup; for a private repo, the same read-authorization
-               grant (#419) that ``clone_repo`` uses is opened for the
-               anonymous clone + checkout, so no extra steps are needed
-               there either -- the egress proxy must simply be
-               configured with a host-resolvable token (broker /
-               ``GITHUB_TOKEN``) for the grant to actually authenticate.
-        pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
-               Pass ``None`` to skip pip install entirely.  Also used when
-               *clone_repo* is specified, and skipped automatically (with a
-               log message) when the container has no network access, since
-               PyPI would be unreachable.
-        pip_args: Additional pip arguments (e.g. ``"--index-url https://download.pytorch.org/whl/cpu"``)
-               passed through to the pip install command.
-               Ignored when *pip_extras* is ``None`` since pip install is skipped entirely.
-        session_label: Optional session identifier string.  When provided,
-               this label is recorded in the journal for all subsequent
-               operations on this container, replacing any previous label.
-               Use this to distinguish operations from different model
-               sessions or task contexts (Issue #479).
-        timeout: Maximum seconds to let the command run (``0`` = no
-               limit, the default).  When the timeout expires the process
-               is killed and the tool returns ``status="timeout"`` with
-               ``exit_code=124`` (the standard exit code for
-               ``timeout(1)``).
-        max_output_tokens: Token budget for output (``0`` = no limit).
-               When set, the output is summarised to fit within this many
-               estimated tokens and a ``resource://run/{run_id}/output``
-               handle is included for full retrieval.
+        image: Docker image, or alias 'neutral'/'python'/'go' (pinned digests).
+        commands: Shell commands run sequentially; must be non-empty.
+        verbose: 'error_only', 'summary' (default), or 'full'.
+        max_lines: Max lines shown in summary/error_only mode.
+        offset: 0-indexed line offset for paging output.
+        limit: Max lines per page.
+        allow_network: Enable network access (needed for git/gh/PyPI).
+        clone_repo: 'owner/name' copied from host pre-clones when available,
+            else cloned over the network (auto-enables allow_network;
+            private repos authenticate host-side, no token in container).
+        clone_dest: Parent dir; the repo lands in {clone_dest}/{repo_name}.
+        repo: 'owner/name'; required with pr.
+        pr: PR number to clone and check out (implies allow_network;
+            anonymous checkout, no token enters the container).
+        pip_extras: Extras for dev install, e.g. '[dev]'. None skips pip
+            install; also auto-skipped without network.
+        pip_args: Extra pip arguments; ignored when pip_extras is None.
+        timeout: Kill after N seconds (0 = no limit); on expiry
+            status='timeout', exit_code=124.
+        max_output_tokens: Summarize output to this token budget (0 = off);
+            full output stays retrievable via a resource://run/ handle.
+        session_label: Session tag recorded in the journal.
 
     Returns:
-        JSON string with ``status``, ``output`` (or ``error``),
-        and metadata (``shown``, ``total_lines``, ``truncated``,
-        ``next_offset``, ``has_more``).
-
-        On success *status* is ``"ok"`` and *output* contains the
-        command output (minimal by default).  On failure *status*
-        is ``"error"`` with an ``error`` field.
+        JSON: status, output (or error), shown, total_lines, truncated,
+        next_offset, has_more.
     """
     import json
 

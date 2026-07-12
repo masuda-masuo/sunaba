@@ -61,57 +61,22 @@ def package_install(
 ) -> str:
     """Install Python packages inside the sandbox container.
 
-    A first-class tool for ``pip install`` that returns structured output
-    (installed packages, changed count, error details) instead of raw pip
-    logs.  This is the recommended way to install Python packages inside
-    the container.
-
-    .. rubric:: Use when
-
-    - Installing Python packages inside an active sandbox container
-    - Installing a package from PyPI, a VCS URL, or a local path
-    - Installing with extras, constraints, or upgrade
-    - Editable installs (``pip install -e .``) of a local project
-
-    .. rubric:: Don't use when
-
-    - **Installing OS packages** — use :func:`sandbox_exec` with ``apt-get`` or ``apk`` instead
-    - **Installing dev dependencies during container init** — use ``pip_extras`` parameter on :func:`sandbox_initialize` instead
-    - **Running arbitrary shell commands** — use :func:`sandbox_exec` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec pip install ...`` when you need structured output
-    - Prefer over ``sandbox_exec`` for package installation (token-efficient)
+    First-class pip install returning structured output instead of raw
+    pip logs.
 
     Args:
-        container_id: 12-character container ID prefix.
-        packages: Package name(s) to install.  Can be a single string
-            (e.g. ``"requests"``) or a list of strings
-            (e.g. ``["requests", "click"]``).  Accepts any format that
-            ``pip install`` accepts: package names, VCS URLs, local paths,
-            or ``package[extra]`` syntax.
-        editable: Path to a local project for editable install
-            (``pip install -e <path>``).  Mutually exclusive with *packages*.
-        constraints: Path to a constraints file inside the container
-            (``pip install -c <file>``).
-        requirements: Path to a requirements file inside the container
-            (``pip install -r <file>``).
-        upgrade: When ``True``, pass ``--upgrade`` to pip (default ``False``).
-        extras: Extras string for editable install
-            (e.g. ``"[dev]"`` → ``pip install -e ".[dev]"``).
-            Only meaningful when *editable* is set.
+        container_id: Container ID prefix.
+        packages: Package name(s), string or list; any pip install
+            spec. Mutually exclusive with editable.
+        editable: Project path for pip install -e.
+        constraints: Constraints file path in the container (-c).
+        requirements: Requirements file path in the container (-r).
+        upgrade: Pass --upgrade to pip.
+        extras: Extras for the editable install (e.g. '[dev]').
 
     Returns:
-        JSON string with fields:
-
-        * ``status``: ``"ok"`` on success, ``"error"`` on failure.
-        * ``installed_packages``: list of ``"name==version"`` strings
-          that were newly installed or changed.
-        * ``changed``: number of packages installed/changed.
-        * ``output``: short human-readable output from pip.
-        * ``error``: error description on failure.
-        * ``stderr``: raw stderr on failure.
+        JSON: status, installed_packages ("name==version"), changed,
+        output; error and stderr on failure.
     """
     # --- Validate arguments ---
     if not any([packages, editable, constraints, requirements]):

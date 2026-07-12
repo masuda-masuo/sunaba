@@ -75,46 +75,25 @@ def diff_in_container(
 ) -> str:
     """Show git diff between *base* and HEAD inside the container.
 
-    Returns a structured JSON response with file-by-file summary
-    (when *path* is omitted) or per-file hunks (when *path* is given).
-
-    **Summary mode** (no *path*): returns a list of file records, each
-    with ``path``, ``status``, ``additions``, ``deletions``, and
-    ``changes`` count — the structured equivalent of
-    ``git diff --numstat`` + ``git diff --name-status``.
-
-    **File mode** (*path* given): returns the hunks for that file as an
-    array of hunk objects with ``old_start``, ``old_count``,
-    ``new_start``, ``new_count``, ``header``, and ``content`` (the hunk
-    header + diff lines).  Supports *offset* / *limit* pagination.
-
-    *raw* (``True``): include the full raw diff output as ``raw_diff``
-    in the response so callers can always retrieve the complete text
-    (escape-hatch principle).
-
-    *base* defaults to the PR's base branch when the container was
-    started with ``pr=N`` (stored in ``.sandbox-meta.json``), or
-    ``HEAD~1`` when no base is recorded.  Pass an explicit ref
-    (commit SHA, branch name, or relative ref like ``HEAD~3``) to
-    override.
+    Summary mode (no path): per-file records with path, status,
+    additions, deletions, changes.  File mode (path given): hunk
+    objects (old/new start and count, header, content) with
+    offset/limit pagination.
 
     Args:
-        container_id: 12-character container ID prefix.
-        base: Git ref to compare against.  ``None`` (default) reads
-            ``base_branch`` from ``.sandbox-meta.json`` (set during
-            ``pr=N`` checkout) or falls back to ``HEAD~1``.
-        path: When given, return hunks for this file only.
-        offset: 0-indexed line offset for hunks in file mode (default 0).
-        limit: Maximum number of hunks to return in file mode (default 50).
-        raw: When ``True``, include ``raw_diff`` field with the full
-            raw ``git diff`` output (default ``False``).
+        container_id: Container ID prefix.
+        base: Ref to diff against; default is the PR base branch
+            recorded at pr=N checkout, else HEAD~1.
+        path: Return hunks for this file only.
+        offset: Hunk paging offset in file mode (0-indexed).
+        limit: Max hunks per page in file mode.
+        raw: Also include the complete raw diff as raw_diff
+            (escape hatch).
 
     Returns:
-        JSON string.  In summary mode:
-        ``{files: [{path, status, additions, deletions, changes}, ...],
-        total_files, total_additions, total_deletions[, raw_diff]}``.
-        In file mode: ``{path: str, hunks: [...], shown, total, truncated,
-        next_offset[, raw_diff]}``.
+        JSON.  Summary: files, total_files, total_additions,
+        total_deletions.  File mode: path, hunks, shown, total,
+        truncated, next_offset.  Plus raw_diff when raw=True.
     """
     client = _docker()
     try:

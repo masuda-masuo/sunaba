@@ -238,109 +238,33 @@ def write_file_sandbox(
     append: bool = False,
     old_str: str | None = None,
 ) -> str:
-    """Write a file to the container. Supports full overwrite and partial updates.
+    """Write or partially edit a file in the container.
 
-    **Mode selection (pick exactly one):**
+    Edit modes are mutually exclusive; with none given the file is
+    fully overwritten.  Line-range: start_line[/end_line], 1-indexed
+    inclusive.  Append: append=True.  String replace: old_str.
 
-    ================= ===================================================
-    Mode              Parameters
-    ================= ===================================================
-    Full overwrite    (none of the below) — writes *file_contents* as-is
-    Line-range        ``start_line`` [+ ``end_line``] — replace lines
-    Append            ``append=True`` — append to existing file
-    String replace    ``old_str`` — replace exact text (see matching below)
-    ================= ===================================================
-
-    **Full overwrite** (default, backward compatible):
-    Writes *file_contents* as the entire file.
-
-    **Line-range replacement** (*start_line* / *end_line*, 1-indexed, inclusive):
-    Replaces the specified line range with *file_contents*. Lines outside the
-    range are preserved.  When *start_line* is omitted it defaults to line 1;
-    when *end_line* is omitted it defaults to the last line of the file.
-
-    **Append** (*append* = True):
-    Appends *file_contents* to the end of the existing file.
-
-    **Replace** (*old_str*):
-    Replaces *old_str* with *file_contents*.  The matching logic is:
-
-    1. **Exact match** -- if *old_str* appears exactly once, it is replaced.
-       If it appears multiple times the call is rejected with the line numbers
-       of each match so the caller can add more surrounding context.
-    2. **Whitespace-flexible fallback** -- if exact matching fails, leading
-       and trailing whitespace is stripped from each line and the search is
-       retried.  On success *file_contents* is re-indented to match the
-       file's original indentation.
-    3. **Near-miss echo** -- if neither strategy finds a match, the most
-       similar region of the file is returned with line numbers via
-       :func:`difflib.SequenceMatcher`.
-
-    *start_line* / *end_line*, *append*, and *old_str* are mutually exclusive.
-    When none of them is specified the file is fully overwritten (original
-    behaviour).
-
-    .. hint::
-
-       ``old_str`` mode is the default edit path for AI — it is robust
-       (uniqueness check + whitespace-flexible fallback) and avoids the
-       ``@@`` header errors that make hand-written diffs fail.  Use
-       :func:`read_file_range` first to inspect the target area before
-       editing.  For bulk / repetitive / structural / computed changes use
-       :func:`transform_file` (imperative).
-
-    .. warning::
-
-       **One operation = one logical unit.**  ``old_str`` matches the
-       *exact string you provide* — if it contains multiple lines,
-       **all** of them are replaced.  A common mistake is including
-       an adjacent line you did not intend to touch (e.g. the line
-       after a tool registration).  When removing a single item,
-       keep ``old_str`` as short as uniquely identifying content.
-       For removing multiple separate lines, use :func:`transform_file`
-       or repeated single-line ``old_str`` calls.
-
-    .. rubric:: Use when
-
-    - **Editing files** inside the container — the default tool for AI-authored edits
-    - **Simple one-off string replacement** — use ``old_str`` mode for safe, unique-match edits
-    - **Creating new files** — use full overwrite mode
-    - **Appending to existing files** — use ``append=True``
-    - **Replacing a known line range** — use ``start_line``/``end_line``
-
-    .. rubric:: Don't use when
-
-    - **Bulk / repetitive / structural edits** — use :func:`transform_file` (imperative) instead
-    - **Edits where the new content is computed from existing text** — use :func:`transform_file` instead
-    - **Running shell commands** — use :func:`sandbox_exec` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over :func:`apply_patch` for AI-authored edits (no ``@@`` header errors)
-    - Prefer over ``sandbox_exec`` + ``sed`` for file editing (no quoting issues, safe uniqueness check)
-
-    .. rubric:: Fallback
-
-    - For complex transforms use :func:`transform_file`
-    - For inspecting content before editing use :func:`read_file_range`
+    old_str contract: multiple matches are rejected with their line
+    numbers (add context, retry); an inexact match retries with
+    per-line whitespace stripped and re-indents on success; no match
+    returns the nearest-miss region with line numbers.  old_str matches
+    the exact string you provide -- if it spans several lines, ALL of
+    them are replaced, so keep it minimal and unique.  For several
+    separate edits use repeated calls or transform_file.
 
     Args:
-        container_id: 12-character container ID prefix.
+        container_id: Container ID prefix.
         file_name: Name of the file to write.
         file_contents: Content to write.
-        dest_dir: Destination directory in the container (default: ``/home/sandbox``).
-        start_line: Start line for line-range replacement (1-indexed, inclusive).
-        end_line: End line for line-range replacement (1-indexed, inclusive).
-        append: When True, appends to the end of the file.
-        old_str: When specified, replaces this string in the existing file.
-            Performs uniqueness check, whitespace-flexible fallback, and near-miss echo (see above).
+        dest_dir: Destination directory.
+        start_line: Line-range start (1-indexed, inclusive).
+        end_line: Line-range end (1-indexed, inclusive; default last line).
+        append: Append to the end of the existing file.
+        old_str: Exact text to replace with file_contents (matching
+            contract above).
 
     Returns:
         Success or error message.
-
-    See also:
-        :func:`transform_file` — imperative edits (bulk / structural / computed).
-        :func:`read_file_range` — inspect file content before editing.
     """
     client = _docker()
     try:
@@ -449,11 +373,10 @@ def copy_project(
     The target directory inside the tar archive is named after the
     source directory itself (i.e. ``/home/sandbox/source_dir_name/...``).
 
-    .. hint::
+    .. note::
 
-       For Git repositories already cloned locally, prefer
-       :func:`sandbox_initialize` with ``clone_repo`` — it copies
-       a pre-cloned repo without network overhead.
+       After copying, files are ``chown``-ed to the container's running
+       user so they remain writable by the file-editing tools.
 
     Args:
         container_id: 12-character container ID prefix.
@@ -464,13 +387,6 @@ def copy_project(
     Returns:
         Success or error message.
 
-    See also:
-        :func:`clone_repo` — clone a remote Git repo inside the container.
-        :func:`copy_file` — copy a single file instead of a directory.
-
-    Note:
-        After copying, files are ``chown``-ed to the container's running user
-        so they remain writable by tools like :func:`write_file_sandbox`.
     """
     client = _docker()
     try:
@@ -596,63 +512,19 @@ def read_file_range(
     start_line: int | None = None,
     end_line: int | None = None,
 ) -> str:
-    """Read lines from *file_path* starting at *offset*.
-
-    Returns a JSON string with:
-    - ``content`` (str): the requested lines
-    - ``total_lines`` (int): total lines in the file
-    - ``shown`` (int): lines returned
-    - ``has_more`` (bool): whether more lines exist after this range
-    - ``next_offset`` (int | None): offset for pagination
-
-    .. hint::
-
-       Use ``limit=-1`` to read all remaining lines from *offset*
-       to end of file in one call.
-
-    .. rubric:: Use when
-
-    - Reading file content inside the container for inspection
-    - Paginating through large files with *offset*/*limit*
-    - Reading the full file with ``limit=-1``
-
-    .. rubric:: Don't use when
-
-    - **Running shell commands** — use :func:`sandbox_exec` instead
-    - **Searching for a pattern across files** — use :func:`search_in_container` instead
-    - **Editing files** — use :func:`write_file_sandbox` or :func:`transform_file` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec cat`` for reading files (structured JSON response, pagination support)
-
-    .. rubric:: Fallback
-
-    - For searching content use :func:`search_in_container`
-    - For listing directory contents use :func:`list_files`
+    """Read lines from *file_path* inside the container.
 
     Args:
-        container_id: 12-character container ID prefix.
-        file_path: Path to the file inside the container.
-        offset: 0-indexed line offset to start reading from.
-        limit: Maximum number of lines to return.  Use ``-1`` to read
-            all remaining lines from *offset*.
-        start_line: 1-indexed start line (inclusive).  When set,
-            *offset* and *limit* are derived from *start_line*
-            and *end_line* instead.
-        end_line: 1-indexed end line (inclusive).  When omitted,
-            reads from *start_line* to end of file.
-            Mutually exclusive with *offset* (use either
-            start_line/end_line or offset/limit, not both).
+        container_id: Container ID prefix.
+        file_path: File path inside the container.
+        offset: 0-indexed start line.
+        limit: Max lines to return; -1 reads to end of file.
+        start_line: 1-indexed inclusive start. start_line/end_line and
+            offset/limit are mutually exclusive pairs.
+        end_line: 1-indexed inclusive end; default end of file.
 
     Returns:
-        JSON string with file content and metadata, or an error
-        message beginning with ``"Error:"``.
-
-    See also:
-        :func:`search_in_container` — find content across files with
-        ripgrep/ast-grep.
-        :func:`write_file_sandbox` — edit files after inspection.
+        JSON: content, total_lines, shown, has_more, next_offset.
     """
     client = _docker()
     try:
@@ -707,27 +579,6 @@ def list_files(
     Returns a JSON array of file paths sorted alphabetically.
     Hidden files (dotfiles) and directories under ``.git`` are
     excluded.
-
-    .. rubric:: Use when
-
-    - Exploring the container's filesystem structure
-    - Finding files matching a glob pattern (*pattern*)
-    - Getting a quick file count in a directory
-
-    .. rubric:: Don't use when
-
-    - **Reading file content** — use :func:`read_file_range` instead
-    - **Searching for text within files** — use :func:`search_in_container` instead
-    - **Running arbitrary shell commands** — use :func:`sandbox_exec` instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over ``sandbox_exec find`` for listing files (structured JSON response, dotfiles excluded by default)
-
-    .. rubric:: Fallback
-
-    - For file content use :func:`read_file_range`
-    - For text search across files use :func:`search_in_container`
 
     Args:
         container_id: 12-character container ID prefix.
@@ -806,95 +657,34 @@ def transform_file(
     offset: int = 0,
     limit: int = 100,
 ) -> str:
-    """Edit a file imperatively by running Python that computes the new text.
+    """Edit a file by running Python that computes the new text.
 
-    The **imperative** edit path: instead of providing the new bytes
-    (:func:`write_file_sandbox`) or a diff (:func:`apply_patch`), you provide
-    *code* that transforms the file's content.  Ideal for edits that the
-    declarative tools handle poorly — bulk / repetitive / structural / computed
-    changes (e.g. a regex applied to every occurrence, renaming a symbol,
-    re-indenting, applying a value derived from the existing text).
-
-    *code* is executed as a **complete Python module** inside the disposable
-    sandbox container (never on the host).  The **only** requirement is that,
-    once the module finishes executing, a top-level callable
-    ``transform(text: str) -> str`` exists — you are free to define helper
-    functions, classes, ``import`` modules, and any number of other top-level
-    statements alongside it.  ``transform`` is called with the file's current
-    text and must return the new text; the result is written back and a
-    **unified diff of the change is returned** so you can verify the effect
-    without a separate read-back.
-
-    *code* is base64-encoded before transport, so quotes (including
-    triple-quoted strings), backslashes, multibyte characters, and newlines
-    need no escaping — pass the program as a single ``code`` string, exactly as
-    you would write it in a ``.py`` file.
-
-    Example — uppercase every TODO marker, using a helper::
+    code executes as a complete module inside the container (never on
+    the host); when it finishes, a top-level callable
+    transform(text: str) -> str must exist (helpers and imports are
+    fine).  The file's text goes in, the returned text is written back,
+    and a unified diff is returned -- always check it: an over-broad
+    pattern can change more than intended.  Prefer write_file_sandbox
+    old_str for a single known replacement; use this for bulk, pattern,
+    or computed edits.  Example::
 
         import re
-
-        def _to_upper(m):
-            return m.group(0).upper()
-
         def transform(text):
-            return re.sub("todo", _to_upper, text, flags=re.IGNORECASE)
-
-    .. hint::
-
-       For a single known string replacement prefer :func:`write_file_sandbox`
-       with ``old_str``.  Reach for ``transform_file`` when the edit is better
-       expressed as logic than as literal text — many occurrences, a pattern,
-       or a value computed from the file.  Always check the returned ``diff``;
-       an over-broad pattern can change more than intended.
-
-    .. rubric:: Use when
-
-    - Making **bulk / repetitive** edits (e.g. renaming a symbol across many files)
-    - Applying **structural / computed** transformations (e.g. regex-based rewrites, re-indentation)
-    - Writing **multi-line Python scripts** that need file I/O, ``subprocess``, or complex logic
-    - Edits where the new content is a **computed value** from the existing text
-
-    .. rubric:: Don't use when
-
-    - **Simple one-off string replacement** — use :func:`write_file_sandbox` with ``old_str`` instead
-    - **Line-range replacement** — use :func:`write_file_sandbox` with ``start_line``/``end_line`` instead
-    - **Appending to a file** — use :func:`write_file_sandbox` with ``append=True`` instead
-    - **Creating a new file** — use :func:`write_file_sandbox` full-overwrite mode instead
-
-    .. rubric:: Prefer over
-
-    - Prefer over :func:`apply_patch` for AI-authored edits (no ``@@`` header errors)
-    - Prefer over ``sandbox_exec`` + ``sed`` for file editing (no quoting issues)
-
-    .. rubric:: Fallback
-
-    - For simple declarative edits use :func:`write_file_sandbox`
-    - For inspecting content before editing use :func:`read_file_range`
+            return re.sub("todo", "TODO", text)
 
     Args:
-        container_id: 12-character container ID prefix.
-        file_path: Absolute path to the file inside the container.
-        code: Python source defining a top-level ``transform(text: str) -> str``
-            (helper functions, classes, and ``import`` statements alongside it
-            are fine; only the ``transform`` callable is required).
-            Executed as a **full Python interpreter** (not a restricted DSL):
-            ``__builtins__``, ``open()``, ``import``, ``subprocess``, etc.
-            are all available inside the disposable sandbox container.
-        max_lines: Maximum diff lines to show (summary truncation).
-        offset: Line offset for paging through a large diff (0-indexed).
-        limit: Maximum diff lines per page.
+        container_id: Container ID prefix.
+        file_path: Absolute path inside the container.
+        code: Python source defining transform(text) -> str. Transported
+            base64-encoded, so quotes, backslashes, and newlines need no
+            escaping -- write it exactly as a .py file.
+        max_lines: Max diff lines shown.
+        offset: Diff paging offset (0-indexed).
+        limit: Max diff lines per page.
 
     Returns:
-        JSON string.  On success: ``status="ok"``, ``changed`` (bool),
-        ``diff`` (str, paginated) and diff metadata (``shown``,
-        ``total_lines``, ``truncated``, ``next_offset``, ``has_more``).
-        On failure: ``status="error"`` with ``error`` (and ``traceback`` when
-        the caller's code raised).
-
-    See also:
-        :func:`write_file_sandbox` — declarative edits (the default path).
-        :func:`read_file_range` — inspect file content before editing.
+        JSON: status, changed, diff (paginated, with paging metadata);
+        on failure error, and traceback when your code raised.
     """
     client = _docker()
     try:

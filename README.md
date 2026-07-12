@@ -134,6 +134,7 @@ Dive deeper into specific topics:
 
 ## Known Limitations
 
+*   **No local export (No host write-back)**: To prevent host contamination, file transfer is strictly one-way (host → container). The only way to export changes from the sandbox is via `publish` to a GitHub repository. Purely local projects that are not hosted on GitHub cannot be round-tripped.
 *   **Job state is in-memory**: Background job results are lost on server restart.
 *   **Job list grows unbounded**: Completed job results accumulate in memory (not an issue for typical short-lived sessions).
 *   **Background jobs are lost on server restart**: Use `run_container_and_exec` for critical one-shot operations.

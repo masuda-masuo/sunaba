@@ -138,7 +138,8 @@ class TestCloneShioriRepoToContainer:
         mock_container.put_archive.return_value = True
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),        # mkdir clone_dest
-            (0, (b"", b"")),        # chown
+            (0, b"999:999"),        # id probe (default user)
+            (0, b""),               # chown as root
             (0, (b"", b"")),        # clone meta write
             (0, (b"true\n", b"")),  # shallow probe
             (0, (b"remote: Enumerating objects: 42, done.\n", b"")),  # unshallow
@@ -154,7 +155,7 @@ class TestCloneShioriRepoToContainer:
         assert "Copied Shiori clone" in result
         assert "/tmp/repo/repo" in result
         mock_container.put_archive.assert_called_once()
-        assert mock_container.exec_run.call_count == 5
+        assert mock_container.exec_run.call_count == 6
 
     def test_nonshallow_repo_skips_unshallow(
             self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
@@ -173,7 +174,8 @@ class TestCloneShioriRepoToContainer:
         mock_container.put_archive.return_value = True
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),         # mkdir clone_dest
-            (0, (b"", b"")),         # chown
+            (0, b"999:999"),         # id probe (default user)
+            (0, b""),                # chown as root
             (0, (b"", b"")),         # clone meta write
             (0, (b"false\n", b"")),  # shallow probe: not shallow
         ]
@@ -186,7 +188,7 @@ class TestCloneShioriRepoToContainer:
             )
 
         assert "Copied Shiori clone" in result
-        assert mock_container.exec_run.call_count == 4
+        assert mock_container.exec_run.call_count == 5
         assert "unshallow" not in caplog.text
 
     def test_unshallow_fails_but_copy_succeeds(
@@ -205,7 +207,8 @@ class TestCloneShioriRepoToContainer:
         mock_container.put_archive.return_value = True
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),        # mkdir clone_dest
-            (0, (b"", b"")),        # chown
+            (0, b"999:999"),        # id probe (default user)
+            (0, b""),               # chown as root
             (0, (b"", b"")),        # clone meta write
             (0, (b"true\n", b"")),  # shallow probe: shallow
             (1, (b"fatal: unable to fetch\n", b"")),  # unshallow fails
@@ -233,7 +236,8 @@ class TestCloneShioriRepoToContainer:
         mock_container.put_archive.return_value = True
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # mkdir clone_dest
-            Exception("network error"),  # chown (caught)
+            (0, b"999:999"),  # id probe (default user)
+            (0, b""),         # chown as root
             Exception("network error"),  # clone meta write (caught)
             Exception("network error"),  # shallow probe (caught)
         ]
@@ -307,7 +311,13 @@ class TestCloneShioriRepoToContainer:
         (clone_dir / "README.md").write_text("hello")
 
         mock_container = MagicMock()
-        mock_container.exec_run.return_value = (0, (b"false\n", b""))
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),         # mkdir clone_dest
+            (0, b"999:999"),         # id probe (default user)
+            (0, b""),                # chown as root
+            (0, (b"", b"")),         # clone meta write
+            (0, (b"false\n", b"")),  # shallow probe: not shallow
+        ]
         mock_container.put_archive.return_value = True
 
         with patch(
@@ -322,6 +332,68 @@ class TestCloneShioriRepoToContainer:
         names = [name for name, _args, _kw in mock_container.method_calls]
         assert names.index("exec_run") < names.index("put_archive")
 
+    def test_chown_runs_as_root_with_default_user_ids(
+            self, tmp_path: Path,
+    ) -> None:
+        """#532 follow-up: put_archive extracts as root, so the tree must be
+        chowned to the default exec user, and the chown itself must run as
+        root (the default user cannot chown root-owned files)."""
+        from unittest.mock import call
+
+        repos_root = tmp_path / "repos"
+        repos_root.mkdir()
+        clone_dir = repos_root / "owner__repo"
+        clone_dir.mkdir(parents=True)
+        (clone_dir / ".git").mkdir()
+        (clone_dir / "README.md").write_text("hello")
+
+        mock_container = MagicMock()
+        mock_container.put_archive.return_value = True
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),         # mkdir clone_dest
+            (0, b"999:999\n"),       # id probe (default user)
+            (0, b""),                # chown as root
+            (0, (b"", b"")),         # clone meta write
+            (0, (b"false\n", b"")),  # shallow probe: not shallow
+        ]
+
+        with patch(
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+        ):
+            result = _clone_shiori_repo_to_container(
+                mock_container, "abc123", "owner/repo", "/tmp/repo"
+            )
+
+        assert "Copied Shiori clone" in result
+        assert mock_container.exec_run.call_args_list[2] == call(
+            ["chown", "-R", "999:999", "/tmp/repo/repo"], user="0"
+        )
+
+    def test_chown_failure_raises(self, tmp_path: Path) -> None:
+        """#532 follow-up: a failed chown leaves an unusable root-owned
+        tree, so it must fail the copy instead of being swallowed."""
+        repos_root = tmp_path / "repos"
+        repos_root.mkdir()
+        clone_dir = repos_root / "owner__repo"
+        clone_dir.mkdir(parents=True)
+        (clone_dir / ".git").mkdir()
+
+        mock_container = MagicMock()
+        mock_container.put_archive.return_value = True
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),   # mkdir clone_dest
+            (0, b"999:999"),   # id probe (default user)
+            (1, b"chown: Operation not permitted"),  # chown fails
+        ]
+
+        with patch(
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+        ):
+            with pytest.raises(RuntimeError, match="Failed to chown"):
+                _clone_shiori_repo_to_container(
+                    mock_container, "abc123", "owner/repo", "/tmp/repo"
+                )
+
     def test_repo_name_in_path(self, tmp_path: Path) -> None:
         repos_root = tmp_path / "repos"
         repos_root.mkdir()
@@ -332,7 +404,13 @@ class TestCloneShioriRepoToContainer:
 
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
-        mock_container.exec_run.return_value = (0, (b"false\n", b""))
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),         # mkdir clone_dest
+            (0, b"999:999"),         # id probe (default user)
+            (0, b""),                # chown as root
+            (0, (b"", b"")),         # clone meta write
+            (0, (b"false\n", b"")),  # shallow probe: not shallow
+        ]
 
         with patch(
             "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)

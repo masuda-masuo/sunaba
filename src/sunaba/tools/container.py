@@ -508,12 +508,25 @@ def _clone_shiori_repo_to_container(
         os.unlink(tmp.name)
 
     clone_path = f"{clone_dest}/{repo_name}"
-    try:
-        container.exec_run(
-            ["sh", "-c", f"chown -R $(id -u):$(id -g) {shlex.quote(clone_path)}"]
+    # put_archive extracts as root, but execs run as the image's default
+    # user (e.g. uid 999) -- left root-owned, every git command dies with
+    # "dubious ownership" and the tree is unwritable (#532).  Ask the
+    # default user for its uid:gid, then chown as root; running
+    # `chown $(id -u)` as root would resolve to 0:0.
+    exit_code, ids_out = container.exec_run(["sh", "-c", 'echo "$(id -u):$(id -g)"'])
+    ids = (ids_out or b"").decode("utf-8", errors="replace").strip()
+    if exit_code != 0 or not ids:
+        raise RuntimeError(
+            f"Failed to resolve container user for chown of {clone_path}"
         )
-    except Exception as e:
-        logger.debug("chown failed for %s: %s", clone_path, e)
+    exit_code, chown_out = container.exec_run(
+        ["chown", "-R", ids, clone_path], user="0"
+    )
+    if exit_code != 0:
+        raise RuntimeError(
+            f"Failed to chown {clone_path} to {ids}: "
+            f"{(chown_out or b'').decode('utf-8', errors='replace').strip()}"
+        )
     _write_clone_meta(container, clone_path)
 
     record_copy(
@@ -745,7 +758,8 @@ def _try_clone_into_container(
     Returns ``(clone_msg, None)`` on success, ``(None, error_str)`` on failure.
     """
     try:
-        if not _shiori_preclone_exists(clone_repo):
+        used_network = not _shiori_preclone_exists(clone_repo)
+        if used_network:
             msg = _clone_repo_via_network(
                 container,
                 container_id,
@@ -761,10 +775,12 @@ def _try_clone_into_container(
                 clone_repo,
                 clone_dest,
             )
-        if not authenticated and not open_read_grant:
-            # Anonymous clone with no proxy read grant (only reachable
-            # proxy-off): warn that a private repo would have failed and
-            # that this checkout is read-only (Issue #333).
+        if used_network and not authenticated and not open_read_grant:
+            # Anonymous network clone with no proxy read grant (only
+            # reachable proxy-off): warn that a private repo would have
+            # failed and that this checkout is read-only (Issue #333).
+            # The Shiori copy route is exempt: it is not a network clone,
+            # and private repos succeed on it (#532).
             msg = f"{msg} — WARNING: {CLONE_NO_TOKEN_WARNING}"
         return CloneResult(msg, None)
     except Exception as e:

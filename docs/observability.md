@@ -31,6 +31,13 @@ Starts automatically by default alongside the MCP server. Binds to `127.0.0.1:87
 > [!TIP]
 > **WSL2 tip**: When running inside WSL2, the dashboard binds to localhost inside the Linux environment. It is accessible from your Windows host browser at `http://localhost:8751` via WSL2's automatic localhost forwarding.
 
+### Stopping Containers from the Dashboard
+
+The dashboard is not just a read-only viewer; it provides active control to stop and clean up running sandbox containers via a **`[Stop]`** button on the UI:
+
+*   **CSRF Protection**: To prevent external malicious websites from sending unauthorized requests to tear down your development sandboxes, all container teardown actions are guarded by a unique CSRF token generated at server startup.
+*   **Unpushed Checkpoints Guard**: If a container has unpushed checkpoints (unsaved Git commits that haven't been pushed back to GitHub via `publish`), the stop action will fail with a warning to prevent accidental data loss. You will be prompted to push your changes or explicitly force-stop the container, discarding unsaved state.
+
 ---
 
 ## 2. Append-Only Execution Journal

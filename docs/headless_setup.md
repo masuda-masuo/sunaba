@@ -24,7 +24,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/dbus-run-session -- /home/masuda/.venv/bin/sunaba --transport streamable-http --port 8750 --dashboard-port 8751
+ExecStart=/usr/bin/dbus-run-session -- %h/.local/share/sunaba-venv/bin/sunaba --transport streamable-http --port 8750 --dashboard-port 8751
 Restart=always
 
 [Install]

@@ -80,13 +80,23 @@ Sunaba is designed to run as a resident background service (daemon) under `syste
 Follow these three phases to install and start the service:
 
 ### Phase 1: Install
-Create a Python virtual environment and install the package:
+Create a Python virtual environment and install the package from PyPI:
 ```bash
 python -m venv ~/.local/share/sunaba-venv
-~/.local/share/sunaba-venv/bin/pip install git+https://github.com/masuda-masuo/sunaba@v0.9.0
+~/.local/share/sunaba-venv/bin/pip install sunaba
 ```
 
+To track unreleased `main` instead:
+`~/.local/share/sunaba-venv/bin/pip install git+https://github.com/masuda-masuo/sunaba`
+
 ### Phase 2: Setup (Keystore Setup)
+The operator scripts live in the repository — the PyPI package ships the server,
+not the scripts — so clone it first:
+```bash
+git clone https://github.com/masuda-masuo/sunaba
+cd sunaba
+```
+
 Register your GitHub App credentials into the OS keystore:
 ```bash
 ./scripts/setup.sh
@@ -125,7 +135,7 @@ Dive deeper into specific topics:
 *   **[Daemon Setup Guide](docs/daemon_setup.md)**: Detailed instructions on running Sunaba as a background `systemd` user service, configuring token rotation, and connecting IDE clients.
 *   **[Security & Network Containment](docs/security.md)**: The Egress Proxy design, allowed host configurations, and token isolation details.
 *   **[Sandbox Images](docs/sandbox_image.md)**: Details on the `base`, `python`, and `go` Docker images, included tools, and language auto-detection.
-*   **[MCP Tool Reference](docs/tools.md)**: A complete reference table of all 30+ available tools.
+*   **[MCP Tool Reference](docs/tools.md)**: A complete reference table of every tool — 22 by default, plus 5 opt-in observability tools.
 *   **[Observability & Dashboard](docs/observability.md)**: The local web dashboard, append-only execution logging, replay traces, and push notification triggers.
 *   **[Contributing Guide](CONTRIBUTING.md)**: Local developer setup instructions (`pip install -e .[test]`) and test commands.
 *   **[Design Decisions](docs/design.md)**: Detailed rationale and design logs.
@@ -136,9 +146,8 @@ Dive deeper into specific topics:
 ## Known Limitations
 
 *   **No local export (No host write-back)**: To prevent host contamination, file transfer is strictly one-way (host → container). The only way to export changes from the sandbox is via `publish` to a GitHub repository. Purely local projects that are not hosted on GitHub cannot be round-tripped.
-*   **Job state is in-memory**: Background job results are lost on server restart.
+*   **Job state is in-memory**: Background job results (`sandbox_exec_background`) are lost on server restart. Use `run_container_and_exec` for critical one-shot operations.
 *   **Job list grows unbounded**: Completed job results accumulate in memory (not an issue for typical short-lived sessions).
-*   **Background jobs are lost on server restart**: Use `run_container_and_exec` for critical one-shot operations.
 
 ---
 

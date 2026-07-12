@@ -64,3 +64,44 @@ class TestServerInstructions:
             assert keyword in server.SERVER_INSTRUCTIONS, (
                 f"workflow map lost its {keyword!r} anchor"
             )
+
+
+# Aggregate budgets: measured after the #550 docstring diet (desc 8249 B,
+# param descriptions 8040 B across 28 tools), capped at roughly +10% so the
+# surface cannot quietly regrow tool by tool.
+TOTAL_DESCRIPTION_BYTE_LIMIT = 9216
+TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 8960
+
+
+def _param_desc_bytes(tool) -> int:
+    props = (tool.parameters or {}).get("properties") or {}
+    return sum(_byte_len(prop.get("description")) for prop in props.values())
+
+
+class TestAggregateBudget:
+    """The whole tool surface stays lean, not just each tool alone.
+
+    FastMCP splits every docstring: the body before ``Args:`` becomes the
+    client-visible description, each ``Args:`` entry becomes the matching
+    JSON-schema parameter description, and everything after ``Args:``
+    (including ``Returns:``) is dropped from the description.  Both halves
+    consume client context, so both get an aggregate cap.
+    """
+
+    def test_total_description_budget(self) -> None:
+        sizes = {t.name: _byte_len(t.description) for t in _tools(server)}
+        total = sum(sizes.values())
+        assert total <= TOTAL_DESCRIPTION_BYTE_LIMIT, (
+            f"tool descriptions total {total} bytes "
+            f"(limit {TOTAL_DESCRIPTION_BYTE_LIMIT}); worst offenders: "
+            f"{sorted(sizes.items(), key=lambda kv: -kv[1])[:5]}"
+        )
+
+    def test_total_param_description_budget(self) -> None:
+        sizes = {t.name: _param_desc_bytes(t) for t in _tools(server)}
+        total = sum(sizes.values())
+        assert total <= TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT, (
+            f"schema parameter descriptions total {total} bytes "
+            f"(limit {TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT}); worst offenders: "
+            f"{sorted(sizes.items(), key=lambda kv: -kv[1])[:5]}"
+        )

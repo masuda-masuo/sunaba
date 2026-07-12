@@ -26,6 +26,8 @@ from sunaba.output_control import (
 from sunaba.tools.common import RECOVERY_DOCKER_TIMEOUT, _coerce_list_arg, _docker
 
 
+# argv mode exists because shell quoting of git/gh bodies is a footgun
+# (#234/#228); it bypasses /bin/bash -c entirely.
 def sandbox_exec(
     container_id: str,
     commands: Annotated[list[str], BeforeValidator(_coerce_list_arg)] | None = None,
@@ -40,59 +42,33 @@ def sandbox_exec(
 ) -> str:
     """Execute commands inside a running sandbox container.
 
-    Each command is executed sequentially in the same ``exec`` instance
-    (chained via ``&&``), preserving working directory and environment
-    between commands.
-
-    .. note:: **Multibyte characters and newlines in commands**
-
-       Pass each command as a plain string — JSON-RPC (and therefore the
-       MCP transport layer) does not allow **raw newlines inside a JSON
-       string value**, so including one causes an ``Unterminated string``
-       parse error before the request even reaches the server.  To run a
-       multi-line shell command use ``\\n`` escape sequences, or write the
-       script to a file first and execute it.  Multibyte characters
-       (e.g. Japanese) are safe as long as no literal newline appears
-       inside the JSON string value.
+    Commands are chained with '&&' in one exec instance (cwd and env
+    persist between them).  A raw newline inside a command string
+    breaks the JSON-RPC request before it reaches the server: use
+    escaped-newline sequences, write a script file first, or use argv.
+    Prefer the dedicated read/edit/search tools over shell equivalents,
+    and argv mode for git/gh calls where shell quoting is a footgun.
 
     Args:
-        container_id: 12-character container ID prefix.
-        commands: List of shell commands to execute sequentially.
-        working_dir: Working directory to set before executing commands
-            (default ``""`` = no change).  When specified, ``cd`` to
-            this directory is prepended to the command chain.
-        verbose: Output verbosity:
-
-            - ``"error_only"``: Show output only on failure.
-            - ``"summary"``: Show first/last lines with omission notice.
-            - ``"full"``: Show all output.
-        max_lines: Maximum lines to show in summary/error_only mode.
-        offset: Line offset for paging (0-indexed).  Use with *limit*
-            to paginate through the output.
-        limit: Maximum lines per page.
-        timeout: Maximum seconds to let the command run (``0`` = no
-            limit, the default).  When the timeout expires the process
-            is killed and the tool returns ``status="timeout"`` with
-            ``exit_code=124`` (the standard exit code for
-            ``timeout(1)``).
-        max_output_tokens: Token budget for output (``0`` = no limit).
-            When set, the output is summarised to fit within this many
-            estimated tokens and a ``resource://run/{run_id}/output``
-            handle is included for full retrieval.
-        argv: When given, run this argument vector **directly** (no
-            ``/bin/bash -c``), so quoting, ``$'...'`` and embedded newlines
-            are passed through literally.  Mutually exclusive with
-            *commands*.  Intended for VCS/``gh`` calls where shell
-            quoting is a footgun (issue #234 / #228).  *working_dir* is
-            honoured via the exec ``workdir`` and *timeout* is prepended
-            as ``timeout(1)`` argv.
+        container_id: Container ID prefix.
+        commands: Shell commands run sequentially. No raw newlines
+            (see above).
+        working_dir: cd here before running.
+        verbose: 'error_only', 'summary' (default), or 'full'.
+        max_lines: Max lines shown in summary/error_only mode.
+        offset: 0-indexed line offset for paging output.
+        limit: Max lines per page.
+        timeout: Kill after N seconds (0 = no limit); on expiry
+            status='timeout', exit_code=124.
+        max_output_tokens: Summarize output to this token budget (0 = off);
+            full output stays retrievable via a resource://run/ handle.
+        argv: Argument vector run directly, no shell -- quoting and
+            embedded newlines pass through literally. Mutually
+            exclusive with commands.
 
     Returns:
-        JSON string with ``status``, ``output``, and metadata
-        (``shown``, ``total_lines``, ``truncated``, ``next_offset``,
-        ``has_more``).  On failure also includes ``exit_code`` and
-        ``stderr``.  ``status`` is ``"timeout"`` when *timeout* was
-        exceeded.
+        JSON: status, output, paging metadata; exit_code and stderr on
+        failure.
     """
     if timeout < 0:
         return json.dumps({"status": "error", "error": "timeout must be >= 0"})

@@ -489,36 +489,29 @@ def checkpoint_restore(
 # ---------------------------------------------------------------------------
 
 
+# Host-side fetch (#360); the old in-container gh path failed under the
+# egress proxy, which never provides a container-side token (#356).
 def issue_view(
     container_id: str,
     repo: str,
     issue_number: int,
     save_to: str = "/home/sandbox/issue.md",
 ) -> str:
-    """Read a GitHub issue and save its body to a file inside the container.
+    """Fetch a GitHub issue host-side and save its body into the container.
 
-    Fetches the issue host-side via the REST API (like :func:`publish`'s PR
-    creation, #360) and writes the body into the container.  The LLM
-    receives only a summary + handle (file path and size); full text can be
-    retrieved with :func:`read_file_range`.
-
-    Because the network hop happens on the host, this works on **any**
-    container -- ``allow_network`` is not required.
-    This also fixes the tool for egress-proxied containers: the previous
-    in-container ``gh issue view`` needed a container-side token, which the
-    proxy deliberately never provides (#356), so it failed outright there.
+    Works on any container -- allow_network is not required.  The
+    response is a summary plus a file handle; read the full text with
+    read_file_range.
 
     Args:
-        container_id: 12-character container ID prefix.
-        repo: Repository in ``"owner/repo"`` format.
+        container_id: Container ID prefix.
+        repo: 'owner/repo'.
         issue_number: Issue number to fetch.
-        save_to: Path inside the container to save the issue body
-            (default ``"/home/sandbox/issue.md"``).
+        save_to: Path inside the container for the issue body.
 
     Returns:
-        JSON string with ``number``, ``title``, ``summary`` (up to 100
-        characters of body), ``file`` path, and ``size_bytes``.
-        On error returns an ``error`` field.
+        JSON: number, title, summary (first 100 chars), file,
+        size_bytes; error on failure.
     """
     client = _docker()
     try:
@@ -587,6 +580,10 @@ def issue_view(
 _ISSUE_WRITE_METHODS = ("create", "comment")
 
 
+# Host-side non-push write: fills the #360 blind spot (under the egress
+# proxy in-container gh has no credential, #356).  Direct REST via
+# _github_api_request, the pattern of _create_pr_via_api / issue_view
+# (#409/#413); single-call, dry-run retired for V1.0 to match publish.
 def sandbox_issue_write(
     container_id: str,
     repo: str,
@@ -597,36 +594,23 @@ def sandbox_issue_write(
 ) -> str:
     """Create a GitHub issue or comment on one -- host-side, no in-container gh.
 
-    First-class tool for the non-push write operations #360 identified as a
-    blind spot: under the egress proxy, in-container ``gh issue create`` /
-    ``gh issue comment`` have no credential to use (#356) and would need the
-    proxy to blanket-allow api.github.com writes, defeating the point of
-    gating push. Executes in a single call (the dry_run/confirmation-token
-    two-step was retired for V1.0, matching :func:`publish`) and calls the
-    GitHub REST API directly from the
-    host (:func:`_github_api_request`, the pattern established by
-    :func:`_create_pr_via_api` and :func:`issue_view`, #409/#413) -- so no
-    token ever needs to reach the container, and the call does not depend on
-    the container having network access at all.
+    The GitHub REST API is called from the host, so no token reaches
+    the container and container network access is not required.
 
     Args:
-        container_id: 12-character container ID prefix.  Used for the
-            journal trail, exactly like :func:`publish`; the container's own
-            network/token state is irrelevant since the GitHub call happens
-            host-side.
-        repo: Repository in ``"owner/repo"`` format.
-        method: ``"create"`` (new issue) or ``"comment"`` (comment on an
-            existing issue or PR number).
-        title: Issue title.  Required when *method* is ``"create"``.
-        body: Issue or comment body (optional for ``"create"``, the actual
-            content for ``"comment"``).
-        issue_number: Issue or PR number to comment on.  Required when
-            *method* is ``"comment"``, ignored for ``"create"``.
+        container_id: Container ID prefix (journal trail only; the
+            container's network state is irrelevant).
+        repo: 'owner/repo'.
+        method: 'create' (new issue) or 'comment' (on an existing
+            issue or PR).
+        title: Issue title; required for 'create'.
+        body: Issue or comment body.
+        issue_number: Issue/PR number to comment on; required for
+            'comment', ignored for 'create'.
 
     Returns:
-        JSON string with ``status``, and on success ``html_url`` (issue or
-        comment URL) plus ``number`` (for ``"create"``).  On error returns
-        an ``error`` field.
+        JSON: status, html_url, number (for 'create'); error on
+        failure.
     """
     if method not in _ISSUE_WRITE_METHODS:
         return json.dumps({"status": "error", "error": f"Invalid method: {method!r} (expected 'create' or 'comment')"})
@@ -697,6 +681,7 @@ def sandbox_issue_write(
 _PR_REVIEW_EVENTS = ("APPROVE", "REQUEST_CHANGES", "COMMENT")
 
 
+# Host-side one-shot review submission, following sandbox_issue_write (#414).
 def sandbox_pr_review_write(
     container_id: str,
     repo: str,
@@ -707,33 +692,23 @@ def sandbox_pr_review_write(
 ) -> str:
     """Create and submit a PR review in one shot -- host-side, no in-container gh.
 
-    One-shot PR review submission following the host-side pattern established
-    by :func:`sandbox_issue_write` (#414): the GitHub REST API is called
-    directly from the host process, so no token ever reaches the container.
-    Creates a review with optional inline comments and submits it in a single
-    API call.
+    The GitHub REST API is called from the host process, so no token
+    reaches the container.
 
     Args:
-        container_id: 12-character container ID prefix.  Used for the
-            journal trail; the container's own network/token state is
-            irrelevant since the GitHub call happens host-side.
-        repo: Repository in ``\"owner/repo\"`` format.
+        container_id: Container ID prefix (journal trail only; the
+            container's network state is irrelevant).
+        repo: 'owner/repo'.
         pr: PR number to review.
-        event: ``\"APPROVE\"``, ``\"REQUEST_CHANGES\"``, or ``\"COMMENT\"``.
-            ``REQUEST_CHANGES`` and ``APPROVE`` fail with 422 when the
-            review is created by the same GitHub App token that owns the
-            PR; use ``COMMENT`` in that case.
-        body: Optional review body text (default ``\"\"``).
-        comments: Optional list of inline comment dicts, each with:
-            - ``path`` (str): file path
-            - ``line`` (int): line number
-            - ``side`` (str, optional): ``\"LEFT\"`` or ``\"RIGHT\"``
-              (default ``\"RIGHT\"``)
-            - ``body`` (str): comment text
+        event: 'APPROVE', 'REQUEST_CHANGES', or 'COMMENT'. The first
+            two fail with 422 when the review token owns the PR; use
+            'COMMENT' then.
+        body: Review body text.
+        comments: Inline comment dicts: path, line, body, optional side
+            ('LEFT'/'RIGHT', default 'RIGHT').
 
     Returns:
-        JSON string with ``status``, ``html_url`` (review URL), and
-        ``review_id``.  On error returns an ``error`` field.
+        JSON: status, html_url, review_id; error on failure.
     """
     if event not in _PR_REVIEW_EVENTS:
         return json.dumps({
@@ -1037,6 +1012,11 @@ def _ensure_proxy_ready(client: Any) -> str | None:
     return None
 
 
+# The single exit tool (docs/design.md section 11.1).  Two transports: git
+# push with credential helper, then GitHub Objects API
+# (blob->tree->commit->ref) as automatic fallback.  Host-side token
+# resolution is #347, proxy-injected push #356, host-side PR creation #360.
+# The dry-run/confirmation-token step was retired in the V1.0 cleanup.
 def publish(
     container_id: str,
     repo: str,
@@ -1051,59 +1031,32 @@ def publish(
     author_name: str | None = None,
     author_email: str | None = None,
 ) -> str:
-    """Stage, commit, push, and optionally create a PR.
+    """Stage, commit, push, and optionally create a PR -- the single exit tool.
 
-The **single exit tool** (design doc `docs/design.md` section 11.1).
-Internally holds two push transports: ``git push`` with credential
-helper, and GitHub Objects API (blob->tree->commit->ref) as
-automatic fallback.  The transport choice is transparent to the
-caller.
+    Executes in one call with no dry-run step.  Does NOT verify: call
+    verify_in_container first (edit -> verify -> publish).  Requires a
+    container started with allow_network=True.  Credentials are
+    resolved host-side at call time, so no token enters the container;
+    if git push is refused, a GitHub-API transport is tried
+    automatically.
 
-.. important::
+    Args:
+        container_id: Container ID prefix.
+        repo: 'owner/repo'.
+        branch: Branch name to push.
+        message: Git commit message.
+        working_dir: Git repo directory (default: auto-detect).
+        create_pr: Open a pull request after the push.
+        pr_title: PR title; required when create_pr=True.
+        pr_body: PR body.
+        base_branch: PR base (default: repository default branch).
+        allow_force_push: Permit git push --force when needed.
+        author_name: Override the image-default commit author.
+        author_email: Override the image-default commit author email.
 
-   ``publish`` does **not** run verification — the design assumes the
-   LLM calls :func:`verify_in_container` before ``publish`` as part of
-   the **edit → verify → publish** workflow (see ``AGENTS.md``).
-
-Executes in a single call: stages, commits, pushes, and (when
-*create_pr* is ``True``) opens the PR.  There is no dry-run /
-confirmation-token step -- the human gate is the MCP client's own
-tool-approval prompt and the egress proxy is the structural guard, so
-an in-band token would only add ceremony (V1.0 API cleanup).
-
-Requires a container started with ``allow_network=True``.  No VCS token
-needs to reach the container: the push credential is resolved host-side
-at call time (Issue #347) and — with the egress proxy configured (#356)
-— injected by the proxy into the authorized push only, so the container
-never holds it.  PR creation likewise runs host-side (#360).
-
-Args:
-    container_id: 12-character container ID prefix.
-    repo: Repository in ``"owner/repo"`` format.
-    branch: Branch name to push.
-    message: Git commit message.
-    working_dir: Directory in the container containing the git
-        repository (default ``None`` = auto-detect).
-    create_pr: Whether to create a pull request after push.
-    pr_title: PR title (required if ``create_pr=True``).
-    pr_body: PR body (optional).
-    base_branch: Base branch for the PR (default: repository
-        default branch).
-    allow_force_push: When ``True`` and needed, permits
-        ``git push --force`` (opt-in; default ``False``).
-    author_name: Git commit author name.  When set, takes precedence
-        over the image-level default configured in
-        ``docker/Dockerfile.base`` (``sunaba[bot]``).
-        When ``None``, the image-level default is used.
-    author_email: Git commit author email.  When set, takes precedence
-        over the image-level default configured in
-        ``docker/Dockerfile.base``
-        (``sunaba[bot]@users.noreply.github.com``).
-        When ``None``, the image-level default is used.
-
-Returns:
-    JSON string with operation result.
-"""
+    Returns:
+        JSON with the operation result.
+    """
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -1473,6 +1426,9 @@ def _try_api_push(
 # ---------------------------------------------------------------------------
 
 
+# Container-side transport probed: gh repo clone when a token exists, else
+# anonymous git clone over HTTPS (#333).  Private-repo auth = egress-proxy
+# read-authorization grant (#356/#419).
 def clone_repo(
     container_id: str,
     repo: str,
@@ -1481,32 +1437,20 @@ def clone_repo(
 ) -> str:
     """Clone a Git repository inside the container.
 
-    Uses ``gh repo clone`` when a VCS token is present in the container,
-    otherwise an anonymous ``git clone`` over HTTPS -- public repos clone
-    without credentials (Issue #333).  The choice between those two
-    container-side transports is made by probing the container itself
-    (``gh auth setup-git``).
-
-    Requires a container started with ``allow_network=True``.  A
-    *private* repository needs no extra flag: under the egress proxy
-    (#356) the container never receives a token, so a host-resolved
-    token is handed to the proxy for a short read-authorization grant
-    (#419) that authenticates the clone's anonymous ``git clone`` at the
-    network layer -- the container's own env and any ``gh``
-    credential-helper state stay untouched.
+    Requires a container started with allow_network=True.  Private
+    repositories need no extra flag: the clone is authenticated at the
+    network layer with a host-resolved token, so no credential enters
+    the container.
 
     Args:
-        container_id: 12-character container ID prefix.
-        repo: Repository in ``"owner/repo"`` format.
-        dest_dir: Parent directory in the container.  The repo is cloned
-            into ``{dest_dir}/{repo_name}`` (default parent
-            ``"/home/sandbox"``).
-        branch: Branch name to clone. Omit for the default branch.
+        container_id: Container ID prefix.
+        repo: 'owner/repo'.
+        dest_dir: Parent directory; the repo lands in
+            {dest_dir}/{repo_name}.
+        branch: Branch to clone; omit for the default branch.
 
     Returns:
-        JSON string with ``status``, ``repo``, ``clone_path``, and
-        ``branch``.  On error returns an ``error`` field.
-
+        JSON: status, repo, clone_path, branch; error on failure.
     """
     client = _docker()
     try:

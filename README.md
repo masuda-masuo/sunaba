@@ -126,6 +126,7 @@ Dive deeper into specific topics:
 *   **[Security & Network Containment](docs/security.md)**: The Egress Proxy design, allowed host configurations, and token isolation details.
 *   **[Sandbox Images](docs/sandbox_image.md)**: Details on the `base`, `python`, and `go` Docker images, included tools, and language auto-detection.
 *   **[MCP Tool Reference](docs/tools.md)**: A complete reference table of all 30+ available tools.
+*   **[Observability & Dashboard](docs/observability.md)**: The local web dashboard, append-only execution logging, replay traces, and push notification triggers.
 *   **[Contributing Guide](CONTRIBUTING.md)**: Local developer setup instructions (`pip install -e .[test]`) and test commands.
 *   **[Design Decisions](docs/design.md)**: Detailed rationale and design logs.
 *   **[Changelog](CHANGELOG.md)**: Release version history and migration guides.

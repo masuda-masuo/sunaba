@@ -394,6 +394,47 @@ class TestCloneShioriRepoToContainer:
                     mock_container, "abc123", "owner/repo", "/tmp/repo"
                 )
 
+    def test_env_template_kept_secrets_filtered(self, tmp_path: Path) -> None:
+        """#561: tracked .env templates survive the copy (a filtered tracked
+        file starts the checkout dirty); real env files are still dropped."""
+        import tarfile as tarfile_mod
+
+        repos_root = tmp_path / "repos"
+        repos_root.mkdir()
+        clone_dir = repos_root / "owner__repo"
+        clone_dir.mkdir(parents=True)
+        (clone_dir / ".git").mkdir()
+        (clone_dir / ".env").write_text("SECRET=1")
+        (clone_dir / ".env.local").write_text("SECRET=1")
+        (clone_dir / ".env.example").write_text("SECRET=")
+        (clone_dir / ".env.sample").write_text("SECRET=")
+
+        mock_container = MagicMock()
+        mock_container.put_archive.return_value = True
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),         # mkdir clone_dest
+            (0, b"999:999"),         # id probe (default user)
+            (0, b""),                # chown as root
+            (0, (b"", b"")),         # clone meta write
+            (0, (b"false\n", b"")),  # shallow probe: not shallow
+        ]
+
+        with patch(
+            "sunaba.tools.container._SHIORI_REPOS_PATH", str(repos_root)
+        ):
+            _clone_shiori_repo_to_container(
+                mock_container, "abc123", "owner/repo", "/tmp/repo"
+            )
+
+        _dest, buf = mock_container.put_archive.call_args.args
+        buf.seek(0)
+        with tarfile_mod.open(fileobj=buf) as tar:
+            names = tar.getnames()
+        assert "repo/.env.example" in names
+        assert "repo/.env.sample" in names
+        assert "repo/.env" not in names
+        assert "repo/.env.local" not in names
+
     def test_repo_name_in_path(self, tmp_path: Path) -> None:
         repos_root = tmp_path / "repos"
         repos_root.mkdir()

@@ -216,10 +216,9 @@ def authorized_read_grant(
     """Open a read grant for *repo*, then always revoke it on exit (#419).
 
     Mirrors :func:`authorized_push_grant`: a no-op when the proxy is
-    unconfigured; when configured, callers such as ``clone_repo`` /
-    ``sandbox_initialize`` use this to let an authenticated clone/fetch
-    through the egress proxy without ever putting the token in the
-    container's own environment.
+    unconfigured; when configured, callers such as ``sandbox_initialize``
+    use this to let an authenticated clone/fetch through the egress proxy
+    without ever putting the token in the container's own environment.
     """
     cfg = config or ProxyControlConfig.from_env()
     if cfg is None:

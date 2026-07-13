@@ -58,7 +58,6 @@ from .tools.vcs import (
     checkpoint,
     checkpoint_list,
     checkpoint_restore,
-    clone_repo,
     issue_view,
     publish,
     sandbox_issue_write,
@@ -104,7 +103,6 @@ sandbox_pr_review_write = mcp.tool()(sandbox_pr_review_write)
 checkpoint = mcp.tool()(checkpoint)
 checkpoint_list = mcp.tool()(checkpoint_list)
 checkpoint_restore = mcp.tool()(checkpoint_restore)
-clone_repo = mcp.tool()(clone_repo)
 
 # Container naming / discovery tools (Issue #478)
 sandbox_list_containers = mcp.tool()(sandbox_list_containers)

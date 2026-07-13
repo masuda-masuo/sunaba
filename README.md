@@ -58,7 +58,7 @@ For the full detailed rationale, see [Design Decisions](docs/design.md).
 The core developer workflow is centered around a single 5-step loop:
 
 ```
-clone_repo            # Pull the repository into a fresh container
+sandbox_initialize    # Pull the repository into a fresh container (clone_repo="owner/name")
     ↓
 write_file_sandbox    # Edit in place (or transform_file for bulk/computed edits)
     ↓
@@ -115,7 +115,7 @@ For client configurations (such as connecting Claude Desktop via `mcp-remote`) a
 
 *   **Docker daemon must be running**: `docker info` should succeed before you start.
 *   **The first initialization can take several minutes**: The first call to `sandbox_initialize` pulls the base sandbox images from GHCR. If using stdio, this can trigger client timeouts. We recommend using the [systemd Daemon Setup](docs/daemon_setup.md) to handle this.
-*   **Network is off by default**: Anything that touches the network inside the container (e.g. `clone_repo`, `package_install`) requires setting `allow_network=True` during initialization.
+*   **Network is off by default**: Anything that touches the network inside the container (e.g. `package_install`, `publish`) requires setting `allow_network=True` during initialization.
 
 ### Troubleshooting
 

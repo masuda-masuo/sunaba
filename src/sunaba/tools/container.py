@@ -1326,9 +1326,10 @@ def sandbox_initialize(
     Container IDs are returned as short 12-character prefixes for
     use in other tools.
 
-    **One-step init + clone:** pass ``clone_repo`` to avoid a separate
-    :func:`clone_repo` call.  For a full one-shot workflow with commands,
-    use :func:`run_container_and_exec` which wraps init/exec/stop.
+    **One-step init + clone:** pass ``clone_repo`` to clone the repository
+    and install its dependencies as part of startup.  For a full one-shot
+    workflow with commands, use :func:`run_container_and_exec` which wraps
+    init/exec/stop.
 
     Args:
         image: Docker image to use (e.g. ``python@sha256:...``).

@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 The compatibility policy (what counts as a breaking change) is described in
 [README.md#compatibility-policy](README.md#compatibility-policy).
 
+## [Unreleased]
+
+### Removed
+
+- **`clone_repo` tool**: the standalone MCP tool that cloned an extra repository
+  into an already-running container is gone. `sandbox_initialize(clone_repo=...)`
+  (and `run_container_and_exec`) clone and install in one call, so the tool was a
+  redundant second implementation whose different `dest_dir` default was a source
+  of confusion (#230, #600). The `clone_repo` *parameter* on `sandbox_initialize`
+  / `run_container_and_exec` is unchanged. (#602)
+
 ## [0.10.0] - 2026-07-13
 
 ### Removed

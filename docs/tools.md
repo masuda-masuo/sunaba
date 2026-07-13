@@ -67,7 +67,6 @@ Integrate with GitHub issues, check out pull requests, and commit/publish change
 
 | Tool Name | Parameters | Description |
 |---|---|---|
-| `clone_repo` | `container_id`, `repo`, `branch` (opt), `dest_dir` (opt) | Clones a repository inside the container. Requires `allow_network=True` at init. To check out a PR branch, use `sandbox_initialize(repo=..., pr=N)` — `clone_repo` has no `pr` parameter. |
 | `issue_view` | `container_id`, `repo`, `issue_number`, `save_to` (opt) | Downloads a GitHub issue thread and saves it to a file in the container, returning a summary. |
 | `checkpoint` | `container_id`, `message`, `working_dir` (opt) | Commits changes locally in the sandbox. Creates a cheap save point before editing. |
 | `checkpoint_list` | `container_id`, `working_dir` (opt), `limit` (opt) | Lists all unpushed local checkpoints. |

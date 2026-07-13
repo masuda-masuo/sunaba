@@ -277,7 +277,7 @@ Multi-service orchestration helper commands were removed (#438) as they were unu
 This MCP provides direct access to the **ingress (cloning/issues)** and **egress (publishing)** steps of the cycle.
 
 *   **`issue_view`**: Downloads issue text to a container file and returns a summary and file handle to the LLM.
-*   **`clone_repo`**: Clones repositories directly inside the container.
+*   **`sandbox_initialize(clone_repo=...)`**: Clones the repository directly inside the container at startup.
 *   **`publish`**: Commits and pushes changes to GitHub. If the egress proxy blocks `git push`, the tool fails immediately and does not fall back to the GitHub Objects API (#401) to avoid masking configuration issues.
 
 ### 11.1 VCS Operations Model

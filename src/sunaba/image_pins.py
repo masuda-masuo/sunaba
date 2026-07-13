@@ -23,7 +23,12 @@ import re
 from importlib import resources
 
 #: Role keys every pin file must define, in the order consumers expect.
-PIN_KEYS: tuple[str, ...] = ("neutral", "python", "go")
+#:
+#: ``full`` is the all-in-one image (base + every language toolchain) that
+#: ``sandbox_initialize`` starts by default (#584).  ``neutral`` remains the
+#: ``FROM`` parent of the variants; ``python`` / ``go`` are the lean images an
+#: explicit ``image=`` can still ask for.
+PIN_KEYS: tuple[str, ...] = ("neutral", "python", "go", "full")
 
 #: A pin must be a fully digest-pinned GHCR reference -- never a mutable tag.
 #: ``<registry>/.../sandbox@sha256:<64 hex>`` (``docs/design-multilang-support.md`` §6).

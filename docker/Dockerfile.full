@@ -61,6 +61,7 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD rg --version && sg --version && node --version && pip --version \
    && ruff --version && pyright --version && pytest --version \
    && python3 -c "import pytest_jsonreport" \
+   && python3 -c "import xdist" \
    && go version || exit 1
 
 CMD ["bash"]

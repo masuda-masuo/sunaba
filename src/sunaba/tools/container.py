@@ -93,6 +93,12 @@ _NEUTRAL_IMAGE: str = _image_pins["neutral"]
 _PYTHON_IMAGE: str = _image_pins["python"]
 _GO_IMAGE: str = _image_pins["go"]
 
+#: All-in-one image: base + every language toolchain verify can dispatch to
+#: (#584).  Kept as a superset of the dispatch matrix on purpose -- see
+#: ``docker/Dockerfile.full`` for why the *default* image must be the union
+#: rather than a guessed-at variant.
+_FULL_IMAGE: str = _image_pins["full"]
+
 #: Neutral fallback used when detection is inconclusive (unknown / unsupported
 #: / py+go polyglot) and for bare ``sandbox_initialize()`` with nothing to
 #: inspect.  Overridable via the ``--default-image`` CLI flag (server.py).
@@ -203,7 +209,7 @@ def prewarm_default_image() -> None:
     image so one bad pull never blocks the others or startup; the next
     refresh cycle retries.
     """
-    images = {_DEFAULT_IMAGE, _PYTHON_IMAGE, _GO_IMAGE}
+    images = {_DEFAULT_IMAGE, _PYTHON_IMAGE, _GO_IMAGE, _FULL_IMAGE}
     for image in images:
         try:
             _ensure_image(image)

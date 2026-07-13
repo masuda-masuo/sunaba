@@ -211,6 +211,7 @@ jobs:
           BASE_DIGEST: ${{ steps.base.outputs.digest }}
           PYTHON_DIGEST: ${{ steps.python.outputs.digest }}
           GO_DIGEST: ${{ steps.go.outputs.digest }}
+          FULL_DIGEST: ${{ steps.full.outputs.digest }}
         run: |
           set -euo pipefail
           F=src/sunaba/image_pins.json
@@ -224,7 +225,8 @@ jobs:
             --repo "${REPO}" \
             --neutral "${BASE_DIGEST}" \
             --python "${PYTHON_DIGEST}" \
-            --go "${GO_DIGEST}"
+            --go "${GO_DIGEST}" \
+            --full "${FULL_DIGEST}"
 
           # digest が変わっていなければ PR 不要
           if git diff --quiet; then
@@ -242,8 +244,9 @@ jobs:
           base:   ghcr.io/${REPO}/sandbox@${BASE_DIGEST}
           python: ghcr.io/${REPO}/sandbox@${PYTHON_DIGEST}
           go:     ghcr.io/${REPO}/sandbox@${GO_DIGEST}
+          full:   ghcr.io/${REPO}/sandbox@${FULL_DIGEST}
 
-          Automated update triggered by docker/Dockerfile.{base,python,go} build."
+          Automated update triggered by docker/Dockerfile.{base,python,go,full} build."
           git push origin "${BRANCH}"
 
           gh pr create \
@@ -261,5 +264,6 @@ jobs:
           | base   | \`${BASE_DIGEST}\` |
           | python | \`${PYTHON_DIGEST}\` |
           | go     | \`${GO_DIGEST}\` |
+          | full   | \`${FULL_DIGEST}\` |
 
           - Workflow run: ${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"

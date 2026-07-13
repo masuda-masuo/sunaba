@@ -8,11 +8,8 @@ must not bake one language into its default.
 
 Detection runs **host-side, before the container starts** -- a container's
 image is immutable once running, and for ``clone_repo`` the project files only
-appear *inside* the container after start, so the host inspects whichever clone
-source is available first:
-
-* a Shiori pre-clone directory on the host (local, network-free); else
-* the GitHub repository contents via the REST API (best-effort, network).
+appear *inside* the container after start, so the host inspects the GitHub
+repository contents via the REST API (best-effort, network).
 
 Unknown / unsupported / py+go-polyglot projects fall back to the neutral
 ``sandbox:base`` image (node + VCS + search tooling, *no* language toolchain)
@@ -31,7 +28,6 @@ from __future__ import annotations
 
 import fnmatch
 import json
-import os
 import urllib.request
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -66,8 +62,8 @@ class LanguageDetection:
             (subset of ``{"python", "go", "js", "ts"}``).
         unsupported: Friendly names of detected-but-unsupported languages
             (e.g. ``{"Rust"}``) used purely for the fallback notice.
-        source: Where the signal came from -- ``"preclone"``,
-            ``"github-api"``, or ``"none"`` (nothing inspected).
+        source: Where the signal came from -- ``"github-api"``,
+            or ``"none"`` (nothing inspected).
     """
 
     supported: set[str] = field(default_factory=set)
@@ -95,20 +91,6 @@ def _classify_names(names: Iterable[str]) -> tuple[set[str], set[str]]:
             unsupported.add(_UNSUPPORTED_MARKERS[name])
     return supported, unsupported
 
-
-def detect_from_local_dir(root: str | os.PathLike[str]) -> LanguageDetection:
-    """Detect languages from the top-level files of a local directory.
-
-    Mirrors the ``-maxdepth 1`` marker scan used by verify detection: only
-    root-level markers (``go.mod``, ``pyproject.toml`` ...) decide the project
-    language.  Any OS error degrades to an empty (neutral) result.
-    """
-    try:
-        names = [e.name for e in os.scandir(os.fspath(root)) if e.is_file()]
-    except OSError:
-        return LanguageDetection(source="none")
-    supported, unsupported = _classify_names(names)
-    return LanguageDetection(supported, unsupported, source="preclone")
 
 
 def detect_from_github(
@@ -197,7 +179,6 @@ def resolve_initial_image(
     *,
     explicit_image: str | None,
     target_repo: str | None,
-    preclone_root: str | os.PathLike[str] | None,
     token: str | None,
     language_image_map: dict[str, str],
     neutral_image: str,
@@ -208,23 +189,15 @@ def resolve_initial_image(
     Precedence:
 
     1. *explicit_image* wins outright (manual escape hatch) -- no detection.
-    2. A Shiori *preclone_root* is scanned locally (network-free).
-    3. If that yields nothing and a *target_repo* is known, the GitHub API is
-       probed (best-effort) when *allow_network_detection* is set.
-    4. Otherwise the *neutral_image* is used (bare init has nothing to inspect).
+    2. If a *target_repo* is known, the GitHub API is probed (best-effort)
+       when *allow_network_detection* is set.
+    3. Otherwise the *neutral_image* is used (bare init has nothing to inspect).
     """
     if explicit_image:
         return explicit_image, None
 
     detection: LanguageDetection | None = None
-    if preclone_root is not None:
-        detection = detect_from_local_dir(preclone_root)
-
-    if (
-        (detection is None or detection.is_empty)
-        and target_repo
-        and allow_network_detection
-    ):
+    if target_repo and allow_network_detection:
         via_api = detect_from_github(target_repo, token=token)
         if via_api is not None:
             detection = via_api

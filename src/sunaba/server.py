@@ -190,18 +190,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Default Docker image (default: python@sha256:...)",
     )
     parser.add_argument(
-        "--shiori-repos-path",
-        type=str,
-        default=os.environ.get("SUNABA_SHIORI_REPOS_PATH"),
-        help=(
-            "Host path to Shiori repos root (e.g. /data/repos). "
-            "When set, sandbox_initialize and run_container_and_exec "
-            "can use clone_repo to copy a pre-cloned repo into the "
-            "container instead of a network git clone. "
-            "Also read from SUNABA_SHIORI_REPOS_PATH env var."
-        ),
-    )
-    parser.add_argument(
         "--transport",
         type=str,
         default="stdio",
@@ -415,12 +403,6 @@ def main() -> None:
     if args.default_image:
         validate_image_ref(args.default_image)
         _ct_mod._DEFAULT_IMAGE = args.default_image
-    if args.shiori_repos_path:
-        _ct_mod._SHIORI_REPOS_PATH = args.shiori_repos_path
-        # One-shot sanity check (Issue #532): a configured-but-unusable root
-        # would otherwise degrade silently to per-call network fallbacks.
-        _ct_mod.warn_if_shiori_root_unusable()
-
     # Compute host-adjusted default limits (Issue #201)
     mem_limit_str, cpu_count = compute_default_limits(
         mem_ratio=args.mem_ratio,

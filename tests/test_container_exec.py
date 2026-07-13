@@ -16,8 +16,7 @@ class TestRunContainerAndExecCloneRepo:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for run_container_and_exec with clone_repo."""
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
     def test_clone_repo_called_before_exec(
@@ -25,7 +24,6 @@ class TestRunContainerAndExecCloneRepo:
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -48,17 +46,14 @@ class TestRunContainerAndExecCloneRepo:
         assert result["status"] == "ok"
         mock_clone.assert_called_once()
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container._SHIORI_REPOS_PATH", "/some/repos")
     def test_clone_error_reported_in_result(
         self,
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -78,17 +73,14 @@ class TestRunContainerAndExecCloneRepo:
         assert result["status"] == "ok"
         assert result["clone_warning"] == "path not found"
 
-    @patch("sunaba.tools.container._SHIORI_REPOS_PATH", None)
     @patch("sunaba.tools.container._clone_repo_via_network")
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
-    def test_network_fallback_when_shiori_not_configured(
+    def test_network_clone_default_path(
         self,
         mock_validate: MagicMock,
         mock_docker: MagicMock,
-        mock_shiori_clone: MagicMock,
-        mock_net_clone: MagicMock,
+        mock_clone: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -96,8 +88,7 @@ class TestRunContainerAndExecCloneRepo:
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_shiori_clone.side_effect = ValueError("Shiori repos path is not configured")
-        mock_net_clone.return_value = "Cloned owner/repo via network"
+        mock_clone.return_value = "Cloned owner/repo via network"
 
         result = json.loads(run_container_and_exec(
             image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -108,9 +99,9 @@ class TestRunContainerAndExecCloneRepo:
 
         assert result["status"] == "ok"
         assert "clone_warning" not in result
-        mock_net_clone.assert_called_once()
+        mock_clone.assert_called_once()
 
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
     def test_without_clone_repo_normally(
@@ -135,18 +126,14 @@ class TestRunContainerAndExecCloneRepo:
         mock_clone.assert_not_called()
         assert "clone_warning" not in result
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=False)
     @patch("sunaba.tools.container._clone_repo_via_network")
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
-    def test_preclone_absent_falls_back_to_network(
+    def test_network_clone_with_clone_repo(
         self,
         mock_validate: MagicMock,
         mock_docker: MagicMock,
-        mock_shiori_clone: MagicMock,
-        mock_net_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
+        mock_clone: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -154,8 +141,7 @@ class TestRunContainerAndExecCloneRepo:
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_shiori_clone.side_effect = ValueError("Repository clone not found: /some/repos/owner/repo")
-        mock_net_clone.return_value = "Cloned owner/repo via network into /tmp/repo/repo in container abc123def456"
+        mock_clone.return_value = "Cloned owner/repo via network into /tmp/repo/repo in container abc123def456"
 
         result = json.loads(run_container_and_exec(
             image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -166,7 +152,7 @@ class TestRunContainerAndExecCloneRepo:
 
         assert result["status"] == "ok"
         assert "clone_warning" not in result
-        mock_net_clone.assert_called_once()
+        mock_clone.assert_called_once()
 
 
 class TestRunContainerAndExecPipExtras:
@@ -175,8 +161,7 @@ class TestRunContainerAndExecPipExtras:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for pip_extras with clone_repo in run_container_and_exec (Issue #245)."""
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
     def test_pip_extras_none_skips_install(
@@ -184,7 +169,6 @@ class TestRunContainerAndExecPipExtras:
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -204,8 +188,7 @@ class TestRunContainerAndExecPipExtras:
         assert result["status"] == "ok"
         assert mock_container.exec_run.call_count == 1
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
     def test_default_pip_extras_installs_dev(
@@ -213,7 +196,6 @@ class TestRunContainerAndExecPipExtras:
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -238,22 +220,23 @@ class TestRunContainerAndExecPipExtras:
         first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
         assert "pip install -e '.[dev]' -q" in first_cmd
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
-    def test_pip_extras_skipped_without_network(
+    def test_pip_extras_installed_when_clone_repo_auto_enables_network(
         self,
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
     ) -> None:
-        """without network access pip can't reach PyPI, so the
-        install must be skipped rather than hang until pip's own timeout."""
+        """clone_repo always auto-enables allow_network=True, so pip
+        install is always possible (the old pre-clone skip path is gone)."""
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"output", b""))
+        mock_container.exec_run.side_effect = [
+            (0, (b"Installed", b"")),
+            (0, (b"output", b"")),
+        ]
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -267,11 +250,13 @@ class TestRunContainerAndExecPipExtras:
         ))
 
         assert result["status"] == "ok"
-        # Only the user command runs — no pip install exec call.
-        assert mock_container.exec_run.call_count == 1
+        # Network is auto-enabled by clone_repo, so pip install runs
+        # before the user command.
+        assert mock_container.exec_run.call_count == 2
+        first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
+        assert "pip install -e '.[dev]' -q" in first_cmd
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
     def test_custom_pip_extras(
@@ -279,7 +264,6 @@ class TestRunContainerAndExecPipExtras:
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -303,8 +287,7 @@ class TestRunContainerAndExecPipExtras:
         first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
         assert "pip install -e '.[test]' -q" in first_cmd
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
     def test_pip_install_failure_non_fatal(
@@ -312,7 +295,6 @@ class TestRunContainerAndExecPipExtras:
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -335,8 +317,7 @@ class TestRunContainerAndExecPipExtras:
         assert result["status"] == "ok"
         assert "clone_warning" not in result
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
     def test_clone_failure_skips_pip_install(
@@ -344,7 +325,6 @@ class TestRunContainerAndExecPipExtras:
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -481,7 +461,6 @@ class TestPipArgs:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for pip_args propagation through _run_pip_install."""
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
     @patch("sunaba.tools.container._try_clone_into_container", return_value=("cloned", None))
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
@@ -490,7 +469,6 @@ class TestPipArgs:
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
     ) -> None:
         container = MagicMock()
         container.id = "abc123def456"
@@ -517,7 +495,6 @@ class TestPipArgs:
         assert "--index-url" in call_str
         assert "https://example.com" in call_str
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
     @patch("sunaba.tools.container._try_clone_into_container", return_value=("cloned", None))
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container.validate_image_ref")
@@ -526,7 +503,6 @@ class TestPipArgs:
         mock_validate: MagicMock,
         mock_docker: MagicMock,
         mock_clone: MagicMock,
-        mock_preclone_exists: MagicMock,
     ) -> None:
         container = MagicMock()
         container.id = "abc123def456"

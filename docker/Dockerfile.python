@@ -3,7 +3,7 @@
 #
 # Code Sandbox MCP — Python backend イメージ（base + Python 開発ツール）
 # 公開タグ: ghcr.io/<owner>/sunaba/sandbox:python
-# 設計: docs/design-multilang-support.md §6
+# 設計: docs/design_multilang_support.md §6
 # ビルド:
 #   docker build -f docker/Dockerfile.python \
 #     --build-arg BASE_IMAGE=sunaba/sandbox:base \
@@ -11,6 +11,10 @@
 #
 # 運用ではイメージはダイジェスト固定で参照すること (image@sha256:...)。
 # CI は base を先にビルドして digest を確定し、BASE_IMAGE にその digest を渡す。
+#
+# 位置づけ (#584): これは *明示 image= 用の lean イメージ*。既定で使われるのは
+# 全部入りの sandbox:full。ツール一式の定義は install-python-tools.sh に一本化し、
+# Dockerfile.full と共有する（2 箇所に書くとドリフトする = #584 の再発）。
 
 ARG BASE_IMAGE=sunaba/sandbox:base
 FROM ${BASE_IMAGE}
@@ -20,23 +24,18 @@ FROM ${BASE_IMAGE}
 # sandbox ユーザが更新もできない（#380 恒久対応）。VIRTUAL_ENV は base の
 # ENV で通っているため uv はフラグなしで venv へ入れる。
 USER sandbox
-RUN uv pip install \
-    ruff \
-    pyright \
-    pytest \
-    pytest-json-report
-
-# ── pyright の node ベース本体を sandbox ユーザのキャッシュに warm up ──
-# pyright は base 同梱の node を使う。ビルド時（ネットワーク可）に一度起動して
-# 本体を取得・キャッシュしておくことで、ネットワーク off 既定の実行時に取りに行かない。
-USER sandbox
 WORKDIR /home/sandbox
-RUN pyright --version
+COPY --chown=sandbox:sandbox docker/install-python-tools.sh /tmp/install-python-tools.sh
+RUN sh /tmp/install-python-tools.sh && rm /tmp/install-python-tools.sh
 
 # ── ヘルスチェック (base 継承 + python 固有ツール) ──────────────
 # HEALTHCHECK は base を上書きするため、base 側の pip --version
-# （venv 健全性チェック）もここに含める必要がある
+# （venv 健全性チェック）もここに含める必要がある。
+# pytest-json-report は verify 自身の前提なので、ここで存在を表明する
+# （#584: 焼き漏れをユーザーの初回 verify ではなく CI で落とす）。
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD rg --version && sg --version && node --version && pip --version && ruff --version && pyright --version && pytest --version || exit 1
+  CMD rg --version && sg --version && node --version && pip --version \
+   && ruff --version && pyright --version && pytest --version \
+   && python3 -c "import pytest_jsonreport" || exit 1
 
 CMD ["bash"]

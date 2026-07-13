@@ -917,6 +917,18 @@ _SANDBOX_ENV: str = (
     "mkdir -p /tmp/.ruff_cache 2>/dev/null; "
 )
 
+#: Environment prefix for *go* invocations only (Issue #584).
+#:
+#: ``GOMAXPROCS=1`` serialises the Go toolchain's compile/vet/link fan-out,
+#: which otherwise blows past the container's ``pids_limit`` of 100 and dies of
+#: fork exhaustion (#233).  It used to be baked into ``Dockerfile.go`` as an
+#: image-wide ``ENV`` -- but *every* Go binary honours ``GOMAXPROCS``, and ``gh``
+#: is written in Go, so the image-wide setting throttled unrelated tools.  Once
+#: the go toolchain lives in the all-in-one default image (``sandbox:full``)
+#: that leak reaches every container, so the guard moves to where it belongs:
+#: the go command itself.
+_GO_ENV: str = "GOMAXPROCS=1 "
+
 
 # ---------------------------------------------------------------------------
 # Public API: called by @mcp.tool() handlers in server.py
@@ -1774,7 +1786,7 @@ def _run_golangci_lint_verify(container: Any, path: str | Sequence[str]) -> Veri
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}golangci-lint run --out-format json {_quote_path(path)}",
+            f"{_SANDBOX_ENV}{_GO_ENV}golangci-lint run --out-format json {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,
@@ -1802,7 +1814,7 @@ def _run_go_vet_verify(container: Any, path: str | Sequence[str]) -> VerifyResul
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}go vet {_quote_path(path)}",
+            f"{_SANDBOX_ENV}{_GO_ENV}go vet {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,
@@ -2034,7 +2046,7 @@ def _run_go_test_verify(container: Any, path: str) -> VerifyResult:
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}go test -json {_quote_path(path)}",
+            f"{_SANDBOX_ENV}{_GO_ENV}go test -json {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,

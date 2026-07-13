@@ -19,6 +19,43 @@ from sunaba.tools.common import _docker, container_not_found_error
 from sunaba.tools.vcs import resolve_git_root
 from sunaba.verify_state import record_verify_success
 
+# ---------------------------------------------------------------------------
+# Tool-absence contract (Issue #584)
+# ---------------------------------------------------------------------------
+#
+# verify must never map "my own prerequisite is missing" onto a verdict about
+# the code under test.  #584 was exactly that: the container lacked
+# ``pytest-json-report``, pytest rejected ``--json-report`` with a usage error,
+# no JSON was produced, and the result was reported as ``no_tests`` -- "this
+# project has no tests" -- which is a lie, and one that reads like a real
+# finding.  Tool absence is ``not_available``; a crashed run is ``error``; only
+# a *successful* pytest run may conclude anything about the tests
+# (``docs/design_multilang_support.md`` §4).
+
+#: pytest's exit code for a usage error (bad/unknown command-line option).
+#: It means *our* command did not fit this pytest -- never that tests failed.
+_PYTEST_USAGE_ERROR: int = 4
+
+#: What pytest prints when the json-report plugin is not installed.
+_JSON_REPORT_ABSENT_MARKER: str = "unrecognized arguments: --json-report"
+
+
+def _tool_absence_detail(raw_tail: str, stderr_text: str) -> str:
+    """Explain a pytest usage error in terms the caller can act on."""
+    if _JSON_REPORT_ABSENT_MARKER in raw_tail or _JSON_REPORT_ABSENT_MARKER in stderr_text:
+        return (
+            "verify runs pytest with --json-report, but the pytest-json-report "
+            "plugin is not installed in this container. The default sandbox image "
+            "bakes it in, so this container was most likely started from a custom "
+            "image=, or the project's own install replaced pytest. Install it "
+            "(package_install pytest-json-report) or re-initialize on the default "
+            "image."
+        )
+    return (
+        "pytest rejected verify's command line (usage error). This is a tooling "
+        "problem in the container, not a test result."
+    )
+
 
 def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
     """Apply a unified diff to a file inside the sandbox container.
@@ -407,6 +444,13 @@ def verify_in_container(
         if ec == 2:
             _, raw_tail = split_pytest_output(stdout_text)
             return {"status": "collection_error", "error": "test collection failed", "raw_output": raw_tail}
+        if ec == _PYTEST_USAGE_ERROR:
+            # pytest rejected our command line -- verify's own prerequisite is
+            # missing, which says nothing about the code under test (#584).
+            _, raw_tail = split_pytest_output(stdout_text)
+            return {"status": "not_available",
+                    "error": _tool_absence_detail(raw_tail, stderr_text),
+                    "raw_output": raw_tail}
         if ec == 5:
             return {"status": "no_tests", "error": "no tests found"}
 
@@ -417,7 +461,19 @@ def verify_in_container(
                     or "No module named pytest" in stderr_text):
                 return {"status": "not_available", "error": "pytest not installed",
                         "raw_output": raw_tail}
-            return {"status": "no_tests", "error": "no test output produced", "raw_output": raw_tail}
+            if _JSON_REPORT_ABSENT_MARKER in raw_tail or _JSON_REPORT_ABSENT_MARKER in stderr_text:
+                return {"status": "not_available",
+                        "error": _tool_absence_detail(raw_tail, stderr_text),
+                        "raw_output": raw_tail}
+            if ec == 0:
+                return {"status": "no_tests", "error": "no test output produced",
+                        "raw_output": raw_tail}
+            # pytest exited non-zero *and* produced no report: it crashed or was
+            # killed.  Reporting that as "no tests" would launder a broken run
+            # into a benign verdict -- the exact failure mode #584 was made of.
+            return {"status": "error",
+                    "error": f"pytest produced no JSON report (exit {ec})",
+                    "raw_output": raw_tail}
 
         try:
             raw_report = json.loads(json_part)

@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1
+# docker/Dockerfile.full
+#
+# Code Sandbox MCP — 全部入りイメージ（base + Python + Go ツールチェーン）
+# 公開タグ: ghcr.io/<owner>/sunaba/sandbox:full
+# 設計: docs/design_multilang_support.md §6 / Issue #584
+# ビルド:
+#   docker build -f docker/Dockerfile.full \
+#     --build-arg BASE_IMAGE=sunaba/sandbox:base \
+#     -t sunaba/sandbox:full .
+#
+# ── なぜ全部入りが「既定」なのか (#584) ─────────────────────────
+#
+# 検出は 2 箇所にある。ホスト側の image 選択（GitHub API 越しの推測、コンテナ
+# 起動 *前*、外すと取り返しがつかない）と、verify の dispatch（コンテナ内の実
+# ファイルを見る、正確、何度でもやり直せる）。**正確なほうが、取り返しのつか
+# ない決定の後に走っていた。** 起動前の推測が外れると、起動後に正しく言語を判
+# 定した verify がツール不在でゲートを落とす — もう直せない状態で。
+#
+# イメージを dispatch マトリクスの **上位集合** にすれば、この非対称が消える。
+# 何を実行するかは正確な in-container 検出だけが決め、ホスト側の推測は要らなく
+# なる（#584 で自動検出は撤去した）。
+#
+# コストはほぼ無い: prewarm は元々 base/python/go を 3 本とも pull しており、
+# ホスト常駐分（≒1.34GB）は全部入り 1 本と同じ。使わないバイナリは寝ているだけ
+# で実行時の CPU/メモリはゼロ、warm なら起動時間も変わらない。
+#
+# 契約: **verify が dispatch しうるツールは、このイメージに全て存在すること。**
+# 下の HEALTHCHECK がそれを実行時に表明し、CI が docker run で検証する
+# （build-sandbox-variants.yml）。焼き漏れはユーザーの初回 verify ではなく CI
+# で落ちる。
+#
+# js ツール (eslint / tsc / jest) は #588 で追加する。
+
+ARG BASE_IMAGE=sunaba/sandbox:base
+FROM ${BASE_IMAGE}
+
+# ── Go ツールチェーン (root) ──────────────────────────────────────
+USER root
+ARG TARGETARCH
+ARG GO_VERSION=1.26.4
+COPY docker/install-go.sh /tmp/install-go.sh
+RUN sh /tmp/install-go.sh "${TARGETARCH}" "${GO_VERSION}" && rm /tmp/install-go.sh
+
+# GOMAXPROCS は焼かない — 全 Go バイナリ（gh を含む）が読むため。理由と代替は
+# Dockerfile.go の同じ節を参照。
+ENV GOPATH=/home/sandbox/go \
+    GOCACHE=/tmp/.gocache \
+    GOFLAGS="-buildvcs=false -p=1"
+
+# ── Python 開発ツール (sandbox ユーザ、base の永続 venv へ) ───────
+USER sandbox
+WORKDIR /home/sandbox
+COPY --chown=sandbox:sandbox docker/install-python-tools.sh /tmp/install-python-tools.sh
+RUN sh /tmp/install-python-tools.sh && rm /tmp/install-python-tools.sh
+
+# ── ヘルスチェック = dispatch マトリクスの和 ──────────────────────
+# ここに並ぶツールの集合が「このイメージが verify に対して負う契約」そのもの。
+# tests/test_image_pins.py がこの表明とコード側の dispatch 表の整合を検査する。
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD rg --version && sg --version && node --version && pip --version \
+   && ruff --version && pyright --version && pytest --version \
+   && python3 -c "import pytest_jsonreport" \
+   && go version || exit 1
+
+CMD ["bash"]

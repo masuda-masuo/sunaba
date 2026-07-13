@@ -77,7 +77,7 @@ def _reindent_lines(lines: list[str], delta: int) -> list[str]:
 
 def _try_whitespace_flexible(
     existing: str, old_str: str, new_str: str,
-) -> str | None:
+) -> tuple[str, int, int] | str | None:
     """Attempt whitespace-flexible matching.
 
     Strips leading/trailing whitespace from each line of *old_str* and
@@ -85,8 +85,9 @@ def _try_whitespace_flexible(
     When found the file's original indentation is preserved and *new_str*
     is re-indented to fit.
 
-    Returns the new file content on success, or ``None`` if no match
-    was found.
+    Returns ``(new_content, replaced_start_line, replaced_end_line)`` on
+    success (1-indexed lines in the *new* content), an ``"Error: ..."``
+    string when the match is ambiguous, or ``None`` if no match was found.
     """
     existing_lines = existing.splitlines()
     old_lines = old_str.splitlines()
@@ -139,15 +140,67 @@ def _try_whitespace_flexible(
     result = existing[:start_offset] + new_content + existing[end_offset:]
     if existing.endswith("\n") and not result.endswith("\n"):
         result += "\n"
-    return result
+    replaced_start = i + 1
+    replaced_end = i + max(len(reindented), 1)
+    return result, replaced_start, replaced_end
+
+
+# Unified diff display limits for the near-miss echo: old_str blocks of up
+# to _NEAR_MISS_FULL_DIFF_MAX_LINES lines get an untruncated diff; longer
+# ones are capped at _NEAR_MISS_DIFF_CAP diff lines.
+_NEAR_MISS_FULL_DIFF_MAX_LINES = 50
+_NEAR_MISS_DIFF_CAP = 30
+
+
+def _build_first_mismatch_report(
+    old_lines: list[str], matched_lines: list[str], best_start: int,
+) -> str:
+    """Report the first line where *old_lines* and *matched_lines* diverge.
+
+    Compares the whitespace-stripped lines with
+    :meth:`difflib.SequenceMatcher.get_opcodes` so that inserted or
+    missing lines (e.g. a duplicated line in old_str) still point at the
+    first real divergence instead of shifting every subsequent line.
+    Lines are shown with ``repr()`` to make tabs, spaces, and other
+    invisible characters visible.  *best_start* is the 0-indexed file
+    line of ``matched_lines[0]`` used to report real file line numbers.
+
+    Returns an empty string when the stripped lines are identical
+    (whitespace-only mismatch, normally handled by the flexible matcher).
+    """
+    old_stripped = [line.strip() for line in old_lines]
+    matched_stripped = [line.strip() for line in matched_lines]
+    sm = difflib.SequenceMatcher(None, old_stripped, matched_stripped)
+    for tag, i1, _i2, j1, _j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "replace":
+            return (
+                f"First mismatch: old_str line {i1 + 1} "
+                f"vs file line {best_start + j1 + 1}\n"
+                f"  old_str: {old_lines[i1]!r}\n"
+                f"  file:    {matched_lines[j1]!r}"
+            )
+        if tag == "delete":
+            return (
+                f"First mismatch: old_str line {i1 + 1}: "
+                f"{old_lines[i1]!r} has no counterpart in the file region"
+            )
+        # tag == "insert"
+        return (
+            f"First mismatch: file line {best_start + j1 + 1}: "
+            f"{matched_lines[j1]!r} has no counterpart in old_str"
+        )
+    return ""
 
 
 def _build_near_miss_echo(existing: str, old_str: str, dest_path: str) -> str:
-    """Build a near-miss error message with diff, context, and indentation hints.
+    """Build a near-miss error message with diff, context, and first mismatch.
 
     Uses a sliding-window line match to find the most similar region,
-    shows at most 6 lines of unified diff, 3 lines of surrounding
-    context, and explicitly flags indentation mismatches.
+    shows a unified diff (full for old_str blocks of up to 50 lines,
+    capped at 30 diff lines beyond that), 3 lines of surrounding
+    context, and pinpoints the first mismatching line (issue #580).
     """
     existing_lines = existing.splitlines()
     old_lines = old_str.splitlines()
@@ -163,6 +216,10 @@ def _build_near_miss_echo(existing: str, old_str: str, dest_path: str) -> str:
         for i in range(n_existing - n_old + 1):
             block = "\n".join(existing_lines[i:i + n_old])
             sm = difflib.SequenceMatcher(None, old_str, block)
+            # quick_ratio() is an upper bound on ratio(); skip windows
+            # that cannot beat the current best (issue #580).
+            if sm.quick_ratio() <= best_ratio:
+                continue
             r = sm.ratio()
             if r > best_ratio:
                 best_ratio = r
@@ -195,21 +252,24 @@ def _build_near_miss_echo(existing: str, old_str: str, dest_path: str) -> str:
             lineterm="",
         )
     )
-    # Cap diff output to at most 6 lines (+ header may show more)
-    if len(diff_lines) > 6:
-        diff_lines = diff_lines[:6] + ["... (diff truncated)"]
+    # Show the full diff for old_str blocks of up to 50 lines; beyond
+    # that cap the diff at 30 lines so the interesting part survives
+    # (issue #580 -- the old 6-line cap hid the actual difference).
+    if (
+        len(old_lines) > _NEAR_MISS_FULL_DIFF_MAX_LINES
+        and len(diff_lines) > _NEAR_MISS_DIFF_CAP
+    ):
+        remaining = len(diff_lines) - _NEAR_MISS_DIFF_CAP
+        diff_lines = diff_lines[:_NEAR_MISS_DIFF_CAP] + [
+            f"... (truncated, {remaining} more lines)"
+        ]
     diff_block = "\n".join(diff_lines) if diff_lines else "(identical content, whitespace differs)"
 
-    # --- indentation hint ---
-    indent_hint = ""
-    if old_lines and matched_lines:
-        old_first_indent = _get_line_indent(old_lines[0])
-        file_first_indent = _get_line_indent(matched_lines[0])
-        if old_first_indent != file_first_indent:
-            indent_hint = (
-                f"\n(Indentation mismatch: old_str indent={old_first_indent}, "
-                f"file indent={file_first_indent})"
-            )
+    # --- first mismatching line (replaces the old indentation hint) ---
+    mismatch_report = _build_first_mismatch_report(
+        old_lines, matched_lines, best_start,
+    )
+    mismatch_section = f"\n{mismatch_report}" if mismatch_report else ""
 
     return (
         f"Error: old_str not found in {dest_path}.\n"
@@ -217,9 +277,53 @@ def _build_near_miss_echo(existing: str, old_str: str, dest_path: str) -> str:
         f"{context_block}\n"
         f"Unified diff (old_str vs file region):\n"
         f"{diff_block}"
-        f"{indent_hint}\n"
+        f"{mismatch_section}\n"
         "Tip: Use read_file_range first to confirm the exact content "
         "(including whitespace)."
+    )
+
+
+# Success echo limits: +-2 context lines around the replaced region and a
+# 30-row overall cap with the middle elided.
+_SUCCESS_ECHO_CONTEXT = 2
+_SUCCESS_ECHO_MAX_ROWS = 30
+
+
+def _build_success_echo(
+    content: str, dest_path: str, rep_start: int, rep_end: int,
+) -> str:
+    """Echo the post-edit region after a successful old_str replacement.
+
+    Shows the replaced lines (marked ``>>>``) with line numbers and
+    +-2 lines of context so the model keeps a ground-truth image of the
+    file right after the edit instead of drifting across batch edits
+    (issue #580).  The echo is capped at 30 rows; the middle is elided.
+    """
+    lines = content.splitlines()
+    if not lines:
+        return f"Written {len(content)} bytes to {dest_path}"
+    rep_start = max(1, min(rep_start, len(lines)))
+    rep_end = max(rep_start, min(rep_end, len(lines)))
+    if rep_start == rep_end:
+        span = f"replaced line {rep_start}"
+    else:
+        span = f"replaced lines {rep_start}-{rep_end}"
+
+    ctx_start = max(1, rep_start - _SUCCESS_ECHO_CONTEXT)
+    ctx_end = min(len(lines), rep_end + _SUCCESS_ECHO_CONTEXT)
+    rows: list[str] = []
+    for ln in range(ctx_start, ctx_end + 1):
+        prefix = ">>>" if rep_start <= ln <= rep_end else "   "
+        rows.append(f"{prefix} {ln:4d} | {lines[ln - 1]}")
+
+    if len(rows) > _SUCCESS_ECHO_MAX_ROWS:
+        keep = (_SUCCESS_ECHO_MAX_ROWS - 1) // 2
+        omitted = len(rows) - 2 * keep
+        rows = rows[:keep] + [f"... ({omitted} lines)"] + rows[-keep:]
+
+    return (
+        f"Written {len(content)} bytes to {dest_path} ({span})\n"
+        + "\n".join(rows)
     )
 
 
@@ -248,7 +352,9 @@ def write_file_sandbox(
     old_str contract: multiple matches are rejected with their line
     numbers (add context, retry); an inexact match retries with
     per-line whitespace stripped and re-indents on success; no match
-    returns the nearest-miss region with line numbers.  old_str matches
+    returns the nearest-miss region with line numbers plus the first
+    mismatching line; a successful replace echoes the post-edit region
+    with line numbers (ground truth for the next edit).  old_str matches
     the exact string you provide -- if it spans several lines, ALL of
     them are replaced, so keep it minimal and unique.  For several
     separate edits use repeated calls or transform_file.
@@ -289,6 +395,9 @@ def write_file_sandbox(
         return "Error: start_line must be >= 1"
 
     content = file_contents
+    # 1-indexed (start, end) lines of the replaced region in the new
+    # content; set only for successful old_str edits (issue #580).
+    replaced_span: tuple[int, int] | None = None
 
     # For partial updates, read existing content
     if append or old_str is not None or has_line_range:
@@ -331,15 +440,22 @@ def write_file_sandbox(
                     + file_contents
                     + existing[idx + len(old_str) :]
                 )
+                rep_start = existing[:idx].count("\n") + 1
+                end_offset = idx + len(file_contents)
+                rep_end = content[:end_offset].count("\n") + 1
+                if file_contents.endswith("\n") and file_contents:
+                    rep_end -= 1
+                replaced_span = (rep_start, max(rep_start, rep_end))
             else:
                 # 2. Whitespace-flexible fallback
                 result = _try_whitespace_flexible(
                     existing, old_str, file_contents,
                 )
+                if isinstance(result, str):
+                    return result  # ambiguous-match error
                 if result is not None:
-                    if result.startswith("Error:"):
-                        return result
-                    content = result
+                    content, rep_start, rep_end = result
+                    replaced_span = (rep_start, rep_end)
                 else:
                     # 3. Near-miss echo
                     return _build_near_miss_echo(existing, old_str, dest_path)
@@ -360,6 +476,8 @@ def write_file_sandbox(
         write_file(container, container_id[:12], dest_path, content)
     except ValueError as e:
         return f"Error: {e}"
+    if replaced_span is not None:
+        return _build_success_echo(content, dest_path, *replaced_span)
     return f"Written {len(content)} bytes to {dest_path}"
 
 

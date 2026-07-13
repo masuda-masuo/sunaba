@@ -398,6 +398,21 @@ def _editable_install_cmd(target: str, pip_args: str = "") -> str:
     )
 
 
+def _normalize_pip_extras(pip_extras: str | None) -> str | None:
+    """Normalize pip_extras format: bare ``"dev"`` → ``"[dev]"``.
+
+    Returns the normalized value (or ``None`` unchanged).
+    """
+    if pip_extras is not None and pip_extras != "" and not pip_extras.startswith("["):
+        logger.warning(
+            "pip_extras=%r does not start with '['; auto-normalizing to [%s]",
+            pip_extras,
+            pip_extras,
+        )
+        return f"[{pip_extras}]"
+    return pip_extras
+
+
 def _run_pip_install(
     container: Any,
     clone_repo: str,
@@ -428,13 +443,6 @@ def _run_pip_install(
             clone_repo,
         )
         return None
-    if not pip_extras.startswith("["):
-        logger.warning(
-            "pip_extras=%r does not start with '['; normalizing to [%s]",
-            pip_extras,
-            pip_extras,
-        )
-        pip_extras = f"[{pip_extras}]"
     repo_name = clone_repo.split("/")[-1]
     safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
     local_pip_args = pip_args or ""
@@ -746,13 +754,6 @@ def _setup_pr_branch(
     pip_msg = ""
     local_pip_args = pip_args or ""
     if pip_extras is not None:
-        if not pip_extras.startswith("["):
-            logger.warning(
-                "pip_extras=%r does not start with '['; normalizing to [%s]",
-                pip_extras,
-                pip_extras,
-            )
-            pip_extras = f"[{pip_extras}]"
         install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
         exit_code, output = container.exec_run(
             ["/bin/sh", "-c", install_cmd],
@@ -772,7 +773,7 @@ def _setup_pr_branch(
                 exit_code,
                 detail,
             )
-            pip_msg = f" (pip install -e .{pip_extras} failed: exit {exit_code})"
+            pip_msg = f" (pip install -e .{pip_extras} failed (exit {exit_code}): {detail})"
 
     _write_clone_meta(container, safe_dest, base_branch=base_ref)
 
@@ -1410,14 +1411,7 @@ def sandbox_initialize(
             clone_repo,
         )
 
-    # Validate pip_extras format early (Issue #595).
-    if pip_extras is not None and pip_extras != "" and not pip_extras.startswith("["):
-        logger.warning(
-            "pip_extras=%r does not start with '['; auto-normalizing to [%s]",
-            pip_extras,
-            pip_extras,
-        )
-        pip_extras = f"[{pip_extras}]"
+    pip_extras = _normalize_pip_extras(pip_extras)
 
     client = _docker()
     # Name collision check (Issue #478): reject if a container with the
@@ -1840,14 +1834,7 @@ def run_container_and_exec(
             clone_repo,
         )
 
-    # Validate pip_extras format early (Issue #595).
-    if pip_extras is not None and pip_extras != "" and not pip_extras.startswith("["):
-        logger.warning(
-            "pip_extras=%r does not start with '['; auto-normalizing to [%s]",
-            pip_extras,
-            pip_extras,
-        )
-        pip_extras = f"[{pip_extras}]"
+    pip_extras = _normalize_pip_extras(pip_extras)
 
     # No image given -> the all-in-one default (#584), same as sandbox_initialize.
     resolved = _select_initial_image(image)

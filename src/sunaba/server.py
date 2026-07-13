@@ -87,6 +87,7 @@ sunaba: Docker-sandboxed dev workflow. All tools take the container_id returned 
 5. PUBLISH: publish(create_pr=True) stages, commits, pushes and opens the PR in one call. It does NOT verify -- run verify_in_container first. checkpoint is local-only; publish is the only network exit. Credentials are resolved host-side; never handle tokens in the container.
 Issue/PR ops: issue_view (read), sandbox_issue_write (create/comment), sandbox_pr_review_write (formal reviews).
 Prefer dedicated tools over raw sandbox_exec: grep->search_in_container, cat->read_file_range, sed->write_file_sandbox/transform_file, pip->package_install, pytest/ruff/pyright->verify/lint/type_check_in_container, git push/gh pr->publish.
+File transfer is one-way (host->container) only -- there is no container-to-container transfer mechanism (egress-proxy boundary). To move work between containers: checkpoint + publish from the original, or start fresh with sandbox_initialize(clone_repo=...).
 """
 
 mcp = FastMCP("sunaba", instructions=SERVER_INSTRUCTIONS)

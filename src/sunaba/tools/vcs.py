@@ -21,6 +21,7 @@ from sunaba.proxy_client import (
     authorized_read_grant,
     proxy_configured,
 )
+from sunaba.security import NETWORK_LABEL
 from sunaba.tools.common import (
     CLONE_NO_TOKEN_WARNING,
     _build_clone_command,
@@ -1197,6 +1198,14 @@ def publish(
     proxied = proxy_configured()
     push_env = None if proxied else token_env
 
+    # Determine network state and token availability for deterministic
+    # hints on push failure (Issue #577).  NETWORK_LABEL is stamped by
+    # security.py at container creation; empty push_token means no VCS
+    # credential is configured on the host.  Both are fact-based checks
+    # (no error-text guessing).
+    network_off = container.labels.get(NETWORK_LABEL) == "false"
+    token_missing = not push_token
+
     # --- Git push (with transport fallback to API push) ---
     force_flag = " --force" if allow_force_push else ""
     push_cmd = (
@@ -1260,12 +1269,28 @@ def publish(
                         f"repo={repo} branch={branch} push_failed transport=both",
                         approved=False,
                     )
-                    return _finish({
+                    hints = []
+                    if network_off:
+                        hints.append(
+                            "Container was started with allow_network=False "
+                            "(no network access). Push needs network access "
+                            "to reach GitHub."
+                        )
+                    if token_missing:
+                        hints.append(
+                            "No VCS token is available on the host. "
+                            "Set GITHUB_TOKEN or GH_TOKEN in the "
+                            "server environment."
+                        )
+                    payload: dict[str, Any] = {
                         "status": "error",
                         "step": "git_push",
                         "error": push_err or push_out,
                         "sha": sha,
-                    })
+                    }
+                    if hints:
+                        payload["hint"] = " ".join(hints)
+                    return _finish(payload)
     except ProxyAuthError as exc:
         record_boundary_crossing(
             cid,

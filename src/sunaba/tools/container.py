@@ -1098,6 +1098,7 @@ def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
     - ``last_checkpoint`` (str | None): most recent checkpoint message
     - ``last_checkpoint_ts`` (str | None): timestamp of last checkpoint
     - ``journal_activity`` (int): number of journal entries for this container
+    - ``allow_network`` (bool | None): whether the container has network access (True, False, or None when the label predates Issue #527)
     - ``error`` (str | None): error message on failure
 
     The orientation summary lets a cold session (or a cheap model) pick up
@@ -1181,6 +1182,7 @@ def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
         "idle_seconds": idle,
         "last_activity_ts": last_ts,
         "match_type": match_type,
+        "allow_network": _label_network(labels),
     }
 
     # Attach is where a different session (or a different model) picks up an
@@ -1345,6 +1347,7 @@ def sandbox_initialize(
 
     Returns:
         Container ID string (12-character prefix).
+        Network state (``[network: on]`` / ``[network: off]``) is appended.
         If *clone_repo* is specified, a message about the clone copy
         is appended (and dev install if pip_extras is set).
         If *pr* is specified, a message about the PR branch setup
@@ -1558,9 +1561,11 @@ def sandbox_initialize(
     # usable container, so completion is recorded regardless.
     record_initialize_complete(cid)
 
+    net_state = "on" if allow_network else "off"
+    net_msg = f" [network: {net_state}]"
     image_msg = f" [image: {image_notice}]" if image_notice else ""
     name_msg = f" [name: {name}]" if name else ""
-    return cid + clone_msg + pr_msg + image_msg + name_msg
+    return cid + clone_msg + pr_msg + net_msg + image_msg + name_msg
 
 
 # Async wrapper around sandbox_initialize: the sync work runs in a thread
@@ -1611,7 +1616,7 @@ async def sandbox_initialize_tool(
         session_label: Session tag recorded in the journal.
 
     Returns:
-        Container ID prefix plus clone/checkout summary.
+        Container ID prefix plus clone/checkout/network summary.
     """
     def _work() -> str:
         return sandbox_initialize(

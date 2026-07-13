@@ -51,11 +51,37 @@ def test_container_constants_are_wired_from_loader() -> None:
     assert container._NEUTRAL_IMAGE == pins["neutral"]
     assert container._PYTHON_IMAGE == pins["python"]
     assert container._GO_IMAGE == pins["go"]
+    assert container._FULL_IMAGE == pins["full"]
     assert container._DEFAULT_IMAGE == pins["neutral"]
     assert container._LANGUAGE_IMAGE_MAP == {
         "python": pins["python"],
         "go": pins["go"],
     }
+
+
+def test_full_image_is_prewarmed() -> None:
+    """The all-in-one image must be pulled ahead of first use (#584).
+
+    It becomes the default in the follow-up, and a default that is never
+    prewarmed reintroduces the cold-pull timeout #303 was about.
+    """
+    import inspect
+
+    from sunaba.tools import container
+
+    source = inspect.getsource(container.prewarm_default_image)
+    assert "_FULL_IMAGE" in source
+
+
+def test_full_alias_resolves_to_a_digest() -> None:
+    """``image="full"`` must resolve via the pin data, like the other aliases.
+
+    Alias resolution is ``_image_pins.get(name, name)`` (#545), so a missing
+    pin key would silently pass the literal string "full" to Docker.
+    """
+    from sunaba.tools import container
+
+    assert container._image_pins.get("full") == load_image_pins()["full"]
 
 
 def test_loader_rejects_unknown_keys(tmp_path, monkeypatch) -> None:

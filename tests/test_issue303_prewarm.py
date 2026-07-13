@@ -68,6 +68,8 @@ class TestPrewarmDefaultImage:
     def test_prewarms_python_and_go_variants_too(self) -> None:
         # language detection can pick python/go instead of the
         # neutral default, so those must be warm too, not just the default.
+        # The all-in-one image (#584) is prewarmed as well: it becomes the
+        # default, and an unwarmed default reintroduces the #303 cold pull.
         with patch(
             "sunaba.tools.container._ensure_image"
         ) as ensure, patch(
@@ -76,10 +78,12 @@ class TestPrewarmDefaultImage:
             "sunaba.tools.container._PYTHON_IMAGE", "python-variant"
         ), patch(
             "sunaba.tools.container._GO_IMAGE", "go-variant"
+        ), patch(
+            "sunaba.tools.container._FULL_IMAGE", "full-variant"
         ):
             prewarm_default_image()
         called_images = {c.args[0] for c in ensure.call_args_list}
-        assert called_images == {_IMAGE, "python-variant", "go-variant"}
+        assert called_images == {_IMAGE, "python-variant", "go-variant", "full-variant"}
 
     def test_swallows_errors(self) -> None:
         with patch(
@@ -99,9 +103,11 @@ class TestPrewarmDefaultImage:
             "sunaba.tools.container._PYTHON_IMAGE", "python-variant"
         ), patch(
             "sunaba.tools.container._GO_IMAGE", "go-variant"
+        ), patch(
+            "sunaba.tools.container._FULL_IMAGE", "full-variant"
         ):
             prewarm_default_image()
-        assert ensure.call_count == 3
+        assert ensure.call_count == 4
 
 
 class TestStartImagePrewarm:

@@ -41,11 +41,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--neutral", required=True, help="base/neutral image digest (sha256:...)")
     parser.add_argument("--python", required=True, help="python image digest (sha256:...)")
     parser.add_argument("--go", required=True, help="go image digest (sha256:...)")
+    parser.add_argument("--full", required=True, help="full image digest (sha256:...)")
     args = parser.parse_args(argv)
 
     refs = _build_refs(
         args.repo,
-        {"neutral": args.neutral, "python": args.python, "go": args.go},
+        {
+            "neutral": args.neutral,
+            "python": args.python,
+            "go": args.go,
+            "full": args.full,
+        },
     )
 
     # Locate the authoritative file the loader reads, and write it there.

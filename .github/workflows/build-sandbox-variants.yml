@@ -153,6 +153,31 @@ jobs:
           wait_healthy "$CID" "go" 30 || { docker kill "$CID" >/dev/null 2>&1; exit 1; }
           docker kill "$CID" >/dev/null 2>&1
 
+      # 6.5) full（全部入り・既定イメージ, #584）
+      #      python / go と同じ install スクリプトを叩くので、ツール定義は
+      #      ドリフトしない。HEALTHCHECK が dispatch マトリクスの和を表明する。
+      - name: Build and push full
+        id: full
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.full
+          push: true
+          build-args: |
+            BASE_IMAGE=ghcr.io/${{ github.repository }}/sandbox@${{ steps.base.outputs.digest }}
+          tags: ghcr.io/${{ github.repository }}/sandbox:full
+
+      # 6.6) full の HEALTHCHECK を確認
+      #      ここが #584 の構造的な再発防止線: verify が dispatch しうるツールの
+      #      焼き漏れは、ユーザーの初回 verify ではなくこの CI ステップで落ちる。
+      - name: Verify full HEALTHCHECK
+        run: |
+          source /tmp/healthcheck.sh
+          IMG="ghcr.io/${{ github.repository }}/sandbox@${{ steps.full.outputs.digest }}"
+          CID=$(docker run -d "$IMG" sleep 90)
+          wait_healthy "$CID" "full" 30 || { docker kill "$CID" >/dev/null 2>&1; exit 1; }
+          docker kill "$CID" >/dev/null 2>&1
+
       # 7) digest 固定参照と HEALTHCHECK 結果を Job Summary に出す
       - name: Summary
         run: |
@@ -164,6 +189,7 @@ jobs:
             echo "| base   | \`${{ steps.base.outputs.digest }}\` | ✅ verified | ✅ unhealthy detected |"
             echo "| python | \`${{ steps.python.outputs.digest }}\` | ✅ verified | — |"
             echo "| go     | \`${{ steps.go.outputs.digest }}\` | ✅ verified | — |"
+            echo "| full   | \`${{ steps.full.outputs.digest }}\` | ✅ verified | — |"
             echo ""
             echo "image_pins.json の neutral / python / go pin を上の digest へ更新する PR を自動作成します（#313）。"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -172,7 +198,11 @@ jobs:
       #    検出ベースの画像選択（image_selection.py）が参照する 3 つの pin を
       #    最新ビルドの digest に揃える。旧 build-sandbox-image.yml が
       #    _DEFAULT_IMAGE をモノリスへ巻き戻していた問題を置き換える。
+      #    ブランチからの workflow_dispatch（新イメージの digest を採取する用途、
+      #    #584 のブートストラップ）では pin PR を開かない。pin は main の
+      #    ビルドだけが更新する。
       - name: Update default image pins in image_pins.json and open PR
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -181,6 +211,7 @@ jobs:
           BASE_DIGEST: ${{ steps.base.outputs.digest }}
           PYTHON_DIGEST: ${{ steps.python.outputs.digest }}
           GO_DIGEST: ${{ steps.go.outputs.digest }}
+          FULL_DIGEST: ${{ steps.full.outputs.digest }}
         run: |
           set -euo pipefail
           F=src/sunaba/image_pins.json
@@ -194,7 +225,8 @@ jobs:
             --repo "${REPO}" \
             --neutral "${BASE_DIGEST}" \
             --python "${PYTHON_DIGEST}" \
-            --go "${GO_DIGEST}"
+            --go "${GO_DIGEST}" \
+            --full "${FULL_DIGEST}"
 
           # digest が変わっていなければ PR 不要
           if git diff --quiet; then
@@ -212,8 +244,9 @@ jobs:
           base:   ghcr.io/${REPO}/sandbox@${BASE_DIGEST}
           python: ghcr.io/${REPO}/sandbox@${PYTHON_DIGEST}
           go:     ghcr.io/${REPO}/sandbox@${GO_DIGEST}
+          full:   ghcr.io/${REPO}/sandbox@${FULL_DIGEST}
 
-          Automated update triggered by docker/Dockerfile.{base,python,go} build."
+          Automated update triggered by docker/Dockerfile.{base,python,go,full} build."
           git push origin "${BRANCH}"
 
           gh pr create \
@@ -231,5 +264,6 @@ jobs:
           | base   | \`${BASE_DIGEST}\` |
           | python | \`${PYTHON_DIGEST}\` |
           | go     | \`${GO_DIGEST}\` |
+          | full   | \`${FULL_DIGEST}\` |
 
           - Workflow run: ${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"

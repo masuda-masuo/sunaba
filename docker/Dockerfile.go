@@ -3,11 +3,15 @@
 #
 # Code Sandbox MCP — Go backend イメージ（base + Go ツールチェーン）
 # 公開タグ: ghcr.io/<owner>/sunaba/sandbox:go
-# 設計: docs/design-multilang-support.md §6
+# 設計: docs/design_multilang_support.md §6
 # ビルド:
 #   docker build -f docker/Dockerfile.go \
 #     --build-arg BASE_IMAGE=sunaba/sandbox:base \
 #     -t sunaba/sandbox:go .
+#
+# 位置づけ (#584): これは *明示 image= 用の lean イメージ*。既定で使われるのは
+# 全部入りの sandbox:full。ツールチェーンの定義は install-go.sh に一本化し、
+# Dockerfile.full と共有する。
 
 ARG BASE_IMAGE=sunaba/sandbox:base
 FROM ${BASE_IMAGE}
@@ -16,26 +20,20 @@ FROM ${BASE_IMAGE}
 USER root
 ARG TARGETARCH
 ARG GO_VERSION=1.26.4
-
-RUN set -ex; \
-    case "${TARGETARCH}" in \
-      amd64) GO_ARCH="amd64" ;; \
-      arm64) GO_ARCH="arm64" ;; \
-      *) echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
-    esac; \
-    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" \
-      | tar -xz -C /usr/local; \
-    ln -s /usr/local/go/bin/go /usr/local/bin/go; \
-    ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+COPY docker/install-go.sh /tmp/install-go.sh
+RUN sh /tmp/install-go.sh "${TARGETARCH}" "${GO_VERSION}" && rm /tmp/install-go.sh
 
 # GOPATH はユーザ home、GOCACHE は書込可能な /tmp 配下（read-only ルート対策）。
 # buildvcs=false: クローン外のディレクトリでも go build が VCS スタンプで失敗しないように。
-# GOMAXPROCS=1: pids 上限（100）超過による fork 枯渇を防ぐ（Issue #233）。
-#   Go の並列コンパイルは多数の compile/vet/link を fork するため、
-#   デフォルトの pids_limit=100 を容易に超過する。直列化で回避。
+#
+# GOMAXPROCS は *ここに焼かない*（#584）。pids 上限（100）超過による fork 枯渇を
+# 防ぐ目的（#233）だが、GOMAXPROCS はイメージ内の **全ての Go バイナリ** が読む
+# ため、gh（Go 製）まで 1 スレッドに絞られる。全部入りイメージ（sandbox:full）で
+# は Go 以外の作業が主になるので、この漏れは看過できない。fork 枯渇対策は
+# go build / go test の呼び出しに属する性質なので、edit_verify が exec 時の env
+# として渡す（_GO_ENV）。
 ENV GOPATH=/home/sandbox/go \
     GOCACHE=/tmp/.gocache \
-    GOMAXPROCS=1 \
     GOFLAGS="-buildvcs=false -p=1"
 
 USER sandbox

@@ -128,24 +128,7 @@ _CONTAINER_TTL_ENV: str = "SUNABA_CONTAINER_TTL_SECONDS"
 #: shorter than the client's request timeout (~60s).
 _PROGRESS_INTERVAL_SECONDS: float = 15.0
 
-_SENSITIVE_FILE_BASENAMES: frozenset[str] = frozenset(
-    {
-        ".env",
-        ".git-credentials",
-        ".gitconfig",
-        "node_modules",
-        ".venv",
-        "venv",
-        "__pycache__",
-    }
-)
 
-#: ``.env.*`` names that carry no secrets by convention.  Filtering them
-#: away deletes tracked files from the copied tree, so the checkout starts
-#: dirty and the deletion can leak into commits (#561).
-_ENV_TEMPLATE_BASENAMES: frozenset[str] = frozenset(
-    {".env.example", ".env.sample", ".env.template"}
-)
 
 
 def _resolve_image_ref(image: str) -> str:
@@ -315,7 +298,6 @@ def _write_clone_meta(container: Any, clone_path: str, base_branch: str | None =
         )
     except Exception as e:
         logger.warning("Failed to write clone meta: %s", e)
-
 
 
 

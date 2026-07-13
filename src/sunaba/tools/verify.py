@@ -489,7 +489,7 @@ def verify_in_container(
                 result["raw_output"] = raw_tail
             return result
 
-    def _run_dispatch_test(lang: str, test_path: str) -> dict:
+    def _run_dispatch_test(lang: str, test_path: str, workdir: str | None = None) -> dict:
         """Run test for a single language using DISPATCH table."""
         from sunaba.edit_verify import _DISPATCH
 
@@ -498,7 +498,7 @@ def verify_in_container(
             return {"status": "skipped", "error": f"no test runner for {lang}"}
 
         try:
-            vr = runner(container, test_path)
+            vr = runner(container, test_path, workdir=workdir)
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -530,7 +530,7 @@ def verify_in_container(
             if lang == "python":
                 results[lang] = _run_inline_pytest("")
             else:
-                results[lang] = _run_dispatch_test(lang, path)
+                results[lang] = _run_dispatch_test(lang, path, workdir=working_dir)
 
             if results[lang].get("status") not in ("ok", "no_tests", "skipped"):
                 overall_ok = False
@@ -623,6 +623,10 @@ def verify_in_container(
             else:
                 result["gate_pass_reason"] = "no tests found \u2014 gate passes"
                 result["gate_passed"] = True
+        elif full_result.get("status") == "error":
+            result["gate_fail_reasons"] = [
+                f"test execution error: {full_result.get('error', 'unknown')}"
+            ]
         else:
             result["gate_fail_reasons"] = [
                 f"tests: {full_result.get('failed', 0)} failure(s)"

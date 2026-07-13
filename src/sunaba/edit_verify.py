@@ -1995,7 +1995,7 @@ def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
         return _envelope_error("pytest", detail, ec)
 
 
-def _run_jest_verify(container: Any, path: str) -> VerifyResult:
+def _run_jest_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run jest --json on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
         [
@@ -2005,6 +2005,7 @@ def _run_jest_verify(container: Any, path: str) -> VerifyResult:
         ],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -2040,7 +2041,7 @@ def _run_jest_verify(container: Any, path: str) -> VerifyResult:
         return _envelope_error("jest", detail, ec)
 
 
-def _run_go_test_verify(container: Any, path: str) -> VerifyResult:
+def _run_go_test_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run go test -json on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
         [
@@ -2050,6 +2051,7 @@ def _run_go_test_verify(container: Any, path: str) -> VerifyResult:
         ],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""

@@ -1095,6 +1095,103 @@ class TestVerifyInContainer:
         assert result["tests"]["filtered"]["status"] == "not_available"
         assert "pytest not available" in result["gate_fail_reasons"][0]
 
+    @patch("sunaba.tools.verify._docker")
+    def test_missing_json_report_plugin_is_not_available(self, mock_docker: MagicMock) -> None:
+        """Missing pytest-json-report → not_available, never a test verdict (#584).
+
+        The plugin is verify's own prerequisite.  Reporting its absence as
+        ``no_tests`` ("this project has no tests") was the #584 failure: a
+        tooling gap that read like a finding about the code.
+        """
+        from sunaba.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        # pytest exits 4 (usage error) and writes no JSON report.
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (4, (
+                b"---PYTEST-RAW---\n"
+                b"pytest: error: unrecognized arguments: --json-report\n",
+                b"",
+            )),
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "sunaba.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "sunaba.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+            ))
+
+        tests = result["tests"]["full"]
+        assert tests["status"] == "not_available"
+        assert "pytest-json-report" in tests["error"]
+        assert result["gate_passed"] is False
+
+    @patch("sunaba.tools.verify._docker")
+    def test_crash_without_json_report_is_error_not_no_tests(
+        self, mock_docker: MagicMock
+    ) -> None:
+        """pytest died producing no report → error, not "no tests found" (#584).
+
+        A non-zero exit with no JSON means the run broke.  Laundering that into
+        ``no_tests`` would report a benign verdict for a run that never happened.
+        """
+        from sunaba.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        # Exit 3 (internal error), no JSON, no recognizable tool-absence marker.
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (3, (b"---PYTEST-RAW---\nINTERNALERROR> boom\n", b"")),
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "sunaba.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "sunaba.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+            ))
+
+        tests = result["tests"]["full"]
+        assert tests["status"] == "error"
+        assert result["gate_passed"] is False
+
+
 # ===================================================================
 # verify_in_container: dispatch path (Issue #493)
 # ===================================================================

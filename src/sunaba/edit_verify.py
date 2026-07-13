@@ -2389,7 +2389,7 @@ def _run_ts_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
 
 def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``pylint --output-format json``. Returns None if pylint is not installed."""
-    exit_code, output = _exec_container(container,
+    exit_code, output = container.exec_run(
         [
             "/bin/sh",
             "-c",

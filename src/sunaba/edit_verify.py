@@ -1935,8 +1935,14 @@ def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> Ve
     return _envelope_ok("tsc", findings, ec)
 
 
-def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
-    """Run pytest --json-report on *path*.  Returns VerifyResult envelope."""
+def _run_pytest_verify(
+    container: Any, path: str, workdir: str | None = None
+) -> VerifyResult:
+    """Run pytest --json-report on *path*.  Returns VerifyResult envelope.
+
+    *workdir* defaults to the container's own working directory, which is
+    the repo root; pass it only to run somewhere else (e.g. a subproject).
+    """
     from sunaba.test_report import (
         PytestAdapter,
         build_pytest_cmd,
@@ -1949,6 +1955,7 @@ def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
         ["/bin/sh", "-c", cmd],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -1995,7 +2002,9 @@ def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
         return _envelope_error("pytest", detail, ec)
 
 
-def _run_jest_verify(container: Any, path: str) -> VerifyResult:
+def _run_jest_verify(
+    container: Any, path: str, workdir: str | None = None
+) -> VerifyResult:
     """Run jest --json on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
         [
@@ -2005,6 +2014,7 @@ def _run_jest_verify(container: Any, path: str) -> VerifyResult:
         ],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -2040,7 +2050,9 @@ def _run_jest_verify(container: Any, path: str) -> VerifyResult:
         return _envelope_error("jest", detail, ec)
 
 
-def _run_go_test_verify(container: Any, path: str) -> VerifyResult:
+def _run_go_test_verify(
+    container: Any, path: str, workdir: str | None = None
+) -> VerifyResult:
     """Run go test -json on *path*.  Returns VerifyResult envelope."""
     ec, output = container.exec_run(
         [
@@ -2050,6 +2062,7 @@ def _run_go_test_verify(container: Any, path: str) -> VerifyResult:
         ],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""

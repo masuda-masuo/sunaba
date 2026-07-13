@@ -487,7 +487,11 @@ def verify_in_container(
             return result
 
     def _run_dispatch_test(lang: str, test_path: str) -> dict:
-        """Run test for a single language using DISPATCH table."""
+        """Run test for a single language using DISPATCH table.
+
+        The runner would land in the repo root anyway (it is the container's
+        working directory), but an explicit *working_dir* has to win.
+        """
         from sunaba.edit_verify import _DISPATCH
 
         runner = _DISPATCH.get(lang, {}).get("test")
@@ -495,7 +499,7 @@ def verify_in_container(
             return {"status": "skipped", "error": f"no test runner for {lang}"}
 
         try:
-            vr = runner(container, test_path)
+            vr = runner(container, test_path, workdir=working_dir)
         except Exception as e:
             return {"status": "error", "error": str(e)}
 

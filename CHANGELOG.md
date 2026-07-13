@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 The compatibility policy (what counts as a breaking change) is described in
 [README.md#compatibility-policy](README.md#compatibility-policy).
 
+## [Unreleased]
+
+### Removed
+
+- **The Shiori pre-clone copy path for `clone_repo`** (#575).  `clone_repo`
+  (in `sandbox_initialize` and `run_container_and_exec`) now always clones
+  over the network; the earlier fast-path that copied a Shiori pre-clone
+  into the container via `put_archive` and then ran `git fetch --unshallow`
+  is gone, along with `--shiori-repos-path` / `SUNABA_SHIORI_REPOS_PATH`.
+  Measurement showed the copy path never actually avoided the network round
+  trip (the unshallow fetch re-fetched full history serially after the
+  copy) and the real init-latency win came from an unrelated pip-install
+  fix, not the clone path. Removing it also drops a class of `put_archive`
+  ownership/dirty-tree bugs (#559, #560, #561, #567) and decouples source
+  tree correctness from Shiori's index/auto-sync liveness. See #84 for the
+  original motivation and #575 for the retirement rationale.
+
 ## [0.8.0] - 2026-07-10
 
 The project is renamed **code-sandbox-mcp -> sunaba** and versioning restarts

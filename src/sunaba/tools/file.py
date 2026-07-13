@@ -451,9 +451,8 @@ def copy_project(
 
     .. hint::
 
-       For Git repositories already cloned locally, prefer
-       :func:`sandbox_initialize` with ``clone_repo`` — it copies
-       a pre-cloned repo without network overhead.
+       For Git repositories, prefer :func:`sandbox_initialize` with
+       ``clone_repo`` — it clones the repo into the container directly.
 
     Args:
         container_id: 12-character container ID prefix.

@@ -38,7 +38,7 @@ The default images come pre-installed with the following utilities, which the se
 
 ## 3. Language Detection & Selection Rules
 
-When `sandbox_initialize` is called without specifying an explicit `image` parameter, the server automatically detects the project's language (either from a pre-cloned directory metadata in Shiori or by querying files from GitHub) and chooses the appropriate image:
+When `sandbox_initialize` is called without specifying an explicit `image` parameter, the server automatically detects the project's language (by querying the repository's file listing from GitHub) and chooses the appropriate image:
 
 1.  **Manual Override**: Passing `language=` to `verify_in_container` or an explicit `image=` to `sandbox_initialize` overrides auto-detection.
 2.  **File Extension (Single-file fallback)**:

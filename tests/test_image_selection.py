@@ -9,7 +9,6 @@ from sunaba import image_selection as imgsel
 from sunaba.image_selection import (
     LanguageDetection,
     detect_from_github,
-    detect_from_local_dir,
     resolve_initial_image,
     select_variant,
 )
@@ -78,36 +77,6 @@ def test_missing_map_entry_degrades_to_neutral():
 
 
 # --------------------------------------------------------------------------
-# detect_from_local_dir: marker files at a directory root
-# --------------------------------------------------------------------------
-
-def test_local_dir_detects_go(tmp_path):
-    (tmp_path / "go.mod").write_text("module x\n")
-    d = detect_from_local_dir(tmp_path)
-    assert d.supported == {"go"}
-    assert d.source == "preclone"
-
-
-def test_local_dir_detects_python_via_glob(tmp_path):
-    (tmp_path / "requirements-dev.txt").write_text("pytest\n")
-    d = detect_from_local_dir(tmp_path)
-    assert d.supported == {"python"}
-
-
-def test_local_dir_flags_unsupported(tmp_path):
-    (tmp_path / "Cargo.toml").write_text("[package]\n")
-    d = detect_from_local_dir(tmp_path)
-    assert d.supported == set()
-    assert d.unsupported == {"Rust"}
-
-
-def test_local_dir_missing_path_is_neutral(tmp_path):
-    d = detect_from_local_dir(tmp_path / "does-not-exist")
-    assert d.is_empty
-    assert d.source == "none"
-
-
-# --------------------------------------------------------------------------
 # detect_from_github: best-effort, never raises
 # --------------------------------------------------------------------------
 
@@ -154,12 +123,14 @@ def test_github_detection_returns_none_on_error(monkeypatch):
 # resolve_initial_image: orchestration / precedence
 # --------------------------------------------------------------------------
 
-def test_explicit_image_wins_without_detection(tmp_path):
-    (tmp_path / "go.mod").write_text("module x\n")
+def test_explicit_image_wins_without_detection(monkeypatch):
+    def _boom(request, timeout=5.0):  # noqa: ARG001
+        raise AssertionError("network must not be probed")
+
+    monkeypatch.setattr(imgsel.urllib.request, "urlopen", _boom)
     image, notice = resolve_initial_image(
         explicit_image="ghcr.io/x/custom@sha256:" + "a" * 64,
         target_repo="owner/repo",
-        preclone_root=tmp_path,
         token=None,
         language_image_map=IMAGE_MAP,
         neutral_image=NEUTRAL,
@@ -168,25 +139,10 @@ def test_explicit_image_wins_without_detection(tmp_path):
     assert notice is None
 
 
-def test_preclone_drives_selection(tmp_path):
-    (tmp_path / "pyproject.toml").write_text("[project]\n")
-    image, notice = resolve_initial_image(
-        explicit_image=None,
-        target_repo="owner/repo",
-        preclone_root=tmp_path,
-        token=None,
-        language_image_map=IMAGE_MAP,
-        neutral_image=NEUTRAL,
-        allow_network_detection=False,
-    )
-    assert image == PY
-
-
 def test_bare_init_is_neutral():
     image, notice = resolve_initial_image(
         explicit_image=None,
         target_repo=None,
-        preclone_root=None,
         token=None,
         language_image_map=IMAGE_MAP,
         neutral_image=NEUTRAL,
@@ -195,7 +151,7 @@ def test_bare_init_is_neutral():
     assert notice is None
 
 
-def test_network_detection_used_when_no_preclone(monkeypatch):
+def test_network_detection_used_for_target_repo(monkeypatch):
     payload = [{"name": "go.mod", "type": "file"}]
     monkeypatch.setattr(
         imgsel.urllib.request, "urlopen", _fake_urlopen(payload)
@@ -203,27 +159,23 @@ def test_network_detection_used_when_no_preclone(monkeypatch):
     image, notice = resolve_initial_image(
         explicit_image=None,
         target_repo="owner/repo",
-        preclone_root=None,
         token=None,
         language_image_map=IMAGE_MAP,
         neutral_image=NEUTRAL,
-        allow_network_detection=True,
     )
     assert image == GO
 
 
-def test_network_detection_skipped_when_disabled(monkeypatch):
+def test_network_detection_failure_degrades_to_neutral(monkeypatch):
     def _boom(request, timeout=5.0):  # noqa: ARG001
-        raise AssertionError("network must not be probed")
+        raise OSError("network down")
 
     monkeypatch.setattr(imgsel.urllib.request, "urlopen", _boom)
     image, _ = resolve_initial_image(
         explicit_image=None,
         target_repo="owner/repo",
-        preclone_root=None,
         token=None,
         language_image_map=IMAGE_MAP,
         neutral_image=NEUTRAL,
-        allow_network_detection=False,
     )
     assert image == NEUTRAL

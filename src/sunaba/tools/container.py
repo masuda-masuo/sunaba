@@ -5,18 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import io
 import json
 import logging
 import os
 import re
 import shlex
-import tarfile
-import tempfile
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated, Any, NamedTuple
 
 from docker.errors import APIError, NotFound
@@ -109,8 +105,6 @@ _LANGUAGE_IMAGE_MAP: dict[str, str] = {
 }
 
 
-_SHIORI_REPOS_PATH: str | None = None
-
 _CLONE_REPO_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 #: Hard cap ratio for per-call mem_limit override (Issue #201).
@@ -133,26 +127,6 @@ _CONTAINER_TTL_ENV: str = "SUNABA_CONTAINER_TTL_SECONDS"
 #: keep the MCP/HTTP connection alive during slow setup (Issue #298).  Must be
 #: shorter than the client's request timeout (~60s).
 _PROGRESS_INTERVAL_SECONDS: float = 15.0
-
-_SENSITIVE_FILE_BASENAMES: frozenset[str] = frozenset(
-    {
-        ".env",
-        ".git-credentials",
-        ".gitconfig",
-        "node_modules",
-        ".venv",
-        "venv",
-        "__pycache__",
-    }
-)
-
-#: ``.env.*`` names that carry no secrets by convention.  Filtering them
-#: away deletes tracked files from the copied tree, so the checkout starts
-#: dirty and the deletion can leak into commits (#561).
-_ENV_TEMPLATE_BASENAMES: frozenset[str] = frozenset(
-    {".env.example", ".env.sample", ".env.template"}
-)
-
 
 def _resolve_image_ref(image: str) -> str:
     """Resolve a tag-based image reference to a digest-based one.
@@ -257,108 +231,6 @@ def _validate_clone_repo(clone_repo: str) -> tuple[str, str]:
     return owner, name
 
 
-def _shiori_preclone_root(repo: str | None) -> Path | None:
-    """Resolve the host path of the Shiori pre-clone for *repo*, if usable.
-
-    Single source of truth for pre-clone path resolution (Issue #532).
-    Shiori materialises its clones **flat** under the repos root as
-    ``<root>/<owner>__<name>`` (double-underscore separator), not nested
-    ``<root>/<owner>/<name>``.  Only that real layout is recognised —
-    accepting a phantom nested layout as well would hide a misconfigured
-    root instead of surfacing it.
-
-    This function never raises.  It runs *before* container creation on
-    the code paths that decide whether network access must be auto-enabled
-    (Issue #178), so any failure here — including an unreadable root
-    (EACCES on e.g. a docker-volume path) — must degrade to "no pre-clone
-    → network fallback" instead of killing ``sandbox_initialize``:
-
-    - ``_SHIORI_REPOS_PATH`` unset (feature off): ``None``, no log.
-    - pre-clone absent: ``None``, info log.
-    - ``OSError`` during the check (EACCES etc.): ``None``, **warning**
-      log — a configured-but-inert optimisation must stay visible
-      (Issue #532).
-    """
-    if not repo or not _SHIORI_REPOS_PATH:
-        return None
-    try:
-        owner, name = _validate_clone_repo(repo)
-    except ValueError:
-        # Malformed repo spec: the clone paths perform (and report) their
-        # own validation; the pre-clone probe just answers "nothing usable".
-        return None
-    try:
-        repos_root = Path(_SHIORI_REPOS_PATH).resolve()
-        clone_path = (repos_root / f"{owner}__{name}").resolve()
-        # Stay under the configured repos root (path-traversal guard).
-        try:
-            clone_path.relative_to(repos_root)
-        except ValueError:
-            return None
-        # Shiori pre-clones are produced by a normal git clone, so .git is a
-        # directory.  Bare clones and git-worktree secondaries (where .git is
-        # a file) are not used by Shiori, so is_dir() is the right check.
-        if clone_path.is_dir() and (clone_path / ".git").is_dir():
-            return clone_path
-        logger.info(
-            "Shiori pre-clone for %s not found at %s; using network fallback",
-            repo,
-            clone_path,
-        )
-        return None
-    except OSError as e:
-        logger.warning(
-            "Shiori pre-clone check for %s failed (%s); treating pre-clone "
-            "as absent and using network fallback",
-            repo,
-            e,
-        )
-        return None
-
-
-def _shiori_preclone_exists(clone_repo: str) -> bool:
-    """Return True when a usable Shiori pre-clone for *clone_repo* exists.
-
-    Thin wrapper over :func:`_shiori_preclone_root`, the single pre-clone
-    path resolver.  Used to decide whether network access must be
-    auto-enabled before container start, and whether the network fallback
-    should run (Issue #178).  Never raises (Issue #532).
-    """
-    return _shiori_preclone_root(clone_repo) is not None
-
-
-def warn_if_shiori_root_unusable() -> None:
-    """Startup sanity check for a configured-but-unusable Shiori root (Issue #532).
-
-    Called once from the server entry point after ``_SHIORI_REPOS_PATH`` is
-    set.  When the configured root is not a directory or cannot be read
-    (traverse denied on a parent included), every pre-clone lookup will
-    silently miss and ``clone_repo`` will always take the network fallback —
-    warn once, visibly, at startup instead of only per-call.
-    """
-    if not _SHIORI_REPOS_PATH:
-        return
-    root = Path(_SHIORI_REPOS_PATH)
-    try:
-        if not root.is_dir():
-            logger.warning(
-                "Shiori repos root %s is not a directory; pre-clone lookup "
-                "will never hit and clone_repo will always use the network "
-                "fallback",
-                root,
-            )
-            return
-        os.listdir(root)
-    except OSError as e:
-        logger.warning(
-            "Shiori repos root %s is not readable (%s); pre-clone lookup "
-            "will never hit and clone_repo will always use the network "
-            "fallback",
-            root,
-            e,
-        )
-
-
 def _select_initial_image(
     image: str | None,
     clone_repo: str | None,
@@ -368,33 +240,25 @@ def _select_initial_image(
     """Choose the image (and optional notice) for a new container (Issue #313).
 
     An explicit *image* wins.  Otherwise the project's language is detected
-    host-side -- from a Shiori pre-clone when available, else the GitHub API
-    when a repo is being cloned -- and the matching variant image is selected,
-    falling back to the neutral ``_DEFAULT_IMAGE`` when detection is
-    inconclusive.  Detection never blocks init: any failure degrades to the
-    neutral image.
+    via the GitHub API when a repo is being cloned, and the matching variant
+    image is selected, falling back to the neutral ``_DEFAULT_IMAGE`` when
+    detection is inconclusive.  Detection never blocks init: any failure
+    degrades to the neutral image.
     """
     target_repo = clone_repo or repo
-    # A GitHub probe is only worthwhile (and only authorized) when we are
-    # actually fetching that repo over the network.
-    network_clone = bool(target_repo) and (
-        pr is not None or (clone_repo is not None and not _shiori_preclone_exists(clone_repo))
-    )
-    # Everything below is best-effort: token minting, the preclone scan, and
-    # the GitHub probe can all raise, and none of them may block init.  Keep
-    # them inside the guard so any failure degrades to the neutral image.
+    # Everything below is best-effort: token minting and the GitHub probe
+    # can both raise, and neither may block init.  Keep them inside the
+    # guard so any failure degrades to the neutral image.
     try:
         token: str | None = None
-        if network_clone:
+        if target_repo:
             token = _resolve_vcs_token() or None
         return image_selection.resolve_initial_image(
             explicit_image=image,
             target_repo=target_repo,
-            preclone_root=_shiori_preclone_root(target_repo),
             token=token,
             language_image_map=_LANGUAGE_IMAGE_MAP,
             neutral_image=_DEFAULT_IMAGE,
-            allow_network_detection=network_clone,
         )
     except Exception as e:  # pragma: no cover - defensive: never block init
         logger.warning("image detection failed, using neutral default: %s", e)
@@ -429,167 +293,6 @@ def _write_clone_meta(container: Any, clone_path: str, base_branch: str | None =
         logger.warning("Failed to write clone meta: %s", e)
 
 
-def _clone_shiori_repo_to_container(
-    container: Any,
-    container_id: str,
-    clone_repo: str,
-    clone_dest: str,
-) -> str:
-    """Copy a Shiori pre-cloned repo into the container.
-
-    Resolves the host-side path via :func:`_shiori_preclone_root` (the
-    single pre-clone path resolver, Issue #532), copies via
-    ``put_archive``, then runs ``git fetch --unshallow`` in the container
-    only when the copy is actually a shallow clone.
-
-    Args:
-        container: Docker container object.
-        container_id: 12-char container ID prefix.
-        clone_repo: ``owner/name`` repository identifier.
-        clone_dest: Destination directory inside the container.
-
-    Returns:
-        Success message string.
-    """
-
-    # Validate clone_dest is a safe path inside the container
-    if not clone_dest.startswith("/tmp/"):
-        raise ValueError(f"clone_dest must start with /tmp/, got: {clone_dest!r}")
-
-    if not _SHIORI_REPOS_PATH:
-        raise ValueError("Shiori repos path is not configured. Set --shiori-repos-path or SUNABA_SHIORI_REPOS_PATH env var.")
-
-    _validate_clone_repo(clone_repo)
-    repo_name = clone_repo.split("/")[-1]
-
-    # Single source of truth for the pre-clone path (Issue #532): the same
-    # resolver the callers used to decide this fast-path is applicable.
-    resolved_from = _shiori_preclone_root(clone_repo)
-    if resolved_from is None:
-        raise ValueError(
-            f"Shiori pre-clone not found for {clone_repo} "
-            f"(expected <root>/<owner>__<name> under {_SHIORI_REPOS_PATH})"
-        )
-
-    logger.info(
-        "Copying Shiori clone %s → container %s:%s",
-        resolved_from,
-        container_id[:12],
-        clone_dest,
-    )
-
-    # put_archive does not create the destination directory, and on this
-    # copy path nothing else does (the network path relies on git clone to
-    # create it) -- a fresh container has no clone_dest yet (#532).
-    mkdir_exit, _ = container.exec_run(["mkdir", "-p", clone_dest])
-    if mkdir_exit != 0:
-        raise RuntimeError(
-            f"Failed to create {clone_dest} in container {container_id[:12]}"
-        )
-
-    # -- Copy via put_archive (same mechanism as copy_project) --
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar")
-
-    def _filter_sensitive(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
-        name = Path(tarinfo.name).name
-        if name in _SENSITIVE_FILE_BASENAMES:
-            return None
-        if name.startswith(".env.") and name not in _ENV_TEMPLATE_BASENAMES:
-            return None
-        if "/.ssh/" in tarinfo.name:
-            return None
-        return tarinfo
-
-    try:
-        with tarfile.open(fileobj=tmp.file, mode="w") as tar:
-            tar.add(str(resolved_from), arcname=repo_name, filter=_filter_sensitive)
-        tmp.file.close()
-        with open(tmp.name, "rb") as f:
-            data = f.read()
-        buf = io.BytesIO(data)
-        try:
-            container.put_archive(clone_dest, buf)
-        except APIError as e:
-            raise RuntimeError(f"Failed to copy repo into container: {e}") from e
-    finally:
-        os.unlink(tmp.name)
-
-    clone_path = f"{clone_dest}/{repo_name}"
-    # put_archive extracts as root, but execs run as the image's default
-    # user (e.g. uid 999) -- left root-owned, every git command dies with
-    # "dubious ownership" and the tree is unwritable (#532).  Ask the
-    # default user for its uid:gid, then chown as root; running
-    # `chown $(id -u)` as root would resolve to 0:0.
-    exit_code, ids_out = container.exec_run(["sh", "-c", 'echo "$(id -u):$(id -g)"'])
-    ids = (ids_out or b"").decode("utf-8", errors="replace").strip()
-    if exit_code != 0 or not ids:
-        raise RuntimeError(
-            f"Failed to resolve container user for chown of {clone_path}"
-        )
-    exit_code, chown_out = container.exec_run(
-        ["chown", "-R", ids, clone_path], user="0"
-    )
-    if exit_code != 0:
-        raise RuntimeError(
-            f"Failed to chown {clone_path} to {ids}: "
-            f"{(chown_out or b'').decode('utf-8', errors='replace').strip()}"
-        )
-    _write_clone_meta(container, clone_path)
-
-    record_copy(
-        container_id[:12],
-        "clone_shiori_repo",
-        str(resolved_from),
-        clone_path,
-    )
-
-    # -- Unshallow only when the copy is actually shallow (Issue #532) --
-    # The pre-clone path runs with network OFF by default, so on a full
-    # clone an unconditional `git fetch --unshallow` could never succeed
-    # and just emitted a spurious warning on every hit.  Probe first and
-    # skip silently in the (normal) non-shallow case.
-    safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
-    try:
-        exit_code, output = container.exec_run(
-            ["/bin/sh", "-c", f"cd {safe_dest} && git rev-parse --is-shallow-repository 2>&1"],
-            stdout=True,
-            stderr=True,
-            demux=True,
-        )
-        stdout_part, _stderr_part = output
-        shallow_probe = (stdout_part.decode("utf-8", errors="replace") if stdout_part else "").strip()
-        if exit_code != 0:
-            logger.debug(
-                "shallow probe failed (exit=%d): %s -- skipping unshallow",
-                exit_code,
-                shallow_probe,
-            )
-        elif shallow_probe == "true":
-            exit_code, output = container.exec_run(
-                ["/bin/sh", "-c", f"cd {safe_dest} && git fetch --unshallow 2>&1"],
-                stdout=True,
-                stderr=True,
-                demux=True,
-            )
-            stdout_part, _stderr_part = output
-            fetch_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-            if exit_code != 0:
-                logger.warning(
-                    "git fetch --unshallow failed (exit=%d): %s",
-                    exit_code,
-                    fetch_output.strip(),
-                )
-            else:
-                logger.info(
-                    "git fetch --unshallow succeeded: %s",
-                    fetch_output.strip(),
-                )
-    except Exception as e:
-        logger.warning("git fetch --unshallow error: %s", e)
-
-    return f"Copied Shiori clone of {clone_repo} → {clone_dest}/{repo_name} in container {container_id[:12]}"
-
-
 def _clone_repo_via_network(
     container,
     container_id: str,
@@ -599,7 +302,7 @@ def _clone_repo_via_network(
     *,
     open_read_grant: bool = False,
 ) -> str:
-    """Fallback: clone via ``gh repo clone`` when Shiori is unavailable (Issue #146).
+    """Clone *clone_repo* into the container over the network (Issue #575).
 
     Requires network access and ``gh`` installed in the container.
 
@@ -619,11 +322,6 @@ def _clone_repo_via_network(
     ``git clone`` transparently.  Used under the egress proxy, where the
     container itself never receives a token (#356).
     """
-    # Not redundant with the callers: on the network-fallback path
-    # _clone_shiori_repo_to_container is never called (the pre-clone probe
-    # returned None -- env unset, pre-clone absent, or unreadable root,
-    # Issue #178/#532), so this is the only validation on the
-    # network-fallback path.
     _validate_clone_repo(clone_repo)
     repo_name = clone_repo.split("/")[-1]
     clone_path = clone_dest.rstrip("/") + "/" + repo_name
@@ -757,37 +455,27 @@ def _try_clone_into_container(
 ) -> CloneResult:
     """Attempt to clone a repo into the container; return (msg, error).
 
-    Selects the clone path up front via ``_shiori_preclone_exists``:
-
-    - pre-clone present  -> Shiori fast-path
-    - pre-clone absent   -> network fallback (Issue #178)
+    Always clones over the network (Issue #575): the earlier Shiori
+    pre-clone fast-path was retired after measurement showed it neither
+    avoided the network round trip (the copy was followed by a serial
+    ``git fetch --unshallow`` that re-fetched full history) nor removed the
+    actual bottleneck (pip install, already fixed independently).
 
     Returns ``(clone_msg, None)`` on success, ``(None, error_str)`` on failure.
     """
     try:
-        used_network = not _shiori_preclone_exists(clone_repo)
-        if used_network:
-            msg = _clone_repo_via_network(
-                container,
-                container_id,
-                clone_repo,
-                clone_dest,
-                authenticated,
-                open_read_grant=open_read_grant,
-            )
-        else:
-            msg = _clone_shiori_repo_to_container(
-                container,
-                container_id,
-                clone_repo,
-                clone_dest,
-            )
-        if used_network and not authenticated and not open_read_grant:
+        msg = _clone_repo_via_network(
+            container,
+            container_id,
+            clone_repo,
+            clone_dest,
+            authenticated,
+            open_read_grant=open_read_grant,
+        )
+        if not authenticated and not open_read_grant:
             # Anonymous network clone with no proxy read grant (only
             # reachable proxy-off): warn that a private repo would have
             # failed and that this checkout is read-only (Issue #333).
-            # The Shiori copy route is exempt: it is not a network clone,
-            # and private repos succeed on it (#532).
             msg = f"{msg} — WARNING: {CLONE_NO_TOKEN_WARNING}"
         return CloneResult(msg, None)
     except Exception as e:
@@ -1676,12 +1364,9 @@ def sandbox_initialize(
                Set to ``True`` for VCS operations (git/gh) that need to
                reach GitHub API.  Network access is a boundary-crossing
                operation and should be used only when necessary.
-        clone_repo: Optional ``owner/name`` repository to copy from the
-               Shiori pre-cloned repos on the host into the container.
-               Uses the host path configured via ``--shiori-repos-path``
-               (default: ``None`` = no clone copy).  When Shiori is not
-               configured, falls back to ``gh repo clone`` over the
-               network (``allow_network`` is auto-enabled).  A *private*
+        clone_repo: Optional ``owner/name`` repository to clone via the
+               network (anonymous ``git clone`` or ``gh repo clone``,
+               Issue #575; ``allow_network`` is auto-enabled).  A *private*
                repo clones transparently too: the egress proxy opens a
                read-authorization grant (#419) authenticated with a
                host-resolved token, so no credential enters the container.
@@ -1756,13 +1441,9 @@ def sandbox_initialize(
     if pr is not None:
         allow_network = True
 
-    # Auto-enable network when pre-clone is absent (Issue #146, #178)
-    if clone_repo and pr is None and not _shiori_preclone_exists(clone_repo):
+    # clone_repo always fetches over the network (Issue #575).
+    if clone_repo and pr is None:
         allow_network = True
-        logger.info(
-            "clone_repo=%r: pre-clone absent, auto-enabling network access",
-            clone_repo,
-        )
 
     client = _docker()
     # Name collision check (Issue #478): reject if a container with the
@@ -1880,9 +1561,9 @@ def sandbox_initialize(
                 record_stop(cid)
             return f"Error: egress proxy CA install failed (failing closed): {e}"
 
-    # -- Clone: Shiori fast-path, network fallback (Issue #84, #146) --
+    # -- Clone: always over the network (Issue #575) --
     # When pr is set, _setup_pr_branch handles its own clone,
-    # so skip the Shiori clone copy to avoid redundant clone.
+    # so skip the clone_repo clone to avoid a redundant clone.
     clone_msg = ""
     # The container never carries a VCS token (#356/#439): its egress runs
     # through the proxy, so the network clone always takes the anonymous
@@ -2175,18 +1856,12 @@ def run_container_and_exec(
         allow_network: Whether to allow network access (default ``False``).
                Set to ``True`` for VCS operations (git/gh) that need to
                reach GitHub API.
-        clone_repo: Optional ``owner/name`` repository to copy from the
-               Shiori pre-cloned repos on the host into the container.
-               Uses the host path configured via ``--shiori-repos-path``
-               (default: ``None`` = no clone copy).  When Shiori is not
-               configured, falls back to ``gh repo clone`` over the
-               network (``allow_network`` is auto-enabled).  A *private*
-               repo clones transparently too: the egress proxy opens a
-               read-authorization grant (#419) authenticated with a
-               host-resolved token, so no credential enters the container.
-        clone_dest: Destination directory in the container for the
-               cloned repository (default: ``/tmp/repo``).
-               The actual path will be ``{clone_dest}/{repo_name}`` where *repo_name* is derived from *clone_repo* or *repo*.
+        clone_repo: Optional ``owner/name`` repository to clone via the
+               network (anonymous ``git clone`` or ``gh repo clone``,
+               Issue #575).  A *private* repo clones transparently too:
+               the egress proxy opens a read-authorization grant (#419)
+               authenticated with a host-resolved token, so no credential
+               enters the container.
         repo: Repository in ``"owner/name"`` format.
                Required when *pr* is specified.
         pr: Pull request number to clone and check out.
@@ -2247,13 +1922,9 @@ def run_container_and_exec(
     if pr is not None:
         allow_network = True
 
-    # Auto-enable network when pre-clone is absent (Issue #146, #178)
-    if clone_repo and pr is None and not _shiori_preclone_exists(clone_repo):
+    # clone_repo always fetches over the network (Issue #575).
+    if clone_repo and pr is None:
         allow_network = True
-        logger.info(
-            "clone_repo=%r: pre-clone absent, auto-enabling network access",
-            clone_repo,
-        )
 
     # Detection-based image selection (Issue #313), same as sandbox_initialize.
     resolved, image_notice = _select_initial_image(
@@ -2328,9 +1999,9 @@ def run_container_and_exec(
                 }
             )
 
-    # --- Clone: Shiori fast-path, network fallback (Issue #84, #146) ---
+    # --- Clone: always over the network (Issue #575) ---
     # When pr is set, _setup_pr_branch handles its own clone,
-    # so skip the Shiori clone copy to avoid redundant clone.
+    # so skip the clone_repo clone to avoid a redundant clone.
     clone_error: str | None = None
     # Same ground truth as sandbox_initialize: a proxied container holds no
     # token (#356), so the network clone must go anonymous (#403 fallout).

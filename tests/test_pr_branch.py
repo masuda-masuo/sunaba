@@ -719,10 +719,10 @@ class TestCloneRepoPrInteraction:
     @patch("sunaba.tools.container._ensure_image")
     @patch("sunaba.tools.container.validate_image_ref")
     @patch("sunaba.tools.container._setup_pr_branch")
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     def test_clone_repo_skipped_when_pr_set(
         self,
-        mock_clone_shiori: MagicMock,
+        mock_net_clone: MagicMock,
         mock_setup: MagicMock,
         mock_validate: MagicMock,
         mock_ensure_image: MagicMock,
@@ -742,25 +742,23 @@ class TestCloneRepoPrInteraction:
             pr=136,
         )
 
-        # _clone_shiori_repo_to_container should NOT be called
-        mock_clone_shiori.assert_not_called()
+        # _clone_repo_via_network should NOT be called
+        mock_net_clone.assert_not_called()
         # _setup_pr_branch SHOULD be called
         mock_setup.assert_called_once()
 
-    @patch("sunaba.tools.container._shiori_preclone_exists", return_value=True)
     @patch("sunaba.tools.container._docker")
     @patch("sunaba.tools.container._ensure_image")
     @patch("sunaba.tools.container.validate_image_ref")
     @patch("sunaba.tools.container._setup_pr_branch")
-    @patch("sunaba.tools.container._clone_shiori_repo_to_container")
+    @patch("sunaba.tools.container._clone_repo_via_network")
     def test_clone_repo_called_when_pr_not_set(
         self,
-        mock_clone_shiori: MagicMock,
+        mock_net_clone: MagicMock,
         mock_setup: MagicMock,
         mock_validate: MagicMock,
         mock_ensure_image: MagicMock,
         mock_docker: MagicMock,
-        mock_preclone_exists: MagicMock,
     ):
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
@@ -774,7 +772,7 @@ class TestCloneRepoPrInteraction:
             pip_extras=None,
         )
 
-        # _clone_shiori_repo_to_container SHOULD be called
-        mock_clone_shiori.assert_called_once()
+        # _clone_repo_via_network SHOULD be called
+        mock_net_clone.assert_called_once()
         # _setup_pr_branch should NOT be called
         mock_setup.assert_not_called()

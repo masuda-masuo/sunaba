@@ -1542,7 +1542,7 @@ def clone_repo(
 
        To avoid the two-step "init → clone" workflow, use
        :func:`sandbox_initialize` with ``clone_repo`` — it starts
-       the container and copies a pre-cloned Shiori repo in one call.
+       the container and clones the repo in one call.
 
     .. rubric:: Use when
 

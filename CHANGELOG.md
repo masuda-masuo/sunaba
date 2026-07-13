@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 The compatibility policy (what counts as a breaking change) is described in
 [README.md#compatibility-policy](README.md#compatibility-policy).
 
+## [0.10.0] - 2026-07-13
+
+### Removed
+
+- **Shiori pre-clone copy path**: `clone_repo` now always clones via the network
+  (`gh repo clone` / `git clone`), eliminating the shiori pre-clone copy route
+  that was faster in theory but slower in practice and had freshness bugs.
+  Removed `_clone_shiori_repo_to_container`, `_shiori_preclone_root`,
+  `_shiori_preclone_exists`, `warn_if_shiori_root_unusable` functions.
+  Removed `--shiori-repos-path` / `SUNABA_SHIORI_REPOS_PATH` CLI argument.
+  Removed `preclone_root` parameter from `resolve_initial_image`.
+  `clone_repo` now always auto-enables `allow_network`. (#575)
+
+### Changed
+
+- Language detection for image selection now always uses the GitHub API
+  instead of probing a Shiori pre-clone directory first. (#575)
+
 ## [0.9.0] - 2026-07-12
 
 ### Added

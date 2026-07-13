@@ -955,6 +955,51 @@ def _github_api_request(
         raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}") from e
 
 
+def _github_api_request_list(
+    path: str,
+    token: str,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Call the GitHub REST API returning a JSON list instead of a dict."""
+    import urllib.error
+    import urllib.request
+
+    url = f"https://api.github.com{path}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(url, data=data, method=method)
+    request.add_header("Accept", "application/vnd.github+json")
+    request.add_header("User-Agent", "sunaba")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        parts: list[str] = []
+        raw_body = ""
+        try:
+            raw_body = e.read().decode("utf-8", errors="replace")
+            body = json.loads(raw_body)
+            if isinstance(body, dict):
+                if body.get("message"):
+                    parts.append(str(body["message"]))
+                parts.extend(str(err.get("message", err)) for err in body.get("errors") or [])
+            else:
+                parts.append(f"raw body: {raw_body[:500]}")
+        except Exception:
+            if raw_body:
+                parts.append(f"raw body: {raw_body[:500]}")
+        detail = f": {'; '.join(parts)}" if parts else ""
+        raise RuntimeError(
+            f"GitHub API {method} {path} returned HTTP {e.code}{detail}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}") from e
+
+
 def _create_pr_via_api(
     repo: str,
     branch: str,
@@ -986,13 +1031,29 @@ def _create_pr_via_api(
     payload: dict[str, Any] = {"title": pr_title, "head": branch, "base": base}
     if pr_body:
         payload["body"] = pr_body
-    created = _github_api_request(
-        f"/repos/{repo}/pulls", token, method="POST", payload=payload
-    )
-    url = str(created.get("html_url") or "")
-    if not url:
-        raise RuntimeError("GitHub API created the PR but returned no html_url")
-    return url
+    try:
+        created = _github_api_request(
+            f"/repos/{repo}/pulls", token, method="POST", payload=payload
+        )
+        url = str(created.get("html_url") or "")
+        if not url:
+            raise RuntimeError("GitHub API created the PR but returned no html_url")
+        return url
+    except RuntimeError as exc:
+        err_msg = str(exc)
+        if "HTTP 422" in err_msg and "already exists" in err_msg.lower():
+            try:
+                owner = repo.split("/")[0]
+                pulls = _github_api_request_list(
+                    f"/repos/{repo}/pulls?head={owner}:{branch}&state=open", token
+                )
+                if pulls and isinstance(pulls, list):
+                    url = str(pulls[0].get("html_url") or "")
+                    if url:
+                        return url
+            except Exception:
+                pass
+        raise exc
 
 
 def _ensure_proxy_ready(client: Any) -> str | None:

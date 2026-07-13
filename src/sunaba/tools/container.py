@@ -398,6 +398,21 @@ def _editable_install_cmd(target: str, pip_args: str = "") -> str:
     )
 
 
+def _normalize_pip_extras(pip_extras: str | None) -> str | None:
+    """Normalize pip_extras format: bare ``"dev"`` → ``"[dev]"``.
+
+    Returns the normalized value (or ``None`` unchanged).
+    """
+    if pip_extras is not None and pip_extras != "" and not pip_extras.startswith("["):
+        logger.warning(
+            "pip_extras=%r does not start with '['; auto-normalizing to [%s]",
+            pip_extras,
+            pip_extras,
+        )
+        return f"[{pip_extras}]"
+    return pip_extras
+
+
 def _run_pip_install(
     container: Any,
     clone_repo: str,
@@ -405,7 +420,7 @@ def _run_pip_install(
     pip_extras: str,
     allow_network: bool = True,
     pip_args: str | None = None,
-) -> None:
+) -> str | None:
     """Run pip install inside the container after a successful clone.
 
     Args:
@@ -418,13 +433,16 @@ def _run_pip_install(
             own connect timeout fires; skip it instead.
         pip_args: Additional pip arguments (e.g. ``"--index-url https://..."``).
             Ignored when the caller passes ``pip_extras=None`` (pip install skipped).
+
+    Returns:
+        Error message string on failure, ``None`` on success.
     """
     if not allow_network:
         logger.info(
             "Skipping pip install for %s: container has no network access",
             clone_repo,
         )
-        return
+        return None
     repo_name = clone_repo.split("/")[-1]
     safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
     local_pip_args = pip_args or ""
@@ -439,12 +457,15 @@ def _run_pip_install(
     install_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
     if exit_code != 0:
+        detail = (stderr_text or install_output).strip()
         logger.warning(
             "pip install deps failed (extras=%s, exit=%d): %s",
             pip_extras,
             exit_code,
-            (stderr_text or install_output).strip(),
+            detail,
         )
+        return f"pip install -e .{pip_extras} failed (exit {exit_code}): {detail}"
+    return None
 
 
 def _try_clone_into_container(
@@ -729,10 +750,8 @@ def _setup_pr_branch(
         cid,
     )
 
-    # Step 4: Install dev dependencies (non-fatal); the installer is
-    # chosen at runtime by _editable_install_cmd (#390); network is always
-    # available here since sandbox_initialize forces allow_network=True
-    # whenever pr is set.
+    # Step 4: Install dev dependencies (non-fatal)
+    pip_msg = ""
     local_pip_args = pip_args or ""
     if pip_extras is not None:
         install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
@@ -747,12 +766,14 @@ def _setup_pr_branch(
         stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
         if exit_code != 0:
+            detail = (stderr_text or install_output).strip()
             logger.warning(
                 "pip install deps failed (extras=%s, exit=%d): %s",
                 pip_extras,
                 exit_code,
-                (stderr_text or install_output).strip(),
+                detail,
             )
+            pip_msg = f" (pip install -e .{pip_extras} failed (exit {exit_code}): {detail})"
 
     _write_clone_meta(container, safe_dest, base_branch=base_ref)
 
@@ -763,7 +784,7 @@ def _setup_pr_branch(
         safe_dest,
     )
 
-    return f"PR #{pr_number} ({head_ref}) → {clone_dest}/{repo_name} in container {cid}"
+    return f"PR #{pr_number} ({head_ref}) → {clone_dest}/{repo_name} in container {cid}{pip_msg}"
 
 
 def _age_seconds(iso_ts: str | None, now: datetime) -> float | None:
@@ -1390,6 +1411,8 @@ def sandbox_initialize(
             clone_repo,
         )
 
+    pip_extras = _normalize_pip_extras(pip_extras)
+
     client = _docker()
     # Name collision check (Issue #478): reject if a container with the
     # same user-assigned name is already running.
@@ -1527,9 +1550,11 @@ def sandbox_initialize(
         else:
             clone_msg = " " + (msg or "")
         if pip_extras is not None and err is None:
-            _run_pip_install(
+            pip_err = _run_pip_install(
                 container, clone_repo, clone_dest, pip_extras, allow_network, pip_args
             )
+            if pip_err is not None:
+                clone_msg += f" (pip install failed: {pip_err})"
     elif clone_repo and pr is not None:
         logger.info(
             "Skipping clone_repo=%s (pr=%s handles its own clone)",
@@ -1809,6 +1834,8 @@ def run_container_and_exec(
             clone_repo,
         )
 
+    pip_extras = _normalize_pip_extras(pip_extras)
+
     # No image given -> the all-in-one default (#584), same as sandbox_initialize.
     resolved = _select_initial_image(image)
     client = _docker()
@@ -1893,9 +1920,11 @@ def run_container_and_exec(
             container_has_token,
         )
         if pip_extras is not None and clone_error is None:
-            _run_pip_install(
+            pip_error = _run_pip_install(
                 container, clone_repo, clone_dest, pip_extras, allow_network, pip_args
             )
+            if pip_error is not None:
+                clone_error = pip_error
     elif clone_repo and pr is not None:
         logger.info(
             "Skipping clone_repo=%s (pr=%s handles its own clone)",

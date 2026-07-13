@@ -187,7 +187,7 @@ def detect_languages(
         for p in search_paths
     )
 
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         ["/bin/sh", "-c", find_cmd],
         stdout=True,
         stderr=True,
@@ -228,7 +228,7 @@ def _find_tsconfig_upward(container: Any, file_path: str, working_dir: str | Non
     """
     current = posixpath.dirname(posixpath.abspath(file_path))
     while True:
-        ec, output = container.exec_run(
+        ec, output = _exec_container(container,
             ["/bin/sh", "-c", f'test -f {shlex.quote(posixpath.join(current, "tsconfig.json"))} && echo found || echo notfound'],
             stdout=True,
             stderr=True,
@@ -258,7 +258,7 @@ def read_file(container: Any, file_path: str) -> str:
     Raises:
         ValueError: Container not found or file read error.
     """
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_container(container,
         ["/bin/sh", "-c", f"cat {_quote_path(file_path)}"],
         stdout=True,
         stderr=True,
@@ -343,7 +343,7 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
     parent_dir = posixpath.dirname(file_path) or "/"
 
     # Ensure the parent directory exists (no file content in argv here).
-    mk_code, mk_out = container.exec_run(
+    mk_code, mk_out = _exec_container(container,
         ["/bin/sh", "-c", f"mkdir -p {_quote_path(parent_dir)}"],
         stdout=True,
         stderr=True,
@@ -411,7 +411,7 @@ def _owner_for_write(
     ``999, 999, 0o644`` when ``stat`` is unavailable.
     """
     def _stat(path: str, fmt: str) -> list[str] | None:
-        code, out = container.exec_run(
+        code, out = _exec_container(container,
             ["/bin/sh", "-c", f"stat -c {shlex.quote(fmt)} {_quote_path(path)}"],
             stdout=True,
             stderr=True,
@@ -598,7 +598,7 @@ def _search_lexical(
         glob=glob, ignore_case=ignore_case,
         context=context, output_mode=output_mode, offset=offset,
     )
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_container(container,
         args,
         stdout=True,
         stderr=True,
@@ -641,7 +641,7 @@ def _grep_fallback(
         pattern, path, max_results,
         ignore_case=ignore_case, context=context, output_mode=output_mode,
     )
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_container(container,
         args,
         stdout=True,
         stderr=True,
@@ -674,7 +674,7 @@ def _search_structural(
 ) -> dict[str, Any]:
     """Structural search using ast-grep."""
     args = ["sg", "run", "-p", pattern, path, "--json=stream"]
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_container(container,
         args,
         stdout=True,
         stderr=True,
@@ -1169,7 +1169,7 @@ def transform_file_in_container(
         f"; exit $rc"
     )
 
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_container(container,
         ["/bin/sh", "-c", cmd],
         stdout=True,
         stderr=True,
@@ -1491,7 +1491,7 @@ def edit_symbol_in_container(
         f"; exit $rc"
     )
 
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_container(container,
         ["/bin/sh", "-c", cmd],
         stdout=True,
         stderr=True,
@@ -1685,6 +1685,29 @@ def _determine_scope(file_path: str) -> ScopeWorkdir:
     return ScopeWorkdir(scope, scope)
 
 
+def _exec_container(
+    container: Any,
+    cmd: list[str],
+    *,
+    workdir: str | None = None,
+    stdout: bool = True,
+    stderr: bool = True,
+    **kwargs: Any,
+) -> tuple[int, tuple[bytes, bytes] | bytes]:
+    """Wrapper around ``container.exec_run``.
+
+    Unlike the raw Docker SDK call, *workdir* is automatically resolved
+    via :func:`resolve_git_root` when ``None`` -- callers never need to
+    know the physical repo location.  This prevents the class of bugs
+    where a new dispatch runner forgets to pass ``workdir`` and silently
+    runs in the default CWD (``/home/sandbox``) instead of the git root.
+    """
+    if workdir is None:
+        from sunaba.tools.vcs import resolve_git_root
+        workdir = resolve_git_root(container)
+    return container.exec_run(cmd, stdout=stdout, stderr=stderr, workdir=workdir, **kwargs)
+
+
 def _run_ruff_verify(
     container: Any,
     path: str | Sequence[str],
@@ -1716,7 +1739,7 @@ def _run_ruff_verify(
         else ""
     )
     fix_arg = "--fix " if fix else ""
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         [
             "/bin/sh",
             "-c",
@@ -1754,7 +1777,7 @@ def _run_eslint_verify(
     that remain *after* fixing (Issue #284).
     """
     fix_arg = "--fix " if fix else ""
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         [
             "/bin/sh",
             "-c",
@@ -1782,7 +1805,7 @@ def _run_eslint_verify(
 
 def _run_golangci_lint_verify(container: Any, path: str | Sequence[str], workdir: str | None = None) -> VerifyResult:
     """Run golangci-lint on *path*.  Falls back to go vet."""
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         [
             "/bin/sh",
             "-c",
@@ -1811,7 +1834,7 @@ def _run_golangci_lint_verify(container: Any, path: str | Sequence[str], workdir
 
 def _run_go_vet_verify(container: Any, path: str | Sequence[str], workdir: str | None = None) -> VerifyResult:
     """Run go vet on *path*."""
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         [
             "/bin/sh",
             "-c",
@@ -1878,7 +1901,7 @@ def _run_pyright_verify(
     container: Any, path: str, workdir: str | None = None
 ) -> VerifyResult:
     """Run pyright on *path*.  Returns VerifyResult envelope."""
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         [
             "/bin/sh",
             "-c",
@@ -1907,7 +1930,7 @@ def _run_pyright_verify(
 
 def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run tsc --noEmit on *path*.  Returns VerifyResult envelope."""
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         [
             "/bin/sh",
             "-c",
@@ -1947,7 +1970,7 @@ def _run_pytest_verify(container: Any, path: str, workdir: str | None = None) ->
     _json_file = "/tmp/_pytest_report.json"
     _raw_file = "/tmp/_pytest_raw.txt"
     cmd = build_pytest_cmd(_json_file, _raw_file, "", _quote_path(path), _SANDBOX_ENV)
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         ["/bin/sh", "-c", cmd],
         stdout=True,
         stderr=True,
@@ -2000,7 +2023,7 @@ def _run_pytest_verify(container: Any, path: str, workdir: str | None = None) ->
 
 def _run_jest_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run jest --json on *path*.  Returns VerifyResult envelope."""
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         [
             "/bin/sh",
             "-c",
@@ -2046,7 +2069,7 @@ def _run_jest_verify(container: Any, path: str, workdir: str | None = None) -> V
 
 def _run_go_test_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run go test -json on *path*.  Returns VerifyResult envelope."""
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         [
             "/bin/sh",
             "-c",
@@ -2366,7 +2389,7 @@ def _run_ts_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
 
 def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``pylint --output-format json``. Returns None if pylint is not installed."""
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_container(container,
         [
             "/bin/sh",
             "-c",
@@ -2670,7 +2693,7 @@ def _run_patch_targets_verify(
     without it are not blocked).  Findings mirror the script's stderr
     output format ``path:lineno: patch target ...``.
     """
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         ["/bin/sh", "-c",
          f"{_SANDBOX_ENV}test -f scripts/check_patch_targets.py && echo EXISTS || echo NOT_FOUND"],
         stdout=True, stderr=True, workdir=working_dir,
@@ -2680,7 +2703,7 @@ def _run_patch_targets_verify(
     if stdout_text.strip() != "EXISTS":
         return _envelope_skipped("check-patch-targets", "scripts/check_patch_targets.py not found")
 
-    ec, output = container.exec_run(
+    ec, output = _exec_container(container,
         ["/bin/sh", "-c",
          f"{_SANDBOX_ENV}python scripts/check_patch_targets.py 2>&1"],
         stdout=True, stderr=True, workdir=working_dir,

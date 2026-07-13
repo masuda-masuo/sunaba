@@ -27,13 +27,21 @@ Sunaba divides state and execution into three isolated filesystem zones:
 +-----------------------------------------------------------------+
 | DISPOSABLE DOCKER CONTAINER                                     |
 |                                                                 |
-|  [Isolated Work Space]                                          |
-|   └── /workspace/        <-- Cloned git repo under test         |
+|  [Git Repository Root]                                          |
+|   └── /tmp/repo/{name}/  <-- Cloned git repo under test         |
+|                              (default clone_dest)               |
 |                                                                 |
 |  [Ephemeral Scratch Space]                                      |
 |   └── /tmp/              <-- Patches, transforms, AST runs      |
+|                                                                 |
+|  [User Home]                                                    |
+|   └── /home/sandbox/     <-- Default CWD, sandbox-meta.json     |
 +-----------------------------------------------------------------+
 ```
+
+The container runs as a non-root user ``sandbox`` (home ``/home/sandbox/``).
+``/tmp/`` is world-writable and is used as both the scratch space and the
+default ``clone_dest`` parent directory.
 
 ---
 
@@ -48,21 +56,55 @@ The AI can run `git add .` or `git commit` inside the workspace without any risk
 
 ---
 
-## 3. Container-Side Isolation (`/workspace` vs `/tmp`)
+## 3. Container-Side Isolation
 
-Inside the disposable sandbox container, the filesystem is divided into distinct zones to prevent code compilation, testing, and modification from polluting the Git staging area.
+Inside the disposable sandbox container, the filesystem is divided into distinct zones:
 
-### `/workspace` (Git Repository Root)
-This is the workspace containing the cloned target repository. Only changes intended for Git commits reside here.
+### ``/tmp/repo/{name}/`` (Git Repository Root)
 
-### `/tmp` (Scratch Space)
-Temporary operations performed by tools are directed to the container's ephemeral `/tmp` directory instead of the `/workspace` folder. Examples include:
+The default clone destination (``clone_dest``) is ``/tmp/repo/``; the actual
+repository lands at ``/tmp/repo/{owner-repo}/``.  ``/tmp/`` was chosen over a
+dedicated ``/workspace/`` directory because:
+
+1. **Non-root constraint**: The container runs as ``sandbox`` (UID 1000), not
+   root. ``/tmp/`` is world-writable in the image, so no special ``chown`` or
+   directory creation is needed at container start (Issue #91).
+2. **Simplicity**: The default Docker image (``sandbox:full``) has no pre-created
+   ``/workspace/`` directory. Using ``/tmp/repo/`` avoids an extra image layer
+   or startup init step.
+
+### ``/tmp/`` (Scratch Space)
+
+Temporary operations performed by tools are directed to the container's
+ephemeral ``/tmp/`` directory. Examples include:
+
 *   Decoded patch blocks before they are applied.
-*   Intermediate files generated during Python or Node AST code transforms (`transform_file`).
+*   Intermediate files generated during Python or Node AST code transforms
+    (``transform_file``).
 *   Linting and type check output reports.
 
 #### Accidental Commit Prevention
-By confining all intermediate compilation files and diagnostic scratchpads to `/tmp` (which resides outside the git workspace root), the Git index remains pristine. Running `git status` inside `/workspace` only reports actual code modifications, completely eliminating the risk of staging temporary patch files or tool-generated logs.
+
+By confining all intermediate compilation files and diagnostic scratchpads to
+``/tmp/`` (which resides outside the git workspace root), the Git index
+remains pristine.  Running ``git status`` inside ``/tmp/repo/{name}/`` only
+reports actual code modifications.
+
+### ``/home/sandbox/`` (Default CWD)
+
+When a tool calls ``container.exec_run`` without an explicit ``workdir``, the
+Docker SDK defaults to the container's working directory
+(``/home/sandbox/``).  This directory is the `sandbox` user's home and is the
+fallback when the git root cannot be auto-detected.
+
+### workdir auto-detection
+
+All dispatch runners use ``_exec_container()`` (defined in
+``edit_verify.py``), which calls ``resolve_git_root()`` when ``workdir`` is
+not provided.  This means new runners never need to know the physical repo
+location; the auto-detection chain (``.sandbox-meta.json`` → ``/home/sandbox``
+git test → ``/tmp/repo/*/`` scan → ``/home/sandbox`` fallback) finds it
+transparently.
 
 ---
 

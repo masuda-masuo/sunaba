@@ -7,6 +7,25 @@ import os
 import shlex
 from typing import Any, Sequence
 
+#: The container's workspace: the git repository root.
+#:
+#: Containers are created with this as their working directory, so an
+#: ``exec_run`` that names no ``workdir`` still runs inside the repo.  That is
+#: what makes the repo root unambiguous -- see
+#: ``docs/design_filesystem_layout.md`` and Issue #600, where runners that
+#: forgot to pass ``workdir`` silently ran in the home directory instead.
+WORKSPACE = "/workspace"
+
+#: Working directory of containers created before the workspace became the
+#: repo root.  Their repo lives elsewhere (``/tmp/repo/*``, ``/home/sandbox``),
+#: so :func:`sunaba.tools.vcs.resolve_git_root` still has to probe for it.
+LEGACY_WORKDIR = "/home/sandbox"
+
+#: Container metadata written by ``sandbox_initialize`` after a clone.  It
+#: stays in the home directory on purpose: inside the workspace it would show
+#: up in ``git status``.
+META_PATH = f"{LEGACY_WORKDIR}/.sandbox-meta.json"
+
 
 def _parse_numstat(lines: Sequence[str]) -> list[dict]:
     """Parse ``git diff --numstat`` output into structured records.

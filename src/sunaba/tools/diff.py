@@ -10,13 +10,18 @@ from collections.abc import Sequence
 from docker.errors import NotFound
 
 from sunaba.journal import record_tool_use
-from sunaba.tools.common import _docker, _parse_numstat, container_not_found_error
+from sunaba.tools.common import (
+    META_PATH,
+    _docker,
+    _parse_numstat,
+    container_not_found_error,
+)
 from sunaba.tools.vcs import resolve_git_root
 
 #: Path inside the container for clone/PR metadata (also referenced by
 #: ``resolve_git_root`` in ``vcs.py`` and ``_write_clone_meta`` in
 #: ``container.py``).
-_META_PATH = "/home/sandbox/.sandbox-meta.json"
+_META_PATH = META_PATH
 
 
 def _read_container_meta(container) -> dict:

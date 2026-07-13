@@ -143,7 +143,7 @@ class TestSetupPrBranch:
                 "/tmp/repo",
             )
         assert "PR #42" in result
-        assert "/tmp/repo/myrepo" in result
+        assert "/tmp/repo" in result
 
 
 class TestResolvePrHeadRef:
@@ -353,7 +353,7 @@ class TestSetupPrBranchReadGrant:
         mock_record.assert_called_once_with(
             "abc123def456",
             "setup_pr_branch",
-            "repo=owner/repo pr=#136 dest=/tmp/repo/repo proxy_read_grant=True",
+            "repo=owner/repo pr=#136 dest=/tmp/repo proxy_read_grant=True",
             approved=True,
         )
 
@@ -378,7 +378,7 @@ class TestSetupPrBranchReadGrant:
         mock_record.assert_called_once_with(
             "abc123def456",
             "setup_pr_branch",
-            "repo=owner/repo pr=#136 dest=/tmp/repo/repo proxy_read_grant=True",
+            "repo=owner/repo pr=#136 dest=/tmp/repo proxy_read_grant=True",
             approved=False,
         )
 
@@ -607,7 +607,7 @@ class TestRunContainerAndExecPrParam:
         # pr=N no longer injects a token; the container is token-free, so the
         # PR checkout takes the anonymous (authenticated=False) path (#439).
         mock_setup.assert_called_once_with(
-            mock_container, "abc123def456", "owner/repo", 136, "/tmp/repo", "[dev]",
+            mock_container, "abc123def456", "owner/repo", 136, "/workspace", "[dev]",
             authenticated=False, pip_args=None,
         )
 

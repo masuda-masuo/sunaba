@@ -99,8 +99,13 @@ RUN groupadd -r sandbox && useradd -r -g sandbox -m -d /home/sandbox sandbox
 # ユーザーが明示的に指定した場合はそちらが優先される（server.py submit 参照）
 RUN git config --system user.name "sunaba[bot]" \
  && git config --system user.email "sunaba[bot]@users.noreply.github.com"
+# ── Workspace (docs/design_filesystem_layout.md) ────────────────────────────
+# git repo の root であり、コンテナの作業ディレクトリ。workdir を指定し忘れた
+# exec もここに着地するので、repo の外で黙って走る事故が起きない (#600)
+RUN mkdir -p /workspace && chown sandbox:sandbox /workspace
+
 USER sandbox
-WORKDIR /home/sandbox
+WORKDIR /workspace
 ENV PATH="/home/sandbox/.local/bin:${PATH}"
 
 # ── 永続 venv (#380 恒久対応) ─────────────────────────────────────

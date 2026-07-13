@@ -1,21 +1,59 @@
-"""Tests for resolve_git_root auto-detection."""
+"""Tests for resolve_git_root.
+
+Current containers answer from their own ``WorkingDir``; the probing below is
+the fallback for containers created before the workspace was the repo root.
+"""
 
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock
 
+from sunaba.tools.common import LEGACY_WORKDIR, WORKSPACE
 from sunaba.tools.vcs import resolve_git_root
 
 
-def _make_container(exec_run_returns: list) -> MagicMock:
-    """Build a mock container with a side-effect sequence for exec_run."""
+def _make_container(exec_run_returns: list, working_dir: str = LEGACY_WORKDIR) -> MagicMock:
+    """Build a mock container with a side-effect sequence for exec_run.
+
+    Defaults to a pre-workspace container, since that is what the probing
+    tests below are about.
+    """
     container = MagicMock()
+    container.attrs = {"Config": {"WorkingDir": working_dir}}
     container.exec_run.side_effect = exec_run_returns
     return container
 
 # Convenience: metadata file not present (most common in tests)
 _NO_META = (1, (b"cat: .sandbox-meta.json: No such file or directory\n", b""))
+
+
+class TestResolveGitRootWorkingDir:
+    """The repo root is the container's working directory -- no exec needed."""
+
+    def test_workspace_returned_without_exec(self) -> None:
+        container = _make_container([], working_dir=WORKSPACE)
+        assert resolve_git_root(container) == WORKSPACE
+        container.exec_run.assert_not_called()
+
+    def test_custom_clone_dest_returned_without_exec(self) -> None:
+        container = _make_container([], working_dir="/srv/checkout")
+        assert resolve_git_root(container) == "/srv/checkout"
+        container.exec_run.assert_not_called()
+
+    def test_legacy_working_dir_falls_back_to_probe(self) -> None:
+        """A pre-workspace container still gets probed."""
+        container = _make_container([
+            (0, (b'{"clone_path": "/tmp/repo/thing"}\n', b"")),
+            (0, (b"/tmp/repo/thing\n", b"")),
+        ])
+        assert resolve_git_root(container) == "/tmp/repo/thing"
+        assert container.exec_run.call_count == 2
+
+    def test_missing_config_falls_back_to_probe(self) -> None:
+        container = _make_container([_NO_META, (0, (b"/home/sandbox\n", b""))])
+        container.attrs = {}
+        assert resolve_git_root(container) == "/home/sandbox"
 
 
 class TestResolveGitRootExplicit:

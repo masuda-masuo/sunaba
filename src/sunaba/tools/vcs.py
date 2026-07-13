@@ -24,6 +24,8 @@ from sunaba.proxy_client import (
 from sunaba.security import NETWORK_LABEL
 from sunaba.tools.common import (
     CLONE_NO_TOKEN_WARNING,
+    LEGACY_WORKDIR,
+    WORKSPACE,
     _build_clone_command,
     _docker,
     container_not_found_error,
@@ -47,33 +49,45 @@ _BRANCH_RE = re.compile(
 # Git root auto-detection
 # ---------------------------------------------------------------------------
 
-_DEFAULT_WD = "/home/sandbox"
+_DEFAULT_WD = LEGACY_WORKDIR
 
 
 def resolve_git_root(
     container: Any,
     working_dir: str | None = None,
 ) -> str:
-    """Auto-detect git repository root when *working_dir* is not given.
+    """Return the container's git repository root.
 
     When *working_dir* is explicitly provided, return it unchanged.
-    When *working_dir* is ``None`` (default), try to locate the
-    actual git repository root by:
 
-    0. Reading ``~/.sandbox-meta.json`` (written by
-       :func:`sandbox_initialize` after a successful clone)
-    1. Testing ``/home/sandbox`` with ``git rev-parse --show-toplevel``
-    2. Scanning ``/tmp/repo/*/`` for a git repository
+    Otherwise the answer is simply the container's own working directory:
+    :func:`sandbox_initialize` creates the container with the repo root as
+    its ``WorkingDir``, so the path is already recorded in the container's
+    config and no command has to run inside the container to find it.
 
-    Step 0 handles any ``clone_dest`` value and is the primary path.
-    Steps 1-2 are fallbacks for containers that were cloned before the
-    metadata mechanism was introduced.
-
-    Returns the resolved path, or ``/home/sandbox`` as fallback.
+    Containers created before that (``WorkingDir`` still the home directory)
+    keep the old probe: metadata file, then home, then ``/tmp/repo/*``.
     """
     if working_dir is not None:
         return working_dir
 
+    # The repo root as decided by the host at creation time.  Reading it back
+    # from the container config costs no exec -- and, unlike the probe below,
+    # cannot disagree with where the exec tools actually run, because it *is*
+    # the directory they run in.
+    config_wd = (container.attrs.get("Config") or {}).get("WorkingDir") or ""
+    if config_wd and config_wd != LEGACY_WORKDIR:
+        return str(config_wd)
+
+    return _resolve_git_root_legacy(container)
+
+
+def _resolve_git_root_legacy(container: Any) -> str:
+    """Probe a pre-workspace container for its git root.
+
+    Only reached for containers whose ``WorkingDir`` is still the home
+    directory, i.e. ones created before the workspace became the repo root.
+    """
     # Step 0: container metadata — written by sandbox_initialize after clone
     ec0, out0 = container.exec_run(
         ["/bin/sh", "-c",
@@ -1479,7 +1493,7 @@ def _try_api_push(
 def clone_repo(
     container_id: str,
     repo: str,
-    dest_dir: str = "/home/sandbox",
+    dest_dir: str = WORKSPACE,
     branch: str = "",
 ) -> str:
     """Clone a Git repository inside the container.
@@ -1492,8 +1506,10 @@ def clone_repo(
     Args:
         container_id: Container ID prefix.
         repo: 'owner/repo'.
-        dest_dir: Parent directory; the repo lands in
-            {dest_dir}/{repo_name}.
+        dest_dir: Directory the repo is cloned into; it becomes the git
+            root.  Defaults to the workspace, which is also the
+            container's working directory.  Pass another path to clone a
+            second repo alongside the first.
         branch: Branch to clone; omit for the default branch.
 
     Returns:
@@ -1515,12 +1531,11 @@ def clone_repo(
         )
 
     # ``gh repo clone`` treats its second argument as the clone target
-    # directory itself, not a parent.  Clone into ``{dest_dir}/{repo_name}``
-    # so the default ``dest_dir`` (``/home/sandbox``, an existing non-empty
-    # home directory) works and the target matches the reported
-    # ``clone_path``.
-    repo_name = repo.split("/")[-1]
-    clone_path = f"{dest_dir.rstrip('/')}/{repo_name}"
+    # directory itself, and so does *dest_dir*: the repo becomes the
+    # directory, rather than a subdirectory named after it.  That is what
+    # lets the default (the workspace) be the git root the container already
+    # works in.
+    clone_path = dest_dir.rstrip("/") or dest_dir
 
     # Recover the proxy control env vars before anything else touches the
     # container, so a lost-env failure (#428) is reported without a wasted

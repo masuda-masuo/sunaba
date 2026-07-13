@@ -91,7 +91,7 @@ class TestCloneRepo:
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
         assert result["repo"] == "owner/mytool"
-        assert result["clone_path"] == "/home/sandbox/mytool"
+        assert result["clone_path"] == "/workspace"
         assert result["branch"] == "default"
         mock_record.assert_called_once()
 
@@ -140,11 +140,11 @@ class TestCloneRepo:
         result = json.loads(
             clone_repo("abc123def456", "owner/mytool", dest_dir="/tmp/work")
         )
-        assert result["clone_path"] == "/tmp/work/mytool"
+        assert result["clone_path"] == "/tmp/work"
 
     @patch("sunaba.tools.vcs._docker")
-    def test_clone_targets_repo_subdir(self, mock_docker):
-        """Issue #131: gh clones into {dest_dir}/{repo_name}, not dest_dir."""
+    def test_clone_targets_dest_dir_itself(self, mock_docker):
+        """dest_dir *is* the git root, not a parent to nest the repo under."""
         container = _make_container([
             (0, b"", b""),
             (0, b"Cloning into 'mytool'...\n", b""),
@@ -155,8 +155,8 @@ class TestCloneRepo:
         clone_repo("abc123def456", "owner/mytool")
 
         cmd = container.exec_run.call_args[0][0][-1]
-        assert "/home/sandbox/mytool" in cmd
-        assert "gh repo clone 'owner/mytool' '/home/sandbox'" not in cmd
+        assert "/workspace" in cmd
+        assert "/workspace/mytool" not in cmd
 
     @patch("sunaba.tools.vcs._docker")
     def test_clone_existing_dir_adds_hint(self, mock_docker):
@@ -191,7 +191,7 @@ class TestCloneRepo:
         from sunaba.server import clone_repo
         result = json.loads(clone_repo("abc123def456", "owner/mytool"))
         assert result["status"] == "ok"
-        assert result["clone_path"] == "/home/sandbox/mytool"
+        assert result["clone_path"] == "/workspace"
 
 
 class TestCloneRepoViaNetwork:
@@ -205,9 +205,9 @@ class TestCloneRepoViaNetwork:
 
     def test_success_returns_message(self) -> None:
         c = self._container(0, b"")
-        msg = _clone_repo_via_network(c, "abc123def456", "owner/repo", "/tmp/repo")
+        msg = _clone_repo_via_network(c, "abc123def456", "owner/repo", "/workspace")
         assert "owner/repo" in msg
-        assert "/tmp/repo/repo" in msg
+        assert "/workspace" in msg
 
     def test_failure_without_token_hints_read_grant(self) -> None:
         c = self._container(1, b"gh: Could not resolve to a Repository")
@@ -254,7 +254,7 @@ class TestCloneRepoViaNetwork:
         mock_record.assert_called_once_with(
             "abc123def456",
             "clone_repo",
-            "repo=owner/repo dest=/tmp/repo/repo proxy_read_grant=True",
+            "repo=owner/repo dest=/tmp/repo proxy_read_grant=True",
             approved=True,
         )
 
@@ -270,7 +270,7 @@ class TestCloneRepoViaNetwork:
         mock_record.assert_called_once_with(
             "abc123def456",
             "clone_repo",
-            "repo=owner/repo dest=/tmp/repo/repo proxy_read_grant=True",
+            "repo=owner/repo dest=/tmp/repo proxy_read_grant=True",
             approved=False,
         )
 
@@ -352,7 +352,7 @@ class TestCloneRepoToolReadGrantJournal:
         mock_record.assert_called_once_with(
             "abc123def456",
             "clone_repo",
-            "repo=owner/mytool branch=default dest=/home/sandbox/mytool proxy_read_grant=True",
+            "repo=owner/mytool branch=default dest=/workspace proxy_read_grant=True",
             approved=True,
         )
 

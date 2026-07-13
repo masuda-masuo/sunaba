@@ -25,7 +25,7 @@ from sunaba.edit_verify import (
 )
 from sunaba.journal import record_copy, record_tool_use
 from sunaba.output_control import paginate_output, truncate_output
-from sunaba.tools.common import _docker, container_not_found_error
+from sunaba.tools.common import WORKSPACE, _docker, container_not_found_error
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -337,7 +337,7 @@ def write_file_sandbox(
     container_id: str,
     file_name: str,
     file_contents: str,
-    dest_dir: str = "/home/sandbox",
+    dest_dir: str = WORKSPACE,
     start_line: int | None = None,
     end_line: int | None = None,
     append: bool = False,
@@ -490,15 +490,13 @@ def write_file_sandbox(
 def copy_project(
     container_id: str,
     local_src_dir: str,
-    dest_dir: str = "/home/sandbox",
+    dest_dir: str = WORKSPACE,
 ) -> str:
-    """Copy a local directory (or file) into the container as a tar archive.
+    """Copy a local directory into the container as a tar archive.
 
-    Creates a tar archive of the local path in a temp directory and
-    streams it into the container with ``put_archive``.
-
-    The target directory inside the tar archive is named after the
-    source directory itself (i.e. ``/home/sandbox/source_dir_name/...``).
+    The directory's *contents* land in *dest_dir*, so the copied project
+    becomes the git root the container already works in -- verify and publish
+    find it without being told where it is.
 
     .. note::
 
@@ -508,8 +506,8 @@ def copy_project(
     Args:
         container_id: 12-character container ID prefix.
         local_src_dir: Path to the local directory to copy.
-        dest_dir: Destination directory in the container (default:
-            ``/home/sandbox``).
+        dest_dir: Destination directory in the container (default: the
+            workspace, ``/workspace``).
 
     Returns:
         Success or error message.
@@ -529,11 +527,10 @@ def copy_project(
     if not src_path.is_dir():
         return f"Error: {local_src_dir} is not a directory"
 
-    arcname = src_path.name or "project"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar")
     try:
         with tarfile.open(fileobj=tmp.file, mode="w") as tar:
-            tar.add(src_path, arcname=arcname)
+            tar.add(src_path, arcname=".")
         tmp.file.close()
         with open(tmp.name, "rb") as f:
             data = f.read()
@@ -542,7 +539,7 @@ def copy_project(
             container.put_archive(dest_dir, buf)
         except APIError as e:
             return f"Error: {e}"
-        dest_path = f"{dest_dir}/{arcname}"
+        dest_path = dest_dir
         try:
             container.exec_run(
                 ["sh", "-c", f"chown -R $(id -u):$(id -g) {shlex.quote(dest_path)}"]
@@ -568,7 +565,7 @@ def copy_project(
 def copy_file(
     container_id: str,
     local_src_file: str,
-    dest_path: str = "/home/sandbox",
+    dest_path: str = WORKSPACE,
 ) -> str:
     """Copy a single local file into the container.
 
@@ -576,7 +573,7 @@ def copy_file(
         container_id: 12-character container ID prefix.
         local_src_file: Path to the local file to copy.
         dest_path: Destination directory or path in the container
-            (default: ``/home/sandbox``).
+            (default: the workspace, ``/workspace``).
 
     Returns:
         Success or error message.
@@ -697,7 +694,7 @@ def read_file_range(
 
 def list_files(
     container_id: str,
-    path: str = "/home/sandbox",
+    path: str = WORKSPACE,
     max_depth: int = 3,
     pattern: str = "",
 ) -> str:
@@ -709,7 +706,8 @@ def list_files(
 
     Args:
         container_id: 12-character container ID prefix.
-        path: Directory path to list (default ``"/home/sandbox"``).
+        path: Directory path to list (default: the workspace,
+            ``"/workspace"``).
         max_depth: Maximum directory depth (default 3).
         pattern: Optional glob pattern to filter files
             (e.g. ``"*.py"``, ``"*.md"``).

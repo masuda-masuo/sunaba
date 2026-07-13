@@ -20,8 +20,13 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 
 # 非 root
 RUN groupadd -r sandbox && useradd -r -g sandbox -m -d /home/sandbox sandbox
+# ── Workspace (docs/design_filesystem_layout.md) ────────────────────────────
+# git repo の root であり、コンテナの作業ディレクトリ。workdir を指定し忘れた
+# exec もここに着地するので、repo の外で黙って走る事故が起きない (#600)
+RUN mkdir -p /workspace && chown sandbox:sandbox /workspace
+
 USER sandbox
-WORKDIR /home/sandbox
+WORKDIR /workspace
 
 # 永続 venv (#380 恒久対応): 非 root でも pip / uv がフラグなしで動く
 # （base イメージと同じ構成。--seed で venv 内に pip も入れる）

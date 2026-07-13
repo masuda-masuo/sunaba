@@ -62,7 +62,9 @@ from sunaba.security import (
 )
 from sunaba.tools.common import (
     CLONE_NO_TOKEN_WARNING,
+    META_PATH,
     RECOVERY_DOCKER_TIMEOUT,
+    WORKSPACE,
     _build_clone_command,
     _coerce_list_arg,
     _docker,
@@ -266,16 +268,38 @@ def _select_initial_image(image: str | None) -> str:
     return image or _DEFAULT_IMAGE
 
 
+def _ensure_workspace(container: Any, workspace: str) -> None:
+    """Make *workspace* exist and belong to the container's user.
+
+    Docker creates a container's working directory when the image does not
+    ship it -- but creates it owned by ``root``, which the non-root sandbox
+    user cannot write to.  Chowning it here means the workspace works on any
+    image, including the currently pinned ones whose ``WORKDIR`` is still the
+    home directory.
+
+    Runs as root because that is the only user who can hand the directory
+    over; every other exec keeps running as the sandbox user.
+    """
+    ec, out = container.exec_run(
+        ["/bin/sh", "-c",
+         f"mkdir -p {shlex.quote(workspace)} "
+         f"&& chown $(id -u sandbox):$(id -g sandbox) {shlex.quote(workspace)}"],
+        user="root",
+    )
+    if ec != 0:
+        detail = out.decode("utf-8", errors="replace").strip() if out else ""
+        raise RuntimeError(f"Failed to prepare workspace {workspace}: {detail}")
+
+
 def _write_clone_meta(container: Any, clone_path: str, base_branch: str | None = None) -> None:
     """Write clone destination path into container metadata.
 
-    The metadata file (``/home/sandbox/.sandbox-meta.json``) is read by
-    :func:`resolve_git_root` to auto-detect the git repository root
-    regardless of the ``clone_dest`` value.
-
-    When *base_branch* is given (e.g. from a PR checkout), it is stored
-    as ``base_branch`` so that :func:`diff_in_container` can resolve the
-    default diff base automatically.
+    The metadata file lives in the home directory, not the workspace, so it
+    never turns up in ``git status``.  :func:`resolve_git_root` no longer
+    needs it to find the repo -- the container's ``WorkingDir`` is the repo
+    root -- but ``diff_in_container`` still reads *base_branch* from it to
+    resolve the default diff base after a PR checkout, and containers created
+    before the workspace existed still fall back to ``clone_path``.
 
     Failures are logged but not propagated so that a metadata write
     failure never breaks an otherwise successful clone.
@@ -286,9 +310,11 @@ def _write_clone_meta(container: Any, clone_path: str, base_branch: str | None =
             meta["base_branch"] = base_branch
         meta_json = json.dumps(meta)
         safe_meta = shlex.quote(meta_json)
+        meta_dir = META_PATH.rsplit("/", 1)[0]
         container.exec_run(
             ["/bin/sh", "-c",
-             f"mkdir -p /home/sandbox && printf '%s' {safe_meta} > /home/sandbox/.sandbox-meta.json"],
+             f"mkdir -p {shlex.quote(meta_dir)} "
+             f"&& printf '%s' {safe_meta} > {shlex.quote(META_PATH)}"],
         )
     except Exception as e:
         logger.warning("Failed to write clone meta: %s", e)
@@ -326,8 +352,7 @@ def _clone_repo_via_network(
     """
     # Validate the repo spec before attempting clone.
     _validate_clone_repo(clone_repo)
-    repo_name = clone_repo.split("/")[-1]
-    clone_path = clone_dest.rstrip("/") + "/" + repo_name
+    clone_path = clone_dest.rstrip("/") or clone_dest
     cmd = _build_clone_command(clone_repo, clone_path, authenticated=authenticated)
     if open_read_grant:
         with authorized_read_grant(clone_repo, token=_resolve_vcs_token() or None):
@@ -443,8 +468,7 @@ def _run_pip_install(
             clone_repo,
         )
         return None
-    repo_name = clone_repo.split("/")[-1]
-    safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
+    safe_dest = shlex.quote(clone_dest)
     local_pip_args = pip_args or ""
     install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
     exit_code, output = container.exec_run(
@@ -622,8 +646,7 @@ def _setup_pr_branch(
         Success message string.
     """
     cid = container_id[:12]
-    repo_name = repo.split("/")[-1]
-    safe_dest = shlex.quote(f"{clone_dest}/{repo_name}")
+    safe_dest = shlex.quote(clone_dest)
     safe_repo = shlex.quote(repo)
 
     anon_token: str | None = None
@@ -672,7 +695,7 @@ def _setup_pr_branch(
         # for no benefit (#436 review).
         anon_token = _resolve_vcs_token()
         head_ref, base_ref = _resolve_pr_head_ref(repo, pr_number, token=anon_token or None)
-        clone_cmd = _build_clone_command(repo, f"{clone_dest}/{repo_name}")
+        clone_cmd = _build_clone_command(repo, clone_dest)
         checkout_cmd = (
             f"cd {safe_dest} && git fetch origin pull/{pr_number}/head"
             f" && git checkout -B {shlex.quote(head_ref)} FETCH_HEAD"
@@ -775,7 +798,7 @@ def _setup_pr_branch(
             )
             pip_msg = f" (pip install -e .{pip_extras} failed (exit {exit_code}): {detail})"
 
-    _write_clone_meta(container, safe_dest, base_branch=base_ref)
+    _write_clone_meta(container, clone_dest, base_branch=base_ref)
 
     record_copy(
         cid,
@@ -784,7 +807,7 @@ def _setup_pr_branch(
         safe_dest,
     )
 
-    return f"PR #{pr_number} ({head_ref}) → {clone_dest}/{repo_name} in container {cid}{pip_msg}"
+    return f"PR #{pr_number} ({head_ref}) → {clone_dest} in container {cid}{pip_msg}"
 
 
 def _age_seconds(iso_ts: str | None, now: datetime) -> float | None:
@@ -1285,7 +1308,7 @@ def sandbox_initialize(
     image: str | None = None,
     allow_network: bool = False,
     clone_repo: str | None = None,
-    clone_dest: str = "/tmp/repo",
+    clone_dest: str = WORKSPACE,
     repo: str | None = None,
     pr: int | None = None,
     pip_extras: str | None = "[dev]",
@@ -1325,9 +1348,10 @@ def sandbox_initialize(
                the egress proxy opens a read-authorization grant (#419)
                authenticated with a host-resolved token, so no credential
                enters the container.
-        clone_dest: Destination directory in the container for the
-               cloned repository (default: ``/tmp/repo``).
-               The actual path will be ``{clone_dest}/{repo_name}`` where *repo_name* is derived from *clone_repo* or *repo*.
+        clone_dest: Directory the repo is cloned into; it becomes the
+               git root *and* the container's working directory, so
+               every command runs inside the repo by default
+               (default: the workspace, ``/workspace``).
         repo: Repository in ``"owner/name"`` format.
                Required when *pr* is specified.
         pr: Pull request number to clone and check out.
@@ -1483,6 +1507,10 @@ def sandbox_initialize(
     labels: dict[str, str] = {CREATED_AT_LABEL: created_at}
     if name:
         labels[NAME_LABEL] = name
+    # The workspace is the container's working directory, so an exec that
+    # names no workdir still runs in the repo root (#600).  Docker records it
+    # in the container config, which is where resolve_git_root reads the repo
+    # root back from -- so the two cannot disagree.
     run_kwargs = build_secure_run_kwargs(
         profile,
         command="sleep infinity",
@@ -1490,6 +1518,7 @@ def sandbox_initialize(
         remove=False,
         environment=env,
         labels=labels,
+        working_dir=clone_dest,
         **resource_overrides,
     )
     if proxy_runtime is not None:
@@ -1498,6 +1527,7 @@ def sandbox_initialize(
     try:
         _ensure_image(resolved)
         container = client.containers.run(resolved, **run_kwargs)
+        _ensure_workspace(container, clone_dest)
     except Exception as e:
         return f"Error: {e}"
 
@@ -1614,7 +1644,7 @@ async def sandbox_initialize_tool(
     image: str | None = None,
     allow_network: bool = False,
     clone_repo: str | None = None,
-    clone_dest: str = "/tmp/repo",
+    clone_dest: str = WORKSPACE,
     repo: str | None = None,
     pr: int | None = None,
     pip_extras: str | None = "[dev]",
@@ -1640,7 +1670,8 @@ async def sandbox_initialize_tool(
         clone_repo: 'owner/name' cloned over the network (auto-enables
             allow_network; private repos authenticate host-side, no token
             in container).
-        clone_dest: Parent dir; the repo lands in {clone_dest}/{repo_name}.
+        clone_dest: Directory the repo is cloned into; it becomes the git
+            root and the container's working directory.
         repo: 'owner/name'; required with pr.
         pr: PR number to clone and check out (implies allow_network;
             anonymous checkout, no token enters the container).
@@ -1770,7 +1801,7 @@ def run_container_and_exec(
     limit: int = 50,
     allow_network: bool = False,
     clone_repo: str | None = None,
-    clone_dest: str = "/tmp/repo",
+    clone_dest: str = WORKSPACE,
     repo: str | None = None,
     pr: int | None = None,
     pip_extras: str | None = "[dev]",
@@ -1797,7 +1828,8 @@ def run_container_and_exec(
         clone_repo: 'owner/name' cloned over the network (auto-enables
             allow_network; private repos authenticate host-side, no token
             in container).
-        clone_dest: Parent dir; the repo lands in {clone_dest}/{repo_name}.
+        clone_dest: Directory the repo is cloned into; it becomes the git
+            root and the container's working directory.
         repo: 'owner/name'; required with pr.
         pr: PR number to clone and check out (implies allow_network;
             anonymous checkout, no token enters the container).
@@ -1870,10 +1902,12 @@ def run_container_and_exec(
             detach=True,
             remove=False,
             environment=env,
+            working_dir=clone_dest,
         )
         if proxy_runtime is not None:
             run_kwargs = proxy_lifecycle.apply_network(run_kwargs, proxy_runtime)
         container = client.containers.run(resolved, **run_kwargs)
+        _ensure_workspace(container, clone_dest)
     except ValueError as e:
         return json.dumps({"status": "error", "error": str(e)})
     except Exception as e:

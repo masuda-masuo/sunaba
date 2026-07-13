@@ -27,8 +27,11 @@ Sunaba divides state and execution into three isolated filesystem zones:
 +-----------------------------------------------------------------+
 | DISPOSABLE DOCKER CONTAINER                                     |
 |                                                                 |
-|  [Isolated Work Space]                                          |
+|  [Isolated Work Space]  <-- also the container's WORKDIR         |
 |   └── /workspace/        <-- Cloned git repo under test         |
+|                                                                 |
+|  [Container User's Home]                                        |
+|   └── /home/sandbox/     <-- venv, caches, .sandbox-meta.json   |
 |                                                                 |
 |  [Ephemeral Scratch Space]                                      |
 |   └── /tmp/              <-- Patches, transforms, AST runs      |
@@ -54,6 +57,11 @@ Inside the disposable sandbox container, the filesystem is divided into distinct
 
 ### `/workspace` (Git Repository Root)
 This is the workspace containing the cloned target repository. Only changes intended for Git commits reside here.
+
+`/workspace` is also the container's **working directory** (`docker run --workdir`, mirrored by `WORKDIR` in the images). This is what makes the repository root unambiguous: a command that names no working directory still runs inside the repository, so a tool that forgets to pass one cannot silently operate outside it (Issue #600). It also means the host never has to ask the container where the repository is — the host chose the path at creation time, and Docker records it in the container's config.
+
+### `/home/sandbox` (Container User's Home)
+The sandbox user's home holds machine state, not project state: the pre-seeded virtualenv, tool caches, `issue.md` dumps, and `.sandbox-meta.json` (the clone metadata written at init). It is deliberately *outside* the workspace — anything written here is invisible to `git status`, exactly like the host-side `~/.sunaba/` above.
 
 ### `/tmp` (Scratch Space)
 Temporary operations performed by tools are directed to the container's ephemeral `/tmp` directory instead of the `/workspace` folder. Examples include:

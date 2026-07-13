@@ -43,7 +43,7 @@ class TestCopyProject:
             )
 
         assert "Error" not in result
-        assert "/root/shiori/myproject" in result
+        assert "/root/shiori" in result
         assert "/root/shiori/." not in result
 
         mock_container.put_archive.assert_called_once()
@@ -51,7 +51,7 @@ class TestCopyProject:
         assert call_args[0][0] == "/root/shiori"
 
         mock_container.exec_run.assert_called_once_with(
-            ["sh", "-c", "chown -R $(id -u):$(id -g) /root/shiori/myproject"]
+            ["sh", "-c", "chown -R $(id -u):$(id -g) /root/shiori"]
         )
 
         tar_data = call_args[0][1]
@@ -60,11 +60,11 @@ class TestCopyProject:
         with tarfile.open(fileobj=tar_data, mode="r") as tar:
             names = tar.getnames()
         assert all(
-            name.startswith("myproject/") or name == "myproject"
+            name == "." or name.startswith("./")
             for name in names
-        ), f"Entries should be under 'myproject/', got: {names}"
-        assert "myproject/hello.txt" in names
-        assert "myproject/subdir/nested.txt" in names
+        ), f"Entries should be rooted at the dest dir, got: {names}"
+        assert "./hello.txt" in names
+        assert "./subdir/nested.txt" in names
 
     @patch("sunaba.tools.file._docker")
     def test_copy_project_with_absolute_path(
@@ -72,7 +72,7 @@ class TestCopyProject:
         mock_docker: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """Absolute paths should use the directory basename as arcname."""
+        """The directory's contents land in dest_dir, not a subdir named after it."""
         src_dir = tmp_path / "myapp"
         src_dir.mkdir()
         (src_dir / "app.py").write_text("print('hello')")
@@ -91,7 +91,7 @@ class TestCopyProject:
         )
 
         assert "Error" not in result
-        assert "/opt/myapp" in result
+        assert "to /opt " in result
 
         call_args = mock_container.put_archive.call_args
         assert call_args[0][0] == "/opt"
@@ -101,10 +101,10 @@ class TestCopyProject:
         import tarfile
         with tarfile.open(fileobj=tar_data, mode="r") as tar:
             names = tar.getnames()
-        assert "myapp/app.py" in names
+        assert "./app.py" in names
 
         mock_container.exec_run.assert_called_once_with(
-            ["sh", "-c", "chown -R $(id -u):$(id -g) /opt/myapp"]
+            ["sh", "-c", "chown -R $(id -u):$(id -g) /opt"]
         )
 
     @patch("sunaba.tools.file._docker")
@@ -260,7 +260,7 @@ class TestCopyProject:
         result = copy_project(
             container_id="abc123",
             local_src_dir=str(src_dir),
-            dest_dir="/home/sandbox",
+            dest_dir="/home/sandbox/my project (1)",
         )
 
         assert "Error" not in result
@@ -292,4 +292,4 @@ class TestCopyProject:
         )
 
         assert "Error" not in result
-        assert "/home/sandbox" in result
+        assert "/workspace" in result

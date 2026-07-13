@@ -636,8 +636,8 @@ class TestWriteFileSandboxReplaceEnhanced:
         assert "def foo" in result or "def bar" in result
 
     @patch("sunaba.tools.file._docker")
-    def test_near_miss_indentation_hint(self, mock_docker: MagicMock) -> None:
-        """Near-miss shows indentation mismatch hint."""
+    def test_near_miss_first_mismatch(self, mock_docker: MagicMock) -> None:
+        """Near-miss pinpoints the first mismatching line (issue #580)."""
         # old_str has indent=2 AND different content ("fox" vs "foo")
         # so whitespace-flexible won't match — near-miss fires.
         existing = "def foo():\n    pass\n\ndef bar():\n    pass\n"
@@ -651,9 +651,11 @@ class TestWriteFileSandboxReplaceEnhanced:
             old_str="  def fox():",
         )
         assert "Error" in result
-        assert "Indentation mismatch" in result
-        assert "old_str indent=2" in result
-        assert "file indent=0" in result
+        # The misleading indentation hint is gone (issue #580).
+        assert "Indentation mismatch" not in result
+        assert "First mismatch: old_str line 1 vs file line 1" in result
+        assert "'  def fox():'" in result
+        assert "'def foo():'" in result
 
     @patch("sunaba.tools.file._docker")
     def test_near_miss_shows_diff(self, mock_docker: MagicMock) -> None:
@@ -673,6 +675,242 @@ class TestWriteFileSandboxReplaceEnhanced:
         assert "+++ /root/test.txt (file)" in result
         assert "-def baz():" in result
         assert "+def bar():" in result
+
+
+def _mock_container_with_file(mock_docker: MagicMock, content: str) -> MagicMock:
+    """Wire a mock container that serves *content* for cat reads."""
+    content_bytes = content.encode("utf-8") if content else b""
+    mock_container = MagicMock()
+    mock_container.exec_run.side_effect = _exec_run_for(content_bytes)
+    mock_client = MagicMock()
+    mock_client.containers.get.return_value = mock_container
+    mock_docker.return_value = mock_client
+    return mock_container
+
+
+class TestNearMissFirstMismatch:
+    """Issue #580: the near-miss echo pinpoints the first mismatching line."""
+
+    @patch("sunaba.tools.file._docker")
+    def test_leading_blank_line_no_bogus_indent_report(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """old_str starting with a blank line reports the real mismatch.
+
+        Reproduces the issue #580 scenario: the old indentation hint
+        compared the blank first line (indent=0) against the file and
+        produced a bogus "indent=0 vs N" report.
+        """
+        existing = "def m():\n    a()\n\n    x = 1\n    y = 2\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents="new",
+            dest_dir="/root",
+            old_str="\n    x = 1\n    y = 3",
+        )
+        assert "Error" in result
+        assert "Indentation mismatch" not in result
+        assert "First mismatch: old_str line 3 vs file line 5" in result
+        assert "'    y = 3'" in result
+        assert "'    y = 2'" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_tab_vs_space_shown_via_repr(self, mock_docker: MagicMock) -> None:
+        """Tabs and spaces are visualized with repr() on the mismatch line."""
+        existing = "def f():\n\tresult = foobar()\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents="new",
+            dest_dir="/root",
+            old_str="def f():\n    result = foo()",
+        )
+        assert "Error" in result
+        assert "First mismatch: old_str line 2 vs file line 2" in result
+        # repr() makes the tab visible as \t and preserves the spaces.
+        assert "'\\tresult = foobar()'" in result
+        assert "'    result = foo()'" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_duplicated_line_in_old_str(self, mock_docker: MagicMock) -> None:
+        """A duplicated line in old_str is reported with the right line number.
+
+        Position-wise comparison (line i vs line i) would blame every
+        line after the duplicate; opcode-based comparison points at the
+        extra line itself.
+        """
+        existing = "a = 1\nb = 2\nc = 3\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents="new",
+            dest_dir="/root",
+            old_str="a = 1\na = 1\nb = 2",
+        )
+        assert "Error" in result
+        assert (
+            "First mismatch: old_str line 1: 'a = 1' "
+            "has no counterpart in the file region"
+        ) in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_small_old_str_gets_full_diff(self, mock_docker: MagicMock) -> None:
+        """old_str of <= 50 lines shows the unified diff untruncated."""
+        existing = "".join(f"actual_{i} = {i}\n" for i in range(1, 11))
+        _mock_container_with_file(mock_docker, existing)
+
+        old_str = "\n".join(f"wanted_{i} = {i}" for i in range(1, 11))
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents="new",
+            dest_dir="/root",
+            old_str=old_str,
+        )
+        assert "Error" in result
+        assert "truncated" not in result
+        # The old 6-line cap would have hidden these later diff lines.
+        assert "-wanted_10 = 10" in result
+        assert "+actual_10 = 10" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_large_old_str_diff_is_capped(self, mock_docker: MagicMock) -> None:
+        """old_str of > 50 lines caps the diff at 30 lines with a marker."""
+        existing = "".join(f"actual_{i} = {i}\n" for i in range(1, 61))
+        _mock_container_with_file(mock_docker, existing)
+
+        old_str = "\n".join(f"wanted_{i} = {i}" for i in range(1, 61))
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents="new",
+            dest_dir="/root",
+            old_str=old_str,
+        )
+        assert "Error" in result
+        assert "... (truncated," in result
+        assert "more lines)" in result
+        # Diff lines past the 30-line cap are not shown.
+        assert "+actual_60 = 60" not in result
+
+
+class TestOldStrSuccessEcho:
+    """Issue #580: successful old_str edits echo the post-edit region."""
+
+    @patch("sunaba.tools.file._docker")
+    def test_exact_match_echoes_replaced_region(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """The exact-match path echoes the new lines with context."""
+        existing = "line1\nline2\nline3\nline4\nline5\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.txt",
+            file_contents="REPLACED",
+            dest_dir="/root",
+            old_str="line3",
+        )
+        assert "Error" not in result
+        assert "Written" in result
+        assert "(replaced line 3)" in result
+        assert ">>>" in result
+        assert "| REPLACED" in result
+        # +-2 lines of context, with line numbers.
+        assert "| line1" in result
+        assert "| line5" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_exact_match_multiline_span(self, mock_docker: MagicMock) -> None:
+        """A multi-line replacement reports the full replaced span."""
+        existing = "line1\nline2\nline3\nline4\nline5\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.txt",
+            file_contents="X\nY\nZ",
+            dest_dir="/root",
+            old_str="line2\nline3",
+        )
+        assert "Error" not in result
+        assert "(replaced lines 2-4)" in result
+        assert "| X" in result
+        assert "| Z" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_whitespace_flexible_echoes_reindented_lines(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """The flexible path echoes the re-indented lines (ground truth)."""
+        existing = "    def foo():\n        pass\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        # Multi-line old_str with no indentation: not an exact substring,
+        # so the whitespace-flexible fallback (re-indent) kicks in.
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents="def bar():\n    changed()",
+            dest_dir="/root",
+            old_str="def foo():\npass",
+        )
+        assert "Error" not in result
+        assert "(replaced lines 1-2)" in result
+        # The echoed lines carry the file's indentation, not old_str's.
+        assert "|     def bar():" in result
+        assert "|         changed()" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_long_replacement_elides_middle(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """An echo of more than 30 rows elides the middle."""
+        existing = "a\nb\nc\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        new_block = "\n".join(f"n{i:02d}" for i in range(1, 41))
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.txt",
+            file_contents=new_block,
+            dest_dir="/root",
+            old_str="b",
+        )
+        assert "Error" not in result
+        assert "(replaced lines 2-41)" in result
+        # 42 echo rows total: 14 head + marker + 14 tail.
+        assert "... (14 lines)" in result
+        assert "| n01" in result
+        assert "| n40" in result
+        assert "| n20" not in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_full_overwrite_keeps_plain_message(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """Non-old_str modes keep the plain 'Written N bytes' message."""
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.txt",
+            file_contents="hello",
+            dest_dir="/root",
+        )
+        assert result == "Written 5 bytes to /root/test.txt"
 
 
 class TestWriteFileSandboxMutualExclusivity:

@@ -1,4 +1,4 @@
-"""VCS tools: issue_view, publish, sandbox_issue_write, clone_repo."""
+"""VCS tools: issue_view, publish, sandbox_issue_write."""
 
 from __future__ import annotations
 
@@ -18,15 +18,11 @@ from sunaba.journal import record_boundary_crossing, record_tool_use
 from sunaba.proxy_client import (
     ProxyAuthError,
     authorized_push_grant,
-    authorized_read_grant,
     proxy_configured,
 )
 from sunaba.security import NETWORK_LABEL
 from sunaba.tools.common import (
-    CLONE_NO_TOKEN_WARNING,
     LEGACY_WORKDIR,
-    WORKSPACE,
-    _build_clone_command,
     _docker,
     container_not_found_error,
 )
@@ -850,7 +846,7 @@ def _resolve_vcs_token() -> str:
     resolver: it also backs authenticated host->GitHub-API GET calls
     (``_resolve_pr_head_ref``, ``issue_write``) and, since #419, egress-proxy
     read-authorization grants (``authorized_read_grant``) for
-    ``clone_repo``/``sandbox_initialize``. There is nothing push-specific in
+    ``sandbox_initialize``. There is nothing push-specific in
     its resolution order (broker mint -> static ``GITHUB_TOKEN``/``GH_TOKEN``).
 
     Resolution order: a freshly minted broker token (Issue #232) takes
@@ -1003,8 +999,8 @@ def _ensure_proxy_ready(client: Any) -> str | None:
     """Reconcile the egress-proxy sidecar before a grant is opened against it.
 
     ``ensure_egress_proxy`` is idempotent and cheap on the happy path (a
-    ``docker inspect`` of the running sidecar), so ``publish``/``clone_repo``
-    simply re-run it rather than inferring the sidecar's state:
+    ``docker inspect`` of the running sidecar), so ``publish`` simply re-runs
+    it rather than inferring the sidecar's state:
 
     - It re-exports ``SUNABA_PROXY_CONTROL_URL/SECRET`` into this process,
       which a server restart wipes even though the sidecar and a pre-existing
@@ -1480,155 +1476,3 @@ def _try_api_push(
         return {"status": "error", "error": push_result["error"]}
 
     return {"status": "ok", "sha": push_result.get("sha", "unknown")[:7]}
-
-
-# ---------------------------------------------------------------------------
-# clone_repo
-# ---------------------------------------------------------------------------
-
-
-# Container-side transport probed: gh repo clone when a token exists, else
-# anonymous git clone over HTTPS (#333).  Private-repo auth = egress-proxy
-# read-authorization grant (#356/#419).
-def clone_repo(
-    container_id: str,
-    repo: str,
-    dest_dir: str = WORKSPACE,
-    branch: str = "",
-) -> str:
-    """Clone a Git repository inside the container.
-
-    Requires a container started with allow_network=True.  Private
-    repositories need no extra flag: the clone is authenticated at the
-    network layer with a host-resolved token, so no credential enters
-    the container.
-
-    Args:
-        container_id: Container ID prefix.
-        repo: 'owner/repo'.
-        dest_dir: Directory the repo is cloned into; it becomes the git
-            root.  Defaults to the workspace, which is also the
-            container's working directory.  Pass another path to clone a
-            second repo alongside the first.
-        branch: Branch to clone; omit for the default branch.
-
-    Returns:
-        JSON: status, repo, clone_path, branch; error on failure.
-    """
-    client = _docker()
-    try:
-        container = client.containers.get(container_id)
-    except NotFound:
-        return container_not_found_error(container_id)
-    except Exception as e:
-        return json.dumps({"status": "error", "error": str(e)})
-
-    cid = container_id[:12]
-
-    if not _REPO_FORMAT_RE.match(repo):
-        return json.dumps(
-            {"status": "error", "error": f"Invalid repo format: {repo} (expected owner/repo)"}
-        )
-
-    # ``gh repo clone`` treats its second argument as the clone target
-    # directory itself, and so does *dest_dir*: the repo becomes the
-    # directory, rather than a subdirectory named after it.  That is what
-    # lets the default (the workspace) be the git root the container already
-    # works in.
-    clone_path = dest_dir.rstrip("/") or dest_dir
-
-    # Recover the proxy control env vars before anything else touches the
-    # container, so a lost-env failure (#428) is reported without a wasted
-    # exec and fails closed as early as possible.
-    proxy_err = _ensure_proxy_ready(client)
-    if proxy_err:
-        return json.dumps({"status": "error", "error": proxy_err})
-
-    # ``gh auth setup-git`` configures gh as the git credential helper so a
-    # later ``git push`` works with the injected token.  Its exit code also
-    # tells us whether a VCS token is present (0 = authenticated / GH_TOKEN
-    # set, non-zero = no token), which selects the clone transport
-    # (Issue #333): ``gh repo clone`` when authenticated (handles private),
-    # an anonymous ``git clone`` otherwise (public repos clone without
-    # credentials; ``gh`` cannot, as it requires auth even for public).
-    auth_ec, _ = container.exec_run(
-        ["/bin/sh", "-c", "gh auth setup-git"],
-        stdout=True,
-        stderr=True,
-    )
-    authenticated = auth_ec == 0
-
-    # Under the egress proxy the container never carries a token (#356), so
-    # `authenticated` above is always False there; a read grant (#419)
-    # authenticates the clone at the proxy instead, without changing the
-    # container-side (anonymous) command.
-    open_read_grant = not authenticated and proxy_configured()
-    cmd = _build_clone_command(repo, clone_path, branch, authenticated)
-
-    if open_read_grant:
-        with authorized_read_grant(repo, token=_resolve_vcs_token() or None):
-            exit_code, output = container.exec_run(
-                ["/bin/sh", "-c", cmd],
-                stdout=True,
-                stderr=True,
-            )
-    else:
-        exit_code, output = container.exec_run(
-            ["/bin/sh", "-c", cmd],
-            stdout=True,
-            stderr=True,
-        )
-
-    stdout_part, stderr_part = (
-        output if isinstance(output, tuple) else (output, b"")
-    )
-    stdout_text = (
-        stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    )
-    stderr_text = (
-        stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-    )
-
-    if exit_code != 0:
-        error_text = stderr_text or stdout_text
-        # Surface a clearer hint when the target already exists, instead of
-        # the bare git "already exists and is not an empty directory" message.
-        if "already exists" in error_text:
-            error_text = (
-                f"{error_text.rstrip()}\n"
-                f"Hint: {repr(clone_path)} already exists. Specify a different "
-                f"dest_dir, or remove the existing directory first."
-            )
-        # Record a denied/failed egress-proxy read grant (#421), mirroring
-        # publish's push-grant recording (#356/#357).  Scoped to the
-        # grant case only -- an ordinary (non-proxied) clone failure was
-        # never journaled before and is out of scope here.
-        if open_read_grant:
-            record_boundary_crossing(
-                cid,
-                "clone_repo",
-                f"repo={repo} branch={branch or 'default'} proxy_read_grant=True",
-                approved=False,
-            )
-        return json.dumps({
-            "status": "error",
-            "error": error_text,
-            "clone_path": clone_path,
-        })
-
-    record_boundary_crossing(
-        cid,
-        "clone_repo",
-        f"repo={repo} branch={branch or 'default'} dest={clone_path} proxy_read_grant={open_read_grant}",
-        approved=True,
-    )
-
-    result: dict[str, Any] = {
-        "status": "ok",
-        "repo": repo,
-        "clone_path": clone_path,
-        "branch": branch or "default",
-    }
-    if not authenticated and not open_read_grant:
-        result["warning"] = CLONE_NO_TOKEN_WARNING
-    return json.dumps(result)

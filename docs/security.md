@@ -8,7 +8,7 @@ The sandbox offers two **independent** guarantees. They are easy to conflate, so
 
 The sandbox container **never receives a VCS token.** There is no opt-in flag: credentials stay host-side. This is enforced by *how the write tools work*, not by the network layer — so it holds whether or not the egress proxy is enabled.
 
-*   **Reads** (`clone_repo`, `sandbox_initialize(clone_repo=...)`, `pr=N`): A public clone needs no credentials; a private one has a host-resolved token handed to the proxy for a short read-authorization grant (this path does require the proxy). Either way, no token enters the container.
+*   **Reads** (`sandbox_initialize(clone_repo=...)`, `pr=N`): A public clone needs no credentials; a private one has a host-resolved token handed to the proxy for a short read-authorization grant (this path does require the proxy). Either way, no token enters the container.
 *   **Pushes / PRs** go through `publish`: It resolves a token host-side and hands it to the proxy for a short authorized push grant (push), or calls the GitHub API directly from the host (PR creation).
 *   **Issue / comment writes** go through `sandbox_issue_write`, which calls the GitHub REST API host-side.
 *   All output is automatically sanitized: Any token value is masked as `KEY=***` in stdout/stderr.
@@ -74,4 +74,4 @@ SUNABA_ALLOWED_EGRESS_HOSTS="mirror.internal, .example.com"
 *   The single value `*` disables destination-host containment entirely (any host passes), restoring the pre-containment passthrough behaviour for operators who need it.
 
 ### Applying changes
-The proxy runs as a long-lived sidecar container (`sunaba-egress-proxy`) that reads these variables once, at its own startup. You do not need to restart or remove it by hand: the next `sandbox_initialize`, `clone_repo`, or `publish` compares the sidecar's baked-in configuration against the current environment and recreates it when they differ. Recreation does not disturb running sandboxes — the proxy CA is persisted in a named volume and stays the same.
+The proxy runs as a long-lived sidecar container (`sunaba-egress-proxy`) that reads these variables once, at its own startup. You do not need to restart or remove it by hand: the next `sandbox_initialize` or `publish` compares the sidecar's baked-in configuration against the current environment and recreates it when they differ. Recreation does not disturb running sandboxes — the proxy CA is persisted in a named volume and stays the same.

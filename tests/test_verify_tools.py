@@ -629,7 +629,7 @@ class TestVerifyInContainer:
     ) -> None:
         """When working_dir is omitted, the git repo root is auto-detected
         instead of silently defaulting to /home/sandbox (matching the
-        resolve_git_root usage already used by clone_repo/publish/etc.)."""
+        resolve_git_root usage already used by publish/etc.)."""
         from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()

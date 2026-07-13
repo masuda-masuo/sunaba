@@ -53,7 +53,7 @@ All authentication resolving happens on the host machine. The server queries thr
 
 ## 3. Delegated Authentication via Egress Proxy
 
-For operations requiring network access (like `clone_repo`), the container needs to authenticate with GitHub. Because the token cannot be placed in the container, Sunaba delegates authentication via the host-side Egress Proxy.
+For operations requiring network access (like `sandbox_initialize(clone_repo=...)`), the container needs to authenticate with GitHub. Because the token cannot be placed in the container, Sunaba delegates authentication via the host-side Egress Proxy.
 
 ```
 +───────────────────────────────+            +─────────────────────────+
@@ -73,7 +73,7 @@ For operations requiring network access (like `clone_repo`), the container needs
 ```
 
 ### The Authorization Window Sequence
-1.  **Pre-authorization**: Before executing a tool that crosses the network boundary (e.g. `clone_repo`), the host server resolves the target VCS token.
+1.  **Pre-authorization**: Before executing a tool that crosses the network boundary (e.g. `sandbox_initialize(clone_repo=...)`), the host server resolves the target VCS token.
 2.  **Grant Registry**: The host grants a temporary "authorization window" to the egress proxy for that specific repository and session.
 3.  **Credential Injection**: When the container's standard Git client requests resources through the proxy sidecar, the proxy intercepts the traffic, matches the target repository, and injects the resolved authorization header dynamically.
 4.  **Window Closure**: Once the operation completes, the authorization window closes, and subsequent container requests to that repository are blocked.

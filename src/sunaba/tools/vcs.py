@@ -1040,6 +1040,9 @@ def _create_pr_via_api(
             raise RuntimeError("GitHub API created the PR but returned no html_url")
         return url
     except RuntimeError as exc:
+        # NOTE: "HTTP 422" / "already exists" matching depends on the
+        # exact error format in _github_api_request. If that format
+        # changes, this idempotent fallback will silently stop working.
         err_msg = str(exc)
         if "HTTP 422" in err_msg and "already exists" in err_msg.lower():
             try:
@@ -1047,12 +1050,15 @@ def _create_pr_via_api(
                 pulls = _github_api_request_list(
                     f"/repos/{repo}/pulls?head={owner}:{branch}&state=open", token
                 )
-                if pulls and isinstance(pulls, list):
+                if pulls:
                     url = str(pulls[0].get("html_url") or "")
                     if url:
                         return url
             except Exception:
-                pass
+                logger.warning(
+                    "PR already exists but recovery GET failed",
+                    exc_info=True,
+                )
         raise exc
 
 

@@ -59,8 +59,9 @@ class TestDetectLanguages:
 
         detect_languages(mock_container, "/app")
         call_kwargs = mock_container.exec_run.call_args[1]
-        # workdir should not be set or be None when working_dir is not passed
-        assert "workdir" not in call_kwargs or call_kwargs.get("workdir") is None
+        # _exec_container auto-resolves workdir via resolve_git_root;
+        # with a mock container the fallback is /home/sandbox.
+        assert call_kwargs.get("workdir") == "/home/sandbox"
 
     def test_file_extension_python(self) -> None:
         from unittest.mock import MagicMock

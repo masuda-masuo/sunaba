@@ -50,7 +50,7 @@ ENV GOPATH=/home/sandbox/go \
 
 # ── Python 開発ツール (sandbox ユーザ、base の永続 venv へ) ───────
 USER sandbox
-WORKDIR /home/sandbox
+WORKDIR /workspace
 COPY --chown=sandbox:sandbox docker/install-python-tools.sh /tmp/install-python-tools.sh
 RUN sh /tmp/install-python-tools.sh && rm /tmp/install-python-tools.sh
 

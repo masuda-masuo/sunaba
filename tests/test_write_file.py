@@ -151,7 +151,7 @@ class TestWriteFileSandboxFullOverwrite:
             file_contents="data",
         )
         assert "Error" not in result
-        assert "/home/sandbox" in result
+        assert "/workspace" in result
         # Verify exec_run was called
         mock_container.put_archive.assert_called_once()
 

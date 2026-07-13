@@ -246,6 +246,6 @@ class TestListFiles:
         mock_docker.return_value = _make_client(container)
 
         result = json.loads(list_files("abc123def456"))
-        assert result["path"] == "/home/sandbox"
+        assert result["path"] == "/workspace"
         assert result["total"] == 0
         assert result["files"] == []

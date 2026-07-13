@@ -269,8 +269,7 @@ def verify_in_container(
             to filtered and full runs.
         language: Force 'python'/'js'/'ts'/'go'; skips auto-detection.
         working_dir: Test working directory; default auto-detects the
-            git root, so a repo cloned outside /home/sandbox needs
-            nothing extra.
+            root, which is also where the container works by default.
         skip_lint_gate: Skip the lint precondition (edit-loop fast
             path; leave False on the final pre-publish run).
         skip_type_gate: Like skip_lint_gate, for the type gate.
@@ -310,10 +309,8 @@ def verify_in_container(
         {"path": path, "test_filter": test_filter, "verbose": verbose},
     )
 
-    # Auto-detect the cloned repo root (Issue #313-style detection, see
-    # resolve_git_root) instead of silently defaulting to /home/sandbox and
-    # forcing callers to pass working_dir explicitly whenever the repo was
-    # cloned elsewhere (e.g. sandbox_initialize(clone_repo=...)'s /tmp/repo/*).
+    # The repo root, which for a container created by sandbox_initialize is
+    # simply its working directory (see resolve_git_root).
     working_dir = resolve_git_root(container, working_dir)
 
     # --- Language detection ---
@@ -623,6 +620,12 @@ def verify_in_container(
             else:
                 result["gate_pass_reason"] = "no tests found \u2014 gate passes"
                 result["gate_passed"] = True
+        elif full_result.get("status") == "error":
+            # The suite never ran.  Reporting the failure count here would
+            # print "0 failure(s)" as the reason the gate went red.
+            result["gate_fail_reasons"] = [
+                f"test execution error: {full_result.get('error', 'unknown')}"
+            ]
         else:
             result["gate_fail_reasons"] = [
                 f"tests: {full_result.get('failed', 0)} failure(s)"

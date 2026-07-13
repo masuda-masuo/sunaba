@@ -21,6 +21,20 @@ def _mock_resolve_git_root() -> None:
     ):
         yield
 
+
+@pytest.fixture(autouse=True)
+def _skip_workspace_bootstrap() -> None:
+    """Stub out the workspace mkdir/chown exec that every init performs.
+
+    Container init prepares the workspace inside the container before doing
+    anything else.  Tests that drive init with a mock container are not about
+    that exec, and letting it through would consume the first entry of every
+    ``exec_run`` side-effect list.  ``tests/test_workspace_root.py`` covers the
+    real thing.
+    """
+    with patch("sunaba.tools.container._ensure_workspace"):
+        yield
+
 # -------------------------------------------------------------------
 # Shared helpers for VCS tool tests
 # -------------------------------------------------------------------

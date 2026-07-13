@@ -37,7 +37,7 @@ ENV GOPATH=/home/sandbox/go \
     GOFLAGS="-buildvcs=false -p=1"
 
 USER sandbox
-WORKDIR /home/sandbox
+WORKDIR /workspace
 
 # ── ヘルスチェック (base 継承 + go 固有ツール) ──────────────────
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

@@ -25,7 +25,7 @@ The original design document (§4) specified that version 1.0 must support **pyt
 
 1.  **Node/JS in the Base Layer; Compilers in Backend Layers**: JS is a cross-cutting layer (needed for Pyright as well as frontend code) and will be bundled into the base image. Specialized compilers/runtimes (like Python or Go) will reside in distinct backend layers.
 2.  **Unified Dispatch Matrix / Modular Images**: Language detection rules will support Python, JS, TS, and Go. Missing tools will be treated as first-class `not_available` statuses rather than silent skips.
-3.  **Monolith Prevention**: Runtimes required by cross-cutting infra belong in the `base` image. Language-specific development/testing packages belong in their respective backend layers.
+3.  **Monolith Prevention (revised by #584)**: The *layer split* stands — runtimes required by cross-cutting infra belong in the `base` image, language-specific development/testing packages belong in their respective backend layers. What was wrong was applying that principle to the **runtime default**. See §6.1.
 4.  **Eradicate Silent Failures**: All verification layers must return a **status envelope** rather than a bare list of findings. Unverified or crashed executions must fail the gate.
 
 ---
@@ -103,10 +103,35 @@ Every validation layer (lint, type check, test) must return a structured status 
 
 | Tag | Layer Composition | Use Case |
 |---|---|---|
-| `sandbox:base` | base | Parent image and fallback for unknown/polyglot repositories. |
-| `sandbox:python` | base + python + js | Selected for Python repositories. |
-| `sandbox:go` | base + go (+ js) | Selected for Go repositories. |
+| `sandbox:full` | base + python + go | **The default.** Started whenever `image=` is omitted. |
+| `sandbox:base` | base | `FROM` parent of the variants. Not a runtime default (#584). |
+| `sandbox:python` | base + python | Lean image, reachable only via an explicit `image=`. |
+| `sandbox:go` | base + go | Lean image, reachable only via an explicit `image=`. |
 | `sandbox:minimal` | Core Git + Python | Lightweight environment for rapid tests. |
+
+The toolchain installs live in `docker/install-python-tools.sh` / `install-go.sh`, which `Dockerfile.python` / `Dockerfile.go` / `Dockerfile.full` all source. Two copies of an install step drift, and that drift *was* #584: `pytest-json-report` was baked into the python image only, so every container started from any other image failed its first verify.
+
+### 6.1 Why the default is the union, not a guess (#584)
+
+Language detection ran **twice**, and the two runs were not equals:
+
+| | Host-side image selection (removed) | `edit_verify.detect_languages` (kept) |
+|---|---|---|
+| When | Before the container starts | Inside the container, on every verify |
+| Evidence | A GitHub contents-API probe over the network | The project's real files |
+| Reversible | **No** — an image is immutable once running | Yes — the next call re-runs it |
+
+The accurate detector ran *after* the irreversible decision. When the probe failed (rate limit, timeout, private repo without a token), init silently landed on an image that lacked the toolchain the code actually needed, and the first verify failed the gate for a reason that had nothing to do with the code. There was no way to fix it after the fact.
+
+The fix is to remove the guess, not to make it more reliable: **the default image is a superset of the dispatch matrix.** Whatever the in-container detector concludes, the tools are there. Host-side detection (`image_selection.py`) is deleted; `image=` remains the escape hatch and the only way to ask for a lean variant.
+
+This costs almost nothing. The server prewarms images anyway, and it used to prewarm base + python + go (≈1.34 GB resident on the host) precisely so detection would never hit a cold pull. The all-in-one image is the same ≈1.34 GB, and it is now the *only* one prewarmed. Unused binaries cost nothing at runtime; layers are shared copy-on-write across containers.
+
+Consequences:
+
+*   **The image contract is "⊇ dispatch matrix."** Each image's `HEALTHCHECK` asserts the tools it owes verify; CI runs it with `docker run`, so a missing tool fails the build rather than a user's first verify.
+*   **`not_available` regains its meaning**: "sunaba has no toolchain for this language at all" (e.g. Rust) — an honest signal — rather than "the GitHub probe lost a coin flip."
+*   **py+go polyglot works for the first time.** It used to fall back to the neutral base, which has *neither* toolchain, so the gate failed no matter what.
 
 ---
 
@@ -114,7 +139,7 @@ Every validation layer (lint, type check, test) must return a structured status 
 
 If language detection returns `go` but the container is running `sandbox:python` (which lacks the Go toolchain), executing Go verification returns `not_available`. The strict validation gate fails with a clear message: `"detected go / this image has no go toolchain; re-initialize with sandbox:go"`.
 
-Auto-detection occurs **on the host side prior to container startup** (via Shiori clones or GitHub API scans) so the correct image is selected at initialization (`sandbox_initialize`). If a mismatch occurs (e.g., custom override is set incorrectly), the loud-failure contract prevents publishing.
+There is **no host-side auto-detection** (#584, §6.1). Language dispatch happens only inside the container, against the real files. A mismatch is therefore possible only when the caller passed an explicit `image=` that lacks the toolchain the project needs — a deliberate act — and the loud-failure contract prevents publishing unverified code.
 
 ---
 
@@ -141,5 +166,5 @@ Auto-detection occurs **on the host side prior to container startup** (via Shior
 ## 10. Non-Goals (Out of Scope)
 
 *   **Additional Languages (Java, Ruby, Rust, etc.)**: Suspended for v1.0. Support is restricted to Python, JS/TS, and Go. Additional compilers can be introduced in subsequent backend layers.
-*   **On-Demand Runtime Installation**: Installing tools at runtime (e.g. `apt-get` or `npm install`) is rejected due to default-off network postures (§2), verification timeouts, and execution reproducibility constraints. Support for new runtimes must be handled using variant Docker images.
+*   **On-Demand Runtime Installation**: Installing tools at runtime (e.g. `apt-get` or `npm install`) is rejected due to default-off network postures (§2), verification timeouts, and execution reproducibility constraints. Support for new runtimes must be handled by baking them into the images. This is why #584 was fixed by widening the default image rather than by having `verify` `pip install` its own missing plugin: a container is network-off by default, and the next missing tool would reopen the same hole.
 *   **Persistent Snapshots & Custom Networking**: Deferred in alignment with core design policies.

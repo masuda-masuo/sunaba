@@ -65,11 +65,12 @@ class TestPrewarmDefaultImage:
             prewarm_default_image()
         ensure.assert_any_call(_IMAGE)
 
-    def test_prewarms_python_and_go_variants_too(self) -> None:
-        # language detection can pick python/go instead of the
-        # neutral default, so those must be warm too, not just the default.
-        # The all-in-one image (#584) is prewarmed as well: it becomes the
-        # default, and an unwarmed default reintroduces the #303 cold pull.
+    def test_prewarms_only_the_default_image(self) -> None:
+        # The lean variants are no longer prewarmed (#584).  They used to be,
+        # because host-side language detection could silently pick one of them
+        # and trade one cold pull for another.  Detection is gone: an init with
+        # no image= always lands on the default, and asking for a lean variant
+        # explicitly is a deliberate act that can afford the pull.
         with patch(
             "sunaba.tools.container._ensure_image"
         ) as ensure, patch(
@@ -78,12 +79,10 @@ class TestPrewarmDefaultImage:
             "sunaba.tools.container._PYTHON_IMAGE", "python-variant"
         ), patch(
             "sunaba.tools.container._GO_IMAGE", "go-variant"
-        ), patch(
-            "sunaba.tools.container._FULL_IMAGE", "full-variant"
         ):
             prewarm_default_image()
         called_images = {c.args[0] for c in ensure.call_args_list}
-        assert called_images == {_IMAGE, "python-variant", "go-variant", "full-variant"}
+        assert called_images == {_IMAGE}
 
     def test_swallows_errors(self) -> None:
         with patch(
@@ -93,21 +92,17 @@ class TestPrewarmDefaultImage:
             # Must not raise - prewarm failures never break startup.
             prewarm_default_image()
 
-    def test_one_failing_image_does_not_block_others(self) -> None:
+    def test_pull_failure_does_not_break_startup(self) -> None:
+        # A registry hiccup must never take the server down with it; the next
+        # refresh cycle retries.
         with patch(
             "sunaba.tools.container._ensure_image",
             side_effect=RuntimeError("registry hiccup"),
         ) as ensure, patch(
             "sunaba.tools.container._DEFAULT_IMAGE", _IMAGE
-        ), patch(
-            "sunaba.tools.container._PYTHON_IMAGE", "python-variant"
-        ), patch(
-            "sunaba.tools.container._GO_IMAGE", "go-variant"
-        ), patch(
-            "sunaba.tools.container._FULL_IMAGE", "full-variant"
         ):
             prewarm_default_image()
-        assert ensure.call_count == 4
+        assert ensure.call_count == 1
 
 
 class TestStartImagePrewarm:

@@ -570,7 +570,7 @@ class TestSandboxInitializePrParam:
             image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
         )
 
-        assert result == "abc123def456"
+        assert result == "abc123def456 [network: off]"
 
 
 class TestRunContainerAndExecPrParam:

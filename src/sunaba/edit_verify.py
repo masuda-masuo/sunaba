@@ -1194,6 +1194,328 @@ def transform_file_in_container(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Symbol-granular edit: edit_symbol (issue #581)
+# ---------------------------------------------------------------------------
+
+# In-container driver for :func:`edit_symbol_in_container`.  Unlike the
+# transform runner it never executes caller-supplied code: the resolve /
+# edit / verify logic is this fixed script, parameterized via a
+# base64-encoded JSON blob, so every error message shape stays under host
+# control.  ``__PARAMS_B64__`` / ``__MARK_A__`` / ``__MARK_B__`` are
+# substituted on the host.
+_EDIT_SYMBOL_DRIVER = r'''
+import ast, base64, difflib, json, sys
+
+PARAMS = json.loads(base64.b64decode("__PARAMS_B64__").decode("utf-8"))
+MARK_A = "__MARK_A__"
+MARK_B = "__MARK_B__"
+
+FILE_PATH = PARAMS["file_path"]
+SYMBOL = PARAMS["symbol"]
+NEW_CODE = PARAMS["new_code"]
+LINE = PARAMS["line"]
+
+
+def emit(obj):
+    sys.stdout.write(MARK_A + json.dumps(obj) + MARK_B)
+    sys.stdout.flush()
+    sys.exit(0)
+
+
+def fail(msg):
+    emit({"status": "error", "error": msg})
+
+
+if NEW_CODE and not NEW_CODE.strip():
+    fail('Error: new_code is whitespace-only; use new_code="" to delete the symbol')
+
+try:
+    with open(FILE_PATH, "r", encoding="utf-8", newline="") as fh:
+        original = fh.read()
+except FileNotFoundError:
+    fail("Error: file not found: " + FILE_PATH)
+except Exception as e:
+    fail("Error: read failed: " + repr(e))
+
+if "\r\n" in original:
+    fail(
+        "Error: " + FILE_PATH + " contains CRLF line endings; edit_symbol"
+        " supports LF files only. Use write_file_sandbox or transform_file."
+    )
+
+try:
+    tree = ast.parse(original)
+except SyntaxError as e:
+    fail(
+        "Error: " + FILE_PATH + " has a syntax error at line " + str(e.lineno)
+        + ": " + str(e.msg) + ". Fix it with write_file_sandbox/transform_file first."
+    )
+
+lines = original.splitlines()
+had_final_nl = original.endswith("\n")
+DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def dec_name(d):
+    target = d.func if isinstance(d, ast.Call) else d
+    parts = []
+    while isinstance(target, ast.Attribute):
+        parts.append(target.attr)
+        target = target.value
+    if isinstance(target, ast.Name):
+        parts.append(target.id)
+        return "@" + ".".join(reversed(parts))
+    return lines[d.lineno - 1].strip()
+
+
+candidates = []
+
+
+def collect(node, scope):
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, DEF_NODES):
+            starts = [child.lineno] + [d.lineno for d in child.decorator_list]
+            candidates.append({
+                "qualname": ".".join(scope + [child.name]),
+                "kind": "class" if isinstance(child, ast.ClassDef) else "function",
+                "def_line": child.lineno,
+                "start": min(starts),
+                "end": child.end_lineno,
+                "decorators": [dec_name(d) for d in child.decorator_list],
+            })
+            collect(child, scope + [child.name])
+        else:
+            collect(child, scope)
+
+
+collect(tree, [])
+
+matches = [
+    c for c in candidates
+    if c["qualname"] == SYMBOL or c["qualname"].endswith("." + SYMBOL)
+]
+
+if not matches:
+    pool = {}
+    for c in candidates:
+        pool.setdefault(c["qualname"], []).append(c)
+        pool.setdefault(c["qualname"].rsplit(".", 1)[-1], []).append(c)
+    close = difflib.get_close_matches(SYMBOL, sorted(pool), n=5, cutoff=0.6)
+    hints = []
+    for name in close:
+        for c in pool[name]:
+            if c not in hints:
+                hints.append(c)
+    msg = "Error: symbol '" + SYMBOL + "' not found in " + FILE_PATH + "."
+    if hints:
+        hints.sort(key=lambda c: c["start"])
+        msg += " Did you mean: " + ", ".join(
+            c["qualname"] + " (line " + str(c["start"]) + ")" for c in hints[:5]
+        ) + "?"
+    fail(msg)
+
+
+def describe(cands):
+    mixed = len(set(c["qualname"] for c in cands)) > 1
+    out = []
+    for c in cands:
+        text = lines[c["def_line"] - 1].strip()[:80]
+        desc = " / ".join(c["decorators"] + [text])
+        if mixed:
+            desc = c["qualname"] + ": " + desc
+        out.append("  lines " + str(c["start"]) + "-" + str(c["end"]) + ":  " + desc)
+    return "\n".join(out)
+
+
+if LINE is not None:
+    containing = [c for c in matches if c["start"] <= LINE <= c["end"]]
+    if not containing:
+        fail(
+            "Error: line=" + str(LINE) + " does not fall within any definition of '"
+            + SYMBOL + "' in " + FILE_PATH + ":\n" + describe(matches)
+            + "\nRetry with line=<start line of the intended definition>."
+        )
+    containing.sort(key=lambda c: (c["end"] - c["start"], -c["start"]))
+    target = containing[0]
+elif len(matches) > 1:
+    fail(
+        "Error: '" + SYMBOL + "' is ambiguous in " + FILE_PATH + ":\n"
+        + describe(matches)
+        + "\nRetry with line=<start line of the intended definition>."
+    )
+else:
+    target = matches[0]
+
+start, end = target["start"], target["end"]
+def_text = lines[target["def_line"] - 1]
+def_indent = len(def_text) - len(def_text.lstrip())
+
+if NEW_CODE == "":
+    before = lines[:start - 1]
+    after = lines[end:]
+    n_blank = 0
+    while before and not before[-1].strip():
+        before.pop()
+        n_blank += 1
+    while after and not after[0].strip():
+        after.pop(0)
+        n_blank += 1
+    if not after or not before:
+        new_lines = before + after
+    else:
+        max_blank = 2 if def_indent == 0 else 1
+        new_lines = before + [""] * min(n_blank, max_blank) + after
+    new = "\n".join(new_lines)
+    if new_lines and had_final_nl:
+        new += "\n"
+else:
+    code_lines = NEW_CODE.splitlines()
+    while code_lines and not code_lines[0].strip():
+        code_lines.pop(0)
+    while code_lines and not code_lines[-1].strip():
+        code_lines.pop()
+    first = code_lines[0]
+    delta = def_indent - (len(first) - len(first.lstrip()))
+    reindented = []
+    for ln in code_lines:
+        if not ln.strip():
+            reindented.append("")
+        elif delta >= 0:
+            reindented.append(" " * delta + ln)
+        else:
+            reindented.append(ln[min(-delta, len(ln) - len(ln.lstrip())):])
+    new_lines = lines[:start - 1] + reindented + lines[end:]
+    new = "\n".join(new_lines)
+    if had_final_nl and new and not new.endswith("\n"):
+        new += "\n"
+
+try:
+    ast.parse(new)
+except SyntaxError as e:
+    fail(
+        "Error: the edited file would have a syntax error at line " + str(e.lineno)
+        + ": " + str(e.msg) + "; nothing was written. Fix new_code and retry."
+    )
+
+resolved = {
+    "qualname": target["qualname"],
+    "kind": target["kind"],
+    "start_line": start,
+    "end_line": end,
+}
+
+if new == original:
+    n_lines = original.count("\n") + (1 if original and not original.endswith("\n") else 0)
+    emit({"status": "ok", "resolved": resolved, "changed": False, "diff": "",
+          "new_size": len(original), "new_lines": n_lines})
+
+try:
+    with open(FILE_PATH, "w", encoding="utf-8", newline="") as fh:
+        fh.write(new)
+except Exception as e:
+    fail("Error: write failed: " + repr(e))
+
+diff = "\n".join(difflib.unified_diff(
+    original.splitlines(), new.splitlines(),
+    fromfile=FILE_PATH, tofile=FILE_PATH, lineterm=""))
+n_lines = new.count("\n") + (1 if new and not new.endswith("\n") else 0)
+emit({"status": "ok", "resolved": resolved, "changed": True, "diff": diff,
+      "new_size": len(new), "new_lines": n_lines})
+'''
+
+
+def edit_symbol_in_container(
+    client: Any,
+    container_id: str,
+    file_path: str,
+    symbol: str,
+    new_code: str,
+    line: int | None = None,
+) -> dict[str, Any]:
+    """Resolve *symbol* in a Python file and replace or delete its definition.
+
+    Runs the fixed :data:`_EDIT_SYMBOL_DRIVER` script inside the sandbox
+    container -- never caller-supplied code, unlike ``transform_file`` --
+    so every error message shape stays under host control.  The file is
+    parsed with ``ast``, the definition of *symbol* (decorators included)
+    is replaced by *new_code* (deleted when ``new_code == ""``), the
+    edited file is re-parsed, and nothing is written on a SyntaxError.
+
+    Returns a dict with ``status`` (``"ok"`` / ``"error"``).  On success:
+    ``resolved`` (qualname / kind / start_line / end_line), ``changed``
+    (bool), ``diff`` (str), ``new_size`` / ``new_lines`` (int).  On
+    failure: ``error`` (str).
+    """
+    if not file_path.startswith("/"):
+        return {"status": "error", "error": f"file_path must be absolute: {file_path!r}"}
+    canon = posixpath.normpath(file_path)
+    if ".." in canon.split(posixpath.sep):
+        return {"status": "error", "error": f"Path traversal detected: {file_path!r}"}
+
+    try:
+        container = client.containers.get(container_id)
+    except Exception as e:
+        return {"status": "error", "error": f"Container {container_id[:12]} not found: {e}"}
+
+    params = {"file_path": file_path, "symbol": symbol, "new_code": new_code, "line": line}
+    params_b64 = base64.b64encode(json.dumps(params).encode("utf-8")).decode("ascii")
+    nonce = secrets.token_hex(8)
+    mark_a = f"<<<ES_{nonce}>>>"
+    mark_b = f"<<<END_ES_{nonce}>>>"
+
+    driver = (
+        _EDIT_SYMBOL_DRIVER
+        .replace("__PARAMS_B64__", params_b64)
+        .replace("__MARK_A__", mark_a)
+        .replace("__MARK_B__", mark_b)
+    )
+    driver_b64 = base64.b64encode(driver.encode("utf-8")).decode("ascii")
+    tmpf = f"/tmp/.es_{nonce}.py"
+    cmd = (
+        f"echo {shlex.quote(driver_b64)} | base64 -d > {tmpf}"
+        f" && python3 {tmpf}; rc=$?"
+        f"; rm -f {tmpf}"
+        f"; exit $rc"
+    )
+
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", cmd],
+        stdout=True,
+        stderr=True,
+        demux=True,
+    )
+    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+
+    start = stdout_text.find(mark_a)
+    end = stdout_text.find(mark_b)
+    if start == -1 or end == -1:
+        detail = stderr_text.strip() or stdout_text.strip() or "no output"
+        if "python3" in detail and ("not found" in detail or "No such file" in detail):
+            detail = (
+                "python3 is not available in this container; edit_symbol "
+                "requires a Python interpreter in the sandbox image"
+            )
+        return {"status": "error", "error": f"edit_symbol driver produced no result: {detail}"}
+
+    try:
+        result: dict[str, Any] = json.loads(stdout_text[start + len(mark_a):end])
+    except json.JSONDecodeError as e:
+        return {"status": "error", "error": f"could not parse driver result: {e}"}
+
+    if result.get("status") == "ok" and result.get("changed"):
+        record_file_write(
+            container_id[:12],
+            posixpath.basename(file_path),
+            posixpath.dirname(file_path) or "/",
+            int(result.get("new_size", 0)),
+            is_test=_is_test_file(file_path),
+        )
+    return result
+
+
 def read_file_lines(
     container: Any,
     file_path: str,

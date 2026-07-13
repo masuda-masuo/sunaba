@@ -40,6 +40,7 @@ Read, write, and copy files inside the sandbox.
 | Tool Name | Parameters | Description |
 |---|---|---|
 | `write_file_sandbox` | `container_id`, `file_name`, `file_contents`, `dest_dir` (opt), `old_str` (opt), `start_line` / `end_line` (opt), `append` (opt) | **Primary edit path.** With no edit mode given the file is fully overwritten; `old_str` replaces an exact string, `start_line`/`end_line` replace a line range, `append=True` appends. The edit modes are mutually exclusive. |
+| `edit_symbol` | `container_id`, `file_path`, `symbol`, `new_code`, `line` (opt) | **Symbol edit path.** Locates a function/class/method by name via AST (decorators included) and replaces the whole definition with `new_code`; `new_code=""` deletes it. Nothing is written unless the edited file parses. Returns the resolved location and a unified diff. Python files only. |
 | `transform_file` | `container_id`, `file_path`, `code` | **Imperative edit path.** Computes new file content via a Python `transform(text) -> str` script inside the container and returns a unified diff. |
 | `read_file_range` | `container_id`, `file_path`, `offset` / `limit` (opt), `start_line` / `end_line` (opt) | Reads a slice of a file (pagination by line numbers) to prevent context flooding. |
 | `list_files` | `container_id`, `path` (opt), `max_depth` (opt), `pattern` (opt) | Recursively lists file paths inside the container starting at the specified path. |

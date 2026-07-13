@@ -1,4 +1,4 @@
-"""File tools: write_file_sandbox, transform_file, copy_project, copy_file, read_file_range, list_files."""
+"""File tools: write_file_sandbox, transform_file, edit_symbol, copy_project, copy_file, read_file_range, list_files."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from docker.errors import APIError, NotFound
 
 from sunaba.edit_verify import (
     _file_size_from_counts,
+    edit_symbol_in_container,
     read_file,
     read_file_lines,
     transform_file_in_container,
@@ -855,3 +856,94 @@ def transform_file(
             int(result.get("new_size", 0)), int(result.get("new_lines", 0))
         )
     return json.dumps(result)
+
+
+# ---------------------------------------------------------------------------
+# edit_symbol (issue #581)
+# ---------------------------------------------------------------------------
+
+
+def edit_symbol(
+    container_id: str,
+    file_path: str,
+    symbol: str,
+    new_code: str,
+    line: int | None = None,
+) -> str:
+    """Replace or delete a function/class/method by name -- no old_str needed.
+
+    Locates the definition of *symbol* ("foo", "Foo.bar", "outer.inner")
+    via AST and replaces the whole definition (decorators included) with
+    *new_code*, re-indented to fit the original location.  new_code=""
+    deletes the definition.  The edited file must parse: on SyntaxError
+    nothing is written.  Returns the resolved symbol location and a
+    unified diff -- check "resolved" to confirm the right definition was
+    edited.  If the name is ambiguous the error lists all candidates;
+    retry with a qualified name or line=.  Python files only.  For 1-3
+    line local edits prefer write_file_sandbox old_str; for non-Python
+    or pattern edits use transform_file.
+
+    Args:
+        container_id: Container ID prefix.
+        file_path: Absolute path inside the container (.py only).
+        symbol: Definition name, optionally qualified ("foo", "Foo.bar",
+            "outer.inner").
+        new_code: Replacement definition source; "" deletes the symbol.
+            Whitespace-only is rejected.
+        line: Disambiguates same-name definitions: any line number inside
+            the intended definition (decorators included).
+
+    Returns:
+        JSON: status, resolved (qualname/kind/start_line/end_line),
+        changed, diff (truncated past 120 lines), truncated, file_size;
+        on failure error.
+    """
+    client = _docker()
+    try:
+        _ = client.containers.get(container_id)
+    except NotFound:
+        return container_not_found_error(container_id)
+    except Exception as e:
+        return json.dumps({"status": "error", "error": str(e)})
+
+    if not file_path.endswith(".py"):
+        return json.dumps({
+            "status": "error",
+            "error": "Error: edit_symbol supports .py files only; "
+            "use write_file_sandbox or transform_file",
+        })
+
+    record_tool_use(
+        container_id[:12],
+        "edit_symbol",
+        {"file_path": file_path, "symbol": symbol},
+    )
+    result = edit_symbol_in_container(
+        client, container_id, file_path, symbol, new_code, line
+    )
+
+    if result.get("status") != "ok":
+        return json.dumps(result)
+
+    file_size = _file_size_from_counts(
+        int(result.get("new_size", 0)), int(result.get("new_lines", 0))
+    )
+    if not result.get("changed"):
+        return json.dumps({
+            "status": "ok",
+            "resolved": result.get("resolved"),
+            "changed": False,
+            "diff": "",
+            "truncated": False,
+            "file_size": file_size,
+        })
+
+    display, meta = truncate_output(result.get("diff", ""), max_lines=120)
+    return json.dumps({
+        "status": "ok",
+        "resolved": result.get("resolved"),
+        "changed": True,
+        "diff": display,
+        "truncated": meta.truncated,
+        "file_size": file_size,
+    })

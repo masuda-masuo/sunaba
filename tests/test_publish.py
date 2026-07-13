@@ -651,3 +651,40 @@ class TestCreatePrViaApi:
                 _create_pr_via_api(
                     "owner/repo", "fix/x", "Title", "", "dev", "ghp_tok"
                 )
+
+    def test_create_pr_idempotent_on_422_already_exists(self) -> None:
+        """When POST pulls returns 422 because PR already exists, it should GET pulls and return the existing PR's html_url."""
+        error_body = json.dumps({
+            "message": "Validation Failed",
+            "errors": [{"message": "A pull request already exists for owner:fix/x."}],
+        }).encode("utf-8")
+        http_error = urllib.error.HTTPError(
+            "https://api.github.com/repos/owner/repo/pulls",
+            422,
+            "Unprocessable Entity",
+            None,  # type: ignore[arg-type]
+            io.BytesIO(error_body),
+        )
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            # First call (POST pulls) -> HTTP 422
+            # Second call (GET pulls) -> Return list with existing PR
+            mock_urlopen.side_effect = [
+                http_error,
+                self._response([
+                    {"html_url": "https://github.com/owner/repo/pull/7", "head": {"ref": "fix/x"}}
+                ])
+            ]
+            url = _create_pr_via_api(
+                "owner/repo", "fix/x", "Title", "", "dev", "ghp_tok"
+            )
+
+        assert url == "https://github.com/owner/repo/pull/7"
+        assert mock_urlopen.call_count == 2
+        req1 = mock_urlopen.call_args_list[0].args[0]
+        assert req1.full_url == "https://api.github.com/repos/owner/repo/pulls"
+        assert req1.get_method() == "POST"
+
+        req2 = mock_urlopen.call_args_list[1].args[0]
+        assert req2.full_url == "https://api.github.com/repos/owner/repo/pulls?head=owner:fix/x&state=open"
+        assert req2.get_method() == "GET"

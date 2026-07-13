@@ -1780,7 +1780,7 @@ def _run_eslint_verify(
     return _envelope_ok("eslint", findings, ec)
 
 
-def _run_golangci_lint_verify(container: Any, path: str | Sequence[str]) -> VerifyResult:
+def _run_golangci_lint_verify(container: Any, path: str | Sequence[str], workdir: str | None = None) -> VerifyResult:
     """Run golangci-lint on *path*.  Falls back to go vet."""
     ec, output = container.exec_run(
         [
@@ -1790,9 +1790,10 @@ def _run_golangci_lint_verify(container: Any, path: str | Sequence[str]) -> Veri
         ],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     if ec == 127:
-        return _run_go_vet_verify(container, path)
+        return _run_go_vet_verify(container, path, workdir=workdir)
 
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -1808,7 +1809,7 @@ def _run_golangci_lint_verify(container: Any, path: str | Sequence[str]) -> Veri
     return _envelope_ok("golangci-lint", findings, ec)
 
 
-def _run_go_vet_verify(container: Any, path: str | Sequence[str]) -> VerifyResult:
+def _run_go_vet_verify(container: Any, path: str | Sequence[str], workdir: str | None = None) -> VerifyResult:
     """Run go vet on *path*."""
     ec, output = container.exec_run(
         [
@@ -1818,6 +1819,7 @@ def _run_go_vet_verify(container: Any, path: str | Sequence[str]) -> VerifyResul
         ],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -1935,7 +1937,7 @@ def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> Ve
     return _envelope_ok("tsc", findings, ec)
 
 
-def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
+def _run_pytest_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
     """Run pytest --json-report on *path*.  Returns VerifyResult envelope."""
     from sunaba.test_report import (
         PytestAdapter,
@@ -1949,6 +1951,7 @@ def _run_pytest_verify(container: Any, path: str) -> VerifyResult:
         ["/bin/sh", "-c", cmd],
         stdout=True,
         stderr=True,
+        workdir=workdir,
     )
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -2642,7 +2645,7 @@ def _gate_lint_runner(
     if lang in ("js", "ts"):
         return _run_eslint_verify(container, path, workdir=workdir)
     if lang == "go":
-        return _run_golangci_lint_verify(container, path)
+        return _run_golangci_lint_verify(container, path, workdir=workdir)
     return _envelope_skipped(f"{lang}-lint", f"language '{lang}' has no lint layer")
 
 

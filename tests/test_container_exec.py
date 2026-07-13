@@ -315,7 +315,8 @@ class TestRunContainerAndExecPipExtras:
         ))
 
         assert result["status"] == "ok"
-        assert "clone_warning" not in result
+        assert "clone_warning" in result
+        assert "pip install" in result["clone_warning"]
 
     @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")

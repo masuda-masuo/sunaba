@@ -318,7 +318,7 @@ class TestSandboxInitializeCloneRepoPipExtras:
 
         assert "abc123def456" in result
         assert "clone_repo failed" not in result
-        assert "pip install" not in result
+        assert "pip install failed" in result
 
     @patch("sunaba.tools.container._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")

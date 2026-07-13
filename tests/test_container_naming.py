@@ -8,8 +8,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sunaba import proxy_lifecycle
 from sunaba.journal import set_session_label
-from sunaba.security import MANAGED_LABEL, NAME_LABEL
+from sunaba.security import KIND_LABEL, KIND_PROXY, MANAGED_LABEL, NAME_LABEL
 from sunaba.tools.container import (
     sandbox_attach,
     sandbox_initialize,
@@ -636,3 +637,89 @@ class TestReapIdleContainers:
         result = json.loads(sandbox_list_containers())
         assert "idle-cid" in result["reaped_ids"]
         c.kill.assert_called_once()
+
+
+class TestReaperNeverTouchesTheProxy:
+    """The idle reaper is scoped to sandboxes (Issue #594).
+
+    ``MANAGED_LABEL`` also matches the egress-proxy sidecar.  Reaping it
+    would break networked init for every container, so the sidecar must be
+    excluded by kind -- not merely by having no activity timestamp.
+    """
+
+    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container._docker")
+    @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
+    def test_labelled_proxy_is_not_reaped(
+        self,
+        mock_docker: MagicMock,
+        mock_activity: MagicMock,
+    ) -> None:
+        from sunaba.tools.container import _reap_idle_containers
+
+        proxy = _make_container(
+            container_id="proxy-cid",
+            labels={MANAGED_LABEL: "true", KIND_LABEL: KIND_PROXY},
+        )
+        mock_docker.return_value = _make_client([proxy])
+        mock_activity.return_value = {"proxy-cid": "2025-01-01T00:00:00+00:00"}
+
+        assert _reap_idle_containers() == []
+        proxy.kill.assert_not_called()
+
+    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container._docker")
+    @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
+    def test_unlabelled_legacy_proxy_is_not_reaped(
+        self,
+        mock_docker: MagicMock,
+        mock_activity: MagicMock,
+    ) -> None:
+        """A sidecar predating KIND_LABEL is recognised by its fixed name.
+
+        It has restart_policy=unless-stopped, so it survives upgrades
+        without ever being relabelled.
+        """
+        from sunaba.tools.container import _reap_idle_containers
+
+        proxy = _make_container(
+            container_id="proxy-cid",
+            labels={MANAGED_LABEL: "true"},
+        )
+        proxy.name = proxy_lifecycle.PROXY_CONTAINER_NAME
+        mock_docker.return_value = _make_client([proxy])
+        mock_activity.return_value = {"proxy-cid": "2025-01-01T00:00:00+00:00"}
+
+        assert _reap_idle_containers() == []
+        proxy.kill.assert_not_called()
+
+
+class TestInitializeRunsIdleReap:
+    """A configured TTL must fire from init, not only from list (Issue #594)."""
+
+    @patch("sunaba.tools.container._reap_idle_containers")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container._ensure_image")
+    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.build_secure_run_kwargs")
+    def test_initialize_reaps_idle_containers(
+        self,
+        mock_build: MagicMock,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+        mock_reap: MagicMock,
+    ) -> None:
+        mock_container = _make_container()
+        mock_container.labels = {}
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_build.return_value = {"command": "sleep infinity", "detach": True}
+        mock_reap.return_value = []
+
+        sandbox_initialize(
+            image="python@sha256:" + "0" * 64,
+        )
+
+        mock_reap.assert_called_once()

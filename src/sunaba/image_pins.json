@@ -1,6 +1,6 @@
 {
-  "neutral": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:618610e2ad96bb041e7481fb6eaefdd5c034180600bd2d974273b890287ccf64",
-  "python": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:08e2f8cd9563c2c13c1c9bdccf38bb2a2b211edd5e0a28420b794e5d9071e749",
-  "go": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:56e06b9efa5916d56f11db7c067c337f0e7d7ed7d9859fcd51069dc4566ff031",
-  "full": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:2a51074bb1b34c45048b00c288d8d1a96b57f42f3951031a89622515422e675d"
+  "neutral": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:fbe44b144d2b212fc84aa8306a7d235331743184122614817c6b3d8b2d8999b1",
+  "python": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:a624fec5e510ffca3270ee988e4e6b43bba83a80e99cc7f62b39438a4c7691c1",
+  "go": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:b1e7a511418725d000d233f82172db27411003bd6cacaf6e5ca46fbfd8c1724a",
+  "full": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:33f0eb085f83a043e00da1cc80424e7422639db67bb98fa53369ff79ac6d0be8"
 }

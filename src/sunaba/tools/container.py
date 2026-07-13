@@ -19,7 +19,7 @@ from docker.errors import APIError, NotFound
 from fastmcp import Context
 from pydantic import BeforeValidator
 
-from sunaba import image_pins, image_selection, proxy_lifecycle
+from sunaba import image_pins, proxy_lifecycle
 from sunaba.journal import (
     get_last_activity_per_container,
     get_session_label,
@@ -75,40 +75,42 @@ from sunaba.tools.vcs import (
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-# -- Default sandbox images (Issue #313) ---------------------------------
-# Image selection is detection-based: when ``image`` is not given, the
-# project's language is detected host-side (before container start) and the
-# matching variant image is chosen.  No language is hardcoded as "the
-# default" -- "Python is the default" only made sense because this repo
-# happens to be Python (see sunaba.image_selection).
+# -- Default sandbox image (Issue #584) -----------------------------------
+# The default is the *union* of every language toolchain, not a guess at which
+# one this project needs.  Host-side language detection used to run here (#313):
+# it probed the GitHub contents API before starting the container and picked a
+# matching variant.  That ordering was the bug -- the guess came before an
+# irreversible decision (an image is immutable once the container runs), while
+# the accurate detector (``edit_verify.detect_languages``, which reads the real
+# files) only runs afterwards.  A failed probe therefore landed init on an image
+# without the toolchain the code needed, and the first verify failed the gate for
+# a reason unrelated to the code (#584).  Making the default a superset removes
+# the guess instead of trying to make it more reliable.
 #
 # The digest pins live as data in ``sunaba/image_pins.json``; CI
 # (``.github/workflows/build-sandbox-variants.yml``) rewrites that file after
 # each variant build, then verifies this loader returns the new digest.  This
 # replaces the old ``sed``-on-source approach that broke silently when the
 # constants moved or were reformatted (#214 / #331).  All refs are digest-pinned
-# per ``docs/design-multilang-support.md`` section 6.
+# per ``docs/design_multilang_support.md`` section 6.
 _image_pins: dict[str, str] = image_pins.load_image_pins()
+
+#: All-in-one image: base + every language toolchain verify can dispatch to
+#: (#584).  A superset of the dispatch matrix on purpose -- see
+#: ``docker/Dockerfile.full``.
+_FULL_IMAGE: str = _image_pins["full"]
+
+#: Lean images, reachable only through an explicit ``image=`` (which also
+#: accepts the aliases "neutral" / "python" / "go" / "full"; alias resolution
+#: reads :data:`_image_pins` directly).  ``neutral`` is also the ``FROM`` parent
+#: the variants are built on.
 _NEUTRAL_IMAGE: str = _image_pins["neutral"]
 _PYTHON_IMAGE: str = _image_pins["python"]
 _GO_IMAGE: str = _image_pins["go"]
 
-#: All-in-one image: base + every language toolchain verify can dispatch to
-#: (#584).  Kept as a superset of the dispatch matrix on purpose -- see
-#: ``docker/Dockerfile.full`` for why the *default* image must be the union
-#: rather than a guessed-at variant.
-_FULL_IMAGE: str = _image_pins["full"]
-
-#: Neutral fallback used when detection is inconclusive (unknown / unsupported
-#: / py+go polyglot) and for bare ``sandbox_initialize()`` with nothing to
-#: inspect.  Overridable via the ``--default-image`` CLI flag (server.py).
-_DEFAULT_IMAGE: str = _NEUTRAL_IMAGE
-
-#: Detected-language -> variant-image map consumed by image_selection.
-_LANGUAGE_IMAGE_MAP: dict[str, str] = {
-    "python": _PYTHON_IMAGE,
-    "go": _GO_IMAGE,
-}
+#: Image used when ``sandbox_initialize`` is called without ``image=``.
+#: Overridable via the ``--default-image`` CLI flag (server.py).
+_DEFAULT_IMAGE: str = _FULL_IMAGE
 
 
 _CLONE_REPO_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9._-]+$")
@@ -188,28 +190,28 @@ def _ensure_image(image: str) -> None:
 
 
 def prewarm_default_image() -> None:
-    """Pull the default and language-variant images so first use is warm.
+    """Pull the default image so first use is warm.
 
     A cold-start image pull can exceed the MCP/HTTP request timeout, so the
     first ``sandbox_initialize`` fails even though the pull finishes in the
-    background and the next call succeeds (Issue #303).  Pulling the images
-    ahead of time — at server startup and periodically — removes that
-    first-call cliff and does not depend on progress notifications keeping the
-    connection alive.
+    background and the next call succeeds (Issue #303).  Pulling ahead of time
+    — at server startup and periodically — removes that first-call cliff and
+    does not depend on progress notifications keeping the connection alive.
 
-    Originally this only pulled the neutral default image, but
-    ``_select_initial_image`` can also pick the ``python`` or ``go`` variant
-    based on language detection — those were never prewarmed, so detection
-    routinely traded one cold pull (neutral) for another (variant).  Pull
-    all three so detection never hits a cold image.
+    Only the *default* image is prewarmed.  It used to pull the python and go
+    variants too, because host-side detection could silently pick one of them
+    and trade one cold pull for another.  Detection is gone (#584): an init
+    with no ``image=`` always lands on the default, and the lean variants are
+    reachable only by asking for them explicitly — a caller who does that can
+    afford the pull, and ``sandbox_initialize`` keeps the connection alive with
+    progress notifications while it happens (#298).
 
     Reads the module-level :data:`_DEFAULT_IMAGE` at call time so a
     ``--default-image`` override applied before the prewarm thread starts is
-    honoured.  Any failure (registry hiccup, Docker down) is swallowed per
-    image so one bad pull never blocks the others or startup; the next
-    refresh cycle retries.
+    honoured.  Any failure (registry hiccup, Docker down) is swallowed so a bad
+    pull never blocks startup; the next refresh cycle retries.
     """
-    images = {_DEFAULT_IMAGE, _PYTHON_IMAGE, _GO_IMAGE, _FULL_IMAGE}
+    images = {_DEFAULT_IMAGE}
     for image in images:
         try:
             _ensure_image(image)
@@ -240,42 +242,28 @@ def _validate_clone_repo(clone_repo: str) -> tuple[str, str]:
     return owner, name
 
 
-def _select_initial_image(
-    image: str | None,
-    clone_repo: str | None,
-    repo: str | None,
-    pr: int | None,
-) -> tuple[str, str | None]:
-    """Choose the image (and optional notice) for a new container (Issue #313).
+def _select_initial_image(image: str | None) -> str:
+    """Choose the image for a new container: the explicit one, or the default.
 
-    An explicit *image* wins.  Otherwise the project's language is detected
-    via the GitHub API when a repo is being cloned and the matching variant
-    image is selected, falling back to the neutral ``_DEFAULT_IMAGE`` when
-    detection is inconclusive.  Detection never blocks init: any failure
-    degrades to the neutral image.
+    There is deliberately **no language detection here** (Issue #584).  There
+    used to be: the host probed the GitHub contents API before starting the
+    container and picked a matching variant image.  That put the *guess* before
+    an irreversible decision -- a container's image is immutable once running,
+    and for ``clone_repo`` the files only exist inside the container afterwards
+    -- while the *accurate* detector (``edit_verify.detect_languages``, which
+    reads the real files) runs afterwards, when nothing can be changed about it.
+    So when the probe failed (rate limit, timeout, private repo), init silently
+    landed on an image without the toolchain the code actually needed, and the
+    first verify failed the gate for a reason that had nothing to do with the
+    code.
+
+    The fix is to remove the guess rather than improve it: the default image is
+    the union of every toolchain verify can dispatch to (``sandbox:full``), so
+    whatever the in-container detector concludes, the tools are there.  An
+    explicit ``image=`` remains the escape hatch -- and the only way to ask for
+    a lean variant.
     """
-    target_repo = clone_repo or repo
-    # A GitHub probe is only worthwhile (and only authorized) when we are
-    # actually fetching that repo over the network.
-    network_clone = bool(target_repo)
-    # Everything below is best-effort: the GitHub probe can raise, and
-    # must never block init.  Keep it inside the guard so any failure
-    # degrades to the neutral image.
-    try:
-        token: str | None = None
-        if network_clone:
-            token = _resolve_vcs_token() or None
-        return image_selection.resolve_initial_image(
-            explicit_image=image,
-            target_repo=target_repo,
-            token=token,
-            language_image_map=_LANGUAGE_IMAGE_MAP,
-            neutral_image=_DEFAULT_IMAGE,
-            allow_network_detection=network_clone,
-        )
-    except Exception as e:  # pragma: no cover - defensive: never block init
-        logger.warning("image detection failed, using neutral default: %s", e)
-        return (image or _DEFAULT_IMAGE), None
+    return image or _DEFAULT_IMAGE
 
 
 def _write_clone_meta(container: Any, clone_path: str, base_branch: str | None = None) -> None:
@@ -1289,10 +1277,12 @@ def sandbox_initialize(
 
     Args:
         image: Docker image to use (e.g. ``python@sha256:...``).
-               Variant aliases ``\"neutral\"``, ``\"python\"``, and ``\"go\"``
-               resolve to the pinned GHCR digest images (Issue #545).
-               Defaults to the image specified
-               via the ``--default-image`` CLI argument in the server config.
+               Variant aliases resolve to the pinned GHCR digest images
+               (Issue #545): the all-in-one "full", and the lean "neutral" /
+               "python" / "go".  Omit this argument unless you have a reason:
+               the default is the all-in-one image, which carries every
+               toolchain verify can run, so nothing about the project's
+               language has to be guessed (Issue #584).
         allow_network: Whether to allow network access (default ``False``).
                Set to ``True`` for VCS operations (git/gh) that need to
                reach GitHub API.  Network access is a boundary-crossing
@@ -1388,12 +1378,8 @@ def sandbox_initialize(
         if existing:
             return f"Error: a container named {name!r} already exists ({existing[0][:12]}); use a different name or sandbox_attach to connect to it"
 
-    # Detection-based image selection (Issue #313): when no image is given,
-    # pick the variant that matches the project's language instead of a
-    # hardcoded default.  *image_notice* explains any neutral fallback.
-    resolved, image_notice = _select_initial_image(
-        image, clone_repo, repo, pr
-    )
+    # No image given -> the all-in-one default (#584).  Nothing is guessed.
+    resolved = _select_initial_image(image)
     # -- Egress proxy sidecar (#358, Epic #509): default-on, fail closed --
     # A proxied container gets no VCS token in its env (#356); publish
     # hands the credential to the proxy per push grant instead.
@@ -1408,7 +1394,7 @@ def sandbox_initialize(
         env.update(proxy_lifecycle.sandbox_proxy_env(proxy_runtime))
 
     try:
-        # Resolve variant aliases ("neutral", "python", "go") to pinned digests (Issue #545)
+        # Resolve variant aliases ("full", "neutral", "python", "go") to pinned digests (Issue #545)
         resolved = _image_pins.get(resolved, resolved)
         resolved = _resolve_image_ref(resolved)
         validate_image_ref(resolved)
@@ -1569,9 +1555,8 @@ def sandbox_initialize(
 
     net_state = "on" if allow_network else "off"
     net_msg = f" [network: {net_state}]"
-    image_msg = f" [image: {image_notice}]" if image_notice else ""
     name_msg = f" [name: {name}]" if name else ""
-    return cid + clone_msg + pr_msg + net_msg + image_msg + name_msg
+    return cid + clone_msg + pr_msg + net_msg + name_msg
 
 
 # Async wrapper around sandbox_initialize: the sync work runs in a thread
@@ -1603,7 +1588,8 @@ async def sandbox_initialize_tool(
     for the real result.
 
     Args:
-        image: Docker image, or alias 'neutral'/'python'/'go' (pinned digests).
+        image: Docker image, or alias 'full'/'neutral'/'python'/'go' (pinned digests).
+               Default: the all-in-one image (every toolchain verify can run).
         allow_network: Enable network access. Required for pip install,
             network clones, and publish.
         clone_repo: 'owner/name' cloned over the network (auto-enables
@@ -1755,7 +1741,8 @@ def run_container_and_exec(
     masked) and consecutive repeated lines are compressed.
 
     Args:
-        image: Docker image, or alias 'neutral'/'python'/'go' (pinned digests).
+        image: Docker image, or alias 'full'/'neutral'/'python'/'go' (pinned digests).
+               Default: the all-in-one image (every toolchain verify can run).
         commands: Shell commands run sequentially; must be non-empty.
         verbose: 'error_only', 'summary' (default), or 'full'.
         max_lines: Max lines shown in summary/error_only mode.
@@ -1802,12 +1789,8 @@ def run_container_and_exec(
             clone_repo,
         )
 
-    # Detection-based image selection (Issue #313), same as sandbox_initialize.
-    resolved, image_notice = _select_initial_image(
-        image, clone_repo, repo, pr
-    )
-    if image_notice:
-        logger.info("image selection: %s", image_notice)
+    # No image given -> the all-in-one default (#584), same as sandbox_initialize.
+    resolved = _select_initial_image(image)
     client = _docker()
     # -- Egress proxy sidecar (#358, Epic #509): default-on, fail closed --
     # A proxied container gets no VCS token in its env (#356); publish
@@ -1829,7 +1812,7 @@ def run_container_and_exec(
 
     # --- Start container ---
     try:
-        # Resolve variant aliases ("neutral", "python", "go") to pinned digests (Issue #545)
+        # Resolve variant aliases ("full", "neutral", "python", "go") to pinned digests (Issue #545)
         resolved = _image_pins.get(resolved, resolved)
         resolved = _resolve_image_ref(resolved)
         validate_image_ref(resolved)

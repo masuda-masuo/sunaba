@@ -52,25 +52,9 @@ def test_container_constants_are_wired_from_loader() -> None:
     assert container._PYTHON_IMAGE == pins["python"]
     assert container._GO_IMAGE == pins["go"]
     assert container._FULL_IMAGE == pins["full"]
-    assert container._DEFAULT_IMAGE == pins["neutral"]
-    assert container._LANGUAGE_IMAGE_MAP == {
-        "python": pins["python"],
-        "go": pins["go"],
-    }
-
-
-def test_full_image_is_prewarmed() -> None:
-    """The all-in-one image must be pulled ahead of first use (#584).
-
-    It becomes the default in the follow-up, and a default that is never
-    prewarmed reintroduces the cold-pull timeout #303 was about.
-    """
-    import inspect
-
-    from sunaba.tools import container
-
-    source = inspect.getsource(container.prewarm_default_image)
-    assert "_FULL_IMAGE" in source
+    # The default is the all-in-one image: nothing about the project's language
+    # is guessed before the container starts (#584).
+    assert container._DEFAULT_IMAGE == pins["full"]
 
 
 def test_full_alias_resolves_to_a_digest() -> None:

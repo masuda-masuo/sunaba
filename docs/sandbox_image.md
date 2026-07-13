@@ -6,14 +6,19 @@ Sunaba runs AI edits, lints, and test checks inside purpose-built Docker sandbox
 
 ## 1. Sandbox Image Variants
 
-To keep image sizes manageable, the single monolith sandbox image is split into modular variants built from `docker/Dockerfile.{base,python,go}`:
+Images are built from `docker/Dockerfile.{base,python,go,full}`. The toolchain installs themselves live in `docker/install-python-tools.sh` and `docker/install-go.sh`, which the variant Dockerfiles all source, so "what the Python toolchain is" is defined in exactly one place.
 
 | Tag | Base Layer | Included Backend Toolchains | Use Case |
 |---|---|---|---|
-| `sandbox:base` | Neutral core | Node runtime + VCS + Search tools. No backend compilers/interpreters. | Fallback when project language is unknown or polyglot. |
-| `sandbox:python` | Base | Python (3.12) toolchain + Node runtime (for Pyright). | Python projects. |
-| `sandbox:go` | Base | Go compiler/toolchain. | Go projects. |
+| `sandbox:full` | Base | Python (3.12) + Go + Node. Every toolchain `verify` can dispatch to. | **The default.** Used whenever `image=` is omitted. |
+| `sandbox:base` | Neutral core | Node runtime + VCS + Search tools. No backend compilers/interpreters. | `FROM` parent of the variants. Not a runtime default. |
+| `sandbox:python` | Base | Python (3.12) toolchain + Node runtime (for Pyright). | Lean image; explicit `image=python` only. |
+| `sandbox:go` | Base | Go compiler/toolchain. | Lean image; explicit `image=go` only. |
 | `sandbox:minimal` | Minimal | Bare Git + Python + Pytest. | Lightweight or rapid testing. |
+
+The default is deliberately the **union** of the toolchains rather than a guess at which one this project needs. See `design_multilang_support.md` §6.1 (Issue #584) for why: the host cannot reliably know a repository's language before the container starts, and the image is immutable once it does, so a wrong guess is unfixable — while the in-container detector that runs later is always right.
+
+Each image's `HEALTHCHECK` asserts the tools it owes `verify`, and CI runs it with `docker run` after every build. A tool missing from an image therefore fails the build, not a user's first `verify`.
 
 ---
 
@@ -38,18 +43,15 @@ The default images come pre-installed with the following utilities, which the se
 
 ## 3. Language Detection & Selection Rules
 
-When `sandbox_initialize` is called without specifying an explicit `image` parameter, the server automatically detects the project's language by querying files from GitHub and chooses the appropriate image:
+**Image selection does not involve detection.** `sandbox_initialize` starts `sandbox:full` unless an explicit `image=` says otherwise (the aliases `full` / `neutral` / `python` / `go` resolve to pinned digests). The host used to probe the GitHub contents API to pick a variant; that was removed in #584 because the guess preceded an irreversible decision and a failed probe silently produced a container missing the toolchain the project needed.
 
-1.  **Manual Override**: Passing `language=` to `verify_in_container` or an explicit `image=` to `sandbox_initialize` overrides auto-detection.
-2.  **File Extension (Single-file fallback)**:
-    *   `.py` → `sandbox:python`
-    *   `.go` → `sandbox:go`
-    *   `.js`, `.jsx`, `.ts`, `.tsx` → `sandbox:base`
-3.  **Project Marker Files (Repository scanning)**:
-    *   `go.mod` → Go project (`sandbox:go`)
-    *   `pyproject.toml` / `setup.py` / `requirements*.txt` / `Pipfile` → Python project (`sandbox:python`)
-    *   `package.json` → Node project (`sandbox:base`)
-4.  **Fallback**: Unknown, polyglot (e.g. Python + Go mixed without override), or unsupported languages default to the neutral `sandbox:base`.
+**Language detection still happens — inside the container, at verify time**, where it reads the real files and can be re-run. It selects which toolchain to *run*, not which image to start (`edit_verify.detect_languages`):
+
+1.  **Manual Override**: `language=` on `verify_in_container` / `lint_in_container` / `type_check_in_container` skips detection.
+2.  **File Extension** (single-file targets): `.py` → Python, `.go` → Go, `.js` / `.jsx` → JS, `.ts` / `.tsx` → TS (scans upward for `tsconfig.json`).
+3.  **Project Marker Files** (directory targets): `go.mod` → Go; `pyproject.toml` / `setup.py` / `requirements*.txt` / `Pipfile` / `tox.ini` → Python; `package.json` → JS; `tsconfig.json` → TS.
+4.  **Polyglot**: all detected languages run, each scoped to the sub-tree holding its marker. The default image carries every toolchain, so a polyglot repository is verified in full rather than falling back to an image that can run neither.
+5.  **Unknown**: no markers found → verify asks for an explicit `language=` instead of silently guessing.
 
 ---
 

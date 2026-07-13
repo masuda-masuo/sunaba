@@ -911,9 +911,12 @@ def _reap_idle_containers() -> list[str]:
     threshold.  When the env var is not set or is 0, this is a no-op
     (auto-reap disabled by default).
 
-    Only containers managed by us (``MANAGED_LABEL``) are considered.
-    A container is ``idle`` when no journal entry exists for it in the
-    last TTL seconds.  Failures are swallowed (best-effort GC).
+    Only sandboxes are considered: ``MANAGED_LABEL`` also matches the
+    egress-proxy sidecar, which is shared infrastructure and must never
+    be reaped.  A container is ``idle`` when no journal entry exists for
+    it in the last TTL seconds.  Failures are swallowed (best-effort GC).
+
+    Runs from both ``sandbox_initialize`` and ``sandbox_list_containers``.
 
     Returns:
         List of 12-character container ID prefixes that were stopped.
@@ -936,6 +939,14 @@ def _reap_idle_containers() -> list[str]:
     reaped: list[str] = []
     for c in containers:
         cid = c.id[:12]
+        # MANAGED_LABEL alone also matches the egress-proxy sidecar, which is
+        # shared infrastructure with no journal activity of its own.  Reaping
+        # it would break networked init for every other container, so scope
+        # the reaper to sandboxes explicitly instead of relying on the sidecar
+        # merely happening to have no activity timestamp.
+        labels = getattr(c, "labels", None) or {}
+        if _container_kind(labels, getattr(c, "name", None)) != KIND_SANDBOX:
+            continue
         last_ts = last_activity.get(cid)
         idle_secs = _age_seconds(last_ts, now)
         if idle_secs is None or idle_secs < ttl:
@@ -1357,6 +1368,15 @@ def sandbox_initialize(
         _reap_orphaned_init_containers()
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("orphan reap failed: %s", e)
+
+    # Idle GC (Issue #480): init is the only call every agent makes, so it is
+    # the one hook where a configured TTL reliably fires.  Reaping solely from
+    # sandbox_list_containers would leave the TTL near-dead in practice --
+    # agents create containers constantly and seldom list them.
+    try:
+        _reap_idle_containers()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("idle reap failed: %s", e)
 
     # When pr is specified, implicitly enable network access.
     if pr is not None:

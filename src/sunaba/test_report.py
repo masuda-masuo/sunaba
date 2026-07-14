@@ -43,12 +43,10 @@ def build_pytest_cmd(
 
     Callers should split the result with :func:`split_pytest_output`.
     """
-    import multiprocessing as _mp
-    n_workers = max(1, _mp.cpu_count())
     quoted_path = shlex.quote(path)
     return (
         f"{sandbox_env}python3 -m pytest --json-report "
-        f"--json-report-file={json_file} -n {n_workers} -q{filter_args} "
+        f"--json-report-file={json_file} -n auto -q{filter_args} "
         f"{quoted_path} >{raw_file} 2>&1; "
         f"_ec=$?; cat {json_file} 2>/dev/null; "
         f"echo '{PYTEST_RAW_MARKER}'; tail -n {_PYTEST_RAW_LINES} {raw_file} 2>/dev/null; "

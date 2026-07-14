@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,6 +35,26 @@ def _skip_workspace_bootstrap() -> None:
     """
     with patch("sunaba.tools.container._ensure_workspace"):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_journal(tmp_path: Path) -> None:
+    """Give each test its own journal directory to avoid parallel-write conflicts.
+
+    xdist workers (``-n N``) each get a separate process, but they share the
+    real ``~/.sunaba/journal.log`` by default.  Parallel journal writes corrupt
+    the sidecar ``container_state.json``.  This fixture redirects every test's
+    journal to an isolated ``tmp_path`` so that parallel tests never collide.
+    """
+    journal_dir = tmp_path / ".sunaba"
+    with (
+        patch("sunaba.journal._JOURNAL_DIR", journal_dir),
+        patch("sunaba.journal._JOURNAL_PATH", journal_dir / "journal.log"),
+        patch("sunaba.journal._JOURNAL_BACKUP_PATH", journal_dir / "journal.log.1"),
+        patch("sunaba.journal._state_synced", False),
+    ):
+        yield
+
 
 # -------------------------------------------------------------------
 # Shared helpers for VCS tool tests

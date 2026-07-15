@@ -875,11 +875,13 @@ def edit_symbol(
     definition (decorators included) with *new_code*, re-indented to fit.
     new_code="" deletes the definition.  SyntaxError in the result is
     rejected before writing.  Use line=<lineno> to disambiguate overloads.
-    Python files only.  For 1-3 line edits prefer write_file_sandbox.
+    Python files only.
 
     *preserve* controls what of the old definition to keep: decorators
     and/or docstring.  If *new_code* already carries them, old ones are
-    not duplicated.
+    not duplicated.  Comments inside the body are never preserved: the
+    AST (``ast.parse``) discards them.  Keep comments in *new_code* if
+    they matter.
 
     Args:
         container_id: Container ID prefix.

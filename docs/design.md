@@ -187,9 +187,8 @@ The edit/verify subsystem is designed to **quickly edit code and verify test fai
 *   **`verify_in_container`**: Runs linter and type check gates before executing the test runner. If either gate fails, testing is aborted and warnings are returned. Automatically selects the runner based on the project language (pytest, jest, go test). Returns structured JSON diffs of modified files (`unstaged` and `staged` additions/deletions).
 
 ### Editing Modalities
-Code modifications are divided into three approaches:
-*   **Declarative (`write_file_sandbox`)**: Used when the exact replacement content is known. This is the primary path for targeted edits.
-*   **Symbolic (`edit_symbol`)**: Locates a function/class/method by name via AST and replaces its whole definition with `new_code`. By default (`preserve="decorators+docstring"`) old decorators and docstring are kept. Comments inside the body are not preserved (AST discards them). Use when `write_file_sandbox`'s `old_str` matching is impractical (large definitions, overloads).
+Code modifications are divided into two approaches:
+*   **Declarative (`write_file_sandbox`)**: Used when the exact replacement content is known. This is the primary path for targeted edits.  On ``.py`` files, ``old_str`` patterns that look like ``def`` / ``class`` / ``async def`` definitions are resolved via AST first, making the replacement robust against indentation shifts and line-number changes — no exact-string matching is required for those cases.  Decoration and docstring preservation follows the ``edit_symbol_in_container`` policy (default ``"decorators+docstring"``).
 *   **Imperative (`transform_file`)**: Used when content needs to be calculated (regex replacements, AST rewrites, patching via `git apply`). The code is passed as a string and executed securely, returning the resulting diff.
 *   **`apply_patch` (Removed)**: Manual patch application was deprecated (#259). LLM-generated diffs suffer from high syntax failure rates, consuming excessive tokens. Automated patching is now handled via the `transform_file` API.
 

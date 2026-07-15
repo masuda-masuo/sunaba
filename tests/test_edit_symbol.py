@@ -1,20 +1,19 @@
-"""Tests for the edit_symbol tool (issue #581).
+"""Tests for the edit_symbol_in_container driver (issue #581).
 
 Covers the in-container driver via ``edit_symbol_in_container`` (symbol
 resolution, decorator-inclusive ranges, re-indentation, seam blank-line
-collapsing, post-edit syntax verification) and the MCP-facing
-``edit_symbol`` envelope (extension gate, diff truncation metadata).
+collapsing, post-edit syntax verification).
+
+The MCP-facing ``edit_symbol`` tool was removed in #627; its AST
+resolution is now integrated into ``write_file_sandbox``'s ``old_str``
+path.
 """
 
-from __future__ import annotations
-
 import ast
-import json
 
 import pytest
 
 from src.sunaba.edit_verify import edit_symbol_in_container
-from sunaba.tools.file import edit_symbol
 from tests.conftest import _FakeClient, _FakeContainer
 
 POSIX = "/sandbox/mod.py"
@@ -506,46 +505,3 @@ def foo():
         text = f.read_text(encoding="utf-8")
         assert "@functools.lru_cache(maxsize=128)" in text
         assert "return 99" in text
-
-
-# ===================================================================
-# MCP-facing tool envelope
-# ===================================================================
-class TestEditSymbolTool:
-    """The tools-layer wrapper: extension gate and JSON envelope."""
-
-    def _patch_docker(self, monkeypatch, path_map) -> None:  # noqa: ANN001
-        fake = _FakeClient(_FakeContainer(path_map))
-        monkeypatch.setattr("sunaba.tools.file._docker", lambda: fake)
-
-    def test_non_py_file_is_rejected(self, monkeypatch) -> None:
-        self._patch_docker(monkeypatch, {})
-        out = json.loads(edit_symbol("abc123", "/sandbox/x.go", "f", ""))
-        assert out["status"] == "error"
-        assert out["error"] == (
-            "Error: edit_symbol supports .py files only; "
-            "use write_file_sandbox or transform_file"
-        )
-
-    def test_replace_returns_resolved_diff_and_file_size(self, tmp_path, monkeypatch) -> None:
-        f = tmp_path / "mod.py"
-        f.write_text(MODULE_SRC, encoding="utf-8")
-        self._patch_docker(monkeypatch, {POSIX: str(f)})
-        out = json.loads(
-            edit_symbol("abc123", POSIX, "foo", "def foo():\n    return 99\n")
-        )
-        assert out["status"] == "ok"
-        assert out["changed"] is True
-        assert out["resolved"]["qualname"] == "foo"
-        assert out["truncated"] is False
-        assert "+    return 99" in out["diff"]
-        assert out["file_size"]["lines"] > 0
-        assert out["file_size"]["bytes"] > 0
-
-    def test_driver_error_passes_through(self, tmp_path, monkeypatch) -> None:
-        f = tmp_path / "mod.py"
-        f.write_text(AMBIG_SRC, encoding="utf-8")
-        self._patch_docker(monkeypatch, {POSIX: str(f)})
-        out = json.loads(edit_symbol("abc123", POSIX, "process", ""))
-        assert out["status"] == "error"
-        assert "is ambiguous" in out["error"]

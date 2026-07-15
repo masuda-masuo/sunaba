@@ -516,10 +516,11 @@ def issue_view(
     response is a summary plus a file handle; read the full text with
     read_file_range.
 
-    Issue comments are fetched automatically (with auto-pagination) and
-    appended to the saved file in a ``## Comments`` section, with
-    ``author`` and ``timestamp``.  Fetched by the host-side API so no
-    network is needed inside the container.
+    Issue comments and PR review comments are fetched automatically (with
+    auto-pagination) and appended to the saved file in a ``## Comments``
+    section, with ``author``, ``timestamp``, and (for PRs) review state
+    and file location.  Fetched by the host-side API so no network is
+    needed inside the container.
 
     Args:
         container_id: Container ID prefix.
@@ -541,9 +542,11 @@ def issue_view(
 
     cid = container_id[:12]
 
+    token = _resolve_vcs_token()
+
     try:
         issue_data = _github_api_request(
-            f"/repos/{repo}/issues/{issue_number}", _resolve_vcs_token()
+            f"/repos/{repo}/issues/{issue_number}", token
         )
     except RuntimeError as e:
         return json.dumps({"status": "error", "error": f"Failed to fetch issue #{issue_number} from {repo}: {e}"})
@@ -553,9 +556,9 @@ def issue_view(
     body = issue_data.get("body") or ""
 
     try:
-        all_comments = _github_api_request_list_all(
+        issue_comments = _github_api_request_list_all(
             f"/repos/{repo}/issues/{issue_number}/comments?per_page=100",
-            _resolve_vcs_token(),
+            token,
         )
     except RuntimeError as e:
         return json.dumps({
@@ -563,13 +566,46 @@ def issue_view(
             "error": f"Failed to fetch comments for issue #{issue_number} from {repo}: {e}",
         })
 
+    all_comments: list[dict[str, Any]] = list(issue_comments)
+
+    if issue_data.get("pull_request"):
+        try:
+            pr_comments = _github_api_request_list_all(
+                f"/repos/{repo}/pulls/{issue_number}/comments?per_page=100",
+                token,
+            )
+            all_comments.extend(pr_comments)
+        except RuntimeError:
+            pass
+        try:
+            pr_reviews = _github_api_request_list_all(
+                f"/repos/{repo}/pulls/{issue_number}/reviews?per_page=100",
+                token,
+            )
+            all_comments.extend(pr_reviews)
+        except RuntimeError:
+            pass
+
+    displayed = 0
     if all_comments:
+        all_comments.sort(key=lambda c: c.get("created_at") or c.get("submitted_at") or "")
+
         parts = ["\n\n## Comments\n"]
         for c in all_comments:
             author = c.get("user", {}).get("login", "unknown")
-            ts = c.get("created_at", "")
+            ts = c.get("created_at") or c.get("submitted_at", "")
+            state = c.get("state", "")
+            path = c.get("path", "")
+            line = c.get("line") or c.get("original_line") or ""
             c_body = (c.get("body") or "").strip()
-            parts.append(f"**@{author}** — {ts}\n\n{c_body}\n")
+            if not c_body:
+                continue
+            displayed += 1
+            prefix = ""
+            if state and state != "COMMENTED":
+                prefix = f" ({state.upper()})"
+            loc = f" — `{path}:{line}`" if path else ""
+            parts.append(f"**@{author}**{prefix}{loc} — {ts}\n\n{c_body}\n")
         full_content = body + "\n".join(parts)
     else:
         full_content = body
@@ -609,7 +645,7 @@ def issue_view(
         "summary": summary,
         "file": save_to,
         "size_bytes": size_bytes,
-        "comments": len(all_comments),
+        "comments": displayed,
     })
 
 

@@ -867,19 +867,19 @@ def edit_symbol(
     symbol: str,
     new_code: str,
     line: int | None = None,
+    preserve: str = "decorators+docstring",
 ) -> str:
-    """Replace or delete a function/class/method by name -- no old_str needed.
+    """Replace or delete a Python definition by name -- no old_str needed.
 
-    Locates the definition of *symbol* ("foo", "Foo.bar", "outer.inner")
-    via AST and replaces the whole definition (decorators included) with
-    *new_code*, re-indented to fit the original location.  new_code=""
-    deletes the definition.  The edited file must parse: on SyntaxError
-    nothing is written.  Returns the resolved symbol location and a
-    unified diff -- check "resolved" to confirm the right definition was
-    edited.  If the name is ambiguous the error lists all candidates;
-    retry with a qualified name or line=.  Python files only.  For 1-3
-    line local edits prefer write_file_sandbox old_str; for non-Python
-    or pattern edits use transform_file.
+    Locates *symbol* ("foo", "Foo.bar") via AST and replaces the whole
+    definition (decorators included) with *new_code*, re-indented to fit.
+    new_code="" deletes the definition.  SyntaxError in the result is
+    rejected before writing.  Use line=<lineno> to disambiguate overloads.
+    Python files only.  For 1-3 line edits prefer write_file_sandbox.
+
+    *preserve* controls what of the old definition to keep: decorators
+    and/or docstring.  If *new_code* already carries them, old ones are
+    not duplicated.
 
     Args:
         container_id: Container ID prefix.
@@ -890,6 +890,9 @@ def edit_symbol(
             Whitespace-only is rejected.
         line: Disambiguates same-name definitions: any line number inside
             the intended definition (decorators included).
+        preserve: Old definition parts to keep:
+            "decorators+docstring" (default);
+            "decorators" / "docstring" / "none".
 
     Returns:
         JSON: status, resolved (qualname/kind/start_line/end_line),
@@ -917,7 +920,7 @@ def edit_symbol(
         {"file_path": file_path, "symbol": symbol},
     )
     result = edit_symbol_in_container(
-        client, container_id, file_path, symbol, new_code, line
+        client, container_id, file_path, symbol, new_code, line, preserve
     )
 
     if result.get("status") != "ok":

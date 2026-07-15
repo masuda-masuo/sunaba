@@ -354,6 +354,161 @@ class TestValidationGates:
 
 
 # ===================================================================
+# Preserve decorators and docstring
+# ===================================================================
+class TestPreserveDecoratorsAndDocstring:
+    """preserve= parameter: keeps decorators/docstring from the old definition."""
+
+    DEC_SRC = """\
+import functools
+
+
+@functools.lru_cache
+@functools.wraps
+def cached():
+    \"\"\"This is a docstring.\"\"\"
+    return 3
+"""
+
+    def test_default_preserves_both(self, tmp_path) -> None:
+        out, f = _run(
+            tmp_path, self.DEC_SRC, "cached",
+            "def cached():\n    return 99\n",
+        )
+        assert out["status"] == "ok"
+        text = f.read_text(encoding="utf-8")
+        assert "@functools.lru_cache" in text
+        assert "@functools.wraps" in text
+        assert '"""This is a docstring."""' in text
+        assert "return 99" in text
+
+    def test_preserve_none_removes_everything(self, tmp_path) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text(self.DEC_SRC, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "cached",
+            "def cached():\n    return 99\n",
+            preserve="none",
+        )
+        assert out["status"] == "ok"
+        text = f.read_text(encoding="utf-8")
+        assert "@functools.lru_cache" not in text
+        assert "@functools.wraps" not in text
+        assert "docstring" not in text
+        assert "return 99" in text
+
+    def test_preserve_decorators_only(self, tmp_path) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text(self.DEC_SRC, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "cached",
+            "def cached():\n    return 99\n",
+            preserve="decorators",
+        )
+        assert out["status"] == "ok"
+        text = f.read_text(encoding="utf-8")
+        assert "@functools.lru_cache" in text
+        assert "@functools.wraps" in text
+        assert "docstring" not in text
+        assert "return 99" in text
+
+    def test_preserve_docstring_only(self, tmp_path) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text(self.DEC_SRC, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "cached",
+            "def cached():\n    return 99\n",
+            preserve="docstring",
+        )
+        assert out["status"] == "ok"
+        text = f.read_text(encoding="utf-8")
+        assert "@functools.lru_cache" not in text
+        assert "@functools.wraps" not in text
+        assert '"""This is a docstring."""' in text
+        assert "return 99" in text
+
+    def test_new_decorators_win_over_old(self, tmp_path) -> None:
+        """When new_code already has decorators, old ones are not duplicated."""
+        f = tmp_path / "mod.py"
+        f.write_text(self.DEC_SRC, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "cached",
+            "@other_decorator\ndef cached():\n    return 99\n",
+        )
+        assert out["status"] == "ok"
+        text = f.read_text(encoding="utf-8")
+        assert "@other_decorator" in text
+        assert "@functools.lru_cache" not in text  # old ones gone
+        assert "return 99" in text
+
+    def test_new_docstring_wins_over_old(self, tmp_path) -> None:
+        """When new_code has a docstring, the old one is not inserted."""
+        f = tmp_path / "mod.py"
+        f.write_text(self.DEC_SRC, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "cached",
+            'def cached():\n    """New docstring."""\n    return 99\n',
+        )
+        assert out["status"] == "ok"
+        text = f.read_text(encoding="utf-8")
+        assert '"""New docstring."""' in text
+        assert "This is a docstring" not in text
+        assert "return 99" in text
+
+    DEC_WITH_ARGS_SRC = """\
+import functools
+
+
+@functools.lru_cache(maxsize=128)
+def cached():
+    return 3
+"""
+
+    def test_docstring_reindented_to_new_body_indent(self, tmp_path) -> None:
+        """Docstring indent adjusts when new_code uses a different body indent."""
+        src = """\
+def foo():
+    \"\"\"A docstring.\"\"\"
+    pass
+"""
+        f = tmp_path / "mod.py"
+        f.write_text(src, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "foo",
+            "def foo():\n  return 1\n",
+        )
+        # new_code uses 2-space body indent; docstring should be re-indented to 2
+        assert out["status"] == "ok"
+        text = f.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if '"""' in line:
+                assert line == '  """A docstring."""'
+                break
+        else:
+            pytest.fail("docstring not found")
+
+    def test_decorator_with_args_preserved(self, tmp_path) -> None:
+        """Decorators with arguments (calls) are preserved correctly."""
+        f = tmp_path / "mod.py"
+        f.write_text(self.DEC_WITH_ARGS_SRC, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "cached",
+            "def cached():\n    return 99\n",
+        )
+        assert out["status"] == "ok"
+        text = f.read_text(encoding="utf-8")
+        assert "@functools.lru_cache(maxsize=128)" in text
+        assert "return 99" in text
+
+
+# ===================================================================
 # MCP-facing tool envelope
 # ===================================================================
 class TestEditSymbolTool:

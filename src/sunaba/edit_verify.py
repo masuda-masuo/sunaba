@@ -1227,6 +1227,7 @@ FILE_PATH = PARAMS["file_path"]
 SYMBOL = PARAMS["symbol"]
 NEW_CODE = PARAMS["new_code"]
 LINE = PARAMS["line"]
+PRESERVE = PARAMS.get("preserve", "decorators+docstring")
 
 
 def emit(obj):
@@ -1397,6 +1398,67 @@ else:
             reindented.append(" " * delta + ln)
         else:
             reindented.append(ln[min(-delta, len(ln) - len(ln.lstrip())):])
+
+    if PRESERVE != "none":
+        old_node = None
+        for n in ast.walk(tree):
+            if isinstance(n, DEF_NODES) and n.lineno == target["def_line"]:
+                old_node = n
+                break
+        if old_node is not None:
+            try:
+                new_tree = ast.parse(NEW_CODE)
+            except SyntaxError:
+                new_tree = None
+            if new_tree is not None:
+                new_node = None
+                for n in ast.walk(new_tree):
+                    if isinstance(n, DEF_NODES):
+                        new_node = n
+                        break
+
+                if new_node is not None:
+                    def _has_docstring(node):
+                        return (node.body
+                                and isinstance(node.body[0], ast.Expr)
+                                and isinstance(node.body[0].value, ast.Constant)
+                                and isinstance(node.body[0].value.value, str))
+
+                    preserve_decs = PRESERVE in ("decorators", "decorators+docstring")
+                    preserve_docs = PRESERVE in ("docstring", "decorators+docstring")
+
+                    if preserve_decs and old_node.decorator_list and not new_node.decorator_list:
+                        dec_lines = []
+                        for d in old_node.decorator_list:
+                            for ln in range(d.lineno, d.end_lineno + 1):
+                                dec_lines.append(lines[ln - 1])
+                        reindented = dec_lines + reindented
+
+                    if preserve_docs and not _has_docstring(new_node) and _has_docstring(old_node):
+                        ds = old_node.body[0]
+                        if ds.lineno != target["def_line"]:
+                            old_body_indent = ds.col_offset
+                            new_body_indent = old_body_indent
+                            def_idx = 0
+                            for i, ln in enumerate(reindented):
+                                stripped = ln.lstrip()
+                                if stripped.startswith("def ") or stripped.startswith("async def ") or stripped.startswith("class "):
+                                    def_idx = i
+                                    break
+                            if def_idx + 1 < len(reindented):
+                                bl = reindented[def_idx + 1]
+                                if bl.strip():
+                                    new_body_indent = len(bl) - len(bl.lstrip())
+                            ds_lines = []
+                            for ln in range(ds.lineno, ds.end_lineno + 1):
+                                raw = lines[ln - 1]
+                                stripped = raw.lstrip()
+                                if stripped:
+                                    ds_lines.append(" " * new_body_indent + stripped)
+                                else:
+                                    ds_lines.append("")
+                            reindented = reindented[:def_idx + 1] + ds_lines + reindented[def_idx + 1:]
+
     new_lines = lines[:start - 1] + reindented + lines[end:]
     new = "\n".join(new_lines)
     if had_final_nl and new and not new.endswith("\n"):
@@ -1444,6 +1506,7 @@ def edit_symbol_in_container(
     symbol: str,
     new_code: str,
     line: int | None = None,
+    preserve: str = "decorators+docstring",
 ) -> dict[str, Any]:
     """Resolve *symbol* in a Python file and replace or delete its definition.
 
@@ -1470,7 +1533,7 @@ def edit_symbol_in_container(
     except Exception as e:
         return {"status": "error", "error": f"Container {container_id[:12]} not found: {e}"}
 
-    params = {"file_path": file_path, "symbol": symbol, "new_code": new_code, "line": line}
+    params = {"file_path": file_path, "symbol": symbol, "new_code": new_code, "line": line, "preserve": preserve}
     params_b64 = base64.b64encode(json.dumps(params).encode("utf-8")).decode("ascii")
     nonce = secrets.token_hex(8)
     mark_a = f"<<<ES_{nonce}>>>"

@@ -772,8 +772,7 @@ def sandbox_pr_review_write(
     The GitHub REST API is called from the host process, so no token
     reaches the container.
 
-    When the review token owns the PR, *APPROVE* and *REQUEST_CHANGES* are
-    automatically downgraded to *COMMENT* (issue #613).
+    *APPROVE*/*REQUEST_CHANGES* auto-downgrade to *COMMENT* on own PR (#613).
 
     Args:
         container_id: Container ID prefix (journal trail only; the

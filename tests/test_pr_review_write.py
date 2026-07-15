@@ -217,7 +217,7 @@ class TestSandboxPrReviewWriteExecute:
     @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.vcs.record_boundary_crossing")
-    def test_own_pr_request_changes_gives_actionable_error(
+    def test_own_pr_request_changes_auto_downgrades(
         self,
         mock_record: MagicMock,
         mock_docker: MagicMock,
@@ -233,21 +233,25 @@ class TestSandboxPrReviewWriteExecute:
                     "GitHub API POST /repos/owner/repo/pulls/1/reviews "
                     "returned HTTP 422: Can not request changes on your own pull request"
                 ),
+                self._REVIEW_RESULT,
             ],
-        ):
+        ) as mock_api:
             result = _decode(sandbox_pr_review_write(
                 container_id="abc123def456", repo="owner/repo", pr=1,
                 event="REQUEST_CHANGES",
             ))
 
-        assert result["status"] == "error"
-        assert "COMMENT" in result["error"]
-        assert "Can not request changes" in result["error"]
+        assert result["status"] == "ok"
+        assert result["review_id"] == 98765
+        assert result["original_event"] == "REQUEST_CHANGES"
+        assert result["downgraded_to"] == "COMMENT"
+        # Third call should have event=COMMENT
+        assert mock_api.call_args_list[2][1]["payload"]["event"] == "COMMENT"
 
     @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.vcs.record_boundary_crossing")
-    def test_own_pr_approve_gives_actionable_error(
+    def test_own_pr_approve_auto_downgrades(
         self,
         mock_record: MagicMock,
         mock_docker: MagicMock,
@@ -263,16 +267,20 @@ class TestSandboxPrReviewWriteExecute:
                     "GitHub API POST /repos/owner/repo/pulls/1/reviews "
                     "returned HTTP 422: Can not approve your own pull request"
                 ),
+                self._REVIEW_RESULT,
             ],
-        ):
+        ) as mock_api:
             result = _decode(sandbox_pr_review_write(
                 container_id="abc123def456", repo="owner/repo", pr=1,
                 event="APPROVE",
             ))
 
-        assert result["status"] == "error"
-        assert "COMMENT" in result["error"]
-        assert "Can not approve" in result["error"]
+        assert result["status"] == "ok"
+        assert result["review_id"] == 98765
+        assert result["original_event"] == "APPROVE"
+        assert result["downgraded_to"] == "COMMENT"
+        # Third call should have event=COMMENT
+        assert mock_api.call_args_list[2][1]["payload"]["event"] == "COMMENT"
 
     @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
     @patch("sunaba.tools.vcs._docker")

@@ -772,20 +772,21 @@ def sandbox_pr_review_write(
     The GitHub REST API is called from the host process, so no token
     reaches the container.
 
+    *APPROVE*/*REQUEST_CHANGES* auto-downgrade to *COMMENT* on own PR (#613).
+
     Args:
         container_id: Container ID prefix (journal trail only; the
             container's network state is irrelevant).
         repo: 'owner/repo'.
         pr: PR number to review.
-        event: 'APPROVE', 'REQUEST_CHANGES', or 'COMMENT'. The first
-            two fail with 422 when the review token owns the PR; use
-            'COMMENT' then.
+        event: 'APPROVE', 'REQUEST_CHANGES', or 'COMMENT'.
         body: Review body text.
         comments: Inline comment dicts: path, line, body, optional side
             ('LEFT'/'RIGHT', default 'RIGHT').
 
     Returns:
-        JSON: status, html_url, review_id; error on failure.
+        JSON: status, html_url, review_id; includes original_event and
+        downgraded_to when an auto-downgrade occurred; error on failure.
     """
     if event not in _PR_REVIEW_EVENTS:
         return json.dumps({
@@ -871,13 +872,30 @@ def sandbox_pr_review_write(
             "cannot approve your own",
         )
         if event in ("REQUEST_CHANGES", "APPROVE") and any(i in err_msg.lower() for i in _OWN_PR_INDICATORS):
+            # Auto-downgrade to COMMENT when the bot owns the PR (issue #613)
+            downgraded_event = "COMMENT"
+            payload["event"] = downgraded_event
+            try:
+                result = _github_api_request(
+                    f"/repos/{repo}/pulls/{pr}/reviews",
+                    push_token,
+                    method="POST",
+                    payload=payload,
+                )
+            except RuntimeError as e2:
+                record_boundary_crossing(
+                    cid, "pr_review_write", f"{details} downgrade to COMMENT also failed", approved=False,
+                )
+                return json.dumps({"status": "error", "error": f"Downgrade to COMMENT also failed: {e2}"})
+            record_boundary_crossing(
+                cid, "pr_review_write", f"{details} (downgraded to COMMENT)", approved=True,
+            )
             return json.dumps({
-                "status": "error",
-                "error": (
-                    "Cannot submit event={!r} on a pull request owned by the same GitHub App token. "
-                    "Use event=\"COMMENT\" instead, or have a different user review the PR. "
-                    "GitHub API: {}".format(event, err_msg)
-                ),
+                "status": "ok",
+                "html_url": result.get("html_url", ""),
+                "review_id": result.get("id"),
+                "original_event": event,
+                "downgraded_to": downgraded_event,
             })
         return json.dumps({"status": "error", "error": err_msg})
 

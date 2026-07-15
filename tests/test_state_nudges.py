@@ -74,6 +74,46 @@ class TestVerifyStateMap:
         assert has_verify_success("abc123def456" + "f" * 52) is True
 
 
+class TestVerifyNudges:
+    """verify_in_container nudges toward publish on gate success (Issue #619)."""
+
+    def test_full_pass_nudges_publish(self) -> None:
+        """When gate_passed=True, recommended_next_action must be "publish"."""
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        with patch("sunaba.tools.verify._docker", return_value=mock_client):
+            import json as j
+            gate_ok = {
+                "gate_passed": True, "incomplete": False,
+                "lint": [], "types": [], "gate_fail_reasons": [],
+            }
+            json_report = j.dumps({
+                "summary": {"collected": 1, "total": 1, "passed": 1, "failed": 0},
+                "duration": 0.1, "tests": [],
+            })
+            nl = "\n"
+            mock_container.exec_run.side_effect = [
+                (0, (b"", b"")),  # git diff HEAD --numstat
+                (0, (b"", b"")),  # git diff --cached --numstat
+                (0, (b"", b"")),  # src/tests dir probe
+                (0, (f"{json_report}{nl}---PYTEST-RAW---{nl}".encode(), b"")),  # pytest
+            ]
+            from sunaba.edit_verify import DetectionResult
+            det = DetectionResult(languages={"python"}, scope={"python": "."}, reason=None)
+            with (
+                patch("sunaba.edit_verify.detect_languages", return_value=det),
+                patch("sunaba.edit_verify.run_lint_type_gate", return_value=gate_ok),
+            ):
+                from sunaba.tools.verify import verify_in_container
+                raw = verify_in_container(
+                    container_id="abc123def456", path="tests/",
+                )
+        parsed = j.loads(raw)
+        assert parsed["gate_passed"] is True
+        assert parsed.get("recommended_next_action") == "publish"
+
+
 class TestPublishVerifyGate:
     """publish blocks with error without a recorded verify success, unless skip_verify_gate=True."""
 

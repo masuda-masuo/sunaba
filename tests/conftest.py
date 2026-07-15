@@ -138,3 +138,16 @@ class _FakeClient:
     @property
     def containers(self):
         return _FakeClient._Containers(self._c)
+
+
+@pytest.fixture(autouse=True)
+def _record_publish_verify() -> None:
+    """Record verify success for the standard test container so publish
+    tests can reach the push logic without triggering the verify gate.
+
+    test_state_nudges.py overrides this by patching ``_verify_map`` to
+    ``{}`` in its own ``_fresh_verify_state`` fixture, which runs after
+    this fixture and clears the recorded state.
+    """
+    from sunaba.verify_state import record_verify_success
+    record_verify_success("abc123def456")

@@ -1,8 +1,10 @@
-"""Tests for state-conditioned nudges (Issue #550).
+"""Tests for state-conditioned nudges (Issue #550) and verify gate (Issue #615).
 
 Nudge fields (``warning`` / ``recommended_next_action`` / ``note``) are
 advisory hints attached to tool results only when the recorded
-server-session state contradicts the action -- they never block.
+server-session state contradicts the action.  The verify gate in
+``publish`` (Issue #615) does block with ``status=error`` when no
+verify_in_container is recorded and ``skip_verify_gate=False``.
 """
 from __future__ import annotations
 
@@ -72,12 +74,12 @@ class TestVerifyStateMap:
         assert has_verify_success("abc123def456" + "f" * 52) is True
 
 
-class TestPublishVerifyWarning:
-    """publish warns -- never blocks -- without a recorded verify success."""
+class TestPublishVerifyGate:
+    """publish blocks with error without a recorded verify success, unless skip_verify_gate=True."""
 
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.vcs.record_boundary_crossing")
-    def test_warning_when_no_verify_recorded(
+    def test_block_when_no_verify_recorded(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
         container = _make_container_mock(list(_PUSH_SEQUENCE))
@@ -85,7 +87,24 @@ class TestPublishVerifyWarning:
 
         result = _run_publish()
 
-        assert result["status"] == "pushed"  # advisory only: push not blocked
+        assert result["status"] == "error"
+        assert result["step"] == "verify_gate"
+        assert "no successful verify_in_container" in result["error"]
+        assert "skip_verify_gate=True" in result["error"]
+        assert result["recommended_next_action"] == "verify_in_container"
+
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    def test_skip_verify_gate_bypasses_block(
+        self, mock_record: MagicMock, mock_docker: MagicMock
+    ) -> None:
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        mock_docker.return_value = _make_client_mock(container)
+
+        result = _run_publish(skip_verify_gate=True)
+
+        assert result["status"] == "pushed"
+        assert "warning" in result
         assert "no successful verify_in_container" in result["warning"]
         assert result["recommended_next_action"] == "verify_in_container"
 
@@ -106,9 +125,25 @@ class TestPublishVerifyWarning:
 
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.vcs.record_boundary_crossing")
-    def test_warning_attached_to_error_results_too(
+    def test_skip_verify_gate_no_warning_after_verify(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
+        record_verify_success("abc123def456")
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        mock_docker.return_value = _make_client_mock(container)
+
+        result = _run_publish(skip_verify_gate=True)
+
+        assert result["status"] == "pushed"
+        assert "warning" not in result
+        assert "recommended_next_action" not in result
+
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    def test_warning_attached_to_other_errors_too(
+        self, mock_record: MagicMock, mock_docker: MagicMock
+    ) -> None:
+        record_verify_success("abc123def456")
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
             (1, b"", b"add failed"),  # git add -> error return
@@ -119,7 +154,7 @@ class TestPublishVerifyWarning:
 
         assert result["status"] == "error"
         assert result["step"] == "git_add"
-        assert result["recommended_next_action"] == "verify_in_container"
+        assert "recommended_next_action" not in result
 
 
 class TestPublishPushOnlyNote:
@@ -130,6 +165,7 @@ class TestPublishPushOnlyNote:
     def test_note_when_create_pr_false(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
+        record_verify_success("abc123def456")
         container = _make_container_mock(list(_PUSH_SEQUENCE))
         mock_docker.return_value = _make_client_mock(container)
 

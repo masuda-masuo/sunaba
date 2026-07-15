@@ -536,7 +536,8 @@ def issue_view(
 
     Returns:
         JSON: number, title, summary (first 100 chars of body), file,
-        size_bytes; error on failure.
+        size_bytes, comments (count or None), comments_truncated
+        (bool or None); error on failure.
     """
     client = _docker()
     try:
@@ -561,10 +562,11 @@ def issue_view(
 
     full_content = body
     comments: list[dict[str, Any]] = []
+    comments_truncated = False
 
     if include_comments:
         try:
-            comments = _github_api_request_list(
+            all_comments, resp_headers = _github_api_request_list_with_headers(
                 f"/repos/{repo}/issues/{issue_number}/comments?per_page=100",
                 _resolve_vcs_token(),
             )
@@ -574,9 +576,17 @@ def issue_view(
                 "error": f"Failed to fetch comments for issue #{issue_number} from {repo}: {e}",
             })
 
+        total = len(all_comments)
+        more_pages = _link_has_next(resp_headers.get("Link"))
         # Keep newest max_comments, oldest-first order
-        if len(comments) > max_comments:
-            comments = comments[-max_comments:]
+        if total > max_comments or more_pages:
+            if total > max_comments:
+                comments = all_comments[-max_comments:]
+            else:
+                comments = all_comments
+            comments_truncated = True
+        else:
+            comments = all_comments
 
         if comments:
             parts = ["\n\n## Comments\n"]
@@ -585,6 +595,11 @@ def issue_view(
                 ts = c.get("created_at", "")
                 c_body = (c.get("body") or "").strip()
                 parts.append(f"**@{author}** — {ts}\n\n{c_body}\n")
+            if comments_truncated:
+                n_dropped = max(0, total - max_comments)
+                note = f"\n> ... and at least {n_dropped} more comment{'s' if n_dropped != 1 else ''}" if n_dropped else "\n> ... and more comments on subsequent pages"
+                parts.append(f"{note} "
+                             f"(use a higher ``max_comments`` to include them)\n")
             full_content = body + "\n".join(parts)
 
     # Summary: first 100 characters of body
@@ -623,6 +638,7 @@ def issue_view(
         "file": save_to,
         "size_bytes": size_bytes,
         "comments": len(comments) if include_comments else None,
+        "comments_truncated": comments_truncated if include_comments else None,
     })
 
 
@@ -1003,6 +1019,21 @@ def _github_api_request_list(
     payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Call the GitHub REST API returning a JSON list instead of a dict."""
+    data, _ = _github_api_request_list_with_headers(path, token, method, payload)
+    return data
+
+
+def _github_api_request_list_with_headers(
+    path: str,
+    token: str,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Like :func:`_github_api_request_list` but also returns response headers.
+
+    Returns:
+        Tuple of (data list, header dict).
+    """
     import urllib.error
     import urllib.request
 
@@ -1017,7 +1048,9 @@ def _github_api_request_list(
         request.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+            body = json.loads(response.read().decode("utf-8"))
+            headers = dict(response.headers)
+            return body, headers
     except urllib.error.HTTPError as e:
         parts: list[str] = []
         raw_body = ""
@@ -1039,6 +1072,14 @@ def _github_api_request_list(
         ) from e
     except urllib.error.URLError as e:
         raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}") from e
+
+
+def _link_has_next(link_header: str | None) -> bool:
+    """Check if a ``Link`` header contains a ``rel=\"next\"`` page."""
+    if not link_header:
+        return False
+    import re
+    return bool(re.search(r'rel="next"', link_header))
 
 
 def _create_pr_via_api(

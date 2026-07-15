@@ -251,8 +251,8 @@ class TestIssueViewWithComments:
                 return_value=self._make_issue_response(),
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list",
-                return_value=comments,
+                "sunaba.tools.vcs._github_api_request_list_with_headers",
+                return_value=(comments, {"Link": ""}),
             ),
         ):
             result = _decode(issue_view(
@@ -264,6 +264,7 @@ class TestIssueViewWithComments:
 
         assert result["number"] == 42
         assert result["comments"] == 2
+        assert result["comments_truncated"] is False
 
         # Verify the file content includes both body and comments
         write_cmd = container.exec_run.call_args[0][0][-1]
@@ -301,7 +302,7 @@ class TestIssueViewWithComments:
                 return_value=self._make_issue_response(),
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list",
+                "sunaba.tools.vcs._github_api_request_list_with_headers",
             ) as mock_comments_api,
         ):
             result = _decode(issue_view(
@@ -311,6 +312,7 @@ class TestIssueViewWithComments:
             ))
 
         assert result["comments"] is None
+        assert result["comments_truncated"] is None
         mock_comments_api.assert_not_called()
 
     @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
@@ -339,8 +341,8 @@ class TestIssueViewWithComments:
                 return_value=self._make_issue_response(),
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list",
-                return_value=comments,
+                "sunaba.tools.vcs._github_api_request_list_with_headers",
+                return_value=(comments, {"Link": ""}),
             ),
         ):
             result = _decode(issue_view(
@@ -352,6 +354,7 @@ class TestIssueViewWithComments:
             ))
 
         assert result["comments"] == 2
+        assert result["comments_truncated"] is True
 
         write_cmd = container.exec_run.call_args[0][0][-1]
         import base64
@@ -362,6 +365,9 @@ class TestIssueViewWithComments:
         assert "Old comment 1" not in written
         assert "new1" in written
         assert "old2" in written
+        # Truncation note
+        assert "1 more comment" in written
+        assert "max_comments" in written
 
     @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
     @patch("sunaba.tools.vcs._docker")
@@ -383,7 +389,7 @@ class TestIssueViewWithComments:
                 return_value=self._make_issue_response(),
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list",
+                "sunaba.tools.vcs._github_api_request_list_with_headers",
                 side_effect=RuntimeError(
                     "GitHub API GET /repos/owner/repo/issues/42/comments returned HTTP 403"
                 ),
@@ -419,8 +425,8 @@ class TestIssueViewWithComments:
                 return_value=self._make_issue_response(),
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list",
-                return_value=[],
+                "sunaba.tools.vcs._github_api_request_list_with_headers",
+                return_value=([], {"Link": ""}),
             ),
         ):
             result = _decode(issue_view(
@@ -431,6 +437,7 @@ class TestIssueViewWithComments:
             ))
 
         assert result["comments"] == 0
+        assert result["comments_truncated"] is False
 
         write_cmd = container.exec_run.call_args[0][0][-1]
         import base64

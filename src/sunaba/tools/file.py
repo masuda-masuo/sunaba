@@ -357,8 +357,12 @@ def write_file_sandbox(
     mismatching line; a successful replace echoes the post-edit region
     with line numbers (ground truth for the next edit).  old_str matches
     the exact string you provide -- if it spans several lines, ALL of
-    them are replaced, so keep it minimal and unique.  For several
-    separate edits use repeated calls or transform_file.
+    them are replaced, so keep it minimal and unique.
+
+    Suitable for local line-range replacement, insertion, or string-based
+    snippet edits.  For replacing an entire Python function/class/method
+    prefer edit_symbol (AST-based, robust to indentation shifts).  For
+    bulk or computed edits across arbitrary patterns use transform_file.
 
     Args:
         container_id: Container ID prefix.
@@ -870,6 +874,10 @@ def edit_symbol(
     preserve: str = "decorators+docstring",
 ) -> str:
     """Replace or delete a Python definition by name -- no old_str needed.
+
+    Best for replacing or deleting an entire Python function, class,
+    or method.  AST-based, so it is robust against line-number shifts
+    and indentation changes -- no exact-string matching required.
 
     Locates *symbol* ("foo", "Foo.bar") via AST and replaces the whole
     definition (decorators included) with *new_code*, re-indented to fit.

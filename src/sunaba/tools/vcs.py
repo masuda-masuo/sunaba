@@ -1271,6 +1271,7 @@ def publish(
     allow_force_push: bool = False,
     author_name: str | None = None,
     author_email: str | None = None,
+    skip_verify_gate: bool = False,
 ) -> str:
     """Stage, commit, push, and optionally create a PR -- the single exit tool.
 
@@ -1294,6 +1295,10 @@ def publish(
         allow_force_push: Permit git push --force when needed.
         author_name: Override the image-default commit author.
         author_email: Override the image-default commit author email.
+        skip_verify_gate: Bypass the verify gate requirement (default
+            False).  When True, no error is raised even when no
+            successful verify_in_container is recorded.  Intended for
+            human-authorized bypass via MCP client tool-approval prompt.
 
     Returns:
         JSON with the operation result.
@@ -1309,10 +1314,12 @@ def publish(
     cid = container_id[:12]
     working_dir = resolve_git_root(container, working_dir)
 
-    # State-conditioned nudge (Issue #550): when no successful
-    # verify_in_container is recorded for this container in this server
-    # session, every outcome of this call carries an advisory warning.
-    # Never blocks -- publish proceeds exactly as before.
+    # Verify gate (Issue #615): when no successful verify_in_container is
+    # recorded for this container in this server session AND
+    # skip_verify_gate is False, publish is blocked with an error.
+    # skip_verify_gate=True is a human-authorized bypass (MCP client
+    # tool-approval prompt), following the same pattern as skip_lint_gate
+    # / skip_type_gate in verify_in_container.
     verified = has_verify_success(cid)
 
     # Reject empty pr_body when creating a PR (Issue #608)
@@ -1324,6 +1331,18 @@ def publish(
         })
 
     def _finish(payload: dict[str, Any]) -> str:
+        if not verified and not skip_verify_gate:
+            return json.dumps({
+                "status": "error",
+                "step": "verify_gate",
+                "error": (
+                    "no successful verify_in_container recorded for this "
+                    "container in this server session.  Pass "
+                    "skip_verify_gate=True to bypass (requires human "
+                    "authorization via MCP client tool-approval prompt)."
+                ),
+                "recommended_next_action": "verify_in_container",
+            })
         if not verified:
             payload["warning"] = (
                 "no successful verify_in_container recorded for this "

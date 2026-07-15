@@ -542,9 +542,11 @@ def issue_view(
 
     cid = container_id[:12]
 
+    token = _resolve_vcs_token()
+
     try:
         issue_data = _github_api_request(
-            f"/repos/{repo}/issues/{issue_number}", _resolve_vcs_token()
+            f"/repos/{repo}/issues/{issue_number}", token
         )
     except RuntimeError as e:
         return json.dumps({"status": "error", "error": f"Failed to fetch issue #{issue_number} from {repo}: {e}"})
@@ -552,8 +554,6 @@ def issue_view(
     number = issue_data.get("number", issue_number)
     title = issue_data.get("title", "")
     body = issue_data.get("body") or ""
-
-    token = _resolve_vcs_token()
 
     try:
         issue_comments = _github_api_request_list_all(
@@ -586,6 +586,7 @@ def issue_view(
         except RuntimeError:
             pass
 
+    displayed = 0
     if all_comments:
         all_comments.sort(key=lambda c: c.get("created_at") or c.get("submitted_at") or "")
 
@@ -595,10 +596,11 @@ def issue_view(
             ts = c.get("created_at") or c.get("submitted_at", "")
             state = c.get("state", "")
             path = c.get("path", "")
-            line = c.get("line", c.get("original_line", ""))
+            line = c.get("line") or c.get("original_line") or ""
             c_body = (c.get("body") or "").strip()
             if not c_body:
                 continue
+            displayed += 1
             prefix = ""
             if state and state != "COMMENTED":
                 prefix = f" ({state.upper()})"
@@ -643,7 +645,7 @@ def issue_view(
         "summary": summary,
         "file": save_to,
         "size_bytes": size_bytes,
-        "comments": len(all_comments),
+        "comments": displayed,
     })
 
 

@@ -590,7 +590,7 @@ class TestIssueView:
                 issue_number=85,
             ))
 
-        assert result["comments"] == 2
+        assert result["comments"] == 1
 
         write_cmd = container.exec_run.call_args[0][0][-1]
         import base64

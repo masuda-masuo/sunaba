@@ -145,10 +145,10 @@ description.  Any contract the model must see has to appear *before* the `Args:`
 block, or it is written for nobody.
 
 The verify-state map is deliberately process-local and in-memory: the nudge
-path is advisory, so a record lost on restart degrades to a missing hint.
-The `publish` gate (Issue #615) blocks on a missing record only at call
-time within the same server session — a restart resets the map and the
-gate re-blocks, which is the correct conservative behaviour.
+path is advisory, so a record lost on server restart degrades to a missing
+hint.  The `publish` gate (Issue #615) blocks on a missing record only at
+call time within the same server session — a server restart resets the map
+and the gate re-blocks, which is the correct conservative behaviour.
 
 ---
 

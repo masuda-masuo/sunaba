@@ -1946,6 +1946,7 @@ def run_container_and_exec(
     # Same ground truth as sandbox_initialize: a proxied container holds no
     # token (#356), so the network clone must go anonymous (#403 fallout).
     container_has_token = "GITHUB_TOKEN" in env or "GH_TOKEN" in env
+    open_read_grant = proxied and not container_has_token
     if clone_repo and pr is None:
         _, clone_error = _try_clone_into_container(
             container,
@@ -1953,6 +1954,7 @@ def run_container_and_exec(
             clone_repo,
             clone_dest,
             container_has_token,
+            open_read_grant=open_read_grant,
         )
         if pip_extras is not None and clone_error is None:
             pip_error = _run_pip_install(
@@ -1985,6 +1987,7 @@ def run_container_and_exec(
                     clone_dest,
                     pip_extras,
                     authenticated=container_has_token,
+                    open_read_grant=open_read_grant,
                     pip_args=pip_args,
                 )
             except Exception as e:

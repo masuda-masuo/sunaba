@@ -608,7 +608,7 @@ class TestRunContainerAndExecPrParam:
         # PR checkout takes the anonymous (authenticated=False) path (#439).
         mock_setup.assert_called_once_with(
             mock_container, "abc123def456", "owner/repo", 136, "/workspace", "[dev]",
-            authenticated=False, pip_args=None,
+            authenticated=False, open_read_grant=False, pip_args=None,
         )
 
     @patch("sunaba.tools.container._docker")

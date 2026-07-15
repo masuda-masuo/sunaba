@@ -200,6 +200,34 @@ class TestPublish:
 
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.vcs.record_boundary_crossing")
+    def test_pr_creation_rejects_empty_body(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """create_pr=True with empty pr_body returns validation error."""
+        container = _make_container_mock([])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            create_pr=True,
+            pr_title="My PR Title",
+            pr_body="",
+            working_dir="/root/repo",
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "validation"
+        assert "pr_body" in result["error"]
+        container.exec_run.assert_not_called()
+
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
     def test_successful_push_with_pr(
         self,
         mock_record: MagicMock,
@@ -259,6 +287,7 @@ class TestPublish:
                 message="Fix",
                 create_pr=True,
                 pr_title="My PR Title",
+                pr_body="PR body here",
                 working_dir="/root/repo",
             ))
 
@@ -338,6 +367,7 @@ class TestPublish:
                 message="Fix",
                 create_pr=True,
                 pr_title="My PR Title",
+                pr_body="PR body here",
                 working_dir="/root/repo",
             ))
 

@@ -426,13 +426,14 @@ class TestPublishProxiedCredentialRouting:
                 message="Fix",
                 create_pr=True,
                 pr_title="Fix",
+                pr_body="PR body",
             ))
         assert result["status"] == "pushed"
         assert result["pr_url"] == "https://github.com/owner/repo/pull/9"
 
         # The PR was created host-side with the host-resolved token...
         mock_create_pr.assert_called_once_with(
-            "owner/repo", "fix/x", "Fix", "", "", "ghs_lazytoken"
+            "owner/repo", "fix/x", "Fix", "PR body", "", "ghs_lazytoken"
         )
         calls = container.exec_run.call_args_list
         # ...no gh exec ran in the container, and no exec carried a token —

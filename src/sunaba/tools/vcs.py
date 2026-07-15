@@ -1316,11 +1316,25 @@ def publish(
 
     # Verify gate (Issue #615): when no successful verify_in_container is
     # recorded for this container in this server session AND
-    # skip_verify_gate is False, publish is blocked with an error.
+    # skip_verify_gate is False, publish is blocked with an error before
+    # any git operations (checkout / add / commit / push).
     # skip_verify_gate=True is a human-authorized bypass (MCP client
     # tool-approval prompt), following the same pattern as skip_lint_gate
     # / skip_type_gate in verify_in_container.
     verified = has_verify_success(cid)
+
+    if not verified and not skip_verify_gate:
+        return json.dumps({
+            "status": "error",
+            "step": "verify_gate",
+            "error": (
+                "no successful verify_in_container recorded for this "
+                "container in this server session.  Pass "
+                "skip_verify_gate=True to bypass (requires human "
+                "authorization via MCP client tool-approval prompt)."
+            ),
+            "recommended_next_action": "verify_in_container",
+        })
 
     # Reject empty pr_body when creating a PR (Issue #608)
     if create_pr and not pr_body.strip():
@@ -1331,18 +1345,6 @@ def publish(
         })
 
     def _finish(payload: dict[str, Any]) -> str:
-        if not verified and not skip_verify_gate:
-            return json.dumps({
-                "status": "error",
-                "step": "verify_gate",
-                "error": (
-                    "no successful verify_in_container recorded for this "
-                    "container in this server session.  Pass "
-                    "skip_verify_gate=True to bypass (requires human "
-                    "authorization via MCP client tool-approval prompt)."
-                ),
-                "recommended_next_action": "verify_in_container",
-            })
         if not verified:
             payload["warning"] = (
                 "no successful verify_in_container recorded for this "

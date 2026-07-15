@@ -1,8 +1,10 @@
-"""Tests for state-conditioned nudges (Issue #550).
+"""Tests for state-conditioned nudges (Issue #550) and verify gate (Issue #615).
 
 Nudge fields (``warning`` / ``recommended_next_action`` / ``note``) are
 advisory hints attached to tool results only when the recorded
-server-session state contradicts the action -- they never block.
+server-session state contradicts the action.  The verify gate in
+``publish`` (Issue #615) does block with ``status=error`` when no
+verify_in_container is recorded and ``skip_verify_gate=False``.
 """
 from __future__ import annotations
 

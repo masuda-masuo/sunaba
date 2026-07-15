@@ -668,6 +668,10 @@ def verify_in_container(
 
     # Track full-gate success for state-conditioned nudges (Issue #550):
     # publish warns when called without a recorded verify success.
+    # Nudge toward publish on success: publish now hard-blocks without
+    # a recorded verify pass (Issue #615), so the agent benefits from
+    # the hint (Issue #619).
     if result["gate_passed"]:
         record_verify_success(container_id)
+        result["recommended_next_action"] = "publish"
     return json.dumps(result)

@@ -15,6 +15,7 @@ on-disk footprint is bounded by approximately twice the max size
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -159,9 +160,13 @@ def _load_states_unlocked() -> dict[str, dict[str, Any]]:
 
 
 def _save_states_unlocked(states: dict[str, dict[str, Any]]) -> None:
-    """Atomically write the sidecar states (caller must hold ``_lock``)."""
+    """Atomically write the sidecar states (caller must hold ``_lock``).
+
+    Uses a PID-suffixed tmp file so that concurrent processes (e.g. xdist
+    workers) do not race on the same ``.tmp`` name (Issue #590).
+    """
     _ensure_dir()
-    tmp = _get_state_path().with_suffix(".tmp")
+    tmp = _get_state_path().with_suffix(f".tmp.{os.getpid()}")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(states, f, ensure_ascii=False)
     tmp.replace(_get_state_path())

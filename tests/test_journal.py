@@ -444,6 +444,7 @@ class TestContainerStateSidecar:
     def _journal_at(self, tmp_path: Path) -> Iterator[Path]:
         journal_dir = tmp_path / "journal"
         with patch("sunaba.journal._JOURNAL_PATH", journal_dir / "journal.log"), \
+             patch("sunaba.journal._JOURNAL_BACKUP_PATH", journal_dir / "journal.log.1"), \
              patch("sunaba.journal._JOURNAL_DIR", journal_dir), \
              patch("sunaba.journal._state_synced", False):
             yield journal_dir

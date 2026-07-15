@@ -37,12 +37,16 @@ def build_pytest_cmd(
     :data:`PYTEST_RAW_MARKER` and the last :data:`_PYTEST_RAW_LINES`
     lines of raw output.  Both temp files are cleaned up on exit.
 
+    Runs tests in parallel via ``-n auto`` (capped at CPU count) for
+    faster verification (Issue #590).  The sandbox image's ``pids.max``
+    is high enough that Python xdist workers do not exhaust it.
+
     Callers should split the result with :func:`split_pytest_output`.
     """
     quoted_path = shlex.quote(path)
     return (
         f"{sandbox_env}python3 -m pytest --json-report "
-        f"--json-report-file={json_file} -q{filter_args} "
+        f"--json-report-file={json_file} -n auto -q{filter_args} "
         f"{quoted_path} >{raw_file} 2>&1; "
         f"_ec=$?; cat {json_file} 2>/dev/null; "
         f"echo '{PYTEST_RAW_MARKER}'; tail -n {_PYTEST_RAW_LINES} {raw_file} 2>/dev/null; "
@@ -459,4 +463,3 @@ class GoTestAdapter:
 # ---------------------------------------------------------------------------
 # Convenience dispatcher
 # ---------------------------------------------------------------------------
-

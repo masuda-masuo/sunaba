@@ -608,7 +608,7 @@ class TestRunContainerAndExecPrParam:
         # PR checkout takes the anonymous (authenticated=False) path (#439).
         mock_setup.assert_called_once_with(
             mock_container, "abc123def456", "owner/repo", 136, "/workspace", "[dev]",
-            authenticated=False, pip_args=None,
+            authenticated=False, open_read_grant=False, pip_args=None,
         )
 
     @patch("sunaba.tools.container._docker")
@@ -660,6 +660,76 @@ class TestRunContainerAndExecPrParam:
 
         assert result["status"] == "ok"
         assert result["pr_warning"] == "network error"
+
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container._setup_pr_branch")
+    @patch("sunaba.tools.container.proxy_lifecycle")
+    def test_proxied_pr_calls_setup_with_open_read_grant(
+        self,
+        mock_proxy_lifecycle: MagicMock,
+        mock_setup: MagicMock,
+        mock_validate: MagicMock,
+        mock_docker: MagicMock,
+    ):
+        """Proxy enabled + no token => open_read_grant=True passed to _setup_pr_branch."""
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_container.exec_run.return_value = (0, (b"test output", b""))
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_proxy_lifecycle.egress_proxy_enabled.return_value = True
+        mock_proxy_lifecycle.sandbox_proxy_env.return_value = {}
+        mock_proxy_lifecycle.apply_network.side_effect = lambda kwargs, runtime: kwargs
+        mock_setup.return_value = "PR #136 (feature) \u2192 /workspace in container abc123"
+
+        with patch.dict(os.environ, clear=True):
+            result = json.loads(run_container_and_exec(
+                image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                commands=["echo hello"],
+                repo="owner/repo",
+                pr=136,
+            ))
+
+        assert result["status"] == "ok"
+        mock_setup.assert_called_once()
+        assert mock_setup.call_args.kwargs["open_read_grant"] is True
+        assert mock_setup.call_args.kwargs["authenticated"] is False
+
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container._try_clone_into_container")
+    @patch("sunaba.tools.container.proxy_lifecycle")
+    def test_proxied_clone_repo_passes_open_read_grant(
+        self,
+        mock_proxy_lifecycle: MagicMock,
+        mock_clone: MagicMock,
+        mock_validate: MagicMock,
+        mock_docker: MagicMock,
+    ):
+        """Proxy enabled + clone_repo => open_read_grant=True passed to _try_clone_into_container."""
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_container.exec_run.return_value = (0, (b"test output", b""))
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_proxy_lifecycle.egress_proxy_enabled.return_value = True
+        mock_proxy_lifecycle.sandbox_proxy_env.return_value = {}
+        mock_proxy_lifecycle.apply_network.side_effect = lambda kwargs, runtime: kwargs
+        mock_clone.return_value = ("Cloned owner/repo via network...", None)
+
+        with patch.dict(os.environ, clear=True):
+            result = json.loads(run_container_and_exec(
+                image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                commands=["echo hello"],
+                clone_repo="owner/repo",
+            ))
+
+        assert result["status"] == "ok"
+        mock_clone.assert_called_once()
+        assert mock_clone.call_args.kwargs["open_read_grant"] is True
 
 
 

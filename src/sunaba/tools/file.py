@@ -869,23 +869,17 @@ def edit_symbol(
     line: int | None = None,
     preserve: str = "decorators+docstring",
 ) -> str:
-    """Replace or delete a function/class/method by name -- no old_str needed.
+    """Replace or delete a Python definition by name -- no old_str needed.
 
-    Locates the definition of *symbol* ("foo", "Foo.bar", "outer.inner")
-    via AST and replaces the whole definition (decorators included) with
-    *new_code*, re-indented to fit the original location.  new_code=""
-    deletes the definition.  The edited file must parse: on SyntaxError
-    nothing is written.  Returns the resolved symbol location and a
-    unified diff -- check "resolved" to confirm the right definition was
-    edited.  If the name is ambiguous the error lists all candidates;
-    retry with a qualified name or line=.  Python files only.  For 1-3
-    line local edits prefer write_file_sandbox old_str; for non-Python
-    or pattern edits use transform_file.
+    Locates *symbol* ("foo", "Foo.bar") via AST and replaces the whole
+    definition (decorators included) with *new_code*, re-indented to fit.
+    new_code="" deletes the definition.  SyntaxError in the result is
+    rejected before writing.  Use line=<lineno> to disambiguate overloads.
+    Python files only.  For 1-3 line edits prefer write_file_sandbox.
 
-    The *preserve* parameter controls what parts of the old definition
-    are automatically kept when *new_code* replaces the body.  When
-    *new_code* already carries decorators or a docstring, the old ones
-    are not duplicated (new wins).
+    *preserve* controls what of the old definition to keep: decorators
+    and/or docstring.  If *new_code* already carries them, old ones are
+    not duplicated.
 
     Args:
         container_id: Container ID prefix.
@@ -896,11 +890,9 @@ def edit_symbol(
             Whitespace-only is rejected.
         line: Disambiguates same-name definitions: any line number inside
             the intended definition (decorators included).
-        preserve: What to keep from the old definition:
-            "decorators+docstring" (default) -- preserve both;
-            "decorators" -- preserve only decorators;
-            "docstring" -- preserve only the docstring;
-            "none" -- full replacement (previous behaviour).
+        preserve: Old definition parts to keep:
+            "decorators+docstring" (default);
+            "decorators" / "docstring" / "none".
 
     Returns:
         JSON: status, resolved (qualname/kind/start_line/end_line),

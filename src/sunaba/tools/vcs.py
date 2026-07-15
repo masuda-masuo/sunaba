@@ -509,8 +509,6 @@ def issue_view(
     repo: str,
     issue_number: int,
     save_to: str = "/home/sandbox/issue.md",
-    include_comments: bool = False,
-    max_comments: int = 30,
 ) -> str:
     """Fetch a GitHub issue host-side and save its body into the container.
 
@@ -518,8 +516,8 @@ def issue_view(
     response is a summary plus a file handle; read the full text with
     read_file_range.
 
-    When *include_comments* is True, the discussion thread (issue comments)
-    is appended to the saved file in a ``## Comments`` section, with
+    Issue comments are fetched automatically (with auto-pagination) and
+    appended to the saved file in a ``## Comments`` section, with
     ``author`` and ``timestamp``.  Fetched by the host-side API so no
     network is needed inside the container.
 
@@ -528,16 +526,10 @@ def issue_view(
         repo: 'owner/repo'.
         issue_number: Issue number to fetch.
         save_to: Path inside the container for the issue body.
-        include_comments: If True, append comments to the saved file.
-        max_comments: Maximum number of comments to include when
-            *include_comments* is True (default 30).  The newest comments
-            are always retained; oldest are dropped when the thread exceeds
-            this limit.
 
     Returns:
         JSON: number, title, summary (first 100 chars of body), file,
-        size_bytes, comments (count or None), comments_truncated
-        (bool or None); error on failure.
+        size_bytes, comments (count); error on failure.
     """
     client = _docker()
     try:
@@ -560,47 +552,27 @@ def issue_view(
     title = issue_data.get("title", "")
     body = issue_data.get("body") or ""
 
-    full_content = body
-    comments: list[dict[str, Any]] = []
-    comments_truncated = False
+    try:
+        all_comments = _github_api_request_list_all(
+            f"/repos/{repo}/issues/{issue_number}/comments?per_page=100",
+            _resolve_vcs_token(),
+        )
+    except RuntimeError as e:
+        return json.dumps({
+            "status": "error",
+            "error": f"Failed to fetch comments for issue #{issue_number} from {repo}: {e}",
+        })
 
-    if include_comments:
-        try:
-            all_comments, resp_headers = _github_api_request_list_with_headers(
-                f"/repos/{repo}/issues/{issue_number}/comments?per_page=100",
-                _resolve_vcs_token(),
-            )
-        except RuntimeError as e:
-            return json.dumps({
-                "status": "error",
-                "error": f"Failed to fetch comments for issue #{issue_number} from {repo}: {e}",
-            })
-
-        total = len(all_comments)
-        more_pages = _link_has_next(resp_headers.get("Link"))
-        # Keep newest max_comments, oldest-first order
-        if total > max_comments or more_pages:
-            if total > max_comments:
-                comments = all_comments[-max_comments:]
-            else:
-                comments = all_comments
-            comments_truncated = True
-        else:
-            comments = all_comments
-
-        if comments:
-            parts = ["\n\n## Comments\n"]
-            for c in comments:
-                author = c.get("user", {}).get("login", "unknown")
-                ts = c.get("created_at", "")
-                c_body = (c.get("body") or "").strip()
-                parts.append(f"**@{author}** — {ts}\n\n{c_body}\n")
-            if comments_truncated:
-                n_dropped = max(0, total - max_comments)
-                note = f"\n> ... and at least {n_dropped} more comment{'s' if n_dropped != 1 else ''}" if n_dropped else "\n> ... and more comments on subsequent pages"
-                parts.append(f"{note} "
-                             f"(use a higher ``max_comments`` to include them)\n")
-            full_content = body + "\n".join(parts)
+    if all_comments:
+        parts = ["\n\n## Comments\n"]
+        for c in all_comments:
+            author = c.get("user", {}).get("login", "unknown")
+            ts = c.get("created_at", "")
+            c_body = (c.get("body") or "").strip()
+            parts.append(f"**@{author}** — {ts}\n\n{c_body}\n")
+        full_content = body + "\n".join(parts)
+    else:
+        full_content = body
 
     # Summary: first 100 characters of body
     summary = body[:100] if body else "(empty body)"
@@ -637,8 +609,7 @@ def issue_view(
         "summary": summary,
         "file": save_to,
         "size_bytes": size_bytes,
-        "comments": len(comments) if include_comments else None,
-        "comments_truncated": comments_truncated if include_comments else None,
+        "comments": len(all_comments),
     })
 
 
@@ -1074,12 +1045,66 @@ def _github_api_request_list_with_headers(
         raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}") from e
 
 
-def _link_has_next(link_header: str | None) -> bool:
-    """Check if a ``Link`` header contains a ``rel=\"next\"`` page."""
+def _link_next_url(link_header: str | None) -> str | None:
+    """Extract the ``rel=\"next\"`` URL from a ``Link`` header, if present."""
     if not link_header:
-        return False
+        return None
     import re
-    return bool(re.search(r'rel="next"', link_header))
+    m = re.search(r'<([^>]+)>\s*;\s*rel="next"', link_header)
+    return m.group(1) if m else None
+
+
+def _github_api_request_list_all(
+    path: str,
+    token: str,
+) -> list[dict[str, Any]]:
+    """Fetch all pages of a paginated GitHub API list endpoint.
+
+    Follows ``Link`` headers until no ``rel=\"next\"`` page is found.
+    The response order from the API is preserved (oldest-first for comments).
+    """
+    import urllib.error
+    import urllib.request
+
+    all_data: list[dict[str, Any]] = []
+    next_path: str | None = path
+
+    while next_path:
+        url = f"https://api.github.com{next_path}" if next_path.startswith("/") else next_path
+        request = urllib.request.Request(url, method="GET")
+        request.add_header("Accept", "application/vnd.github+json")
+        request.add_header("User-Agent", "sunaba")
+        if token:
+            request.add_header("Authorization", f"Bearer {token}")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                page = json.loads(response.read().decode("utf-8"))
+                all_data.extend(page)
+                link = response.headers.get("Link")
+                next_path = _link_next_url(link)
+        except urllib.error.HTTPError as e:
+            parts: list[str] = []
+            raw_body = ""
+            try:
+                raw_body = e.read().decode("utf-8", errors="replace")
+                body = json.loads(raw_body)
+                if isinstance(body, dict):
+                    if body.get("message"):
+                        parts.append(str(body["message"]))
+                    parts.extend(str(err.get("message", err)) for err in body.get("errors") or [])
+                else:
+                    parts.append(f"raw body: {raw_body[:500]}")
+            except Exception:
+                if raw_body:
+                    parts.append(f"raw body: {raw_body[:500]}")
+            detail = f": {'; '.join(parts)}" if parts else ""
+            raise RuntimeError(
+                f"GitHub API GET {path} returned HTTP {e.code}{detail}"
+            ) from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"GitHub API GET {path} failed: {e.reason}") from e
+
+    return all_data
 
 
 def _create_pr_via_api(

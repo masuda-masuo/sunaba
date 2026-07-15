@@ -1,4 +1,4 @@
-"""File tools: write_file_sandbox, transform_file, edit_symbol, copy_project, copy_file, read_file_range, list_files."""
+"""File tools: write_file_sandbox, transform_file, copy_project, copy_file, read_file_range, list_files."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import posixpath
+import re
 import shlex
 import tarfile
 import tempfile
@@ -32,6 +33,34 @@ logger: logging.Logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # write_file_sandbox  --  old_str helper functions
 # ---------------------------------------------------------------------------
+
+
+_DEF_RE = re.compile(r'^\s*(?:async\s+)?def\s+(\w+)')
+_CLASS_RE = re.compile(r'^\s*class\s+(\w+)')
+
+
+def _extract_symbol_from_old_str(old_str: str) -> str | None:
+    """Extract a function/class name from *old_str* if it looks like a definition.
+
+    Skips blank lines, comments, and decorator lines.  Returns the symbol
+    name (``"foo"``, ``"Bar"``) of the first ``def`` / ``async def`` /
+    ``class`` line, or ``None`` when *old_str* does not start with a
+    Python definition.
+    """
+    for line in old_str.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        m = _DEF_RE.match(stripped)
+        if m:
+            return m.group(1)
+        m = _CLASS_RE.match(stripped)
+        if m:
+            return m.group(1)
+        if stripped.startswith('@'):
+            continue
+        break
+    return None
 
 
 def _find_all_matches(text: str, pattern: str) -> list[tuple[int, int]]:
@@ -342,6 +371,8 @@ def write_file_sandbox(
     end_line: int | None = None,
     append: bool = False,
     old_str: str | None = None,
+    preserve: str | None = None,
+    line: int | None = None,
 ) -> str:
     """Write or partially edit a file in the container.
 
@@ -360,8 +391,9 @@ def write_file_sandbox(
     them are replaced, so keep it minimal and unique.
 
     Suitable for local line-range replacement, insertion, or string-based
-    snippet edits.  For replacing an entire Python function/class/method
-    prefer edit_symbol (AST-based, robust to indentation shifts).  For
+    snippet edits.  For replacing an entire Python function/class/method,
+    write the definition signature as ``old_str`` (e.g. ``def foo():`) —
+    it will be resolved via AST automatically.  For
     bulk or computed edits across arbitrary patterns use transform_file.
 
     Args:
@@ -374,6 +406,15 @@ def write_file_sandbox(
         append: Append to the end of the existing file.
         old_str: Exact text to replace with file_contents (matching
             contract above).
+        preserve: When old_str triggers AST resolution on a .py file,
+            controls which parts of the old definition to keep:
+            ``\"decorators+docstring\"`` (default when None),
+            ``\"decorators\"``, ``\"docstring\"``, or ``\"none\"``.
+            Ignored when AST resolution does not apply.
+        line: When old_str triggers AST resolution on a .py file,
+            disambiguates same-name definitions (any line number
+            inside the intended definition, decorators included).
+            Ignored when AST resolution does not apply.
 
     Returns:
         Success or error message.
@@ -428,6 +469,27 @@ def write_file_sandbox(
             if existing.endswith("\n") and not content.endswith("\n"):
                 content += "\n"
         elif old_str is not None:
+            if dest_path.endswith(".py"):
+                symbol = _extract_symbol_from_old_str(old_str)
+                if symbol is not None:
+                    ast_result = edit_symbol_in_container(
+                        client, container_id, dest_path, symbol, file_contents, line, preserve or "decorators+docstring",
+                    )
+                    if ast_result.get("status") == "ok" and ast_result.get("changed"):
+                        try:
+                            new_content = read_file(container, dest_path)
+                        except ValueError:
+                            return f"Error: failed to read {dest_path} after edit"
+                        resolved = ast_result.get("resolved", {})
+                        rep_start = resolved.get("start_line", 1)
+                        rep_end = resolved.get("end_line", 1)
+                        return _build_success_echo(new_content, dest_path, rep_start, rep_end)
+                    logger.debug(
+                        "AST resolution attempted for %s (symbol=%s) but %s",
+                        dest_path, symbol,
+                        ast_result.get("error", "no change made — falling through to string matching"),
+                    )
+
             # 1. Exact match with uniqueness check
             exact_matches = _find_all_matches(existing, old_str)
             if len(exact_matches) > 1:
@@ -858,103 +920,3 @@ def transform_file(
             int(result.get("new_size", 0)), int(result.get("new_lines", 0))
         )
     return json.dumps(result)
-
-
-# ---------------------------------------------------------------------------
-# edit_symbol (issue #581)
-# ---------------------------------------------------------------------------
-
-
-def edit_symbol(
-    container_id: str,
-    file_path: str,
-    symbol: str,
-    new_code: str,
-    line: int | None = None,
-    preserve: str = "decorators+docstring",
-) -> str:
-    """Replace or delete a Python definition by name -- no old_str needed.
-
-    Best for replacing or deleting an entire Python function, class,
-    or method.  AST-based, so it is robust against line-number shifts
-    and indentation changes -- no exact-string matching required.
-
-    Locates *symbol* ("foo", "Foo.bar") via AST and replaces the whole
-    definition (decorators included) with *new_code*, re-indented to fit.
-    new_code="" deletes the definition.  SyntaxError in the result is
-    rejected before writing.  Use line=<lineno> to disambiguate overloads.
-    Python files only.
-
-    *preserve* controls what of the old definition to keep: decorators
-    and/or docstring.  If *new_code* already carries them, old ones are
-    not duplicated.  Comments inside the body are never preserved: the
-    AST (``ast.parse``) discards them.  Keep comments in *new_code* if
-    they matter.
-
-    Args:
-        container_id: Container ID prefix.
-        file_path: Absolute path inside the container (.py only).
-        symbol: Definition name, optionally qualified ("foo", "Foo.bar",
-            "outer.inner").
-        new_code: Replacement definition source; "" deletes the symbol.
-            Whitespace-only is rejected.
-        line: Disambiguates same-name definitions: any line number inside
-            the intended definition (decorators included).
-        preserve: Old definition parts to keep:
-            "decorators+docstring" (default);
-            "decorators" / "docstring" / "none".
-
-    Returns:
-        JSON: status, resolved (qualname/kind/start_line/end_line),
-        changed, diff (truncated past 120 lines), truncated, file_size;
-        on failure error.
-    """
-    client = _docker()
-    try:
-        _ = client.containers.get(container_id)
-    except NotFound:
-        return container_not_found_error(container_id)
-    except Exception as e:
-        return json.dumps({"status": "error", "error": str(e)})
-
-    if not file_path.endswith(".py"):
-        return json.dumps({
-            "status": "error",
-            "error": "Error: edit_symbol supports .py files only; "
-            "use write_file_sandbox or transform_file",
-        })
-
-    record_tool_use(
-        container_id[:12],
-        "edit_symbol",
-        {"file_path": file_path, "symbol": symbol},
-    )
-    result = edit_symbol_in_container(
-        client, container_id, file_path, symbol, new_code, line, preserve
-    )
-
-    if result.get("status") != "ok":
-        return json.dumps(result)
-
-    file_size = _file_size_from_counts(
-        int(result.get("new_size", 0)), int(result.get("new_lines", 0))
-    )
-    if not result.get("changed"):
-        return json.dumps({
-            "status": "ok",
-            "resolved": result.get("resolved"),
-            "changed": False,
-            "diff": "",
-            "truncated": False,
-            "file_size": file_size,
-        })
-
-    display, meta = truncate_output(result.get("diff", ""), max_lines=120)
-    return json.dumps({
-        "status": "ok",
-        "resolved": result.get("resolved"),
-        "changed": True,
-        "diff": display,
-        "truncated": meta.truncated,
-        "file_size": file_size,
-    })

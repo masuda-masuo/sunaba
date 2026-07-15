@@ -14,6 +14,7 @@ import ast
 import pytest
 
 from src.sunaba.edit_verify import edit_symbol_in_container
+from sunaba.tools.file import write_file_sandbox
 from tests.conftest import _FakeClient, _FakeContainer
 
 POSIX = "/sandbox/mod.py"
@@ -505,3 +506,264 @@ def foo():
         text = f.read_text(encoding="utf-8")
         assert "@functools.lru_cache(maxsize=128)" in text
         assert "return 99" in text
+
+
+# ===================================================================
+# write_file_sandbox integration via old_str AST resolution
+# ===================================================================
+
+
+class _FakeContainerWithIO(_FakeContainer):
+    """Extends _FakeContainer with cat/stat/mkdir for write_file_sandbox I/O."""
+
+    def exec_run(self, cmd, **kwargs):  # noqa: ANN001, ANN201
+        import shlex
+        shell_cmd = cmd[-1] if isinstance(cmd, (list, tuple)) else cmd
+
+        if shell_cmd.startswith("cat "):
+            file_path = shlex.split(shell_cmd)[1]
+            real_path = self.path_map.get(file_path, file_path)
+            try:
+                with open(real_path) as f:
+                    return (0, (f.read().encode("utf-8"), b""))
+            except FileNotFoundError:
+                return (0, (b"", b""))
+
+        if shell_cmd.startswith("mkdir "):
+            return (0, (b"", b""))
+
+        if shell_cmd.startswith("test -f "):
+            file_path = shlex.split(shell_cmd)[1]
+            real_path = self.path_map.get(file_path, file_path)
+            try:
+                with open(real_path) as f:
+                    return (0, (b"", b""))
+            except FileNotFoundError:
+                return (1, (b"", b""))
+
+        if shell_cmd.startswith("stat "):
+            return (0, (b"1000 1000 644\n", b""))
+
+        if shell_cmd.startswith("echo ") and "base64" in shell_cmd:
+            return super().exec_run(cmd, **kwargs)
+
+        return (0, (b"", b""))
+
+    def put_archive(self, _path, _data) -> bool:
+        return True
+
+
+def _write_fake_docker(path_map):
+    """Build a _FakeClient with _FakeContainerWithIO for write_file_sandbox tests."""
+    return _FakeClient(_FakeContainerWithIO(path_map))
+
+
+class TestWriteFileSymbolIntegration:
+    """write_file_sandbox + AST resolution integration (issue #627/#628)."""
+
+    # ── _extract_symbol_from_old_str unit tests ──────────────────────
+
+    def test_extract_symbol_from_def(self) -> None:
+        from sunaba.tools.file import _extract_symbol_from_old_str
+        assert _extract_symbol_from_old_str("def foo():") == "foo"
+        assert _extract_symbol_from_old_str("async def fetch():") == "fetch"
+        assert _extract_symbol_from_old_str("class Bar:") == "Bar"
+        assert _extract_symbol_from_old_str("@decorator\ndef foo():") == "foo"
+        assert _extract_symbol_from_old_str("@dec1\n@dec2\ndef f():") == "f"
+        assert _extract_symbol_from_old_str("# comment\ndef foo():") == "foo"
+        assert _extract_symbol_from_old_str("\n\ndef foo():") == "foo"
+        assert _extract_symbol_from_old_str("x = 1") is None
+        assert _extract_symbol_from_old_str("") is None
+        assert _extract_symbol_from_old_str("   def foo():") == "foo"
+
+    def test_extract_symbol_from_non_py_old_str(self) -> None:
+        from sunaba.tools.file import _extract_symbol_from_old_str
+        assert _extract_symbol_from_old_str("def foo(): # type: ignore") == "foo"
+
+    def test_extract_from_decorated_with_blank_lines(self) -> None:
+        from sunaba.tools.file import _extract_symbol_from_old_str
+        old = "\n\n# some comment\n@decorator\ndef foo():\n    pass\n"
+        assert _extract_symbol_from_old_str(old) == "foo"
+
+    # ── AST path is taken on .py files ───────────────────────────────
+
+    def test_def_old_str_triggers_ast_on_py_file(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def foo():\n    return 99\n",
+            old_str="def foo():",
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+        assert "return 99" in result
+
+    def test_class_old_str_triggers_ast_on_py_file(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text("class C:\n    def m(self):\n        return 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="class C:\n    def m(self):\n        return 99\n",
+            old_str="class C:",
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+
+    def test_async_def_old_str_triggers_ast_on_py_file(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text("async def fetch():\n    return 0\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="async def fetch():\n    return 1\n",
+            old_str="async def fetch():",
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+
+    # ── Non-.py files bypass AST path ────────────────────────────────
+
+    def test_non_py_file_bypasses_ast_path(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "data.txt"
+        f.write_text("hello world\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({"/sandbox/data.txt": str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="/sandbox/data.txt",
+            file_contents="goodbye\n",
+            old_str="hello world",
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+
+    def test_non_py_def_like_old_str_bypasses_ast(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "data.txt"
+        f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({"/sandbox/data.txt": str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="/sandbox/data.txt",
+            file_contents="def bar():\n    return 2\n",
+            old_str="def foo():",
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+
+    # ── Fallthrough when AST returns no-change ───────────────────────
+
+    def test_ast_no_change_falls_through_to_string_matching(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def foo():\n    return 1",
+            old_str="def foo():\n    return 1",
+        )
+        # No change: AST driver returns changed=False, falls through
+        # to string matching, still succeeds.
+        assert "Error" not in result, result
+        assert "replaced" in result
+
+    # ── Ambiguous symbol on .py with definition old_str ──────────────
+
+    def test_ambiguous_symbol_falls_through_to_string_match(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """AST ambiguity degrades gracefully to string matching.
+
+        When the symbol is ambiguous, the AST driver returns an error;
+        ``write_file_sandbox`` logs a DEBUG message and falls through
+        to exact-string matching, which succeeds if the old_str text is
+        unique in the file.
+        """
+        f = tmp_path / "mod.py"
+        src = (
+            "def process(x):\n    return x\n\n\n"
+            "class Handler:\n    def process(self, x):\n        return x\n"
+        )
+        f.write_text(src, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def process(x):\n    return x + 1\n",
+            old_str="def process(x):",
+        )
+        # AST fails (ambiguous), falls through to string matching,
+        # which finds the exact unique match on line 1.
+        assert "Error" not in result, result
+        assert "replaced" in result
+        assert "return x + 1" in result
+
+    # ── preserve and line params are passed through ──────────────────
+
+    def test_preserve_param_passed_to_ast_driver(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def foo():\n    return 99\n",
+            old_str="def foo():",
+            preserve="none",
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+
+    def test_line_param_passed_to_ast_driver(self, tmp_path, monkeypatch) -> None:
+        f = tmp_path / "mod.py"
+        src = (
+            "from typing import overload\n\n\n"
+            "@overload\ndef process(x: int) -> int: ...\n"
+            "@overload\ndef process(x: str) -> str: ...\n"
+            "def process(x):\n    return x\n"
+        )
+        f.write_text(src, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def process(x):\n    return x + 1\n",
+            old_str="def process(x):",
+            line=9,
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result

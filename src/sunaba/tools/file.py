@@ -371,6 +371,8 @@ def write_file_sandbox(
     end_line: int | None = None,
     append: bool = False,
     old_str: str | None = None,
+    preserve: str | None = None,
+    line: int | None = None,
 ) -> str:
     """Write or partially edit a file in the container.
 
@@ -404,6 +406,15 @@ def write_file_sandbox(
         append: Append to the end of the existing file.
         old_str: Exact text to replace with file_contents (matching
             contract above).
+        preserve: When old_str triggers AST resolution on a .py file,
+            controls which parts of the old definition to keep:
+            ``\"decorators+docstring\"`` (default when None),
+            ``\"decorators\"``, ``\"docstring\"``, or ``\"none\"``.
+            Ignored when AST resolution does not apply.
+        line: When old_str triggers AST resolution on a .py file,
+            disambiguates same-name definitions (any line number
+            inside the intended definition, decorators included).
+            Ignored when AST resolution does not apply.
 
     Returns:
         Success or error message.
@@ -462,7 +473,7 @@ def write_file_sandbox(
                 symbol = _extract_symbol_from_old_str(old_str)
                 if symbol is not None:
                     ast_result = edit_symbol_in_container(
-                        client, container_id, dest_path, symbol, file_contents, None, "decorators+docstring",
+                        client, container_id, dest_path, symbol, file_contents, line, preserve or "decorators+docstring",
                     )
                     if ast_result.get("status") == "ok" and ast_result.get("changed"):
                         try:
@@ -473,6 +484,11 @@ def write_file_sandbox(
                         rep_start = resolved.get("start_line", 1)
                         rep_end = resolved.get("end_line", 1)
                         return _build_success_echo(new_content, dest_path, rep_start, rep_end)
+                    logger.debug(
+                        "AST resolution attempted for %s (symbol=%s) but %s",
+                        dest_path, symbol,
+                        ast_result.get("error", "no change made — falling through to string matching"),
+                    )
 
             # 1. Exact match with uniqueness check
             exact_matches = _find_all_matches(existing, old_str)

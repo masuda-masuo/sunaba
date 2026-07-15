@@ -132,19 +132,23 @@ so that no fact is stated twice:
     ever passed for it in this session (`verify_state.py`).  When an action
     contradicts that state, the result carries an advisory
     `recommended_next_action` field — a missing container points at
-    `sandbox_initialize`, a `publish` with no recorded verify pass points at
-    `verify_in_container`.  Journal analysis behind #550 showed that
-    unconditional nudges are mostly noise, so they fire only on contradiction,
-    and they never block: the nudge is a hint, and the gate is the gate.
+    `sandbox_initialize`, a `publish` with no recorded verify pass and
+    `skip_verify_gate=False` blocks with `status=error` (Issue #615).
+    When `skip_verify_gate=True` the nudge still fires as advisory.
+    Journal analysis behind #550 showed that unconditional nudges are
+    mostly noise, so they fire only on contradiction, and they never
+    block: the nudge is a hint, and the gate is the gate.
 
 **Constraint worth knowing before editing a docstring:** FastMCP drops
 everything from the `Args:` line onward when it builds the visible tool
 description.  Any contract the model must see has to appear *before* the `Args:`
 block, or it is written for nobody.
 
-The verify-state map is deliberately process-local and in-memory: every consumer
-is advisory, so a record lost on restart degrades to a missing hint, never to a
-false block.
+The verify-state map is deliberately process-local and in-memory: the nudge
+path is advisory, so a record lost on restart degrades to a missing hint.
+The `publish` gate (Issue #615) blocks on a missing record only at call
+time within the same server session — a restart resets the map and the
+gate re-blocks, which is the correct conservative behaviour.
 
 ---
 

@@ -509,6 +509,8 @@ def issue_view(
     repo: str,
     issue_number: int,
     save_to: str = "/home/sandbox/issue.md",
+    include_comments: bool = False,
+    max_comments: int = 30,
 ) -> str:
     """Fetch a GitHub issue host-side and save its body into the container.
 
@@ -516,14 +518,24 @@ def issue_view(
     response is a summary plus a file handle; read the full text with
     read_file_range.
 
+    When *include_comments* is True, the discussion thread (issue comments)
+    is appended to the saved file in a ``## Comments`` section, with
+    ``author`` and ``timestamp``.  Fetched by the host-side API so no
+    network is needed inside the container.
+
     Args:
         container_id: Container ID prefix.
         repo: 'owner/repo'.
         issue_number: Issue number to fetch.
         save_to: Path inside the container for the issue body.
+        include_comments: If True, append comments to the saved file.
+        max_comments: Maximum number of comments to include when
+            *include_comments* is True (default 30).  The newest comments
+            are always retained; oldest are dropped when the thread exceeds
+            this limit.
 
     Returns:
-        JSON: number, title, summary (first 100 chars), file,
+        JSON: number, title, summary (first 100 chars of body), file,
         size_bytes; error on failure.
     """
     client = _docker()
@@ -547,11 +559,39 @@ def issue_view(
     title = issue_data.get("title", "")
     body = issue_data.get("body") or ""
 
+    full_content = body
+    comments: list[dict[str, Any]] = []
+
+    if include_comments:
+        try:
+            comments = _github_api_request_list(
+                f"/repos/{repo}/issues/{issue_number}/comments?per_page=100",
+                _resolve_vcs_token(),
+            )
+        except RuntimeError as e:
+            return json.dumps({
+                "status": "error",
+                "error": f"Failed to fetch comments for issue #{issue_number} from {repo}: {e}",
+            })
+
+        # Keep newest max_comments, oldest-first order
+        if len(comments) > max_comments:
+            comments = comments[-max_comments:]
+
+        if comments:
+            parts = ["\n\n## Comments\n"]
+            for c in comments:
+                author = c.get("user", {}).get("login", "unknown")
+                ts = c.get("created_at", "")
+                c_body = (c.get("body") or "").strip()
+                parts.append(f"**@{author}** — {ts}\n\n{c_body}\n")
+            full_content = body + "\n".join(parts)
+
     # Summary: first 100 characters of body
     summary = body[:100] if body else "(empty body)"
 
-    # Write body to file in container via base64
-    encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
+    # Write full content to file in container via base64
+    encoded = base64.b64encode(full_content.encode("utf-8")).decode("ascii")
     dir_part = posixpath.dirname(save_to)
     write_cmd = (
         f"mkdir -p {shlex.quote(dir_part)} &&"
@@ -566,7 +606,7 @@ def issue_view(
     if exit_code2 != 0:
         return json.dumps({"status": "error", "error": f"Failed to write issue body to {save_to}"})
 
-    size_bytes = len(body.encode("utf-8"))
+    size_bytes = len(full_content.encode("utf-8"))
 
     # Record boundary crossing (read-only, so approved=None)
     record_boundary_crossing(
@@ -582,6 +622,7 @@ def issue_view(
         "summary": summary,
         "file": save_to,
         "size_bytes": size_bytes,
+        "comments": len(comments) if include_comments else None,
     })
 
 

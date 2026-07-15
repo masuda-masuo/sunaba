@@ -867,6 +867,7 @@ def edit_symbol(
     symbol: str,
     new_code: str,
     line: int | None = None,
+    preserve: str = "decorators+docstring",
 ) -> str:
     """Replace or delete a function/class/method by name -- no old_str needed.
 
@@ -881,6 +882,11 @@ def edit_symbol(
     line local edits prefer write_file_sandbox old_str; for non-Python
     or pattern edits use transform_file.
 
+    The *preserve* parameter controls what parts of the old definition
+    are automatically kept when *new_code* replaces the body.  When
+    *new_code* already carries decorators or a docstring, the old ones
+    are not duplicated (new wins).
+
     Args:
         container_id: Container ID prefix.
         file_path: Absolute path inside the container (.py only).
@@ -890,6 +896,11 @@ def edit_symbol(
             Whitespace-only is rejected.
         line: Disambiguates same-name definitions: any line number inside
             the intended definition (decorators included).
+        preserve: What to keep from the old definition:
+            "decorators+docstring" (default) -- preserve both;
+            "decorators" -- preserve only decorators;
+            "docstring" -- preserve only the docstring;
+            "none" -- full replacement (previous behaviour).
 
     Returns:
         JSON: status, resolved (qualname/kind/start_line/end_line),
@@ -917,7 +928,7 @@ def edit_symbol(
         {"file_path": file_path, "symbol": symbol},
     )
     result = edit_symbol_in_container(
-        client, container_id, file_path, symbol, new_code, line
+        client, container_id, file_path, symbol, new_code, line, preserve
     )
 
     if result.get("status") != "ok":

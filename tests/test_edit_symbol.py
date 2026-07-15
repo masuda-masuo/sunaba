@@ -469,6 +469,30 @@ def cached():
     return 3
 """
 
+    def test_docstring_reindented_to_new_body_indent(self, tmp_path) -> None:
+        """Docstring indent adjusts when new_code uses a different body indent."""
+        src = """\
+def foo():
+    \"\"\"A docstring.\"\"\"
+    pass
+"""
+        f = tmp_path / "mod.py"
+        f.write_text(src, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "foo",
+            "def foo():\n  return 1\n",
+        )
+        # new_code uses 2-space body indent; docstring should be re-indented to 2
+        assert out["status"] == "ok"
+        text = f.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if '"""' in line:
+                assert line == '  """A docstring."""'
+                break
+        else:
+            pytest.fail("docstring not found")
+
     def test_decorator_with_args_preserved(self, tmp_path) -> None:
         """Decorators with arguments (calls) are preserved correctly."""
         f = tmp_path / "mod.py"

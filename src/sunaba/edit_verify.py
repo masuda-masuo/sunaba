@@ -1437,15 +1437,26 @@ else:
                     if preserve_docs and not _has_docstring(new_node) and _has_docstring(old_node):
                         ds = old_node.body[0]
                         if ds.lineno != target["def_line"]:
-                            ds_lines = []
-                            for ln in range(ds.lineno, ds.end_lineno + 1):
-                                ds_lines.append(lines[ln - 1])
+                            old_body_indent = ds.col_offset
+                            new_body_indent = old_body_indent
                             def_idx = 0
                             for i, ln in enumerate(reindented):
                                 stripped = ln.lstrip()
                                 if stripped.startswith("def ") or stripped.startswith("async def ") or stripped.startswith("class "):
                                     def_idx = i
                                     break
+                            if def_idx + 1 < len(reindented):
+                                bl = reindented[def_idx + 1]
+                                if bl.strip():
+                                    new_body_indent = len(bl) - len(bl.lstrip())
+                            ds_lines = []
+                            for ln in range(ds.lineno, ds.end_lineno + 1):
+                                raw = lines[ln - 1]
+                                stripped = raw.lstrip()
+                                if stripped:
+                                    ds_lines.append(" " * new_body_indent + stripped)
+                                else:
+                                    ds_lines.append("")
                             reindented = reindented[:def_idx + 1] + ds_lines + reindented[def_idx + 1:]
 
     new_lines = lines[:start - 1] + reindented + lines[end:]

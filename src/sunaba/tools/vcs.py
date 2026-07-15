@@ -1315,6 +1315,14 @@ def publish(
     # Never blocks -- publish proceeds exactly as before.
     verified = has_verify_success(cid)
 
+    # Reject empty pr_body when creating a PR (Issue #608)
+    if create_pr and not pr_body.strip():
+        return json.dumps({
+            "status": "error",
+            "step": "validation",
+            "error": "pr_body is required when create_pr=True",
+        })
+
     def _finish(payload: dict[str, Any]) -> str:
         if not verified:
             payload["warning"] = (

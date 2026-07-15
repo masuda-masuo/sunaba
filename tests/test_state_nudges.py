@@ -157,7 +157,7 @@ class TestPublishPushOnlyNote:
         container = _make_container_mock(list(_PUSH_SEQUENCE))
         mock_docker.return_value = _make_client_mock(container)
 
-        result = _run_publish(create_pr=True, pr_title="t")
+        result = _run_publish(create_pr=True, pr_title="t", pr_body="PR body")
 
         assert result["status"] == "pushed"
         assert result["pr_url"] == "https://github.com/owner/repo/pull/1"

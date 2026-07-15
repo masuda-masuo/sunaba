@@ -789,6 +789,124 @@ def sandbox_pr_review_write(
         JSON: status, html_url, review_id; includes original_event and
         downgraded_to when an auto-downgrade occurred; error on failure.
     """
+    if event not in _PR_REVIEW_EVENTS:
+        return json.dumps({
+            "status": "error",
+            "error": f"Invalid event: {event!r} (expected APPROVE, REQUEST_CHANGES, or COMMENT)",
+        })
+    if not _REPO_FORMAT_RE.match(repo):
+        return json.dumps({"status": "error", "error": f"Invalid repo format: {repo} (expected owner/repo)"})
+    if pr < 1:
+        return json.dumps({"status": "error", "error": f"Invalid PR number: {pr}"})
+
+    if comments is not None:
+        for i, c in enumerate(comments):
+            if not isinstance(c, dict):
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Invalid comment at index {i}: expected a dict, got {type(c).__name__}",
+                })
+            if "path" not in c:
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Comment at index {i} is missing required key 'path'",
+                })
+            if "body" not in c:
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Comment at index {i} is missing required key 'body'",
+                })
+
+    client = _docker()
+    try:
+        client.containers.get(container_id)
+    except NotFound:
+        return container_not_found_error(container_id)
+    except Exception as e:
+        return json.dumps({"status": "error", "error": str(e)})
+
+    cid = container_id[:12]
+    details = f"repo={repo} pr=#{pr} event={event}"
+
+    push_token = _resolve_vcs_token()
+    if not push_token:
+        return json.dumps({
+            "status": "error",
+            "error": "No host-side GitHub token available (GITHUB_TOKEN / broker); "
+                     "PR review write requires one regardless of container state.",
+        })
+
+    # Resolve PR head SHA for inline comment commit_id
+    try:
+        pr_data = _github_api_request(f"/repos/{repo}/pulls/{pr}", push_token)
+    except RuntimeError as e:
+        record_boundary_crossing(cid, "pr_review_write", f"{details} failed to fetch PR data", approved=False)
+        return json.dumps({"status": "error", "error": f"Failed to fetch PR #{pr}: {e}"})
+
+    head_sha = pr_data.get("head", {}).get("sha", "")
+    if not head_sha:
+        record_boundary_crossing(cid, "pr_review_write", f"{details} no head sha", approved=False)
+        return json.dumps({"status": "error", "error": f"Could not resolve head SHA for PR #{pr}"})
+
+    payload: dict[str, Any] = {
+        "body": body,
+        "event": event,
+        "commit_id": head_sha,
+    }
+    if comments:
+        payload["comments"] = comments
+
+    try:
+        result = _github_api_request(
+            f"/repos/{repo}/pulls/{pr}/reviews",
+            push_token,
+            method="POST",
+            payload=payload,
+        )
+    except RuntimeError as e:
+        record_boundary_crossing(cid, "pr_review_write", f"{details} failed", approved=False)
+        err_msg = str(e)
+        _OWN_PR_INDICATORS = (
+            "can not request changes on your own",
+            "cannot request changes on your own",
+            "can not approve your own",
+            "cannot approve your own",
+        )
+        if event in ("REQUEST_CHANGES", "APPROVE") and any(i in err_msg.lower() for i in _OWN_PR_INDICATORS):
+            # Auto-downgrade to COMMENT when the bot owns the PR (issue #613)
+            downgraded_event = "COMMENT"
+            payload["event"] = downgraded_event
+            try:
+                result = _github_api_request(
+                    f"/repos/{repo}/pulls/{pr}/reviews",
+                    push_token,
+                    method="POST",
+                    payload=payload,
+                )
+            except RuntimeError as e2:
+                record_boundary_crossing(
+                    cid, "pr_review_write", f"{details} downgrade to COMMENT also failed", approved=False,
+                )
+                return json.dumps({"status": "error", "error": f"Downgrade to COMMENT also failed: {e2}"})
+            record_boundary_crossing(
+                cid, "pr_review_write", f"{details} (downgraded to COMMENT)", approved=True,
+            )
+            return json.dumps({
+                "status": "ok",
+                "html_url": result.get("html_url", ""),
+                "review_id": result.get("id"),
+                "original_event": event,
+                "downgraded_to": downgraded_event,
+            })
+        return json.dumps({"status": "error", "error": err_msg})
+
+    record_boundary_crossing(cid, "pr_review_write", details, approved=True)
+
+    return json.dumps({
+        "status": "ok",
+        "html_url": result.get("html_url", ""),
+        "review_id": result.get("id"),
+    })
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from docker.errors import APIError, NotFound
 
+from sunaba import undo
 from sunaba.edit_verify import (
     _file_size_from_counts,
     edit_symbol_in_container,
@@ -439,7 +440,10 @@ def write_file_sandbox(
     file -- the edit was probably applied by an earlier call); a
     successful replace echoes the post-edit region with line numbers
     (ground truth for the next edit).  On .py files, an edit that
-    leaves the file unparseable is flagged with a warning in the echo.  old_str matches
+    leaves the file unparseable is flagged with a warning in the echo.
+
+    Every edit snapshots the pre-edit file first; undo_file_edit
+    restores it -- prefer that over repairing a broken file in place.  old_str matches
     the exact string you provide -- if it spans several lines, ALL of
     them are replaced, so keep it minimal and unique.
 
@@ -447,12 +451,10 @@ def write_file_sandbox(
     snippet edits.  For replacing an entire Python function/class/method,
     write the definition signature as ``old_str`` (e.g. ``def foo():`) —
     it will be resolved via AST automatically.  When AST resolution
-    applies, a no-op edit returns "No changes" without touching the
-    file, and a resolution failure (ambiguous symbol, syntax error in
-    the file) is reported as-is when file_contents is a complete
-    definition -- there is no silent fallback that could splice a
-    duplicate body.  For bulk or computed edits across arbitrary
-    patterns use transform_file.
+    applies, a no-op edit returns "No changes", and a resolution
+    failure is surfaced when file_contents is a complete definition
+    (no silent fallback that could splice a duplicate body).  For bulk
+    or computed edits across arbitrary patterns use transform_file.
 
     Args:
         container_id: Container ID prefix.
@@ -538,6 +540,7 @@ def write_file_sandbox(
                     if ast_result.get("status") == "ok":
                         resolved = ast_result.get("resolved", {})
                         if ast_result.get("changed"):
+                            undo.save_version(container_id, dest_path, existing)
                             try:
                                 new_content = read_file(container, dest_path)
                             except ValueError:
@@ -667,10 +670,22 @@ def write_file_sandbox(
             syntax_note = (
                 f"\nWarning: {dest_path} does not parse as Python after "
                 f"this edit (line {e.lineno}: {e.msg}). If unintended, "
-                "check file_contents for escaping artifacts (stray \\n, "
-                '\\" or unbalanced quotes) and re-edit, or repair with '
-                "transform_file."
+                "call undo_file_edit to restore the pre-edit file (do "
+                "NOT try to repair the broken text in place), check "
+                "file_contents for escaping artifacts (stray \\n, "
+                '\\" or unbalanced quotes), and re-apply the edit.'
             )
+
+    # Snapshot the pre-edit content so undo_file_edit can restore it.
+    if append or old_str is not None or has_line_range:
+        undo.save_version(container_id, dest_path, existing)
+    else:
+        try:
+            undo.save_version(
+                container_id, dest_path, read_file(container, dest_path)
+            )
+        except ValueError:
+            pass  # new file -- nothing to snapshot
 
     try:
         write_file(container, container_id[:12], dest_path, content)
@@ -679,6 +694,120 @@ def write_file_sandbox(
     if replaced_span is not None:
         return _build_success_echo(content, dest_path, *replaced_span) + syntax_note
     return f"Written {len(content)} bytes to {dest_path}" + syntax_note
+
+
+# ---------------------------------------------------------------------------
+# undo_file_edit
+# ---------------------------------------------------------------------------
+
+# Max diff lines echoed by undo_file_edit before truncation.
+_UNDO_DIFF_MAX_LINES = 50
+
+
+def undo_file_edit(
+    container_id: str,
+    file_path: str,
+    steps: int = 1,
+) -> str:
+    """Restore *file_path* to the state it had before a recent edit.
+
+    Every write_file_sandbox / transform_file edit snapshots the
+    pre-edit file automatically, so a broken edit is never a dead end:
+    call this to step back to the file as it was BEFORE the edit,
+    instead of trying to repair broken text in place.  steps=1 (default)
+    is the state right before the last edit; steps=2 the edit before
+    that, and so on.
+
+    The current content is snapshotted too before restoring, so an
+    undo can itself be undone: calling again with steps=1 re-applies
+    the undone edit (redo).
+
+    Args:
+        container_id: Container ID prefix.
+        file_path: Absolute path of the file inside the container
+            (the same path echoed by the editing tools).
+        steps: How many edits to step back (default 1).
+
+    Returns:
+        JSON: status, file_path, restored diff (capped), and the
+        remaining snapshots; error with available snapshots when
+        no matching snapshot exists.
+    """
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        return container_not_found_error(container_id)
+    except Exception as e:
+        return json.dumps({"status": "error", "error": str(e)})
+
+    target = undo.get_version(container_id, file_path, steps)
+    if target is None:
+        available = undo.list_versions(container_id, file_path)
+        if not available:
+            return json.dumps({
+                "status": "error",
+                "error": (
+                    f"No undo history for {file_path}. Snapshots are taken "
+                    "on every write_file_sandbox/transform_file edit in "
+                    "this server session; pass the exact path echoed by "
+                    "those tools."
+                ),
+            })
+        return json.dumps({
+            "status": "error",
+            "error": (
+                f"steps={steps} is out of range for {file_path}: "
+                f"{len(available)} snapshot(s) available."
+            ),
+            "snapshots": available,
+        })
+
+    try:
+        current = read_file(container, file_path)
+    except ValueError:
+        current = None
+
+    if current is not None:
+        undo.save_version(container_id, file_path, current)
+
+    try:
+        write_file(container, container_id[:12], file_path, target)
+    except ValueError as e:
+        return json.dumps({"status": "error", "error": str(e)})
+
+    record_tool_use(
+        container_id[:12],
+        "undo_file_edit",
+        {"file_path": file_path, "steps": steps},
+    )
+
+    diff_lines = list(difflib.unified_diff(
+        (current or "").splitlines(),
+        target.splitlines(),
+        fromfile=f"{file_path} (before undo)",
+        tofile=f"{file_path} (restored)",
+        lineterm="",
+    ))
+    truncated = len(diff_lines) > _UNDO_DIFF_MAX_LINES
+    if truncated:
+        remaining = len(diff_lines) - _UNDO_DIFF_MAX_LINES
+        diff_lines = diff_lines[:_UNDO_DIFF_MAX_LINES] + [
+            f"... (truncated, {remaining} more lines)"
+        ]
+
+    return json.dumps({
+        "status": "ok",
+        "file_path": file_path,
+        "restored_steps_back": steps,
+        "diff": "\n".join(diff_lines),
+        "note": (
+            "The replaced content was snapshotted too: undo_file_edit "
+            "with steps=1 now re-applies the undone edit (redo); "
+            "steps=2 goes further back."
+        ),
+        "snapshots": undo.list_versions(container_id, file_path),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -988,9 +1117,10 @@ def transform_file(
     transform(text: str) -> str must exist (helpers and imports are
     fine).  The file's text goes in, the returned text is written back,
     and a unified diff is returned -- always check it: an over-broad
-    pattern can change more than intended.  Prefer write_file_sandbox
-    old_str for a single known replacement; use this for bulk, pattern,
-    or computed edits.  Example::
+    pattern can change more than intended (the pre-edit file is
+    snapshotted; undo_file_edit rolls it back).  Prefer
+    write_file_sandbox old_str for a single known replacement; use
+    this for bulk, pattern, or computed edits.  Example::
 
         import re
         def transform(text):
@@ -1023,9 +1153,17 @@ def transform_file(
         "transform_file",
         {"file_path": file_path},
     )
+    # Pre-edit snapshot for undo_file_edit -- best-effort: the edit
+    # must never fail because its undo snapshot could not be read.
+    try:
+        before = read_file(_, file_path)
+    except Exception:
+        before = None
     result = transform_file_in_container(client, container_id, file_path, code)
 
     if result.get("status") == "ok" and result.get("changed"):
+        if before is not None:
+            undo.save_version(container_id, file_path, before)
         display, meta = truncate_output(
             result.get("diff", ""),
             max_lines=max_lines,

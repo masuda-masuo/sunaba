@@ -10,6 +10,16 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ### Added
 
+- **Per-edit undo: `undo_file_edit` tool** — every `write_file_sandbox` /
+  `transform_file` edit now snapshots the pre-edit file automatically
+  (host-side under `~/.sunaba/undo/`, bounded ring of 10 versions per file,
+  files over 5 MB skipped, history cleared on container stop). The new
+  `undo_file_edit(container_id, file_path, steps=1)` tool restores the state
+  `steps` edits back; the replaced content is snapshotted too, so an undo is
+  redoable. Rationale: when an LLM breaks a file, it tends to keep "fixing"
+  the broken text forward and spirals; a guaranteed way back to the pre-edit
+  state breaks that loop. The `.py` parse-regression warning now points at
+  `undo_file_edit` as the first recovery step. (#599)
 - **`write_file_sandbox` anti-loop guards** (the callers are LLMs — a mistake
   must come back as an actionable message, and dead ends must offer an exit):
   a failed `old_str` match whose `file_contents` already exists in the file now

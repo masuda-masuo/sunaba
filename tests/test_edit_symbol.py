@@ -5,7 +5,7 @@ resolution, decorator-inclusive ranges, re-indentation, seam blank-line
 collapsing, post-edit syntax verification).
 
 The MCP-facing ``edit_symbol`` tool was removed in #627; its AST
-resolution is now integrated into ``write_file_sandbox``'s ``old_str``
+resolution is now integrated into ``edit_file``'s ``old_str``
 path.
 """
 
@@ -14,7 +14,7 @@ import ast
 import pytest
 
 from src.sunaba.edit_verify import edit_symbol_in_container
-from sunaba.tools.file import write_file_sandbox
+from sunaba.tools.file import edit_file
 from tests.conftest import _FakeClient, _FakeContainer
 
 POSIX = "/sandbox/mod.py"
@@ -319,7 +319,7 @@ class TestValidationGates:
         out, _ = _run(tmp_path, "def broken(:\n    pass\n", "broken", "")
         assert out["status"] == "error"
         assert "has a syntax error at line 1" in out["error"]
-        assert "write_file_sandbox/transform_file" in out["error"]
+        assert "edit_file (complete old_str) or transform_file" in out["error"]
 
     def test_whitespace_only_new_code_is_rejected(self, tmp_path) -> None:
         out, f = _run(tmp_path, MODULE_SRC, "foo", "  \n")
@@ -619,12 +619,12 @@ def foo():
 
 
 # ===================================================================
-# write_file_sandbox integration via old_str AST resolution
+# edit_file integration via old_str AST resolution
 # ===================================================================
 
 
 class _FakeContainerWithIO(_FakeContainer):
-    """Extends _FakeContainer with cat/stat/mkdir for write_file_sandbox I/O."""
+    """Extends _FakeContainer with cat/stat/mkdir for edit_file I/O."""
 
     def exec_run(self, cmd, **kwargs):  # noqa: ANN001, ANN201
         import shlex
@@ -664,12 +664,12 @@ class _FakeContainerWithIO(_FakeContainer):
 
 
 def _write_fake_docker(path_map):
-    """Build a _FakeClient with _FakeContainerWithIO for write_file_sandbox tests."""
+    """Build a _FakeClient with _FakeContainerWithIO for edit_file tests."""
     return _FakeClient(_FakeContainerWithIO(path_map))
 
 
 class TestWriteFileSymbolIntegration:
-    """write_file_sandbox + AST resolution integration (issue #627/#628)."""
+    """edit_file + AST resolution integration (issue #627/#628)."""
 
     # ── _extract_symbol_from_old_str unit tests ──────────────────────
 
@@ -754,7 +754,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="def process(x: bytes) -> bytes: ...",
@@ -773,7 +773,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="def foo():\n    return 99\n",
@@ -790,7 +790,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="class C:\n    def m(self):\n        return 99\n",
@@ -806,7 +806,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="async def fetch():\n    return 1\n",
@@ -824,7 +824,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({"/sandbox/data.txt": str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="/sandbox/data.txt",
             file_contents="goodbye\n",
@@ -840,7 +840,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({"/sandbox/data.txt": str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="/sandbox/data.txt",
             file_contents="def bar():\n    return 2\n",
@@ -866,7 +866,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="def foo():\n    return 1",
@@ -892,7 +892,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="def foo():\n    return 1\n",
@@ -922,7 +922,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="def process(x):\n    return x + 1\n",
@@ -952,7 +952,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="def process(x):\n    return x + 1",
@@ -977,7 +977,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="def foo_renamed():",
@@ -997,7 +997,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="x = 1",
@@ -1016,7 +1016,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="def foo():\n    return 99\n",
@@ -1039,7 +1039,7 @@ class TestWriteFileSymbolIntegration:
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name=POSIX,
             file_contents="def process(x):\n    return x + 1\n",

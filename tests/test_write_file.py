@@ -1,4 +1,4 @@
-"""Tests for write_file_sandbox tool (including partial update support).
+"""Tests for the write_file / edit_file tools (issue #630 split).
 
 Tests cover:
 - Full overwrite (backward compatible)
@@ -14,7 +14,7 @@ import io
 import tarfile
 from unittest.mock import MagicMock, patch
 
-from sunaba.tools.file import write_file_sandbox
+from sunaba.tools.file import edit_file, write_file
 
 
 def _exec_run_for(
@@ -86,7 +86,7 @@ class TestWriteFileSandboxFullOverwrite:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="hello.txt",
             file_contents="new content",
@@ -108,7 +108,7 @@ class TestWriteFileSandboxFullOverwrite:
         mock_client.containers.get.side_effect = NotFound("not found")
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="f.txt",
             file_contents="data",
@@ -127,7 +127,7 @@ class TestWriteFileSandboxFullOverwrite:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="f.txt",
             file_contents="data",
@@ -145,7 +145,7 @@ class TestWriteFileSandboxFullOverwrite:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="f.txt",
             file_contents="data",
@@ -167,7 +167,7 @@ class TestWriteFileSandboxFullOverwrite:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="/tmp/repo/src/foo.py",
             file_contents="data",
@@ -188,7 +188,7 @@ class TestWriteFileSandboxFullOverwrite:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="src/pkg/module.py",
             file_contents="data",
@@ -220,7 +220,7 @@ class TestWriteFileSandboxLineRange:
         existing = "line1\nline2\nline3\nline4\nline5\n"
         mock_container = self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="REPLACED\n",
@@ -238,7 +238,7 @@ class TestWriteFileSandboxLineRange:
         existing = "line1\nline2\nline3\n"
         mock_container = self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="NEWSTART\n",
@@ -255,7 +255,7 @@ class TestWriteFileSandboxLineRange:
         existing = "line1\nline2\nline3\n"
         mock_container = self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="END\n",
@@ -274,7 +274,7 @@ class TestWriteFileSandboxLineRange:
         existing = "line1\nline2\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="data",
@@ -292,7 +292,7 @@ class TestWriteFileSandboxLineRange:
         existing = "line1\nline2\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="data",
@@ -311,7 +311,7 @@ class TestWriteFileSandboxLineRange:
         existing = "line1\nline2\nline3\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="data",
@@ -328,7 +328,7 @@ class TestWriteFileSandboxLineRange:
         existing = "line1\nline2\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="data",
@@ -344,7 +344,7 @@ class TestWriteFileSandboxLineRange:
         existing = "keep\nreplace_me\nkeep\n"
         mock_container = self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="replaced\n",
@@ -379,7 +379,7 @@ class TestWriteFileSandboxAppend:
             mock_docker, existing,
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="appended\n",
@@ -398,7 +398,7 @@ class TestWriteFileSandboxAppend:
             mock_docker, existing,
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="content",
@@ -432,7 +432,7 @@ class TestWriteFileSandboxReplace:
             mock_docker, existing,
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="GOODBYE",
@@ -451,7 +451,7 @@ class TestWriteFileSandboxReplace:
             mock_docker, existing,
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="NEW\nCONTENT",
@@ -468,7 +468,7 @@ class TestWriteFileSandboxReplace:
         existing = "some content\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="replacement",
@@ -484,7 +484,7 @@ class TestWriteFileSandboxReplace:
         existing = "some content\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="replacement",
@@ -517,7 +517,7 @@ class TestWriteFileSandboxReplaceEnhanced:
         existing = "hello\nworld\nhello\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="HI",
@@ -537,7 +537,7 @@ class TestWriteFileSandboxReplaceEnhanced:
             mock_docker, existing,
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="REPLACED",
@@ -559,7 +559,7 @@ class TestWriteFileSandboxReplaceEnhanced:
             mock_docker, existing,
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="def bar():",
@@ -581,7 +581,7 @@ class TestWriteFileSandboxReplaceEnhanced:
         existing = "  hello\n  world\n\thello\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="HI",
@@ -600,7 +600,7 @@ class TestWriteFileSandboxReplaceEnhanced:
             mock_docker, existing,
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="goodbye",
@@ -621,7 +621,7 @@ class TestWriteFileSandboxReplaceEnhanced:
         existing = "def foo():\n    pass\n\ndef bar():\n    pass\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="new",
@@ -643,7 +643,7 @@ class TestWriteFileSandboxReplaceEnhanced:
         existing = "def foo():\n    pass\n\ndef bar():\n    pass\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="new",
@@ -663,7 +663,7 @@ class TestWriteFileSandboxReplaceEnhanced:
         existing = "def foo():\n    pass\n\ndef bar():\n    pass\n"
         self._mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="new",
@@ -704,7 +704,7 @@ class TestNearMissFirstMismatch:
         existing = "def m():\n    a()\n\n    x = 1\n    y = 2\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.py",
             file_contents="new",
@@ -723,7 +723,7 @@ class TestNearMissFirstMismatch:
         existing = "def f():\n\tresult = foobar()\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.py",
             file_contents="new",
@@ -747,7 +747,7 @@ class TestNearMissFirstMismatch:
         existing = "a = 1\nb = 2\nc = 3\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.py",
             file_contents="new",
@@ -767,7 +767,7 @@ class TestNearMissFirstMismatch:
         _mock_container_with_file(mock_docker, existing)
 
         old_str = "\n".join(f"wanted_{i} = {i}" for i in range(1, 11))
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.py",
             file_contents="new",
@@ -787,7 +787,7 @@ class TestNearMissFirstMismatch:
         _mock_container_with_file(mock_docker, existing)
 
         old_str = "\n".join(f"wanted_{i} = {i}" for i in range(1, 61))
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.py",
             file_contents="new",
@@ -812,7 +812,7 @@ class TestOldStrSuccessEcho:
         existing = "line1\nline2\nline3\nline4\nline5\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="REPLACED",
@@ -834,7 +834,7 @@ class TestOldStrSuccessEcho:
         existing = "line1\nline2\nline3\nline4\nline5\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="X\nY\nZ",
@@ -856,7 +856,7 @@ class TestOldStrSuccessEcho:
 
         # Multi-line old_str with no indentation: not an exact substring,
         # so the whitespace-flexible fallback (re-indent) kicks in.
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.py",
             file_contents="def bar():\n    changed()",
@@ -878,7 +878,7 @@ class TestOldStrSuccessEcho:
         _mock_container_with_file(mock_docker, existing)
 
         new_block = "\n".join(f"n{i:02d}" for i in range(1, 41))
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents=new_block,
@@ -904,7 +904,7 @@ class TestOldStrSuccessEcho:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="hello",
@@ -924,7 +924,7 @@ class TestWriteFileSandboxMutualExclusivity:
         mock_client = MagicMock()
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="f.txt",
             file_contents="data",
@@ -942,7 +942,7 @@ class TestWriteFileSandboxMutualExclusivity:
         mock_client = MagicMock()
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="f.txt",
             file_contents="data",
@@ -960,7 +960,7 @@ class TestWriteFileSandboxMutualExclusivity:
         mock_client = MagicMock()
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="f.txt",
             file_contents="data",
@@ -978,7 +978,7 @@ class TestWriteFileSandboxMutualExclusivity:
         mock_client = MagicMock()
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="f.txt",
             file_contents="data",
@@ -1009,7 +1009,7 @@ class TestWriteFileSandboxFileNotFound:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="nonexistent.txt",
             file_contents="data",
@@ -1023,8 +1023,106 @@ class TestWriteFileSandboxFileNotFound:
         )
 
 
+class TestEditFileSplitContract:
+    """Issue #630 split: edit_file needs a mode and an existing file."""
+
+    @patch("sunaba.tools.file._docker")
+    def test_no_mode_rejected_with_write_file_pointer(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """edit_file without any edit mode is rejected, pointing at write_file."""
+        mock_client = MagicMock()
+        mock_docker.return_value = mock_client
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="f.txt",
+            file_contents="data",
+        )
+        assert result.startswith("Error")
+        assert "requires one edit mode" in result
+        assert "write_file" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_missing_file_points_at_write_file(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """edit_file on a missing file names write_file as the creation path."""
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (1, (b"", b"no such file"))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="new.txt",
+            file_contents="data",
+            dest_dir="/root",
+            old_str="foo",
+        )
+        assert "Error: file /root/new.txt not found" in result
+        assert "use write_file to create it" in result
+
+    @patch("sunaba.tools.file.record_tool_use")
+    @patch("sunaba.tools.file._docker")
+    def test_write_file_journals_overwrote_existing_true(
+        self, mock_docker: MagicMock, mock_record: MagicMock,
+    ) -> None:
+        """Overwriting an existing file logs overwrote_existing=True (#630 metric)."""
+        mock_container = MagicMock()
+        mock_container.exec_run.side_effect = _exec_run_for(b"old content")
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = write_file(
+            container_id="abc123",
+            file_name="f.txt",
+            file_contents="new content",
+            dest_dir="/root",
+        )
+        assert "Error" not in result
+        mock_record.assert_called_once_with(
+            "abc123",
+            "write_file",
+            {"file_path": "/root/f.txt", "overwrote_existing": True},
+        )
+
+    @patch("sunaba.tools.file.record_tool_use")
+    @patch("sunaba.tools.file._docker")
+    def test_write_file_journals_overwrote_existing_false(
+        self, mock_docker: MagicMock, mock_record: MagicMock,
+    ) -> None:
+        """Creating a new file logs overwrote_existing=False (#630 metric)."""
+        def _cat_fails(cmd, **kwargs):  # noqa: ANN001, ANN202
+            shell = cmd[2] if isinstance(cmd, (list, tuple)) and len(cmd) > 2 else ""
+            if shell.startswith("cat "):
+                return (1, (b"", b"no such file"))
+            return (0, (b"", b""))
+
+        mock_container = MagicMock()
+        mock_container.exec_run.side_effect = _cat_fails
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = write_file(
+            container_id="abc123",
+            file_name="f.txt",
+            file_contents="new content",
+            dest_dir="/root",
+        )
+        assert "Error" not in result
+        mock_record.assert_called_once_with(
+            "abc123",
+            "write_file",
+            {"file_path": "/root/f.txt", "overwrote_existing": False},
+        )
+
+
 class TestWriteFileSandboxJournal:
-    """Tests that write_file_sandbox records journal entries via write_file (Issue #96)."""
+    """Tests that write_file/edit_file record journal entries (Issue #96)."""
 
     @patch("sunaba.tools.file._docker")
     @patch("sunaba.edit_verify.record_file_write")
@@ -1037,7 +1135,7 @@ class TestWriteFileSandboxJournal:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="test.py",
             file_contents="print('hello')",
@@ -1077,7 +1175,7 @@ class TestWriteFileLargeFile:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="big.py",
             file_contents=big,
@@ -1108,7 +1206,7 @@ class TestWriteFileLargeFile:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="big.py",
             file_contents="REPLACED",
@@ -1167,7 +1265,7 @@ class TestWriteFileOwnership:
     ) -> None:
         """End-to-end: write_file streams the resolved owner into the tar.
 
-        Drives the full ``write_file_sandbox`` path through the realistic
+        Drives the full ``edit_file`` path through the realistic
         ``_exec_run_for`` mock (which answers the ``stat`` probes) and asserts
         the put_archive tar entry carries the existing file's uid/gid/mode —
         guarding against a regression that would leave files owned by root.
@@ -1180,7 +1278,7 @@ class TestWriteFileOwnership:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        write_file_sandbox(
+        edit_file(
             "abc123abc123",
             "f.py",
             "appended\n",
@@ -1229,7 +1327,7 @@ class TestWriteFileIsTestDetection:
 
     @patch("sunaba.tools.file._docker")
     @patch("sunaba.edit_verify.record_file_write")
-    def test_write_file_sandbox_detects_test_file(
+    def test_write_file_detects_test_file(
         self, mock_record: MagicMock, mock_docker: MagicMock,
     ) -> None:
         mock_container = MagicMock()
@@ -1238,7 +1336,7 @@ class TestWriteFileIsTestDetection:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        write_file_sandbox(
+        write_file(
             container_id="abc123",
             file_name="test_foo.py",
             file_contents="def test_foo(): pass",
@@ -1287,10 +1385,10 @@ class TestPosixpathFix:
         assert _is_test_file("/tmp/repo/src/bar.py") is False
 
     @patch("sunaba.tools.file._docker")
-    def test_write_file_sandbox_dest_path_uses_forward_slash(
+    def test_write_file_dest_path_uses_forward_slash(
         self, mock_docker: MagicMock,
     ) -> None:
-        """dest_path constructed by write_file_sandbox must use forward slashes.
+        """dest_path constructed by write_file must use forward slashes.
 
         Regression test: os.path.join would produce backslash-separated paths
         on Windows, causing "file not found" in Linux containers (Issue #219).
@@ -1301,7 +1399,7 @@ class TestPosixpathFix:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.py",
             file_contents="new content",
@@ -1323,7 +1421,7 @@ class TestPosixpathFix:
         ), f"Expected forward-slash path in cat calls: {cat_calls}"
 
     @patch("sunaba.tools.file._docker")
-    def test_write_file_sandbox_full_overwrite_path(
+    def test_write_file_full_overwrite_path(
         self, mock_docker: MagicMock,
     ) -> None:
         """Full overwrite mode also uses correct path (not os.path.join behavior)."""
@@ -1334,7 +1432,7 @@ class TestPosixpathFix:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="output.txt",
             file_contents="data",
@@ -1376,7 +1474,7 @@ class TestTrailingNewlinePreservation:
             mock_docker, "aaa\nbbb\nccc\n",
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="t.txt",
             file_contents="CCC",
@@ -1395,7 +1493,7 @@ class TestTrailingNewlinePreservation:
             mock_docker, "aaa\nbbb\nccc\n",
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="t.txt",
             file_contents="BBB",
@@ -1414,7 +1512,7 @@ class TestTrailingNewlinePreservation:
             mock_docker, "aaa\nbbb\nccc",
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="t.txt",
             file_contents="BBB",
@@ -1434,7 +1532,7 @@ class TestTrailingNewlinePreservation:
             mock_docker, "aaa\nbbb\nccc",
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="t.txt",
             file_contents="CCC\n",
@@ -1451,7 +1549,7 @@ class TestTrailingNewlinePreservation:
             mock_docker, "aaa\nbbb\n",
         )
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="t.txt",
             file_contents="ccc",
@@ -1467,7 +1565,7 @@ class TestTrailingNewlinePreservation:
     ) -> None:
         mock_container = self._mock_container_with_file(mock_docker, "aaa\nbbb")
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="t.txt",
             file_contents="ccc",
@@ -1496,7 +1594,7 @@ class TestLlmErgonomicsGuards:
         existing = "alpha\nreplacement text\ngamma\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="replacement text",
@@ -1515,7 +1613,7 @@ class TestLlmErgonomicsGuards:
         existing = "x = 1\ny = 2\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="y",
@@ -1535,7 +1633,7 @@ class TestLlmErgonomicsGuards:
         existing = "x = 1\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.py",
             file_contents='y = "unclosed',
@@ -1553,7 +1651,7 @@ class TestLlmErgonomicsGuards:
         existing = "x = 1\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.py",
             file_contents="y = 2",
@@ -1570,7 +1668,7 @@ class TestLlmErgonomicsGuards:
         """The warning also covers full overwrites (no edit mode)."""
         _mock_container_with_file(mock_docker, "")
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="test.py",
             file_contents="def broken(:\n    pass\n",
@@ -1583,7 +1681,7 @@ class TestLlmErgonomicsGuards:
     def test_non_py_file_never_warns(self, mock_docker: MagicMock) -> None:
         _mock_container_with_file(mock_docker, "")
 
-        result = write_file_sandbox(
+        result = write_file(
             container_id="abc123",
             file_name="notes.md",
             file_contents="def broken(:\n",
@@ -1601,7 +1699,7 @@ class TestLlmErgonomicsGuards:
         existing = "hello\nworld\nhello\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="HI",
@@ -1618,7 +1716,7 @@ class TestLlmErgonomicsGuards:
         existing = "aaa\nbbb\n"
         _mock_container_with_file(mock_docker, existing)
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id="abc123",
             file_name="test.txt",
             file_contents="new",

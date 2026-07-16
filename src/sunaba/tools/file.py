@@ -1,4 +1,4 @@
-"""File tools: write_file_sandbox, transform_file, copy_project, copy_file, read_file_range, list_files."""
+"""File tools: write_file, edit_file, transform_file, undo_file_edit, copy_project, copy_file, read_file_range, list_files."""
 
 from __future__ import annotations
 
@@ -25,7 +25,9 @@ from sunaba.edit_verify import (
     read_file,
     read_file_lines,
     transform_file_in_container,
-    write_file,
+)
+from sunaba.edit_verify import (
+    write_file as write_file_in_container,
 )
 from sunaba.journal import record_copy, record_tool_use
 from sunaba.output_control import paginate_output, truncate_output
@@ -34,7 +36,7 @@ from sunaba.tools.common import WORKSPACE, _docker, container_not_found_error
 logger: logging.Logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# write_file_sandbox  --  old_str helper functions
+# edit_file  --  old_str helper functions
 # ---------------------------------------------------------------------------
 
 
@@ -437,11 +439,97 @@ def _build_success_echo(
 
 
 # ---------------------------------------------------------------------------
-# write_file_sandbox
+# write_file / edit_file  (split by intent -- issue #630)
 # ---------------------------------------------------------------------------
 
 
-def write_file_sandbox(
+def _python_syntax_note(dest_path: str, content: str) -> str:
+    """Warning suffix when *content* for a .py file does not parse.
+
+    A .py file that stops parsing right after a write is almost always
+    an escaping or matching mistake -- say so in the success echo, so
+    the caller can repair it immediately instead of discovering it at
+    verify time (issue #599).  Warning only: multi-step edits may pass
+    through broken intermediate states on purpose.
+    """
+    if not dest_path.endswith(".py"):
+        return ""
+    try:
+        ast.parse(content)
+    except SyntaxError as e:
+        return (
+            f"\nWarning: {dest_path} does not parse as Python after "
+            f"this edit (line {e.lineno}: {e.msg}). If unintended, "
+            "call undo_file_edit to restore the pre-edit file (do "
+            "NOT try to repair the broken text in place), check "
+            "file_contents for escaping artifacts (stray \\n, "
+            '\\" or unbalanced quotes), and re-apply the edit.'
+        )
+    return ""
+
+
+def write_file(
+    container_id: str,
+    file_name: str,
+    file_contents: str,
+    dest_dir: str = WORKSPACE,
+) -> str:
+    """Create a file, or fully overwrite an existing one.
+
+    The file becomes exactly file_contents.  This tool never does
+    partial updates: to change part of an existing file (string
+    replace, line range, append) use edit_file; for bulk or computed
+    edits use transform_file.
+
+    An existing file's pre-write content is snapshotted first;
+    undo_file_edit restores it.  On .py files, content that does not
+    parse is flagged with a warning in the echo.
+
+    Args:
+        container_id: Container ID prefix.
+        file_name: Name of the file to write.
+        file_contents: Complete new content of the file.
+        dest_dir: Destination directory.
+
+    Returns:
+        Success or error message.
+    """
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        return f"Error: container {container_id[:12]} not found"
+    except Exception as e:
+        return f"Error: {e}"
+
+    dest_path = posixpath.join(dest_dir, file_name)
+
+    syntax_note = _python_syntax_note(dest_path, file_contents)
+
+    # Snapshot the pre-write content so undo_file_edit can restore it.
+    try:
+        existing: str | None = read_file(container, dest_path)
+    except ValueError:
+        existing = None  # new file -- nothing to snapshot
+    if existing is not None:
+        undo.save_version(container_id, dest_path, existing)
+
+    # overwrote_existing feeds the issue #630 measurement: how often a
+    # full overwrite hits a file that edit_file could have modified.
+    record_tool_use(
+        container_id[:12],
+        "write_file",
+        {"file_path": dest_path, "overwrote_existing": existing is not None},
+    )
+
+    try:
+        write_file_in_container(container, container_id[:12], dest_path, file_contents)
+    except ValueError as e:
+        return f"Error: {e}"
+    return f"Written {len(file_contents)} bytes to {dest_path}" + syntax_note
+
+
+def edit_file(
     container_id: str,
     file_name: str,
     file_contents: str,
@@ -453,41 +541,36 @@ def write_file_sandbox(
     preserve: str | None = None,
     line: int | None = None,
 ) -> str:
-    """Write or partially edit a file in the container.
+    """Edit part of an existing file in the container.
 
-    Edit modes are mutually exclusive; with none given the file is
-    fully overwritten.  Line-range: start_line[/end_line], 1-indexed
-    inclusive.  Append: append=True.  String replace: old_str.
-    Line-range and append keep the file's trailing newline as it was.
+    Exactly one edit mode is required: string replace (old_str),
+    line-range (start_line[/end_line], 1-indexed inclusive), or
+    append=True.  The file must already exist -- to create a file or
+    replace one wholesale use write_file.
 
-    old_str contract: multiple matches are rejected with their line
-    numbers (add context, retry); an inexact match retries with
-    per-line whitespace stripped and re-indents on success; no match
-    returns the nearest-miss region with line numbers plus the first
-    mismatching line (and says so when file_contents is already in the
-    file -- the edit was probably applied by an earlier call); a
-    successful replace echoes the post-edit region with line numbers
-    (ground truth for the next edit).  On .py files, an edit that
-    leaves the file unparseable is flagged with a warning in the echo.
+    old_str matches the exact string you provide (a multi-line match
+    is replaced whole, so keep it minimal and unique).  Multiple
+    matches are rejected with their line numbers; an inexact match
+    retries with per-line whitespace stripped and re-indents on
+    success; no match returns the nearest-miss region (and says so
+    when file_contents is already in the file -- probably applied by
+    an earlier call).  A successful replace echoes the post-edit
+    region with line numbers; a .py edit that leaves the file
+    unparseable is flagged there.
 
-    Every edit snapshots the pre-edit file first; undo_file_edit
-    restores it -- prefer that over repairing a broken file in place.  old_str matches
-    the exact string you provide -- if it spans several lines, ALL of
-    them are replaced, so keep it minimal and unique.
+    To replace a whole Python function/class, pass its signature as
+    old_str (e.g. ``def foo():``) -- it resolves via AST; a no-op
+    returns "No changes" and a resolution failure is surfaced when
+    file_contents is a complete definition (no silent fallback).
 
-    Suitable for local line-range replacement, insertion, or string-based
-    snippet edits.  For replacing an entire Python function/class/method,
-    write the definition signature as ``old_str`` (e.g. ``def foo():`) —
-    it will be resolved via AST automatically.  When AST resolution
-    applies, a no-op edit returns "No changes", and a resolution
-    failure is surfaced when file_contents is a complete definition
-    (no silent fallback that could splice a duplicate body).  For bulk
-    or computed edits across arbitrary patterns use transform_file.
+    Every edit snapshots the pre-edit file; undo_file_edit restores it
+    -- prefer that over repairing a broken file in place.  For bulk or
+    computed edits use transform_file.
 
     Args:
         container_id: Container ID prefix.
-        file_name: Name of the file to write.
-        file_contents: Content to write.
+        file_name: Name of the file to edit.
+        file_contents: Replacement text for the chosen mode.
         dest_dir: Destination directory.
         start_line: Line-range start (1-indexed, inclusive).
         end_line: Line-range end (1-indexed, inclusive; default last line).
@@ -517,209 +600,203 @@ def write_file_sandbox(
 
     dest_path = posixpath.join(dest_dir, file_name)
 
-    # Validate mutual exclusivity
+    # Exactly one edit mode -- no mode is not a full overwrite here,
+    # that is write_file's job (issue #630: the split is by intent,
+    # and any overlap would re-create the old tool-shadowing problem).
     has_line_range = start_line is not None or end_line is not None
     mode_count = sum([append, old_str is not None, has_line_range])
     if mode_count > 1:
         return "Error: start_line/end_line, append, and old_str are mutually exclusive"
+    if mode_count == 0:
+        return (
+            "Error: edit_file requires one edit mode: old_str, "
+            "start_line/end_line, or append=True. To create a new file "
+            "or fully overwrite one use write_file."
+        )
 
     if old_str is not None and old_str == "":
         return "Error: old_str must not be empty"
     if start_line is not None and start_line < 1:
         return "Error: start_line must be >= 1"
 
+    try:
+        existing = read_file(container, dest_path)
+    except ValueError:
+        return (
+            f"Error: file {dest_path} not found. edit_file only "
+            "modifies existing files; use write_file to create it."
+        )
+    existing_lines = existing.splitlines()
+
+    # Validate bounds
+    if start_line is not None and start_line > len(existing_lines):
+        return f"Error: start_line {start_line} exceeds file length ({len(existing_lines)} lines)"
+    if end_line is not None:
+        if end_line > len(existing_lines):
+            return f"Error: end_line {end_line} exceeds file length ({len(existing_lines)} lines)"
+        if start_line is not None and start_line > end_line:
+            return "Error: start_line is greater than end_line"
+
+    record_tool_use(
+        container_id[:12],
+        "edit_file",
+        {
+            "file_path": dest_path,
+            "mode": (
+                "old_str" if old_str is not None
+                else "append" if append
+                else "line_range"
+            ),
+        },
+    )
+
     content = file_contents
     # 1-indexed (start, end) lines of the replaced region in the new
     # content; set only for successful old_str edits (issue #580).
     replaced_span: tuple[int, int] | None = None
-    # Pre-edit content; stays None for a full overwrite (read separately
-    # at snapshot time) and doubles as the partial-update marker.
-    existing: str | None = None
 
-    # For partial updates, read existing content
-    if append or old_str is not None or has_line_range:
-        try:
-            existing = read_file(container, dest_path)
-        except ValueError:
-            return f"Error: file {dest_path} not found"
-        existing_lines = existing.splitlines()
-
-        # Validate bounds
-        if start_line is not None and start_line > len(existing_lines):
-            return f"Error: start_line {start_line} exceeds file length ({len(existing_lines)} lines)"
-        if end_line is not None:
-            if end_line > len(existing_lines):
-                return f"Error: end_line {end_line} exceeds file length ({len(existing_lines)} lines)"
-            if start_line is not None and start_line > end_line:
-                return "Error: start_line is greater than end_line"
-
-        if append:
-            sep = "\n" if existing else ""
-            content = existing.rstrip("\n") + sep + file_contents
-            # rstrip() would also swallow the file's final newline (#570).
-            if existing.endswith("\n") and not content.endswith("\n"):
-                content += "\n"
-        elif old_str is not None:
-            symbol: str | None = None
-            ast_error: str | None = None
-            if dest_path.endswith(".py"):
-                symbol = _extract_symbol_from_old_str(old_str)
-                if symbol is not None:
-                    ast_result = edit_symbol_in_container(
-                        client, container_id, dest_path, symbol, file_contents, line, preserve or "decorators+docstring",
+    if append:
+        sep = "\n" if existing else ""
+        content = existing.rstrip("\n") + sep + file_contents
+        # rstrip() would also swallow the file's final newline (#570).
+        if existing.endswith("\n") and not content.endswith("\n"):
+            content += "\n"
+    elif old_str is not None:
+        symbol: str | None = None
+        ast_error: str | None = None
+        if dest_path.endswith(".py"):
+            symbol = _extract_symbol_from_old_str(old_str)
+            if symbol is not None:
+                ast_result = edit_symbol_in_container(
+                    client, container_id, dest_path, symbol, file_contents, line, preserve or "decorators+docstring",
+                )
+                if ast_result.get("status") == "ok":
+                    resolved = ast_result.get("resolved", {})
+                    if ast_result.get("changed"):
+                        undo.save_version(container_id, dest_path, existing)
+                        try:
+                            new_content = read_file(container, dest_path)
+                        except ValueError:
+                            return f"Error: failed to read {dest_path} after edit"
+                        rep_start = resolved.get("start_line", 1)
+                        rep_end = resolved.get("end_line", 1)
+                        return _build_success_echo(new_content, dest_path, rep_start, rep_end)
+                    # AST no-op: the resolved definition already matches
+                    # file_contents.  Never fall through to string
+                    # matching here -- old_str would re-match the
+                    # signature line and splice a duplicate body into
+                    # the file.
+                    span = ""
+                    if resolved.get("start_line") and resolved.get("end_line"):
+                        span = f" (lines {resolved['start_line']}-{resolved['end_line']})"
+                    return (
+                        f"No changes to {dest_path}: "
+                        f"{resolved.get('kind', 'definition')} "
+                        f"'{resolved.get('qualname', symbol)}'{span} "
+                        "already matches file_contents"
                     )
-                    if ast_result.get("status") == "ok":
-                        resolved = ast_result.get("resolved", {})
-                        if ast_result.get("changed"):
-                            undo.save_version(container_id, dest_path, existing)
-                            try:
-                                new_content = read_file(container, dest_path)
-                            except ValueError:
-                                return f"Error: failed to read {dest_path} after edit"
-                            rep_start = resolved.get("start_line", 1)
-                            rep_end = resolved.get("end_line", 1)
-                            return _build_success_echo(new_content, dest_path, rep_start, rep_end)
-                        # AST no-op: the resolved definition already matches
-                        # file_contents.  Never fall through to string
-                        # matching here -- old_str would re-match the
-                        # signature line and splice a duplicate body into
-                        # the file.
-                        span = ""
-                        if resolved.get("start_line") and resolved.get("end_line"):
-                            span = f" (lines {resolved['start_line']}-{resolved['end_line']})"
-                        return (
-                            f"No changes to {dest_path}: "
-                            f"{resolved.get('kind', 'definition')} "
-                            f"'{resolved.get('qualname', symbol)}'{span} "
-                            "already matches file_contents"
-                        )
-                    ast_error = ast_result.get("error", "AST resolution failed")
-                    if (
-                        _parses_as_definition(file_contents)
-                        and _is_bare_signature(old_str)
-                    ):
-                        # old_str is a bare signature and file_contents a
-                        # complete definition: the string fallback would
-                        # replace only the signature line and orphan the
-                        # old body.  Surface the AST error instead.
-                        return (
-                            f"{ast_error}\n"
-                            f"Note: old_str looks like a bare '{symbol}' "
-                            "signature and file_contents is a complete "
-                            "definition, so this edit must go through AST "
-                            "resolution (a plain string replacement would "
-                            "leave the old body behind). Fix the error "
-                            "above, put the full old definition in "
-                            "old_str for an exact string edit, or use "
-                            "transform_file."
-                        )
-                    logger.debug(
-                        "AST resolution attempted for %s (symbol=%s) but failed: %s"
-                        " -- falling through to string matching",
-                        dest_path, symbol, ast_error,
+                ast_error = ast_result.get("error", "AST resolution failed")
+                if (
+                    _parses_as_definition(file_contents)
+                    and _is_bare_signature(old_str)
+                ):
+                    # old_str is a bare signature and file_contents a
+                    # complete definition: the string fallback would
+                    # replace only the signature line and orphan the
+                    # old body.  Surface the AST error instead.
+                    return (
+                        f"{ast_error}\n"
+                        f"Note: old_str looks like a bare '{symbol}' "
+                        "signature and file_contents is a complete "
+                        "definition, so this edit must go through AST "
+                        "resolution (a plain string replacement would "
+                        "leave the old body behind). Fix the error "
+                        "above, put the full old definition in "
+                        "old_str for an exact string edit, or use "
+                        "transform_file."
                     )
+                logger.debug(
+                    "AST resolution attempted for %s (symbol=%s) but failed: %s"
+                    " -- falling through to string matching",
+                    dest_path, symbol, ast_error,
+                )
 
-            # 1. Exact match with uniqueness check
-            exact_matches = _find_all_matches(existing, old_str)
-            if len(exact_matches) > 1:
-                line_nos = ", ".join(str(m[1]) for m in exact_matches[:10])
-                suffix = "..." if len(exact_matches) > 10 else ""
-                return (
-                    f"Error: old_str matches at {len(exact_matches)} locations "
-                    f"(lines {line_nos}{suffix}). "
-                    "Add more surrounding context to make it unique, or use "
-                    "transform_file to edit several occurrences in one call."
-                )
-            if len(exact_matches) == 1:
-                idx = exact_matches[0][0]
-                content = (
-                    existing[:idx]
-                    + file_contents
-                    + existing[idx + len(old_str) :]
-                )
-                rep_start = existing[:idx].count("\n") + 1
-                end_offset = idx + len(file_contents)
-                rep_end = content[:end_offset].count("\n") + 1
-                if file_contents.endswith("\n") and file_contents:
-                    rep_end -= 1
-                replaced_span = (rep_start, max(rep_start, rep_end))
-            else:
-                # 2. Whitespace-flexible fallback
-                result = _try_whitespace_flexible(
-                    existing, old_str, file_contents,
-                )
-                if isinstance(result, str):
-                    return result  # ambiguous-match error
-                if result is not None:
-                    content, rep_start, rep_end = result
-                    replaced_span = (rep_start, rep_end)
-                else:
-                    # 3. Near-miss echo
-                    near_miss = _build_near_miss_echo(existing, old_str, dest_path)
-                    # A retried edit is the most common cause of "old_str
-                    # not found": the previous call already replaced it.
-                    # Saying so breaks the re-read/retry loop early.
-                    if (
-                        len(file_contents.strip()) >= _ALREADY_APPLIED_MIN_CHARS
-                        and file_contents in existing
-                    ):
-                        line_no = existing[: existing.find(file_contents)].count("\n") + 1
-                        near_miss += (
-                            f"\nNote: file_contents already appears at line "
-                            f"{line_no} -- this edit may have already been "
-                            "applied. Re-read the file before retrying."
-                        )
-                    if ast_error is not None:
-                        near_miss += (
-                            f"\nNote: AST resolution for '{symbol}' was "
-                            f"attempted first and failed: {ast_error}"
-                        )
-                    return near_miss
-        else:
-            start = start_line - 1 if start_line is not None else 0
-            end = end_line if end_line is not None else len(existing_lines)
-            new_lines = file_contents.splitlines()
-            content_lines = existing_lines[:start] + new_lines + existing_lines[end:]
-            content = "\n".join(content_lines)
-            # The trailing newline belongs to the file, not to the replacement
-            # snippet: splitlines() drops it, so restore it from *existing*
-            # (#570).  A snippet that ends in "\n" still forces one, so a file
-            # that lacked the final newline can gain it deliberately.
-            if existing.endswith("\n") or file_contents.endswith("\n"):
-                content += "\n"
-
-    # A .py file that stops parsing right after an edit is almost always
-    # an escaping or matching mistake -- say so in the success echo, so
-    # the caller can repair it immediately instead of discovering it at
-    # verify time (issue #599).  Warning only: multi-step edits may pass
-    # through broken intermediate states on purpose.
-    syntax_note = ""
-    if dest_path.endswith(".py"):
-        try:
-            ast.parse(content)
-        except SyntaxError as e:
-            syntax_note = (
-                f"\nWarning: {dest_path} does not parse as Python after "
-                f"this edit (line {e.lineno}: {e.msg}). If unintended, "
-                "call undo_file_edit to restore the pre-edit file (do "
-                "NOT try to repair the broken text in place), check "
-                "file_contents for escaping artifacts (stray \\n, "
-                '\\" or unbalanced quotes), and re-apply the edit.'
+        # 1. Exact match with uniqueness check
+        exact_matches = _find_all_matches(existing, old_str)
+        if len(exact_matches) > 1:
+            line_nos = ", ".join(str(m[1]) for m in exact_matches[:10])
+            suffix = "..." if len(exact_matches) > 10 else ""
+            return (
+                f"Error: old_str matches at {len(exact_matches)} locations "
+                f"(lines {line_nos}{suffix}). "
+                "Add more surrounding context to make it unique, or use "
+                "transform_file to edit several occurrences in one call."
             )
+        if len(exact_matches) == 1:
+            idx = exact_matches[0][0]
+            content = (
+                existing[:idx]
+                + file_contents
+                + existing[idx + len(old_str) :]
+            )
+            rep_start = existing[:idx].count("\n") + 1
+            end_offset = idx + len(file_contents)
+            rep_end = content[:end_offset].count("\n") + 1
+            if file_contents.endswith("\n") and file_contents:
+                rep_end -= 1
+            replaced_span = (rep_start, max(rep_start, rep_end))
+        else:
+            # 2. Whitespace-flexible fallback
+            result = _try_whitespace_flexible(
+                existing, old_str, file_contents,
+            )
+            if isinstance(result, str):
+                return result  # ambiguous-match error
+            if result is not None:
+                content, rep_start, rep_end = result
+                replaced_span = (rep_start, rep_end)
+            else:
+                # 3. Near-miss echo
+                near_miss = _build_near_miss_echo(existing, old_str, dest_path)
+                # A retried edit is the most common cause of "old_str
+                # not found": the previous call already replaced it.
+                # Saying so breaks the re-read/retry loop early.
+                if (
+                    len(file_contents.strip()) >= _ALREADY_APPLIED_MIN_CHARS
+                    and file_contents in existing
+                ):
+                    line_no = existing[: existing.find(file_contents)].count("\n") + 1
+                    near_miss += (
+                        f"\nNote: file_contents already appears at line "
+                        f"{line_no} -- this edit may have already been "
+                        "applied. Re-read the file before retrying."
+                    )
+                if ast_error is not None:
+                    near_miss += (
+                        f"\nNote: AST resolution for '{symbol}' was "
+                        f"attempted first and failed: {ast_error}"
+                    )
+                return near_miss
+    else:
+        start = start_line - 1 if start_line is not None else 0
+        end = end_line if end_line is not None else len(existing_lines)
+        new_lines = file_contents.splitlines()
+        content_lines = existing_lines[:start] + new_lines + existing_lines[end:]
+        content = "\n".join(content_lines)
+        # The trailing newline belongs to the file, not to the replacement
+        # snippet: splitlines() drops it, so restore it from *existing*
+        # (#570).  A snippet that ends in "\n" still forces one, so a file
+        # that lacked the final newline can gain it deliberately.
+        if existing.endswith("\n") or file_contents.endswith("\n"):
+            content += "\n"
+
+    syntax_note = _python_syntax_note(dest_path, content)
 
     # Snapshot the pre-edit content so undo_file_edit can restore it.
-    if existing is not None:
-        undo.save_version(container_id, dest_path, existing)
-    else:
-        try:
-            undo.save_version(
-                container_id, dest_path, read_file(container, dest_path)
-            )
-        except ValueError:
-            pass  # new file -- nothing to snapshot
+    undo.save_version(container_id, dest_path, existing)
 
     try:
-        write_file(container, container_id[:12], dest_path, content)
+        write_file_in_container(container, container_id[:12], dest_path, content)
     except ValueError as e:
         return f"Error: {e}"
     if replaced_span is not None:
@@ -742,7 +819,7 @@ def undo_file_edit(
 ) -> str:
     """Restore *file_path* to the state it had before a recent edit.
 
-    Every write_file_sandbox / transform_file edit snapshots the
+    Every write_file / edit_file / transform_file edit snapshots the
     pre-edit file automatically, so a broken edit is never a dead end:
     call this to step back to the file as it was BEFORE the edit,
     instead of trying to repair broken text in place.  steps=1 (default)
@@ -780,7 +857,7 @@ def undo_file_edit(
                 "status": "error",
                 "error": (
                     f"No undo history for {file_path}. Snapshots are taken "
-                    "on every write_file_sandbox/transform_file edit in "
+                    "on every write_file/edit_file/transform_file edit in "
                     "this server session; pass the exact path echoed by "
                     "those tools."
                 ),
@@ -803,7 +880,7 @@ def undo_file_edit(
         undo.save_version(container_id, file_path, current)
 
     try:
-        write_file(container, container_id[:12], file_path, target)
+        write_file_in_container(container, container_id[:12], file_path, target)
     except ValueError as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -1150,7 +1227,7 @@ def transform_file(
     and a unified diff is returned -- always check it: an over-broad
     pattern can change more than intended (the pre-edit file is
     snapshotted; undo_file_edit rolls it back).  Prefer
-    write_file_sandbox old_str for a single known replacement; use
+    edit_file old_str for a single known replacement; use
     this for bulk, pattern, or computed edits.  Example::
 
         import re

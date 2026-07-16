@@ -12,8 +12,8 @@
 
 | # | Use Case | Typical Flow | Support |
 |---|---|---|---|
-| **UC-1** | **GitHub issue-driven bug fixing** | `sandbox_initialize(clone_repo=...)` → `issue_view` → `search_in_container` → `read_file_range` → `write_file_sandbox` → `verify_in_container` → `checkpoint` → `publish` | **◎** |
-| **UC-2** | **Feature additions & TDD on GitHub** | Same loop as UC-1. If writing tests first: `write_file_sandbox` (test file) → `verify_in_container(test_filter=...)` → implement code → verify all → `publish` | **◎** |
+| **UC-1** | **GitHub issue-driven bug fixing** | `sandbox_initialize(clone_repo=...)` → `issue_view` → `search_in_container` → `read_file_range` → `edit_file` → `verify_in_container` → `checkpoint` → `publish` | **◎** |
+| **UC-2** | **Feature additions & TDD on GitHub** | Same loop as UC-1. If writing tests first: `write_file` (test file) → `verify_in_container(test_filter=...)` → implement code → verify all → `publish` | **◎** |
 | **UC-3** | **Checking out and fixing existing PRs** | `sandbox_initialize(repo=..., pr=N)` → edit-verify loop → `publish` | **○** (See §3.4) |
 | **UC-4** | **Editing purely local projects** | `copy_project` → edit loop → `verify_in_container` | **△** (See §3.2) |
 | **UC-5** | **Disposable code execution & scratch pads** | `run_container_and_exec` or `sandbox_initialize` → `sandbox_exec` | **◎** |
@@ -42,7 +42,7 @@ Verification of whether first-class tools exist for each phase of the loop:
 | **Ingress** | `issue_view` / `sandbox_initialize(clone_repo=..., pr=N)` | ✅ | ✅ | ✅ |
 | **Search** | `search_in_container` (`ripgrep` / `ast-grep`) | ✅ | ✅ | ✅ |
 | **Read** | `read_file_range` / `list_files` | ✅ | ✅ | ✅ |
-| **Edit (Decl)** | `write_file_sandbox` | ✅ | ✅ | ✅ |
+| **Edit (Decl)** | `write_file` / `edit_file` | ✅ | ✅ | ✅ |
 | **Edit (Imp)** | `transform_file` | ✅ | ✅ | ✅ |
 | **Lint** | `lint_in_container` (`ruff` / `eslint` with `fix=True`) | ✅ | ✅ | — (Unimplemented) |
 | **Type Check**| `type_check_in_container` (`pyright` / `tsc`) | ✅ | ✅ | — (`go vet` not wired) |

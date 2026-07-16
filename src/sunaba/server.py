@@ -38,11 +38,12 @@ from .tools.exec import (
 from .tools.file import (
     copy_file,
     copy_project,
+    edit_file,
     list_files,
     read_file_range,
     transform_file,
     undo_file_edit,
-    write_file_sandbox,
+    write_file,
 )
 from .tools.journal import (
     sandbox_journal_path,
@@ -81,12 +82,12 @@ SERVER_INSTRUCTIONS = """\
 sunaba: Docker-sandboxed dev workflow. All tools take the container_id returned by sandbox_initialize. Typical flow:
 1. INIT: sandbox_initialize(clone_repo="owner/repo") clones + installs deps in one call; pr=N checks out a PR branch instead. run_container_and_exec wraps init/exec/stop for one-shot runs; sandbox_attach reconnects to a running container; sandbox_stop cleans up.
 2. EXPLORE: search_in_container (grep), read_file_range (cat/head), list_files (ls/find).
-3. EDIT: write_file_sandbox (full write or exact string replace; on .py files old_str resolves function/class definitions via AST automatically), transform_file (Python transform for complex edits). undo_file_edit restores the auto-saved pre-edit snapshot; don't repair a broken edit in place. checkpoint() = local commit savepoint, no push; checkpoint_restore rolls back the repo.
+3. EDIT: write_file creates or wholly overwrites a file; edit_file changes part of an existing one (old_str replace -- AST-resolved for .py def/class -- line range, or append); transform_file runs a Python transform for bulk/computed edits. undo_file_edit restores the auto-saved pre-edit snapshot; don't repair a broken edit in place. checkpoint() = local commit savepoint, no push; checkpoint_restore rolls back the repo.
 4. VERIFY: verify_in_container is the pre-publish gate (tests + lint + type in one call; test_filter runs a fast subset first, then the full suite automatically). lint_in_container / type_check_in_container run individual single-file checks. diff_in_container reviews pending changes before pushing.
 5. PUBLISH: publish(create_pr=True) stages, commits, pushes and opens the PR in one call. It does NOT verify -- run verify_in_container first. checkpoint is local-only; publish is the only network exit. Credentials are resolved host-side; never handle tokens in the container.
 Issue/PR ops: issue_view (read), sandbox_issue_write (create/comment), sandbox_pr_review_write (formal reviews).
-Prefer dedicated tools over raw sandbox_exec: grep->search_in_container, cat->read_file_range, sed->write_file_sandbox/transform_file, pip->package_install, pytest/ruff/pyright->verify/lint/type_check_in_container, git push/gh pr->publish.
-File transfer is one-way (host->container) only -- there is no container-to-container transfer mechanism (egress-proxy boundary). To move work between containers: checkpoint + publish from the original, or start fresh with sandbox_initialize(clone_repo=...).
+Prefer dedicated tools over raw sandbox_exec: grep->search_in_container, cat->read_file_range, sed->edit_file/transform_file, pip->package_install, pytest/ruff/pyright->verify/lint/type_check_in_container, git push/gh pr->publish.
+File transfer is one-way (host->container; egress-proxy boundary). To move work between containers: checkpoint + publish from the original, or start fresh with sandbox_initialize(clone_repo=...).
 """
 
 mcp = FastMCP("sunaba", instructions=SERVER_INSTRUCTIONS)
@@ -119,7 +120,8 @@ sandbox_stop = mcp.tool()(sandbox_stop)
 run_container_and_exec = mcp.tool()(run_container_and_exec)
 
 # File tool registrations
-write_file_sandbox = mcp.tool()(write_file_sandbox)
+write_file = mcp.tool()(write_file)
+edit_file = mcp.tool()(edit_file)
 undo_file_edit = mcp.tool()(undo_file_edit)
 copy_project = mcp.tool()(copy_project)
 copy_file = mcp.tool()(copy_file)

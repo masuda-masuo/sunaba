@@ -671,7 +671,9 @@ _TOOL_INTRO_DATES: dict[str, str] = {
     "transform_file": "2026-06-07",
     "lint_in_container": "2026-06-07",
     "type_check_in_container": "2026-06-07",
-    "write_file_sandbox": "2026-06-07",
+    "write_file_sandbox": "2026-06-07",  # retired 2026-07-17 (#630 split)
+    "write_file": "2026-07-17",
+    "edit_file": "2026-07-17",
     "copy_project": "2026-06-07",
     "copy_file": "2026-06-07",
 }

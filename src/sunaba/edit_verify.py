@@ -1254,7 +1254,8 @@ except Exception as e:
 if "\r\n" in original:
     fail(
         "Error: " + FILE_PATH + " contains CRLF line endings; edit_symbol"
-        " supports LF files only. Use write_file_sandbox or transform_file."
+        " supports LF files only. Use edit_file with a complete old_str,"
+        " or transform_file."
     )
 
 try:
@@ -1262,7 +1263,7 @@ try:
 except SyntaxError as e:
     fail(
         "Error: " + FILE_PATH + " has a syntax error at line " + str(e.lineno)
-        + ": " + str(e.msg) + ". Fix it with write_file_sandbox/transform_file first."
+        + ": " + str(e.msg) + ". Fix it with edit_file (complete old_str) or transform_file first."
     )
 
 lines = original.splitlines()

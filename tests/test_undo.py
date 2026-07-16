@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sunaba import undo
-from sunaba.tools.file import transform_file, undo_file_edit, write_file_sandbox
+from sunaba.tools.file import edit_file, transform_file, undo_file_edit, write_file
 from tests.conftest import _FakeClient
 from tests.test_edit_symbol import _FakeContainerWithIO
 from tests.test_write_file import _exec_run_for, _get_written_content
@@ -117,7 +117,7 @@ class TestEditToolsSnapshot:
     ) -> None:
         existing = "alpha\nbeta\n"
         self._mock(mock_docker, existing)
-        result = write_file_sandbox(
+        result = edit_file(
             container_id=CID,
             file_name="test.txt",
             file_contents="BETA",
@@ -133,7 +133,7 @@ class TestEditToolsSnapshot:
     ) -> None:
         existing = "previous content\n"
         self._mock(mock_docker, existing)
-        result = write_file_sandbox(
+        result = write_file(
             container_id=CID,
             file_name="test.txt",
             file_contents="new content\n",
@@ -152,7 +152,7 @@ class TestEditToolsSnapshot:
             "sunaba.tools.file._docker",
             lambda: _FakeClient(_FakeContainerWithIO({POSIX: str(f)})),
         )
-        result = write_file_sandbox(
+        result = edit_file(
             container_id=CID,
             file_name=POSIX,
             file_contents="def foo():\n    return 99\n",
@@ -296,7 +296,7 @@ class TestBreakThenUndoFlow:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = write_file_sandbox(
+        result = edit_file(
             container_id=CID,
             file_name="test.py",
             file_contents='y = "unclosed',

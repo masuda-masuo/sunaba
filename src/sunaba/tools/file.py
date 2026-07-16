@@ -25,6 +25,8 @@ from sunaba.edit_verify import (
     read_file,
     read_file_lines,
     transform_file_in_container,
+)
+from sunaba.edit_verify import (
     write_file as write_file_in_container,
 )
 from sunaba.journal import record_copy, record_tool_use
@@ -543,33 +545,27 @@ def edit_file(
 
     Exactly one edit mode is required: string replace (old_str),
     line-range (start_line[/end_line], 1-indexed inclusive), or
-    append=True.  The file must already exist -- to create a new file
-    or replace one wholesale use write_file.  Line-range and append
-    keep the file's trailing newline as it was.
+    append=True.  The file must already exist -- to create a file or
+    replace one wholesale use write_file.
 
-    old_str contract: multiple matches are rejected with their line
-    numbers (add context, retry); an inexact match retries with
-    per-line whitespace stripped and re-indents on success; no match
-    returns the nearest-miss region with line numbers plus the first
-    mismatching line (and says so when file_contents is already in the
-    file -- the edit was probably applied by an earlier call); a
-    successful replace echoes the post-edit region with line numbers
-    (ground truth for the next edit).  On .py files, an edit that
-    leaves the file unparseable is flagged with a warning in the echo.
+    old_str matches the exact string you provide (a multi-line match
+    is replaced whole, so keep it minimal and unique).  Multiple
+    matches are rejected with their line numbers; an inexact match
+    retries with per-line whitespace stripped and re-indents on
+    success; no match returns the nearest-miss region (and says so
+    when file_contents is already in the file -- probably applied by
+    an earlier call).  A successful replace echoes the post-edit
+    region with line numbers; a .py edit that leaves the file
+    unparseable is flagged there.
 
-    Every edit snapshots the pre-edit file first; undo_file_edit
-    restores it -- prefer that over repairing a broken file in place.  old_str matches
-    the exact string you provide -- if it spans several lines, ALL of
-    them are replaced, so keep it minimal and unique.
+    To replace a whole Python function/class, pass its signature as
+    old_str (e.g. ``def foo():``) -- it resolves via AST; a no-op
+    returns "No changes" and a resolution failure is surfaced when
+    file_contents is a complete definition (no silent fallback).
 
-    Suitable for local line-range replacement, insertion, or string-based
-    snippet edits.  For replacing an entire Python function/class/method,
-    write the definition signature as ``old_str`` (e.g. ``def foo():``) —
-    it will be resolved via AST automatically.  When AST resolution
-    applies, a no-op edit returns "No changes", and a resolution
-    failure is surfaced when file_contents is a complete definition
-    (no silent fallback that could splice a duplicate body).  For bulk
-    or computed edits across arbitrary patterns use transform_file.
+    Every edit snapshots the pre-edit file; undo_file_edit restores it
+    -- prefer that over repairing a broken file in place.  For bulk or
+    computed edits use transform_file.
 
     Args:
         container_id: Container ID prefix.

@@ -60,7 +60,7 @@ The core developer workflow is centered around a single 5-step loop:
 ```
 sandbox_initialize    # Pull the repository into a fresh container (clone_repo="owner/name")
     ↓
-write_file_sandbox    # Edit in place (or transform_file for bulk/computed edits)
+write_file/edit_file  # Create or edit files (transform_file for bulk/computed edits)
     ↓
 verify_in_container   # Lint + type-check, then runs tests → structured result
     ↓

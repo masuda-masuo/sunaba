@@ -8,6 +8,24 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: `write_file_sandbox` split into `write_file` + `edit_file`**
+  (issue #630). The tools are partitioned by *intent*, not mechanism:
+  `write_file` creates a file or overwrites it wholesale (no partial-update
+  parameters at all); `edit_file` modifies an existing file with exactly one
+  edit mode per call — `old_str` replacement (with the `.py` AST resolution),
+  `start_line`/`end_line` range, or `append=True`. `edit_file` rejects calls
+  on missing files (pointing at `write_file`) and calls with no mode
+  (pointing at the mode list). Rationale: the pre-consolidation surface
+  (`write_file` with `old_str` + `edit_symbol`) starved the specific tool
+  because two tools shared the intent "modify existing code"; splitting by
+  intent (create vs modify) matches the Write/Edit shape LLMs are trained
+  on. Both tools journal their use (`write_file` logs an
+  `overwrote_existing` flag) so full-overwrite-of-existing-file rates can be
+  measured before deciding on a guard. Hard cut, no alias (pre-1.0, #438
+  precedent).
+
 ### Added
 
 - **Per-edit undo: `undo_file_edit` tool** — every `write_file_sandbox` /

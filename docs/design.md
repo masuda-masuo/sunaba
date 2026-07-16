@@ -182,13 +182,14 @@ The edit/verify subsystem is designed to **quickly edit code and verify test fai
 ### Core Tools
 *   **`search_in_container`**: Runs `ripgrep` (lexical search) or `ast-grep` (structural search), returning `{file, line, text}` matches.
 *   **`read_file_range`**: Reads files using line ranges with `offset` and `limit`.
-*   **`write_file_sandbox`**: Declarative file editor supporting overwrite, line ranges, appending, and search-and-replace (`old_str` to `new_str`).
+*   **`write_file`**: Creates a file or overwrites one wholesale with the provided content. Never performs a partial update (issue #630 split).
+*   **`edit_file`**: Declarative partial editor for existing files. Requires exactly one edit mode per call: search-and-replace (`old_str` to `new_str`), line ranges, or appending.
 *   **`lint_in_container` / `type_check_in_container`**: Single-file checkers (`ruff`, `pyright`, `eslint`). `lint_in_container` supports `fix=True` to run autofixes on the target file.
 *   **`verify_in_container`**: Runs linter and type check gates before executing the test runner. If either gate fails, testing is aborted and warnings are returned. Automatically selects the runner based on the project language (pytest, jest, go test). Returns structured JSON diffs of modified files (`unstaged` and `staged` additions/deletions).
 
 ### Editing Modalities
 Code modifications are divided into two approaches:
-*   **Declarative (`write_file_sandbox`)**: Used when the exact replacement content is known. This is the primary path for targeted edits.  On ``.py`` files, ``old_str`` patterns that look like ``def`` / ``class`` / ``async def`` definitions are resolved via AST first, making the replacement robust against indentation shifts and line-number changes — no exact-string matching is required for those cases.  Decoration and docstring preservation follows the ``edit_symbol_in_container`` policy (default ``"decorators+docstring"``).
+*   **Declarative (`write_file` / `edit_file`)**: Used when the exact replacement content is known. `write_file` creates or fully overwrites a file; `edit_file` is the primary path for targeted edits to existing files.  On ``.py`` files, ``old_str`` patterns that look like ``def`` / ``class`` / ``async def`` definitions are resolved via AST first, making the replacement robust against indentation shifts and line-number changes — no exact-string matching is required for those cases.  Decoration and docstring preservation follows the ``edit_symbol_in_container`` policy (default ``"decorators+docstring"``).
 *   **Imperative (`transform_file`)**: Used when content needs to be calculated (regex replacements, AST rewrites, patching via `git apply`). The code is passed as a string and executed securely, returning the resulting diff.
 *   **`apply_patch` (Removed)**: Manual patch application was deprecated (#259). LLM-generated diffs suffer from high syntax failure rates, consuming excessive tokens. Automated patching is now handled via the `transform_file` API.
 
@@ -261,7 +262,7 @@ Every tool must record its operations in the journal:
 | `sandbox_exec_background` | `record_exec` (exit=-1) | `exec` | Async execution |
 | `sandbox_exec_check` | `record_tool_use` | `tool_use` | Check status |
 | `sandbox_stop` | `record_stop` | `stop` | Stop container |
-| `write_file_sandbox` | `record_file_write` | `write_file` | File edit |
+| `write_file` / `edit_file` | `record_tool_use` + `record_file_write` | `tool_use`, `write_file` | File create / edit |
 | `transform_file` | `record_tool_use` | `tool_use` | Scripted edit |
 | `copy_project` / `copy_file` | `record_copy` | `copy_project` | Copy action |
 | `publish` | `record_boundary_crossing` | `boundary_crossing` | Push to GitHub |

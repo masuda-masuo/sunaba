@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import difflib
 import io
 import json
@@ -12,6 +13,7 @@ import re
 import shlex
 import tarfile
 import tempfile
+import textwrap
 from pathlib import Path
 
 from docker.errors import APIError, NotFound
@@ -61,6 +63,46 @@ def _extract_symbol_from_old_str(old_str: str) -> str | None:
             continue
         break
     return None
+
+
+def _parses_as_definition(text: str) -> bool:
+    """True when *text* parses standalone as code containing a def/class."""
+    try:
+        tree = ast.parse(textwrap.dedent(text))
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        for n in ast.walk(tree)
+    )
+
+
+def _is_bare_signature(old_str: str) -> bool:
+    """True when *old_str* has no content beyond a single def/class line.
+
+    Blank lines, comments, and decorators around the definition line are
+    allowed.  Used to decide whether the exact-string fallback is safe
+    after a failed AST resolution: string-replacing a bare signature
+    with a complete definition would splice the new body in front of
+    the old one and leave the old body orphaned in the file (issue
+    #599 follow-up).  old_str blocks that carry any body line -- even a
+    mis-indented one the whitespace-flexible matcher handles -- are NOT
+    bare and keep the fallback.
+    """
+    seen_def = False
+    for line in old_str.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if seen_def:
+            return False
+        if stripped.startswith("@"):
+            continue
+        if _DEF_RE.match(stripped) or _CLASS_RE.match(stripped):
+            seen_def = True
+            continue
+        return False
+    return seen_def
 
 
 def _find_all_matches(text: str, pattern: str) -> list[tuple[int, int]]:
@@ -393,8 +435,13 @@ def write_file_sandbox(
     Suitable for local line-range replacement, insertion, or string-based
     snippet edits.  For replacing an entire Python function/class/method,
     write the definition signature as ``old_str`` (e.g. ``def foo():`) —
-    it will be resolved via AST automatically.  For
-    bulk or computed edits across arbitrary patterns use transform_file.
+    it will be resolved via AST automatically.  When AST resolution
+    applies, a no-op edit returns "No changes" without touching the
+    file, and a resolution failure (ambiguous symbol, syntax error in
+    the file) is reported as-is when file_contents is a complete
+    definition -- there is no silent fallback that could splice a
+    duplicate body.  For bulk or computed edits across arbitrary
+    patterns use transform_file.
 
     Args:
         container_id: Container ID prefix.
@@ -469,25 +516,61 @@ def write_file_sandbox(
             if existing.endswith("\n") and not content.endswith("\n"):
                 content += "\n"
         elif old_str is not None:
+            symbol: str | None = None
+            ast_error: str | None = None
             if dest_path.endswith(".py"):
                 symbol = _extract_symbol_from_old_str(old_str)
                 if symbol is not None:
                     ast_result = edit_symbol_in_container(
                         client, container_id, dest_path, symbol, file_contents, line, preserve or "decorators+docstring",
                     )
-                    if ast_result.get("status") == "ok" and ast_result.get("changed"):
-                        try:
-                            new_content = read_file(container, dest_path)
-                        except ValueError:
-                            return f"Error: failed to read {dest_path} after edit"
+                    if ast_result.get("status") == "ok":
                         resolved = ast_result.get("resolved", {})
-                        rep_start = resolved.get("start_line", 1)
-                        rep_end = resolved.get("end_line", 1)
-                        return _build_success_echo(new_content, dest_path, rep_start, rep_end)
+                        if ast_result.get("changed"):
+                            try:
+                                new_content = read_file(container, dest_path)
+                            except ValueError:
+                                return f"Error: failed to read {dest_path} after edit"
+                            rep_start = resolved.get("start_line", 1)
+                            rep_end = resolved.get("end_line", 1)
+                            return _build_success_echo(new_content, dest_path, rep_start, rep_end)
+                        # AST no-op: the resolved definition already matches
+                        # file_contents.  Never fall through to string
+                        # matching here -- old_str would re-match the
+                        # signature line and splice a duplicate body into
+                        # the file.
+                        span = ""
+                        if resolved.get("start_line") and resolved.get("end_line"):
+                            span = f" (lines {resolved['start_line']}-{resolved['end_line']})"
+                        return (
+                            f"No changes to {dest_path}: "
+                            f"{resolved.get('kind', 'definition')} "
+                            f"'{resolved.get('qualname', symbol)}'{span} "
+                            "already matches file_contents"
+                        )
+                    ast_error = ast_result.get("error", "AST resolution failed")
+                    if (
+                        _parses_as_definition(file_contents)
+                        and _is_bare_signature(old_str)
+                    ):
+                        # old_str is a bare signature and file_contents a
+                        # complete definition: the string fallback would
+                        # replace only the signature line and orphan the
+                        # old body.  Surface the AST error instead.
+                        return (
+                            f"{ast_error}\n"
+                            f"Note: old_str looks like a bare '{symbol}' "
+                            "signature and file_contents is a complete "
+                            "definition, so this edit must go through AST "
+                            "resolution (a plain string replacement would "
+                            "leave the old body behind). Fix the error "
+                            "above, or put the full old definition in "
+                            "old_str for an exact string edit."
+                        )
                     logger.debug(
-                        "AST resolution attempted for %s (symbol=%s) but %s",
-                        dest_path, symbol,
-                        ast_result.get("error", "no change made — falling through to string matching"),
+                        "AST resolution attempted for %s (symbol=%s) but failed: %s"
+                        " -- falling through to string matching",
+                        dest_path, symbol, ast_error,
                     )
 
             # 1. Exact match with uniqueness check
@@ -525,7 +608,13 @@ def write_file_sandbox(
                     replaced_span = (rep_start, rep_end)
                 else:
                     # 3. Near-miss echo
-                    return _build_near_miss_echo(existing, old_str, dest_path)
+                    near_miss = _build_near_miss_echo(existing, old_str, dest_path)
+                    if ast_error is not None:
+                        near_miss += (
+                            f"\nNote: AST resolution for '{symbol}' was "
+                            f"attempted first and failed: {ast_error}"
+                        )
+                    return near_miss
         else:
             start = start_line - 1 if start_line is not None else 0
             end = end_line if end_line is not None else len(existing_lines)

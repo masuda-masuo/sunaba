@@ -8,6 +8,26 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [Unreleased]
 
+### Fixed
+
+- **`write_file_sandbox` AST-fallthrough corruption**: when `old_str` was a bare
+  definition signature (`def foo():`) and AST resolution failed (ambiguous
+  symbol) or reported no change, the silent fallback to exact-string matching
+  replaced only the signature line and spliced the new body in front of the old
+  one, leaving the old body orphaned in the file — reported as success. A no-op
+  AST edit now returns "No changes" without writing; an AST failure with a
+  bare-signature `old_str` and complete-definition `file_contents` surfaces the
+  AST error (with `line=` guidance) instead of corrupting the file.
+  Signature-to-signature renames and full-definition `old_str` blocks keep the
+  string fallback. Near-miss errors now note the preceding AST failure. (#599)
+- **`edit_symbol` docstring preservation**: the preserved docstring was inserted
+  right after the first `def` line, which broke multi-line signatures and
+  one-liner replacements (both rejected valid `new_code` with a spurious syntax
+  error), and multi-line docstrings were flattened to a single indent level.
+  Insertion now uses the new definition's AST body position, one-liners skip
+  preservation, and docstring blocks shift as a whole keeping relative
+  indentation. (#599)
+
 ### Removed
 
 - **`clone_repo` tool**: the standalone MCP tool that cloned an extra repository

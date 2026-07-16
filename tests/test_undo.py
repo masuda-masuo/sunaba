@@ -7,6 +7,7 @@ forward.
 """
 
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -81,6 +82,19 @@ class TestUndoStore:
         undo.save_version("bbb222bbb222", POSIX, "from b")
         assert undo.get_version("aaa111aaa111", POSIX, 1) == "from a"
         assert undo.get_version("bbb222bbb222", POSIX, 1) == "from b"
+
+    def test_save_failure_is_logged_not_raised(self, caplog) -> None:
+        # Occupy the snapshot directory path with a plain file so
+        # mkdir() raises: the edit must survive, but the operator must
+        # see a warning (PR #629 review finding).
+        snap_dir = undo._file_dir(CID, POSIX)
+        snap_dir.parent.mkdir(parents=True, exist_ok=True)
+        snap_dir.write_text("in the way", encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger="sunaba.undo"):
+            undo.save_version(CID, POSIX, "content")
+        assert "undo snapshot failed" in caplog.text
+        assert POSIX in caplog.text
+        assert undo.get_version(CID, POSIX, 1) is None
 
 
 # ===================================================================

@@ -705,10 +705,22 @@ class TestWriteFileSymbolIntegration:
         assert _is_bare_signature("@decorator\ndef foo():") is True
         assert _is_bare_signature("# comment\ndef foo():\n") is True
         assert _is_bare_signature("def foo(") is True  # multi-line sig start
+        # Multi-line decorators and multi-line signatures are still bare
+        # (PR #629 review: the old line scan rejected the continuation
+        # lines and re-opened the unsafe string fallback).
+        assert _is_bare_signature(
+            "@decorator(\n    arg1,\n    arg2,\n)\ndef foo():"
+        ) is True
+        assert _is_bare_signature(
+            "def foo(\n    a: int,\n    b: str = 'x',\n) -> None:"
+        ) is True
         # Anything carrying a body line is NOT bare -- even mis-indented
         # bodies that only the whitespace-flexible matcher can place.
         assert _is_bare_signature("def foo():\npass") is False
         assert _is_bare_signature("def foo():\n    return 1") is False
+        assert _is_bare_signature(
+            "@decorator(\n    arg,\n)\ndef foo():\n    return 1"
+        ) is False
         assert _is_bare_signature("x = 1") is False
         assert _is_bare_signature("") is False
 

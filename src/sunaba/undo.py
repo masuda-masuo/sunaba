@@ -25,10 +25,13 @@ Thread-safe via a module-level lock, mirroring the journal module.
 from __future__ import annotations
 
 import hashlib
+import logging
 import posixpath
 import shutil
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 #: Root directory for undo snapshots.
 _UNDO_ROOT: Path = Path.home() / ".sunaba" / "undo"
@@ -61,9 +64,9 @@ def save_version(container_id: str, file_path: str, content: str) -> None:
     """Snapshot *content* as the newest undo version for *file_path*.
 
     Call with the file's **pre-edit** content, immediately before
-    writing the new content.  Best-effort: any OS error is swallowed --
-    an edit must never fail because its undo snapshot could not be
-    written.
+    writing the new content.  Best-effort: an OS error is logged but
+    never raised -- an edit must never fail because its undo snapshot
+    could not be written.
     """
     data = content.encode("utf-8")
     if len(data) > _MAX_SNAPSHOT_BYTES:
@@ -80,8 +83,15 @@ def save_version(container_id: str, file_path: str, content: str) -> None:
             (d / f"v{next_n}").write_bytes(data)
             for stale in existing[: max(0, len(existing) + 1 - _MAX_VERSIONS)]:
                 stale.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as e:
+        # The caller already reported the edit as successful, so a lost
+        # snapshot must at least be visible to the server operator
+        # (disk full, permissions) -- undo_file_edit will not cover
+        # this edit.
+        logger.warning(
+            "undo snapshot failed for %s (container %s): %s",
+            file_path, container_id[:12], e,
+        )
 
 
 def list_versions(container_id: str, file_path: str) -> list[dict[str, object]]:

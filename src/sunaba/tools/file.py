@@ -79,10 +79,12 @@ def _parses_as_definition(text: str) -> bool:
 
 
 def _is_bare_signature(old_str: str) -> bool:
-    """True when *old_str* has no content beyond a single def/class line.
+    """True when *old_str* has no content beyond a single def/class signature.
 
-    Blank lines, comments, and decorators around the definition line are
-    allowed.  Used to decide whether the exact-string fallback is safe
+    Blank lines, comments, and decorators (including multi-line
+    decorators and multi-line signatures) around the definition are
+    allowed; an unfinished signature start like ``def foo(`` counts as
+    bare too.  Used to decide whether the exact-string fallback is safe
     after a failed AST resolution: string-replacing a bare signature
     with a complete definition would splice the new body in front of
     the old one and leave the old body orphaned in the file (issue
@@ -90,6 +92,26 @@ def _is_bare_signature(old_str: str) -> bool:
     mis-indented one the whitespace-flexible matcher handles -- are NOT
     bare and keep the fallback.
     """
+    src = textwrap.dedent(old_str).rstrip()
+    # AST probe: a complete signature block (decorators + def/class
+    # line, however many physical lines) plus an appended probe body
+    # parses to exactly one definition whose body is that probe.
+    try:
+        tree = ast.parse(src + "\n    pass")
+    except SyntaxError:
+        pass
+    else:
+        if len(tree.body) == 1 and isinstance(
+            tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            body = tree.body[0].body
+            return len(body) == 1 and isinstance(body[0], ast.Pass)
+        return False
+    # Unparseable: line scan for signature *fragments* (e.g. the first
+    # line of a multi-line signature).  Continuation lines of an
+    # unfinished multi-line decorator or signature are not recognized
+    # here and fall through to False -- the fallback then relies on the
+    # exact-string match semantics.
     seen_def = False
     for line in old_str.splitlines():
         stripped = line.strip()
@@ -504,6 +526,9 @@ def write_file_sandbox(
     # 1-indexed (start, end) lines of the replaced region in the new
     # content; set only for successful old_str edits (issue #580).
     replaced_span: tuple[int, int] | None = None
+    # Pre-edit content; stays None for a full overwrite (read separately
+    # at snapshot time) and doubles as the partial-update marker.
+    existing: str | None = None
 
     # For partial updates, read existing content
     if append or old_str is not None or has_line_range:
@@ -677,7 +702,7 @@ def write_file_sandbox(
             )
 
     # Snapshot the pre-edit content so undo_file_edit can restore it.
-    if append or old_str is not None or has_line_range:
+    if existing is not None:
         undo.save_version(container_id, dest_path, existing)
     else:
         try:
@@ -1142,7 +1167,7 @@ def transform_file(
     """
     client = _docker()
     try:
-        _ = client.containers.get(container_id)
+        container = client.containers.get(container_id)
     except NotFound:
         return container_not_found_error(container_id)
     except Exception as e:
@@ -1156,7 +1181,7 @@ def transform_file(
     # Pre-edit snapshot for undo_file_edit -- best-effort: the edit
     # must never fail because its undo snapshot could not be read.
     try:
-        before = read_file(_, file_path)
+        before = read_file(container, file_path)
     except Exception:
         before = None
     result = transform_file_in_container(client, container_id, file_path, code)

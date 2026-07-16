@@ -8,6 +8,47 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [Unreleased]
 
+### Added
+
+- **Per-edit undo: `undo_file_edit` tool** — every `write_file_sandbox` /
+  `transform_file` edit now snapshots the pre-edit file automatically
+  (host-side under `~/.sunaba/undo/`, bounded ring of 10 versions per file,
+  files over 5 MB skipped, history cleared on container stop). The new
+  `undo_file_edit(container_id, file_path, steps=1)` tool restores the state
+  `steps` edits back; the replaced content is snapshotted too, so an undo is
+  redoable. Rationale: when an LLM breaks a file, it tends to keep "fixing"
+  the broken text forward and spirals; a guaranteed way back to the pre-edit
+  state breaks that loop. The `.py` parse-regression warning now points at
+  `undo_file_edit` as the first recovery step. (#599)
+- **`write_file_sandbox` anti-loop guards** (the callers are LLMs — a mistake
+  must come back as an actionable message, and dead ends must offer an exit):
+  a failed `old_str` match whose `file_contents` already exists in the file now
+  says "this edit may have already been applied" (the most common retry loop:
+  repeating an edit that already landed); a `.py` edit that leaves the file
+  unparseable gets a warning in the success echo pointing at escaping artifacts
+  (instead of surfacing later at verify time); multi-match and near-miss errors
+  suggest `transform_file` as the pattern-based escape hatch. (#599)
+
+### Fixed
+
+- **`write_file_sandbox` AST-fallthrough corruption**: when `old_str` was a bare
+  definition signature (`def foo():`) and AST resolution failed (ambiguous
+  symbol) or reported no change, the silent fallback to exact-string matching
+  replaced only the signature line and spliced the new body in front of the old
+  one, leaving the old body orphaned in the file — reported as success. A no-op
+  AST edit now returns "No changes" without writing; an AST failure with a
+  bare-signature `old_str` and complete-definition `file_contents` surfaces the
+  AST error (with `line=` guidance) instead of corrupting the file.
+  Signature-to-signature renames and full-definition `old_str` blocks keep the
+  string fallback. Near-miss errors now note the preceding AST failure. (#599)
+- **`edit_symbol` docstring preservation**: the preserved docstring was inserted
+  right after the first `def` line, which broke multi-line signatures and
+  one-liner replacements (both rejected valid `new_code` with a spurious syntax
+  error), and multi-line docstrings were flattened to a single indent level.
+  Insertion now uses the new definition's AST body position, one-liners skip
+  preservation, and docstring blocks shift as a whole keeping relative
+  indentation. (#599)
+
 ### Removed
 
 - **`clone_repo` tool**: the standalone MCP tool that cloned an extra repository

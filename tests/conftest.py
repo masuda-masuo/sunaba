@@ -141,6 +141,13 @@ class _FakeClient:
 
 
 @pytest.fixture(autouse=True)
+def _undo_root_tmp(tmp_path, monkeypatch) -> None:
+    """Keep per-edit undo snapshots out of the real ~/.sunaba during tests."""
+    from sunaba import undo
+    monkeypatch.setattr(undo, "_UNDO_ROOT", tmp_path / "undo-snapshots")
+
+
+@pytest.fixture(autouse=True)
 def _record_publish_verify() -> None:
     """Record verify success for the standard test container so publish
     tests can reach the push logic without triggering the verify gate.

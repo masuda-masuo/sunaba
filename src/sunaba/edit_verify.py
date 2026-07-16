@@ -1384,8 +1384,10 @@ if NEW_CODE == "":
         new += "\n"
 else:
     code_lines = NEW_CODE.splitlines()
+    n_lead_stripped = 0
     while code_lines and not code_lines[0].strip():
         code_lines.pop(0)
+        n_lead_stripped += 1
     while code_lines and not code_lines[-1].strip():
         code_lines.pop()
     first = code_lines[0]
@@ -1427,37 +1429,47 @@ else:
                     preserve_decs = PRESERVE in ("decorators", "decorators+docstring")
                     preserve_docs = PRESERVE in ("docstring", "decorators+docstring")
 
+                    dec_offset = 0
                     if preserve_decs and old_node.decorator_list and not new_node.decorator_list:
                         dec_lines = []
                         for d in old_node.decorator_list:
                             for ln in range(d.lineno, d.end_lineno + 1):
                                 dec_lines.append(lines[ln - 1])
                         reindented = dec_lines + reindented
+                        dec_offset = len(dec_lines)
 
                     if preserve_docs and not _has_docstring(new_node) and _has_docstring(old_node):
                         ds = old_node.body[0]
-                        if ds.lineno != target["def_line"]:
-                            old_body_indent = ds.col_offset
-                            new_body_indent = old_body_indent
-                            def_idx = 0
-                            for i, ln in enumerate(reindented):
-                                stripped = ln.lstrip()
-                                if stripped.startswith("def ") or stripped.startswith("async def ") or stripped.startswith("class "):
-                                    def_idx = i
-                                    break
-                            if def_idx + 1 < len(reindented):
-                                bl = reindented[def_idx + 1]
-                                if bl.strip():
-                                    new_body_indent = len(bl) - len(bl.lstrip())
+                        new_body = new_node.body[0]
+                        # Locate the new body's first statement in code_lines
+                        # coordinates (AST linenos count the leading blank
+                        # lines that were stripped above).  Insertion is only
+                        # possible when that statement starts its own line:
+                        # a one-liner (def f(): return 1) has nowhere to put
+                        # a docstring line.  Likewise skip when the OLD
+                        # docstring shares the def line.
+                        body_idx = new_body.lineno - 1 - n_lead_stripped
+                        body_on_own_line = (
+                            0 <= body_idx < len(code_lines)
+                            and not code_lines[body_idx][: new_body.col_offset].strip()
+                        )
+                        if ds.lineno != target["def_line"] and body_on_own_line:
+                            new_body_indent = max(0, new_body.col_offset + delta)
+                            # Shift the docstring block as a whole so nested
+                            # lines keep their relative indentation.
+                            shift = new_body_indent - ds.col_offset
                             ds_lines = []
                             for ln in range(ds.lineno, ds.end_lineno + 1):
                                 raw = lines[ln - 1]
-                                stripped = raw.lstrip()
-                                if stripped:
-                                    ds_lines.append(" " * new_body_indent + stripped)
-                                else:
+                                if not raw.strip():
                                     ds_lines.append("")
-                            reindented = reindented[:def_idx + 1] + ds_lines + reindented[def_idx + 1:]
+                                elif shift >= 0:
+                                    ds_lines.append(" " * shift + raw)
+                                else:
+                                    cut = min(-shift, len(raw) - len(raw.lstrip()))
+                                    ds_lines.append(raw[cut:])
+                            ins = body_idx + dec_offset
+                            reindented = reindented[:ins] + ds_lines + reindented[ins:]
 
     new_lines = lines[:start - 1] + reindented + lines[end:]
     new = "\n".join(new_lines)

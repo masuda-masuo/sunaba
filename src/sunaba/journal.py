@@ -385,6 +385,11 @@ def record_stop(container_id: str) -> None:
     _append_json(entry)
     _update_container_state(container_id, stopped=True)
     remove_run_id(container_id)
+    # A stopped container's files are gone; hooking here (the single
+    # funnel every stop/reap path goes through) keeps the invariant
+    # "stopped container => no stale undo snapshots" in one place.
+    from sunaba import undo
+    undo.clear_history(container_id)
 
 
 def record_boundary_crossing(

@@ -507,6 +507,116 @@ def foo():
         assert "@functools.lru_cache(maxsize=128)" in text
         assert "return 99" in text
 
+    def test_multiline_signature_preserves_docstring(self, tmp_path) -> None:
+        """Docstring lands after the whole signature, not inside it.
+
+        The old implementation inserted the docstring right after the
+        first ``def`` line, which broke multi-line signatures and made
+        the driver reject valid new_code.
+        """
+        src = 'def foo():\n    """Doc."""\n    return 1\n'
+        f = tmp_path / "mod.py"
+        f.write_text(src, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "foo",
+            "def foo(\n    a=1,\n    b=2,\n):\n    return a + b\n",
+        )
+        assert out["status"] == "ok", out.get("error")
+        text = f.read_text(encoding="utf-8")
+        ast.parse(text)
+        assert text == (
+            "def foo(\n    a=1,\n    b=2,\n):\n"
+            '    """Doc."""\n    return a + b\n'
+        )
+
+    def test_one_liner_new_def_skips_docstring_preservation(self, tmp_path) -> None:
+        """A one-liner replacement has no body line to host the docstring.
+
+        Preservation is skipped instead of producing an IndentationError
+        that rejected valid new_code.
+        """
+        src = 'def foo():\n    """Doc."""\n    return 1\n'
+        f = tmp_path / "mod.py"
+        f.write_text(src, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "foo", "def foo(): return 2\n",
+        )
+        assert out["status"] == "ok", out.get("error")
+        text = f.read_text(encoding="utf-8")
+        ast.parse(text)
+        assert "return 2" in text
+
+    def test_multiline_docstring_keeps_relative_indent(self, tmp_path) -> None:
+        """Nested docstring lines shift as a block, not flattened.
+
+        The old implementation re-indented every docstring line to the
+        body indent, destroying the internal structure of Args:/Returns:
+        sections.
+        """
+        src = (
+            "def foo():\n"
+            '    """Summary.\n'
+            "\n"
+            "    Args:\n"
+            "        x: something.\n"
+            '    """\n'
+            "    return 1\n"
+        )
+        f = tmp_path / "mod.py"
+        f.write_text(src, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "foo", "def foo():\n    return 99\n",
+        )
+        assert out["status"] == "ok", out.get("error")
+        text = f.read_text(encoding="utf-8")
+        assert '    """Summary.' in text
+        assert "    Args:" in text
+        assert "        x: something." in text
+        assert "return 99" in text
+
+    def test_decorators_and_docstring_with_multiline_signature(self, tmp_path) -> None:
+        """Decorator prepend and docstring insert compose (offset math)."""
+        src = (
+            "@wraps\n"
+            "def foo():\n"
+            '    """Doc."""\n'
+            "    return 1\n"
+        )
+        f = tmp_path / "mod.py"
+        f.write_text(src, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "foo",
+            "def foo(\n    a=1,\n):\n    return a\n",
+        )
+        assert out["status"] == "ok", out.get("error")
+        text = f.read_text(encoding="utf-8")
+        ast.parse(text)
+        assert text == (
+            "@wraps\ndef foo(\n    a=1,\n):\n"
+            '    """Doc."""\n    return a\n'
+        )
+
+    def test_comment_between_signature_and_body(self, tmp_path) -> None:
+        """A comment before the first statement stays above the docstring."""
+        src = 'def foo():\n    """Doc."""\n    return 1\n'
+        f = tmp_path / "mod.py"
+        f.write_text(src, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, "foo",
+            "def foo():\n    # note\n    return 2\n",
+        )
+        assert out["status"] == "ok", out.get("error")
+        text = f.read_text(encoding="utf-8")
+        ast.parse(text)
+        assert '"""Doc."""' in text
+        assert "# note" in text
+        assert "return 2" in text
+
 
 # ===================================================================
 # write_file_sandbox integration via old_str AST resolution
@@ -584,6 +694,75 @@ class TestWriteFileSymbolIntegration:
         from sunaba.tools.file import _extract_symbol_from_old_str
         old = "\n\n# some comment\n@decorator\ndef foo():\n    pass\n"
         assert _extract_symbol_from_old_str(old) == "foo"
+
+    # ── _is_bare_signature unit tests ────────────────────────────────
+
+    def test_is_bare_signature(self) -> None:
+        from sunaba.tools.file import _is_bare_signature
+        assert _is_bare_signature("def foo():") is True
+        assert _is_bare_signature("async def fetch():") is True
+        assert _is_bare_signature("class Bar:") is True
+        assert _is_bare_signature("@decorator\ndef foo():") is True
+        assert _is_bare_signature("# comment\ndef foo():\n") is True
+        assert _is_bare_signature("def foo(") is True  # multi-line sig start
+        # Multi-line decorators and multi-line signatures are still bare
+        # (PR #629 review: the old line scan rejected the continuation
+        # lines and re-opened the unsafe string fallback).
+        assert _is_bare_signature(
+            "@decorator(\n    arg1,\n    arg2,\n)\ndef foo():"
+        ) is True
+        assert _is_bare_signature(
+            "def foo(\n    a: int,\n    b: str = 'x',\n) -> None:"
+        ) is True
+        # Anything carrying a body line is NOT bare -- even mis-indented
+        # bodies that only the whitespace-flexible matcher can place.
+        assert _is_bare_signature("def foo():\npass") is False
+        assert _is_bare_signature("def foo():\n    return 1") is False
+        assert _is_bare_signature(
+            "@decorator(\n    arg,\n)\ndef foo():\n    return 1"
+        ) is False
+        assert _is_bare_signature("x = 1") is False
+        assert _is_bare_signature("") is False
+        # Complete ONE-LINER definitions (inline body, overload stubs)
+        # are whole definitions: string-replacing them orphans nothing,
+        # so they keep the exact-string fallback.
+        assert _is_bare_signature("def foo(): pass") is False
+        assert _is_bare_signature("def foo(): return 1") is False
+        assert _is_bare_signature(
+            "@overload\ndef p(x: int) -> int: ..."
+        ) is False
+
+    def test_one_liner_stub_old_str_keeps_string_fallback(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Replacing an @overload stub by its exact text must still work.
+
+        The symbol is ambiguous for AST resolution (three same-name
+        defs), but the stub text is unique in the file and complete, so
+        the exact-string fallback is safe and must not be blocked by
+        the bare-signature guard.
+        """
+        f = tmp_path / "mod.py"
+        src = (
+            "from typing import overload\n\n\n"
+            "@overload\ndef process(x: int) -> int: ...\n"
+            "@overload\ndef process(x: str) -> str: ...\n"
+            "def process(x):\n    return x\n"
+        )
+        f.write_text(src, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def process(x: bytes) -> bytes: ...",
+            old_str="def process(x: int) -> int: ...",
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+        assert "bytes" in result
 
     # ── AST path is taken on .py files ───────────────────────────────
 
@@ -670,13 +849,19 @@ class TestWriteFileSymbolIntegration:
         assert "Error" not in result, result
         assert "replaced" in result
 
-    # ── Fallthrough when AST returns no-change ───────────────────────
+    # ── AST no-change returns "No changes" (no string fallthrough) ───
 
-    def test_ast_no_change_falls_through_to_string_matching(
+    def test_ast_no_change_reports_no_changes(
         self, tmp_path, monkeypatch,
     ) -> None:
+        """A no-op AST edit must NOT fall through to string matching.
+
+        Falling through used to re-match the signature line and splice
+        a duplicate body into the file (silent corruption).
+        """
+        src = "def foo():\n    return 1\n"
         f = tmp_path / "mod.py"
-        f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        f.write_text(src, encoding="utf-8")
         monkeypatch.setattr(
             "sunaba.tools.file._docker",
             lambda: _write_fake_docker({POSIX: str(f)}),
@@ -687,22 +872,45 @@ class TestWriteFileSymbolIntegration:
             file_contents="def foo():\n    return 1",
             old_str="def foo():\n    return 1",
         )
-        # No change: AST driver returns changed=False, falls through
-        # to string matching, still succeeds.
         assert "Error" not in result, result
-        assert "replaced" in result
+        assert "No changes" in result
+        assert "'foo'" in result
+        assert f.read_text(encoding="utf-8") == src
+
+    def test_bare_signature_no_change_does_not_duplicate_body(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Regression: bare-signature old_str + identical file_contents.
+
+        The old fallthrough replaced the ``def foo():`` line with the
+        whole definition, leaving ``return 1`` duplicated.
+        """
+        src = "def foo():\n    return 1\n"
+        f = tmp_path / "mod.py"
+        f.write_text(src, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def foo():\n    return 1\n",
+            old_str="def foo():",
+        )
+        assert "No changes" in result, result
+        assert f.read_text(encoding="utf-8") == src
 
     # ── Ambiguous symbol on .py with definition old_str ──────────────
 
-    def test_ambiguous_symbol_falls_through_to_string_match(
+    def test_ambiguous_bare_signature_surfaces_ast_error(
         self, tmp_path, monkeypatch,
     ) -> None:
-        """AST ambiguity degrades gracefully to string matching.
+        """Bare signature + complete definition must not string-fall-through.
 
-        When the symbol is ambiguous, the AST driver returns an error;
-        ``write_file_sandbox`` logs a DEBUG message and falls through
-        to exact-string matching, which succeeds if the old_str text is
-        unique in the file.
+        The old fallthrough replaced only the signature line and left
+        the old body orphaned in the file.  The AST ambiguity error
+        (with its ``line=`` guidance) is surfaced instead.
         """
         f = tmp_path / "mod.py"
         src = (
@@ -720,11 +928,84 @@ class TestWriteFileSymbolIntegration:
             file_contents="def process(x):\n    return x + 1\n",
             old_str="def process(x):",
         )
-        # AST fails (ambiguous), falls through to string matching,
-        # which finds the exact unique match on line 1.
+        assert "ambiguous" in result
+        assert "Retry with line=" in result
+        assert "Note: old_str looks like a bare 'process' signature" in result
+        assert f.read_text(encoding="utf-8") == src
+
+    def test_full_def_old_str_still_falls_through_on_ast_failure(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """AST ambiguity degrades to string matching for full-definition old_str.
+
+        When old_str contains the whole old definition, an exact string
+        replacement is safe (nothing is orphaned), so the fallthrough
+        is kept.
+        """
+        f = tmp_path / "mod.py"
+        src = (
+            "def process(x):\n    return x\n\n\n"
+            "class Handler:\n    def process(self, x):\n        return x\n"
+        )
+        f.write_text(src, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def process(x):\n    return x + 1",
+            old_str="def process(x):\n    return x",
+        )
         assert "Error" not in result, result
         assert "replaced" in result
         assert "return x + 1" in result
+
+    def test_bare_signature_rename_still_falls_through(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Signature-to-signature rename keeps working via string match.
+
+        file_contents is itself a bare signature (not a complete
+        definition), so replacing just the signature line is exactly
+        what the caller wants.
+        """
+        f = tmp_path / "mod.py"
+        f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def foo_renamed():",
+            old_str="def foo():",
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+        assert "foo_renamed" in result
+
+    def test_near_miss_error_includes_ast_failure_note(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """When AST failed first and string matching finds nothing, say so."""
+        f = tmp_path / "mod.py"
+        f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="x = 1",
+            old_str="def nope():",
+        )
+        assert "Error: old_str not found" in result
+        assert "Note: AST resolution for 'nope' was attempted first" in result
+        assert "not found" in result
 
     # ── preserve and line params are passed through ──────────────────
 

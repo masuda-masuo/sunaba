@@ -8,6 +8,17 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [Unreleased]
 
+### Added
+
+- **`write_file_sandbox` anti-loop guards** (the callers are LLMs — a mistake
+  must come back as an actionable message, and dead ends must offer an exit):
+  a failed `old_str` match whose `file_contents` already exists in the file now
+  says "this edit may have already been applied" (the most common retry loop:
+  repeating an edit that already landed); a `.py` edit that leaves the file
+  unparseable gets a warning in the success echo pointing at escaping artifacts
+  (instead of surfacing later at verify time); multi-match and near-miss errors
+  suggest `transform_file` as the pattern-based escape hatch. (#599)
+
 ### Fixed
 
 - **`write_file_sandbox` AST-fallthrough corruption**: when `old_str` was a bare

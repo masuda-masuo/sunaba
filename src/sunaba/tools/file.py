@@ -183,7 +183,8 @@ def _try_whitespace_flexible(
         return (
             f"Error: old_str matches at {len(matches)} locations "
             f"(lines {line_nos}{suffix}) after whitespace normalization. "
-            "Add more surrounding context to make it unique."
+            "Add more surrounding context to make it unique, or use "
+            "transform_file to edit several occurrences in one call."
         )
 
     i = matches[0]
@@ -351,7 +352,9 @@ def _build_near_miss_echo(existing: str, old_str: str, dest_path: str) -> str:
         f"{diff_block}"
         f"{mismatch_section}\n"
         "Tip: Use read_file_range first to confirm the exact content "
-        "(including whitespace)."
+        "(including whitespace). If exact matching keeps failing, switch "
+        "to transform_file -- it edits by pattern (e.g. re.sub) and does "
+        "not need the exact text."
     )
 
 
@@ -359,6 +362,11 @@ def _build_near_miss_echo(existing: str, old_str: str, dest_path: str) -> str:
 # 30-row overall cap with the middle elided.
 _SUCCESS_ECHO_CONTEXT = 2
 _SUCCESS_ECHO_MAX_ROWS = 30
+
+# Minimum (stripped) file_contents length for the "already applied" hint on
+# a failed old_str match -- short snippets appear coincidentally too often
+# to be evidence of a retried edit.
+_ALREADY_APPLIED_MIN_CHARS = 8
 
 
 def _build_success_echo(
@@ -427,8 +435,11 @@ def write_file_sandbox(
     numbers (add context, retry); an inexact match retries with
     per-line whitespace stripped and re-indents on success; no match
     returns the nearest-miss region with line numbers plus the first
-    mismatching line; a successful replace echoes the post-edit region
-    with line numbers (ground truth for the next edit).  old_str matches
+    mismatching line (and says so when file_contents is already in the
+    file -- the edit was probably applied by an earlier call); a
+    successful replace echoes the post-edit region with line numbers
+    (ground truth for the next edit).  On .py files, an edit that
+    leaves the file unparseable is flagged with a warning in the echo.  old_str matches
     the exact string you provide -- if it spans several lines, ALL of
     them are replaced, so keep it minimal and unique.
 
@@ -564,8 +575,9 @@ def write_file_sandbox(
                             "definition, so this edit must go through AST "
                             "resolution (a plain string replacement would "
                             "leave the old body behind). Fix the error "
-                            "above, or put the full old definition in "
-                            "old_str for an exact string edit."
+                            "above, put the full old definition in "
+                            "old_str for an exact string edit, or use "
+                            "transform_file."
                         )
                     logger.debug(
                         "AST resolution attempted for %s (symbol=%s) but failed: %s"
@@ -581,7 +593,8 @@ def write_file_sandbox(
                 return (
                     f"Error: old_str matches at {len(exact_matches)} locations "
                     f"(lines {line_nos}{suffix}). "
-                    "Add more surrounding context to make it unique."
+                    "Add more surrounding context to make it unique, or use "
+                    "transform_file to edit several occurrences in one call."
                 )
             if len(exact_matches) == 1:
                 idx = exact_matches[0][0]
@@ -609,6 +622,19 @@ def write_file_sandbox(
                 else:
                     # 3. Near-miss echo
                     near_miss = _build_near_miss_echo(existing, old_str, dest_path)
+                    # A retried edit is the most common cause of "old_str
+                    # not found": the previous call already replaced it.
+                    # Saying so breaks the re-read/retry loop early.
+                    if (
+                        len(file_contents.strip()) >= _ALREADY_APPLIED_MIN_CHARS
+                        and file_contents in existing
+                    ):
+                        line_no = existing[: existing.find(file_contents)].count("\n") + 1
+                        near_miss += (
+                            f"\nNote: file_contents already appears at line "
+                            f"{line_no} -- this edit may have already been "
+                            "applied. Re-read the file before retrying."
+                        )
                     if ast_error is not None:
                         near_miss += (
                             f"\nNote: AST resolution for '{symbol}' was "
@@ -628,13 +654,31 @@ def write_file_sandbox(
             if existing.endswith("\n") or file_contents.endswith("\n"):
                 content += "\n"
 
+    # A .py file that stops parsing right after an edit is almost always
+    # an escaping or matching mistake -- say so in the success echo, so
+    # the caller can repair it immediately instead of discovering it at
+    # verify time (issue #599).  Warning only: multi-step edits may pass
+    # through broken intermediate states on purpose.
+    syntax_note = ""
+    if dest_path.endswith(".py"):
+        try:
+            ast.parse(content)
+        except SyntaxError as e:
+            syntax_note = (
+                f"\nWarning: {dest_path} does not parse as Python after "
+                f"this edit (line {e.lineno}: {e.msg}). If unintended, "
+                "check file_contents for escaping artifacts (stray \\n, "
+                '\\" or unbalanced quotes) and re-edit, or repair with '
+                "transform_file."
+            )
+
     try:
         write_file(container, container_id[:12], dest_path, content)
     except ValueError as e:
         return f"Error: {e}"
     if replaced_span is not None:
-        return _build_success_echo(content, dest_path, *replaced_span)
-    return f"Written {len(content)} bytes to {dest_path}"
+        return _build_success_echo(content, dest_path, *replaced_span) + syntax_note
+    return f"Written {len(content)} bytes to {dest_path}" + syntax_note
 
 
 # ---------------------------------------------------------------------------

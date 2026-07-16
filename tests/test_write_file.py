@@ -1476,3 +1476,154 @@ class TestTrailingNewlinePreservation:
         )
         assert "Error" not in result
         assert _get_written_content(mock_container) == "aaa\nbbb\nccc"
+
+
+class TestLlmErgonomicsGuards:
+    """Anti-loop hints and parse-regression warnings (issue #599 follow-up).
+
+    The only callers are LLMs: a mistake must come back as an actionable
+    message that breaks retry loops, and a corrupting write must never
+    stay silent.
+    """
+
+    # --- "edit may already be applied" hint on a failed match ---
+
+    @patch("sunaba.tools.file._docker")
+    def test_near_miss_notes_already_applied_contents(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """Retrying an applied edit says so instead of a bare near-miss."""
+        existing = "alpha\nreplacement text\ngamma\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.txt",
+            file_contents="replacement text",
+            dest_dir="/root",
+            old_str="original text",
+        )
+        assert "Error: old_str not found" in result
+        assert "file_contents already appears at line 2" in result
+        assert "may have already been applied" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_no_already_applied_note_for_short_contents(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """Tiny snippets appear coincidentally -- no misleading hint."""
+        existing = "x = 1\ny = 2\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.txt",
+            file_contents="y",
+            dest_dir="/root",
+            old_str="zzz not here",
+        )
+        assert "Error: old_str not found" in result
+        assert "already been applied" not in result
+
+    # --- parse-regression warning on .py writes ---
+
+    @patch("sunaba.tools.file._docker")
+    def test_broken_python_replace_warns_in_echo(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """An old_str edit that breaks the file parsing gets a warning."""
+        existing = "x = 1\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents='y = "unclosed',
+            dest_dir="/root",
+            old_str="x = 1",
+        )
+        assert "Error" not in result
+        assert "Warning: /root/test.py does not parse as Python" in result
+        assert "escaping artifacts" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_valid_python_replace_has_no_warning(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        existing = "x = 1\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents="y = 2",
+            dest_dir="/root",
+            old_str="x = 1",
+        )
+        assert "Error" not in result
+        assert "Warning" not in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_broken_python_full_overwrite_warns(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """The warning also covers full overwrites (no edit mode)."""
+        _mock_container_with_file(mock_docker, "")
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.py",
+            file_contents="def broken(:\n    pass\n",
+            dest_dir="/root",
+        )
+        assert "Written" in result
+        assert "Warning: /root/test.py does not parse as Python" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_non_py_file_never_warns(self, mock_docker: MagicMock) -> None:
+        _mock_container_with_file(mock_docker, "")
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="notes.md",
+            file_contents="def broken(:\n",
+            dest_dir="/root",
+        )
+        assert "Written" in result
+        assert "Warning" not in result
+
+    # --- transform_file escape hatches at dead ends ---
+
+    @patch("sunaba.tools.file._docker")
+    def test_multi_match_error_suggests_transform_file(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        existing = "hello\nworld\nhello\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.txt",
+            file_contents="HI",
+            dest_dir="/root",
+            old_str="hello",
+        )
+        assert "matches at 2 locations" in result
+        assert "transform_file" in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_near_miss_suggests_transform_file(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        existing = "aaa\nbbb\n"
+        _mock_container_with_file(mock_docker, existing)
+
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name="test.txt",
+            file_contents="new",
+            dest_dir="/root",
+            old_str="zzz",
+        )
+        assert "Error: old_str not found" in result
+        assert "transform_file" in result

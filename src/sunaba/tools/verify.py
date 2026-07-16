@@ -65,7 +65,7 @@ def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
        This function is **no longer registered as an MCP tool** (see
        issue #256).  It remains available as an internal helper for
        machine-generated diffs.  For AI-authored edits, use
-       :func:`write_file_sandbox` with ``old_str`` or
+       :func:`edit_file` with ``old_str`` or
        :func:`transform_file`.
 
     Reads the current file from the container, applies the unified diff,

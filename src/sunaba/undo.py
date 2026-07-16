@@ -1,7 +1,8 @@
 """Per-edit undo history for file-editing tools (issue #599 follow-up).
 
-Every mutating file operation (``write_file_sandbox`` in all modes,
-the AST edit path, ``transform_file``) saves the pre-edit content of
+Every mutating file operation (``write_file``, ``edit_file`` in all
+modes including the AST edit path, ``transform_file``) saves the
+pre-edit content of
 the touched file here, host-side, before writing.  ``undo_file_edit``
 restores the previous version -- the escape hatch that lets an LLM
 caller step back to the last state *before* it broke a file instead

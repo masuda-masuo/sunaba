@@ -723,6 +723,46 @@ class TestWriteFileSymbolIntegration:
         ) is False
         assert _is_bare_signature("x = 1") is False
         assert _is_bare_signature("") is False
+        # Complete ONE-LINER definitions (inline body, overload stubs)
+        # are whole definitions: string-replacing them orphans nothing,
+        # so they keep the exact-string fallback.
+        assert _is_bare_signature("def foo(): pass") is False
+        assert _is_bare_signature("def foo(): return 1") is False
+        assert _is_bare_signature(
+            "@overload\ndef p(x: int) -> int: ..."
+        ) is False
+
+    def test_one_liner_stub_old_str_keeps_string_fallback(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Replacing an @overload stub by its exact text must still work.
+
+        The symbol is ambiguous for AST resolution (three same-name
+        defs), but the stub text is unique in the file and complete, so
+        the exact-string fallback is safe and must not be blocked by
+        the bare-signature guard.
+        """
+        f = tmp_path / "mod.py"
+        src = (
+            "from typing import overload\n\n\n"
+            "@overload\ndef process(x: int) -> int: ...\n"
+            "@overload\ndef process(x: str) -> str: ...\n"
+            "def process(x):\n    return x\n"
+        )
+        f.write_text(src, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = write_file_sandbox(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def process(x: bytes) -> bytes: ...",
+            old_str="def process(x: int) -> int: ...",
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+        assert "bytes" in result
 
     # ── AST path is taken on .py files ───────────────────────────────
 

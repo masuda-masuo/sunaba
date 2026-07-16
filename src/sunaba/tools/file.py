@@ -99,7 +99,13 @@ def _is_bare_signature(old_str: str) -> bool:
     try:
         tree = ast.parse(src + "\n    pass")
     except SyntaxError:
-        pass
+        # The probe also fails on a complete ONE-LINER definition
+        # (``def f(): pass``, overload stubs ``def f(): ...``) because
+        # the appended body is an unexpected indent after the inline
+        # body.  Those are complete definitions -- string-replacing
+        # them orphans nothing -- so they are never bare.
+        if _parses_as_definition(src):
+            return False
     else:
         if len(tree.body) == 1 and isinstance(
             tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)

@@ -23,7 +23,7 @@ The original design document (§4) specified that version 1.0 must support **pyt
 
 ## 2. Strategy
 
-1.  **Node/JS in the Base Layer; Compilers in Backend Layers**: JS is a cross-cutting layer (needed for Pyright as well as frontend code) and will be bundled into the base image. Specialized compilers/runtimes (like Python or Go) will reside in distinct backend layers.
+1.  **Node Runtime in the Base Layer; Dev Tools in Backend Layers**: Node itself is a cross-cutting *runtime* (needed for Pyright as well as frontend code) and is bundled into the base image. JS *development* tools (`eslint` / `tsc` / `jest`) are not part of that cross-cutting concern -- they are project-specific dev/testing packages, so (mirroring Python and Go) they live in a dedicated backend layer (`docker/Dockerfile.js`, sharing `install-js-tools.sh` with `Dockerfile.full`; Issue #588) rather than in `base`.
 2.  **Unified Dispatch Matrix / Modular Images**: Language detection rules will support Python, JS, TS, and Go. Missing tools will be treated as first-class `not_available` statuses rather than silent skips.
 3.  **Monolith Prevention (revised by #584)**: The *layer split* stands — runtimes required by cross-cutting infra belong in the `base` image, language-specific development/testing packages belong in their respective backend layers. What was wrong was applying that principle to the **runtime default**. See §6.1.
 4.  **Eradicate Silent Failures**: All verification layers must return a **status envelope** rather than a bare list of findings. Unverified or crashed executions must fail the gate.
@@ -44,9 +44,17 @@ Detection priority (primary matches take precedence, polyglots aggregate all mat
     *   `.go` → Go
 3.  **Directory Paths (Project Marker Scan)**:
     *   `go.mod` → Go
-    *   `package.json` → JS (detects Jest vs Vitest; maps to TS if `tsconfig.json` is present)
+    *   `package.json` → JS (maps to TS if `tsconfig.json` is present)
     *   `pyproject.toml` / `setup.py` / `requirements*.txt` / `Pipfile` / `tox.ini` → Python
     *   *Excludes directories like `node_modules`, `.venv`, `vendor`, `dist`, and `build`.*
+
+    Jest vs Vitest is a *test-runner* distinction, not a language, so it is
+    resolved one level down: the `test` layer's jest runner reads
+    `package.json` itself before invoking anything (`_detect_js_test_runner`,
+    Issue #588). A vitest-only project (`vitest` present, `jest` absent)
+    reports a clear `skipped` status instead of being forced through the
+    jest CLI, which would misparse vitest's own output. No `VitestAdapter`
+    exists yet; the skip message says so explicitly.
 4.  **Polyglot/Multiple Markers**: Returns an aggregated set of detected languages. Executes toolchains scoped to the respective subtrees containing the markers.
 5.  **No Match (Unknown)**: Skips validation and prompts the user to explicitly specify `language=`. No silent fallback to Python.
 
@@ -94,22 +102,26 @@ Every validation layer (lint, type check, test) must return a structured status 
 
 ### Layer Hierarchy (`FROM` chain)
 
-*   **`sandbox:base`**: Contains language-agnostic utilities (`ripgrep`, `ast-grep`, `fd`, `sd`, `ctags`, `git`, `gh`, `jq`, `uv`) + **Python runtime + Node runtime**.
+*   **`sandbox:base`**: Contains language-agnostic utilities (`ripgrep`, `ast-grep`, `fd`, `sd`, `ctags`, `git`, `gh`, `jq`, `uv`) + **Python runtime + Node runtime** (+ a non-root npm global prefix, `NPM_CONFIG_PREFIX`, so backend layers can `npm install -g` without root).
 *   **Backend Layers** (inherit from `sandbox:base` using `FROM`):
     *   `sandbox:python`: Ruff, Pyright, Pytest + pytest-json-report.
     *   `sandbox:go`: Go compiler and build toolchains.
+    *   `sandbox:js`: eslint, typescript (tsc), jest (Issue #588).
 
 ### Image Tags (Pinned to SHA-256 Digests)
 
 | Tag | Layer Composition | Use Case |
 |---|---|---|
-| `sandbox:full` | base + python + go | **The default.** Started whenever `image=` is omitted. |
+| `sandbox:full` | base + python + go + js | **The default.** Started whenever `image=` is omitted. |
 | `sandbox:base` | base | `FROM` parent of the variants. Not a runtime default (#584). |
 | `sandbox:python` | base + python | Lean image, reachable only via an explicit `image=`. |
 | `sandbox:go` | base + go | Lean image, reachable only via an explicit `image=`. |
+| `sandbox:js` | base + js | Lean image, reachable only via an explicit `image=` (#588). |
 | `sandbox:minimal` | Core Git + Python | Lightweight environment for rapid tests. |
 
-The toolchain installs live in `docker/install-python-tools.sh` / `install-go.sh`, which `Dockerfile.python` / `Dockerfile.go` / `Dockerfile.full` all source. Two copies of an install step drift, and that drift *was* #584: `pytest-json-report` was baked into the python image only, so every container started from any other image failed its first verify.
+The toolchain installs live in `docker/install-python-tools.sh` / `install-go.sh` / `install-js-tools.sh`, which `Dockerfile.python` / `Dockerfile.go` / `Dockerfile.js` / `Dockerfile.full` all source. Two copies of an install step drift, and that drift *was* #584: `pytest-json-report` was baked into the python image only, so every container started from any other image failed its first verify.
+
+**js dev tools are baked, not pip-install-like.** Unlike Python's `pip install -e .[dev]`, which writes into the same venv the image already put on `PATH` so the repo naturally wins, `npm install -g` and a repo's own `node_modules` are two entirely separate trees -- nothing makes the repo win by default. A globally baked eslint 9 hitting a repo pinned to eslint 8's config is a silent version mismatch, not an error. So `edit_verify`'s eslint/tsc/jest runners resolve `node_modules/.bin/<tool>` relative to the verify working directory *first*, falling back to the image-baked global only when the repo has no local install, and always record which one ran in the `VerifyResult.detail` field (`_resolve_js_tool` / `_annotate_resolution`, Issue #588). This is a resolution-order fix, not an image-splitting one: shipping a separate `sandbox:js` image does not by itself solve the version-mismatch problem -- the per-invocation resolution does.
 
 ### 6.1 Why the default is the union, not a guess (#584)
 

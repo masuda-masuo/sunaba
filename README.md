@@ -134,7 +134,7 @@ Dive deeper into specific topics:
 
 *   **[Daemon Setup Guide](docs/daemon_setup.md)**: Detailed instructions on running Sunaba as a background `systemd` user service, configuring token rotation, and connecting IDE clients.
 *   **[Security & Network Containment](docs/security.md)**: The Egress Proxy design, allowed host configurations, and token isolation details.
-*   **[Sandbox Images](docs/sandbox_image.md)**: Details on the `base`, `python`, and `go` Docker images, included tools, and language auto-detection.
+*   **[Sandbox Images](docs/sandbox_image.md)**: Details on the `base`, `python`, `go`, `js`, and `full` Docker images, included tools, and language auto-detection.
 *   **[MCP Tool Reference](docs/tools.md)**: A complete reference table of every tool — 22 by default, plus 5 opt-in observability tools.
 *   **[Observability & Dashboard](docs/observability.md)**: The local web dashboard, append-only execution logging, replay traces, and push notification triggers.
 *   **[Contributing Guide](CONTRIBUTING.md)**: Local developer setup instructions (`pip install -e .[test]`) and test commands.

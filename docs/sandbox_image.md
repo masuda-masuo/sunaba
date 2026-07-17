@@ -6,15 +6,18 @@ Sunaba runs AI edits, lints, and test checks inside purpose-built Docker sandbox
 
 ## 1. Sandbox Image Variants
 
-Images are built from `docker/Dockerfile.{base,python,go,full}`. The toolchain installs themselves live in `docker/install-python-tools.sh` and `docker/install-go.sh`, which the variant Dockerfiles all source, so "what the Python toolchain is" is defined in exactly one place.
+Images are built from `docker/Dockerfile.{base,python,go,js,full}`. The toolchain installs themselves live in `docker/install-python-tools.sh`, `docker/install-go.sh`, and `docker/install-js-tools.sh`, which the variant Dockerfiles all source, so "what the Python/Go/JS toolchain is" is defined in exactly one place each.
 
 | Tag | Base Layer | Included Backend Toolchains | Use Case |
 |---|---|---|---|
-| `sandbox:full` | Base | Python (3.12) + Go + Node. Every toolchain `verify` can dispatch to. | **The default.** Used whenever `image=` is omitted. |
-| `sandbox:base` | Neutral core | Node runtime + VCS + Search tools. No backend compilers/interpreters. | `FROM` parent of the variants. Not a runtime default. |
+| `sandbox:full` | Base | Python (3.12) + Go + JS (eslint/tsc/jest) + Node runtime. Every toolchain `verify` can dispatch to. | **The default.** Used whenever `image=` is omitted. |
+| `sandbox:base` | Neutral core | Node runtime + VCS + Search tools. No backend compilers/interpreters or JS dev tools. | `FROM` parent of the variants. Not a runtime default. |
 | `sandbox:python` | Base | Python (3.12) toolchain + Node runtime (for Pyright). | Lean image; explicit `image=python` only. |
 | `sandbox:go` | Base | Go compiler/toolchain. | Lean image; explicit `image=go` only. |
+| `sandbox:js` | Base | eslint, typescript (tsc), jest (Issue #588). | Lean image; explicit `image=js` only. |
 | `sandbox:minimal` | Minimal | Bare Git + Python + Pytest. | Lightweight or rapid testing. |
+
+**JS tools are the global fallback only, never the silent truth.** A repository's own `node_modules/.bin/{eslint,tsc,jest}` -- when present -- always wins over the image-baked global, so a project pinned to a different major version is never linted or type-checked by the wrong one. `edit_verify` resolves this per invocation (`test -x node_modules/.bin/<tool>` relative to the verify working directory) and stamps the result: `VerifyResult.detail` always states whether `local` (repo `node_modules/.bin`) or `global` (image-baked) ran. This is why `sandbox:js` existing as a separate tag does not, by itself, fix version drift -- the resolution order does.
 
 The default is deliberately the **union** of the toolchains rather than a guess at which one this project needs. See `design_multilang_support.md` §6.1 (Issue #584) for why: the host cannot reliably know a repository's language before the container starts, and the image is immutable once it does, so a wrong guess is unfixable — while the in-container detector that runs later is always right.
 
@@ -43,7 +46,7 @@ The default images come pre-installed with the following utilities, which the se
 
 ## 3. Language Detection & Selection Rules
 
-**Image selection does not involve detection.** `sandbox_initialize` starts `sandbox:full` unless an explicit `image=` says otherwise (the aliases `full` / `neutral` / `python` / `go` resolve to pinned digests). The host used to probe the GitHub contents API to pick a variant; that was removed in #584 because the guess preceded an irreversible decision and a failed probe silently produced a container missing the toolchain the project needed.
+**Image selection does not involve detection.** `sandbox_initialize` starts `sandbox:full` unless an explicit `image=` says otherwise (the aliases `full` / `neutral` / `python` / `go` / `js` resolve to pinned digests). The host used to probe the GitHub contents API to pick a variant; that was removed in #584 because the guess preceded an irreversible decision and a failed probe silently produced a container missing the toolchain the project needed.
 
 **Language detection still happens — inside the container, at verify time**, where it reads the real files and can be re-run. It selects which toolchain to *run*, not which image to start (`edit_verify.detect_languages`):
 

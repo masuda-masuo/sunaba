@@ -134,6 +134,6 @@ ENV NPM_CONFIG_PREFIX="/home/sandbox/.npm-global" \
 # ── ヘルスチェック (base が保有するツールのみ) ────────────────────
 # pip --version は venv の健全性を兼ねて確認する（壊れたツールを隠さない）
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD rg --version && sg --version && node --version && pip --version || exit 1
+  CMD rg --version && sg --version && node --version && npm --version && pip --version || exit 1
 
 CMD ["bash"]

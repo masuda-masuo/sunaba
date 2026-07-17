@@ -31,7 +31,7 @@ RUN sh /tmp/install-js-tools.sh && rm /tmp/install-js-tools.sh
 
 # ── ヘルスチェック (base 継承 + js 固有ツール) ────────────────────
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD rg --version && sg --version && node --version \
+  CMD rg --version && sg --version && node --version && npm --version \
    && eslint --version && tsc --version && jest --version || exit 1
 
 CMD ["bash"]

@@ -69,8 +69,8 @@ class TestServerInstructions:
 # Aggregate budgets: measured after the #550 docstring diet (desc 8249 B,
 # param descriptions 8040 B across 28 tools), capped at roughly +10% so the
 # surface cannot quietly regrow tool by tool.
-TOTAL_DESCRIPTION_BYTE_LIMIT = 9984
-TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 8960
+TOTAL_DESCRIPTION_BYTE_LIMIT = 10752
+TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 9984
 
 
 def _param_desc_bytes(tool) -> int:

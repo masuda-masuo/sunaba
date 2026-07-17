@@ -2,5 +2,6 @@
   "neutral": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:fbe44b144d2b212fc84aa8306a7d235331743184122614817c6b3d8b2d8999b1",
   "python": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:a624fec5e510ffca3270ee988e4e6b43bba83a80e99cc7f62b39438a4c7691c1",
   "go": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:b1e7a511418725d000d233f82172db27411003bd6cacaf6e5ca46fbfd8c1724a",
-  "full": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:33f0eb085f83a043e00da1cc80424e7422639db67bb98fa53369ff79ac6d0be8"
+  "full": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:33f0eb085f83a043e00da1cc80424e7422639db67bb98fa53369ff79ac6d0be8",
+  "js": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000"
 }

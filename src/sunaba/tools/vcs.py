@@ -328,6 +328,14 @@ def checkpoint(
         approved=None,
     )
 
+    # Increment the auto-checkpoint counter (Issue #586).  The commit was
+    # already created above, so no second commit is needed.
+    try:
+        from sunaba.auto_checkpoint import increment_counter  # noqa: PLC0415
+        increment_counter(container_id)
+    except Exception:
+        logger.debug("auto_checkpoint increment after checkpoint: ignored", exc_info=True)
+
     return json.dumps({
         "status": "ok",
         "sha": sha,

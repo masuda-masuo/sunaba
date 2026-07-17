@@ -296,7 +296,7 @@ class TestWriteFileIntegration:
             (1, (b"", b"")),              # read_file: cat (fails - new file)
             (0, (b"", b"")),              # mkdir -p
             (1, (b"", b"")),              # stat existing file (fails)
-            (0, (b"1000 1000\n", b"")),   # stat /proc/self (succeeds)
+            (0, (b"1000\n1000\n", b"")),  # id -u; id -g (running user, #642)
         ]
         client = MagicMock()
         client.containers.get.return_value = container

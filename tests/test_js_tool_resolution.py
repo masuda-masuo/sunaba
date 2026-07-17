@@ -198,7 +198,6 @@ class TestRunEslintVerifyResolution:
         result = _run_eslint_verify(container, "file.js", workdir="/repo")
 
         invoke_cmd = container.exec_run.call_args_list[1][0][0][2]
-        assert invoke_cmd.split()[-3] if False else True  # (no-op; see substring check below)
         assert "eslint" in invoke_cmd
         assert "node_modules/.bin" not in invoke_cmd
         assert "resolved via global" in result.detail

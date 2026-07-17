@@ -497,3 +497,408 @@ class TestDiffInContainer:
 
         assert "raw_diff" in result
         assert result["raw_diff"] == git_output
+
+    # --- worktree=True tests (Issue #633) ---
+
+    def test_worktree_tracked_changes(self):
+        """worktree=True shows tracked file changes (git diff HEAD, no triple-dot)."""
+        container = MagicMock()
+        numstat_output = b"10\t5\tsrc/foo.py\n"
+        name_status_output = b"M\tsrc/foo.py\n"
+        ls_files_output = b""  # no untracked
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "--numstat" in cmd_str:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd_str:
+                return (0, (name_status_output, b""))
+            elif "ls-files" in cmd_str:
+                return (0, (ls_files_output, b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container(
+                "abc123def456", worktree=True,
+            ))
+
+        assert result["total_files"] == 1
+        assert result["total_additions"] == 10
+        assert result["total_deletions"] == 5
+        assert result["files"][0]["path"] == "src/foo.py"
+        assert result["files"][0]["status"] == "M"
+
+    def test_worktree_untracked_files_summary(self):
+        """worktree=True includes untracked files in summary mode."""
+        container = MagicMock()
+        numstat_output = b""  # no tracked changes
+        name_status_output = b""
+        ls_files_output = b"3 new_file.py\n5 other.py\n"
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "--numstat" in cmd_str:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd_str:
+                return (0, (name_status_output, b""))
+            elif "ls-files" in cmd_str:
+                return (0, (ls_files_output, b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container(
+                "abc123def456", worktree=True,
+            ))
+
+        assert result["total_files"] == 2
+        assert result["total_additions"] == 8  # 3 + 5
+        assert result["total_deletions"] == 0
+
+        # Verify no "total" entry from wc -l aggregate line (#633 follow-up)
+        assert not any(f.get("path") == "total" for f in result["files"]), (
+            "wc -l 'total' aggregate line was not filtered"
+        )
+
+        paths_to_status = {f["path"]: f["status"] for f in result["files"]}
+        assert paths_to_status == {
+            "new_file.py": "untracked",
+            "other.py": "untracked",
+        }
+        # Verify line counts
+        for f in result["files"]:
+            if f["path"] == "new_file.py":
+                assert f["additions"] == 3
+                assert f["changes"] == 3
+            elif f["path"] == "other.py":
+                assert f["additions"] == 5
+                assert f["changes"] == 5
+
+    def test_worktree_untracked_file_mode(self):
+        """worktree=True file mode with untracked file uses --no-index diff."""
+        container = MagicMock()
+        diff_output = (
+            "diff --git a/new_file.py b/new_file.py\n"
+            "new file mode 100644\n"
+            "index 0000000..abc1234\n"
+            "--- /dev/null\n"
+            "+++ b/new_file.py\n"
+            "@@ -0,0 +1,3 @@\n"
+            "+line1\n"
+            "+line2\n"
+            "+line3\n"
+        )
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "--no-index" in cmd_str:
+                return (0, (diff_output.encode(), b""))
+            elif "ls-files" in cmd_str:
+                return (0, (b"new_file.py\n", b""))
+            # git diff HEAD -- path → empty for untracked
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container(
+                "abc123def456", worktree=True, path="new_file.py",
+            ))
+
+        assert result["path"] == "new_file.py"
+        assert result["total"] == 1
+        assert len(result["hunks"]) == 1
+        assert result["hunks"][0]["new_start"] == 1
+        assert result["hunks"][0]["new_count"] == 3
+        assert "+line1" in result["hunks"][0]["content"]
+
+    def test_worktree_no_changes(self):
+        """worktree=True with no tracked or untracked changes returns empty."""
+        container = MagicMock()
+        numstat_output = b""
+        name_status_output = b""
+        ls_files_output = b""
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "--numstat" in cmd_str:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd_str:
+                return (0, (name_status_output, b""))
+            elif "ls-files" in cmd_str:
+                return (0, (ls_files_output, b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container(
+                "abc123def456", worktree=True,
+            ))
+
+        assert result["total_files"] == 0
+        assert result["total_additions"] == 0
+        assert result["total_deletions"] == 0
+
+    def test_worktree_mixed_tracked_and_untracked(self):
+        """worktree=True combines tracked changes with untracked files."""
+        container = MagicMock()
+        numstat_output = b"10\t5\tsrc/foo.py\n"
+        name_status_output = b"M\tsrc/foo.py\n"
+        ls_files_output = b"3 new_file.py\n"
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "--numstat" in cmd_str:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd_str:
+                return (0, (name_status_output, b""))
+            elif "ls-files" in cmd_str:
+                return (0, (ls_files_output, b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container(
+                "abc123def456", worktree=True,
+            ))
+
+        assert result["total_files"] == 2
+        assert result["total_additions"] == 13  # 10 + 3
+        assert result["total_deletions"] == 5
+
+        paths_to_status = {f["path"]: f["status"] for f in result["files"]}
+        assert paths_to_status == {
+            "src/foo.py": "M",
+            "new_file.py": "untracked",
+        }
+
+    def test_worktree_untracked_file_mode_no_index_exit_1(self):
+        """git diff --no-index exit code 1 is treated as success."""
+        container = MagicMock()
+        diff_output = (
+            "@@ -0,0 +1,2 @@\n"
+            "+a\n"
+            "+b\n"
+        )
+
+        # exit code 1 is normal for --no-index with differences
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "--no-index" in cmd_str:
+                return (1, (diff_output.encode(), b""))
+            elif "ls-files" in cmd_str and "--others" in cmd_str:
+                return (0, (b"untracked.py\n", b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container(
+                "abc123def456", worktree=True, path="untracked.py",
+            ))
+
+        assert result["path"] == "untracked.py"
+        assert result["total"] == 1
+        assert len(result["hunks"]) == 1
+        assert result["hunks"][0]["new_start"] == 1
+        assert result["hunks"][0]["new_count"] == 2
+
+    def test_worktree_file_mode_tracked_with_changes(self):
+        """worktree=True file mode with tracked file uses git diff HEAD -- path."""
+        container = MagicMock()
+        git_output = (
+            "@@ -1,3 +1,4 @@\n"
+            " line1\n"
+            "-old line\n"
+            "+new line\n"
+            "+extra line\n"
+            " line3\n"
+        )
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "--" in cmd_str and "--no-index" not in cmd_str:
+                # This is the git diff HEAD -- path call
+                return (0, (git_output.encode(), b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container(
+                "abc123def456", worktree=True, path="src/foo.py",
+            ))
+
+        assert result["path"] == "src/foo.py"
+        assert result["total"] == 1
+        assert "+extra line" in result["hunks"][0]["content"]
+
+    def test_worktree_mode_ignores_base_parameter(self):
+        """worktree=True ignores the base parameter entirely."""
+        container = MagicMock()
+        numstat_output = b"5\t0\tfile.py\n"
+        name_status_output = b""
+
+        executed_cmds = []
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            executed_cmds.append(cmd_str)
+            if "--numstat" in cmd_str:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd_str:
+                return (0, (name_status_output, b""))
+            elif "ls-files" in cmd_str:
+                return (0, (b"", b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            diff_in_container(
+                "abc123def456", base="main", worktree=True,
+            )
+
+        # Verify that the git commands use HEAD, not main...HEAD
+        for cmd in executed_cmds:
+            assert "main...HEAD" not in cmd
+            if "git diff" in cmd:
+                assert "HEAD" in cmd
+                assert "..." not in cmd
+
+    def test_existing_behavior_unchanged(self):
+        """worktree=False (default) preserves existing base↔HEAD behavior."""
+        container = MagicMock()
+        numstat_output = b"10\t5\tsrc/foo.py\n"
+        name_status_output = b"M\tsrc/foo.py\n"
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "--numstat" in cmd_str:
+                return (0, (numstat_output, b""))
+            elif "--name-status" in cmd_str:
+                return (0, (name_status_output, b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(diff_in_container(
+                "abc123def456", base="main",
+            ))
+
+        assert result["total_files"] == 1
+        assert result["files"][0]["status"] == "M"

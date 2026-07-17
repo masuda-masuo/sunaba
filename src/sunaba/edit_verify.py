@@ -438,6 +438,8 @@ def _owner_for_write(
     )
     stdout_part = out[0] if isinstance(out, tuple) else out
     if code == 0 and stdout_part:
+        # ``id -u; id -g`` prints two newline-separated tokens ("999\n999\n");
+        # split() on whitespace yields exactly [uid, gid] on success.
         ids = stdout_part.decode("utf-8", errors="replace").split()
         if len(ids) == 2:
             try:

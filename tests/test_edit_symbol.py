@@ -1048,3 +1048,177 @@ class TestWriteFileSymbolIntegration:
         )
         assert "Error" not in result, result
         assert "replaced" in result
+
+    # ── ast= parameter (issue #632) ─────────────────────────────────
+
+    def test_ast_false_skips_ast_for_docstring_only_edit(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """ast=False must do a plain string replace, not a whole-body AST edit.
+
+        This is the motivating case from #632 (via shiori#287): old_str
+        is the full old definition and only the docstring changes, but
+        the def-line trigger used to route this through AST resolution
+        regardless of intent.  With ast=False it is a plain string
+        match and the AST driver is never invoked.
+        """
+        src = (
+            "def foo():\n"
+            "    \"\"\"old doc.\"\"\"\n"
+            "    return 1\n"
+        )
+        f = tmp_path / "mod.py"
+        f.write_text(src, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents=(
+                "def foo():\n"
+                "    \"\"\"new doc.\"\"\"\n"
+                "    return 1\n"
+            ),
+            old_str=src,
+            ast=False,
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+        assert "new doc" in result
+
+    def test_ast_false_bare_signature_replaces_only_signature_line(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """ast=False on a bare-signature old_str is a plain line replace.
+
+        No AST path is attempted at all, so the bare-signature safety
+        net (which exists to force AST resolution) does not apply --
+        the caller explicitly opted out of AST semantics.
+        """
+        f = tmp_path / "mod.py"
+        f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def foo_renamed():",
+            old_str="def foo():",
+            ast=False,
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+        assert "foo_renamed" in result
+
+    def test_ast_true_forces_resolution_on_success(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def foo():\n    return 99\n",
+            old_str="def foo():",
+            ast=True,
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result
+        assert "return 99" in result
+
+    def test_ast_true_on_non_py_file_errors(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        f = tmp_path / "data.txt"
+        f.write_text("hello world\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({"/sandbox/data.txt": str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name="/sandbox/data.txt",
+            file_contents="goodbye\n",
+            old_str="hello world",
+            ast=True,
+        )
+        assert "Error: ast=True requires a .py file" in result
+        assert f.read_text(encoding="utf-8") == "hello world\n"
+
+    def test_ast_true_with_non_definition_old_str_errors(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text("x = 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="x = 2\n",
+            old_str="x = 1",
+            ast=True,
+        )
+        assert "Error: ast=True requires old_str to start with a" in result
+        assert f.read_text(encoding="utf-8") == "x = 1\n"
+
+    def test_ast_true_does_not_fall_back_on_resolution_failure(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """ast=True must surface the AST error, never degrade to string match.
+
+        Same ambiguous-symbol setup as test_full_def_old_str_still_falls_through_on_ast_failure,
+        where ast=None (default) falls back to a safe string replace.
+        ast=True forbids that fallback even though it would have been
+        safe here, because the caller explicitly asked for AST-only
+        semantics.
+        """
+        f = tmp_path / "mod.py"
+        src = (
+            "def process(x):\n    return x\n\n\n"
+            "class Handler:\n    def process(self, x):\n        return x\n"
+        )
+        f.write_text(src, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def process(x):\n    return x + 1",
+            old_str="def process(x):\n    return x",
+            ast=True,
+        )
+        assert "Error" in result
+        assert "ambiguous" in result
+        assert f.read_text(encoding="utf-8") == src
+
+    def test_ast_none_default_unchanged_behavior(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Omitting ast entirely keeps the pre-#632 implicit trigger."""
+        f = tmp_path / "mod.py"
+        f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents="def foo():\n    return 99\n",
+            old_str="def foo():",
+        )
+        assert "Error" not in result, result
+        assert "replaced" in result

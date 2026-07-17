@@ -540,6 +540,7 @@ def edit_file(
     old_str: str | None = None,
     preserve: str | None = None,
     line: int | None = None,
+    ast: bool | None = None,
 ) -> str:
     """Edit part of an existing file in the container.
 
@@ -577,15 +578,16 @@ def edit_file(
         append: Append to the end of the existing file.
         old_str: Exact text to replace with file_contents (matching
             contract above).
-        preserve: When old_str triggers AST resolution on a .py file,
-            controls which parts of the old definition to keep:
-            ``\"decorators+docstring\"`` (default when None),
-            ``\"decorators\"``, ``\"docstring\"``, or ``\"none\"``.
-            Ignored when AST resolution does not apply.
-        line: When old_str triggers AST resolution on a .py file,
-            disambiguates same-name definitions (any line number
-            inside the intended definition, decorators included).
-            Ignored when AST resolution does not apply.
+        preserve: For old_str AST resolution on .py files, parts of
+            the old definition to keep: ``"decorators+docstring"``
+            (default), ``"decorators"``, ``"docstring"``, or
+            ``"none"``.
+        line: For old_str AST resolution on .py files, disambiguates
+            same-name definitions (any line inside the target).
+        ast: Overrides the implicit old_str AST trigger on .py files.
+            ``True`` forces AST resolution (error, no fallback).
+            ``False`` forces a plain string replace even for a
+            def/class old_str (e.g. docstring-only edits).
 
     Returns:
         Success or error message.
@@ -664,8 +666,17 @@ def edit_file(
     elif old_str is not None:
         symbol: str | None = None
         ast_error: str | None = None
-        if dest_path.endswith(".py"):
+        if ast is True and not dest_path.endswith(".py"):
+            return "Error: ast=True requires a .py file"
+        attempt_ast = ast is not False and dest_path.endswith(".py")
+        if attempt_ast:
             symbol = _extract_symbol_from_old_str(old_str)
+            if symbol is None and ast is True:
+                return (
+                    "Error: ast=True requires old_str to start with a "
+                    "function/class definition (a `def`/`async def`/`class` "
+                    "line, optionally preceded by decorators/comments)."
+                )
             if symbol is not None:
                 ast_result = edit_symbol_in_container(
                     client, container_id, dest_path, symbol, file_contents, line, preserve or "decorators+docstring",
@@ -696,6 +707,8 @@ def edit_file(
                         "already matches file_contents"
                     )
                 ast_error = ast_result.get("error", "AST resolution failed")
+                if ast is True:
+                    return f"Error: {ast_error}"
                 if (
                     _parses_as_definition(file_contents)
                     and _is_bare_signature(old_str)

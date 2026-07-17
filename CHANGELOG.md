@@ -28,6 +28,28 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ### Added
 
+- **js/ts toolchain baked in; verify's js dispatch now actually runs**
+  (#588). `edit_verify` had eslint/tsc/jest adapters since #493, but no
+  image shipped the binaries, so js/ts verify always returned
+  `not_available`. `docker/install-js-tools.sh` (mirroring
+  `install-python-tools.sh` / `install-go.sh`, #584) bakes eslint,
+  typescript, and jest into `sandbox:full` (the runtime default) and the
+  new lean `sandbox:js` image; both `HEALTHCHECK`s assert the three
+  tools, and a new test (`tests/test_image_pins.py`) checks the
+  dispatch-matrix-⊆-healthcheck contract statically so a bake omission
+  fails CI instead of a user's first verify. **Repo-pinned tools win
+  over the baked global**: unlike Python's `pip install -e .[dev]`
+  (which writes into the same venv already on `PATH`), node has no such
+  mechanism, so a globally baked eslint 9 hitting a repo pinned to
+  eslint 8 would silently lint with the wrong version. The eslint/tsc/jest
+  runners now resolve `node_modules/.bin/<tool>` first, falling back to
+  the image-baked global only when absent, and always record which one
+  ran in the `VerifyResult.detail` field (as JSON fields for jest, since
+  its `detail` carries a machine-parsed test report; as a text prefix
+  for eslint/tsc). Jest vs Vitest is discriminated by reading
+  `package.json` before invoking anything; a vitest-only project reports
+  a clear `skipped` status instead of being forced through the jest CLI
+  (no `VitestAdapter` yet — tracked as a follow-up).
 - **Per-edit undo: `undo_file_edit` tool** — every `write_file_sandbox` /
   `transform_file` edit now snapshots the pre-edit file automatically
   (host-side under `~/.sunaba/undo/`, bounded ring of 10 versions per file,

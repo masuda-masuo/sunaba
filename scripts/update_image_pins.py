@@ -14,7 +14,8 @@ writer and loader can never disagree about *which* file is authoritative.
 Usage (digests are the ``sha256:...`` outputs of docker/build-push-action)::
 
     PYTHONPATH=src python3 scripts/update_image_pins.py \\
-        --repo owner/name --neutral sha256:... --python sha256:... --go sha256:...
+        --repo owner/name --neutral sha256:... --python sha256:... --go sha256:... \\
+        --full sha256:... --js sha256:...
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--python", required=True, help="python image digest (sha256:...)")
     parser.add_argument("--go", required=True, help="go image digest (sha256:...)")
     parser.add_argument("--full", required=True, help="full image digest (sha256:...)")
+    parser.add_argument("--js", required=True, help="js image digest (sha256:...)")
     args = parser.parse_args(argv)
 
     refs = _build_refs(
@@ -51,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             "python": args.python,
             "go": args.go,
             "full": args.full,
+            "js": args.js,
         },
     )
 

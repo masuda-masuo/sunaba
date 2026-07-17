@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from importlib import resources
+from pathlib import Path
 
 import pytest
 
@@ -52,6 +53,7 @@ def test_container_constants_are_wired_from_loader() -> None:
     assert container._PYTHON_IMAGE == pins["python"]
     assert container._GO_IMAGE == pins["go"]
     assert container._FULL_IMAGE == pins["full"]
+    assert container._JS_IMAGE == pins["js"]
     # The default is the all-in-one image: nothing about the project's language
     # is guessed before the container starts (#584).
     assert container._DEFAULT_IMAGE == pins["full"]
@@ -66,6 +68,13 @@ def test_full_alias_resolves_to_a_digest() -> None:
     from sunaba.tools import container
 
     assert container._image_pins.get("full") == load_image_pins()["full"]
+
+
+def test_js_alias_resolves_to_a_digest() -> None:
+    """``image="js"`` (#588) must resolve the same way as the other aliases."""
+    from sunaba.tools import container
+
+    assert container._image_pins.get("js") == load_image_pins()["js"]
 
 
 def test_loader_rejects_unknown_keys(tmp_path, monkeypatch) -> None:
@@ -123,3 +132,59 @@ def _patch_resource(monkeypatch, tmp_path, text: str) -> None:
             return pin_file
 
     monkeypatch.setattr(image_pins.resources, "files", lambda _pkg: _FakeFiles())
+
+
+# ===================================================================
+# Dispatch matrix ⊆ HEALTHCHECK (Issue #584, extended for js in #588)
+# ===================================================================
+#
+# design_multilang_support.md §6.1: "the image contract is ⊇ dispatch
+# matrix" -- each variant image's HEALTHCHECK must assert every primary
+# binary edit_verify's dispatch table can invoke, so a bake omission
+# fails *here* / in CI's `docker run` healthcheck, not a user's first
+# verify.  #584 built this contract for python/go; #588 adds js
+# (eslint/tsc/jest) and must not regress the ones already covered.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _dockerfile_healthcheck_text(name: str) -> str:
+    """Return the HEALTHCHECK CMD line(s) of docker/Dockerfile.<name>."""
+    text = (_REPO_ROOT / "docker" / f"Dockerfile.{name}").read_text(encoding="utf-8")
+    # Grab from the HEALTHCHECK keyword onward (there is exactly one per
+    # Dockerfile in this repo); good enough to check tool-name substrings.
+    assert "HEALTHCHECK" in text, f"Dockerfile.{name} has no HEALTHCHECK"
+    return text.split("HEALTHCHECK", 1)[1]
+
+
+class TestFullImageHealthcheckCoversDispatchMatrix:
+    """sandbox:full is the runtime default -- every dispatch tool must be baked."""
+
+    # golangci-lint is deliberately excluded: edit_verify falls back to
+    # `go vet` (bundled with the `go` binary, asserted via "go version")
+    # when golangci-lint is absent, so it has no not_available failure
+    # mode to guard against and is never baked.
+    _REQUIRED_TOOLS = (
+        "ruff", "pyright", "pytest",  # python
+        "go version",  # go
+        "eslint", "tsc", "jest",  # js/ts (#588)
+    )
+
+    def test_healthcheck_names_every_dispatch_tool(self) -> None:
+        healthcheck = _dockerfile_healthcheck_text("full")
+        missing = [t for t in self._REQUIRED_TOOLS if t not in healthcheck]
+        assert not missing, (
+            f"docker/Dockerfile.full HEALTHCHECK is missing dispatch-matrix "
+            f"tool(s) {missing}: a bake omission here would surface as "
+            f"not_available deep inside a user's first verify instead of "
+            f"failing CI's docker-run healthcheck (#584/#588)."
+        )
+
+
+class TestJsImageHealthcheckCoversJsDispatchTools:
+    """sandbox:js (explicit image=js) must assert its own three js tools."""
+
+    def test_healthcheck_names_eslint_tsc_jest(self) -> None:
+        healthcheck = _dockerfile_healthcheck_text("js")
+        missing = [t for t in ("eslint", "tsc", "jest") if t not in healthcheck]
+        assert not missing, f"docker/Dockerfile.js HEALTHCHECK is missing {missing}"

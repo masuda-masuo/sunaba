@@ -20,6 +20,11 @@ on:
       - "docker/Dockerfile.base"
       - "docker/Dockerfile.python"
       - "docker/Dockerfile.go"
+      - "docker/Dockerfile.full"
+      - "docker/Dockerfile.js"
+      - "docker/install-python-tools.sh"
+      - "docker/install-go.sh"
+      - "docker/install-js-tools.sh"
   workflow_dispatch:
 
 permissions:
@@ -178,6 +183,28 @@ jobs:
           wait_healthy "$CID" "full" 30 || { docker kill "$CID" >/dev/null 2>&1; exit 1; }
           docker kill "$CID" >/dev/null 2>&1
 
+      # 6.7) js（明示 image= 用の lean イメージ、#588）
+      #      full と同じ install-js-tools.sh を叩くので、ツール定義はドリフトしない。
+      - name: Build and push js
+        id: js
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.js
+          push: true
+          build-args: |
+            BASE_IMAGE=ghcr.io/${{ github.repository }}/sandbox@${{ steps.base.outputs.digest }}
+          tags: ghcr.io/${{ github.repository }}/sandbox:js
+
+      # 6.8) js の HEALTHCHECK を確認
+      - name: Verify js HEALTHCHECK
+        run: |
+          source /tmp/healthcheck.sh
+          IMG="ghcr.io/${{ github.repository }}/sandbox@${{ steps.js.outputs.digest }}"
+          CID=$(docker run -d "$IMG" sleep 90)
+          wait_healthy "$CID" "js" 30 || { docker kill "$CID" >/dev/null 2>&1; exit 1; }
+          docker kill "$CID" >/dev/null 2>&1
+
       # 7) digest 固定参照と HEALTHCHECK 結果を Job Summary に出す
       - name: Summary
         run: |
@@ -190,8 +217,9 @@ jobs:
             echo "| python | \`${{ steps.python.outputs.digest }}\` | ✅ verified | — |"
             echo "| go     | \`${{ steps.go.outputs.digest }}\` | ✅ verified | — |"
             echo "| full   | \`${{ steps.full.outputs.digest }}\` | ✅ verified | — |"
+            echo "| js     | \`${{ steps.js.outputs.digest }}\` | ✅ verified | — |"
             echo ""
-            echo "image_pins.json の neutral / python / go pin を上の digest へ更新する PR を自動作成します（#313）。"
+            echo "image_pins.json の neutral / python / go / full / js pin を上の digest へ更新する PR を自動作成します（#313 / #588）。"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # 8) 既定イメージの digest pin を image_pins.json に書き戻して PR を作成（#313）
@@ -212,6 +240,7 @@ jobs:
           PYTHON_DIGEST: ${{ steps.python.outputs.digest }}
           GO_DIGEST: ${{ steps.go.outputs.digest }}
           FULL_DIGEST: ${{ steps.full.outputs.digest }}
+          JS_DIGEST: ${{ steps.js.outputs.digest }}
         run: |
           set -euo pipefail
           F=src/sunaba/image_pins.json
@@ -226,7 +255,8 @@ jobs:
             --neutral "${BASE_DIGEST}" \
             --python "${PYTHON_DIGEST}" \
             --go "${GO_DIGEST}" \
-            --full "${FULL_DIGEST}"
+            --full "${FULL_DIGEST}" \
+            --js "${JS_DIGEST}"
 
           # digest が変わっていなければ PR 不要
           if git diff --quiet; then
@@ -245,8 +275,9 @@ jobs:
           python: ghcr.io/${REPO}/sandbox@${PYTHON_DIGEST}
           go:     ghcr.io/${REPO}/sandbox@${GO_DIGEST}
           full:   ghcr.io/${REPO}/sandbox@${FULL_DIGEST}
+          js:     ghcr.io/${REPO}/sandbox@${JS_DIGEST}
 
-          Automated update triggered by docker/Dockerfile.{base,python,go,full} build."
+          Automated update triggered by docker/Dockerfile.{base,python,go,full,js} build."
           git push origin "${BRANCH}"
 
           gh pr create \
@@ -255,8 +286,8 @@ jobs:
             --title "chore(#313): 既定 variant イメージの digest pin を更新" \
             --body "## 自動生成 PR（#313: 検出ベース既定イメージの pin 更新）
 
-          CI で \`docker/Dockerfile.{base,python,go}\` のビルドが完了したため、
-          \`image_pins.json\` の \`neutral\` / \`python\` / \`go\` pin を
+          CI で \`docker/Dockerfile.{base,python,go,full,js}\` のビルドが完了したため、
+          \`image_pins.json\` の \`neutral\` / \`python\` / \`go\` / \`full\` / \`js\` pin を
           新しい digest へ更新します。
 
           | tag | digest |
@@ -265,5 +296,6 @@ jobs:
           | python | \`${PYTHON_DIGEST}\` |
           | go     | \`${GO_DIGEST}\` |
           | full   | \`${FULL_DIGEST}\` |
+          | js     | \`${JS_DIGEST}\` |
 
           - Workflow run: ${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"

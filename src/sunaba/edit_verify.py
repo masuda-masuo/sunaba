@@ -931,6 +931,115 @@ _GO_ENV: str = "GOMAXPROCS=1 "
 
 
 # ---------------------------------------------------------------------------
+# JS/TS tool resolution: repo node_modules/.bin wins over the baked global
+# (Issue #588)
+# ---------------------------------------------------------------------------
+#
+# Python's ``pip install -e .[dev]`` writes into the same venv the image
+# already put on PATH, so the repo naturally wins.  Node has no equivalent:
+# a globally baked eslint 9 hitting a repo pinned to eslint 8's config is a
+# silent version mismatch, not an error -- the worst outcome for a verify
+# gate (a repo could look "clean" only because the wrong linter ran).  So
+# every js/ts runner resolves per-invocation instead of trusting PATH:
+# ``node_modules/.bin/<tool>`` wins when it exists, the image-baked global
+# is the fallback, and *which one ran* is always surfaced in the envelope's
+# ``detail`` field -- never silent.
+
+
+def _resolve_js_tool(container: Any, tool: str, workdir: str | None = None) -> tuple[str, str]:
+    """Resolve *tool* (``eslint`` / ``tsc`` / ``jest``) to a command + source.
+
+    Checks ``node_modules/.bin/<tool>`` relative to *workdir* (the
+    container's own working directory -- normally the repo root -- when
+    *workdir* is ``None``).  Returns ``(command, source)`` where *source*
+    is ``"local"`` when the repo-pinned binary exists, or ``"global"`` when
+    falling back to the image-baked one on ``PATH``.
+    """
+    ec, _ = container.exec_run(
+        ["/bin/sh", "-c", f"test -x node_modules/.bin/{tool}"],
+        stdout=True,
+        stderr=True,
+        workdir=workdir,
+    )
+    if ec == 0:
+        return f"./node_modules/.bin/{tool}", "local"
+    return tool, "global"
+
+
+def _annotate_resolution(result: VerifyResult, source: str, cmd: str) -> VerifyResult:
+    """Stamp *result*'s ``detail`` with which eslint/tsc/jest binary ran.
+
+    Silently using a different tool version than the repo pins is the
+    worst outcome for a verify gate (#588), so every eslint/tsc/jest
+    envelope must say whether it ran the repository's
+    ``node_modules/.bin`` binary or the image-baked global fallback.
+    Test-layer results (jest) carry a JSON test report in ``detail`` that
+    downstream code parses with ``json.loads`` (``tools/verify.py``); for
+    those the resolution is injected as JSON fields instead of a text
+    prefix so that contract survives untouched.
+    """
+    if result.detail:
+        try:
+            payload = json.loads(result.detail)
+        except (json.JSONDecodeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            payload["resolved_via"] = source
+            payload["resolved_cmd"] = cmd
+            result.detail = json.dumps(payload)
+            return result
+        result.detail = f"[resolved via {source}: {cmd}] {result.detail}"
+    else:
+        result.detail = f"resolved via {source}: {cmd}"
+    return result
+
+
+def _detect_js_test_runner(container: Any, workdir: str | None = None) -> str:
+    """Tell jest and vitest projects apart via ``package.json`` (design §3).
+
+    Only a jest adapter exists today (:class:`sunaba.test_report.JestAdapter`).
+    Running the jest CLI against a vitest-only project would misparse
+    vitest's own output as a crash, so a vitest project is reported
+    honestly instead of forced through the wrong tool.
+
+    Returns ``"vitest"`` only when ``vitest`` appears in dependencies (or
+    the ``test`` script) and ``jest`` does not -- a project migrating
+    between the two, or one that runs jest via a vitest-compatible shim,
+    still gets the jest path.  Returns ``"jest"`` in every other case,
+    including when ``package.json`` is missing or unreadable (matches the
+    tool's prior unconditional-jest behavior).
+
+    TODO(#588 follow-up): no VitestAdapter exists yet -- add one and
+    dispatch to it here once vitest support is in scope.
+    """
+    ec, output = container.exec_run(
+        ["/bin/sh", "-c", "cat package.json 2>/dev/null || true"],
+        stdout=True,
+        stderr=True,
+        workdir=workdir,
+    )
+    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
+    raw = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    if not raw.strip():
+        return "jest"
+    try:
+        pkg = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return "jest"
+    if not isinstance(pkg, dict):
+        return "jest"
+    deps: dict[str, Any] = {}
+    deps.update(pkg.get("dependencies") or {})
+    deps.update(pkg.get("devDependencies") or {})
+    test_script = str((pkg.get("scripts") or {}).get("test") or "")
+    has_vitest = "vitest" in deps or "vitest" in test_script
+    has_jest = "jest" in deps or "jest" in test_script
+    if has_vitest and not has_jest:
+        return "vitest"
+    return "jest"
+
+
+# ---------------------------------------------------------------------------
 # Public API: called by @mcp.tool() handlers in server.py
 # ---------------------------------------------------------------------------
 
@@ -1828,13 +1937,19 @@ def _run_eslint_verify(
     When *fix* is ``True`` eslint is invoked with ``--fix`` so it
     rewrites *path* in place; the returned findings are the problems
     that remain *after* fixing (Issue #284).
+
+    Resolves ``node_modules/.bin/eslint`` before the image-baked global
+    (Issue #588) so a repo pinned to a different eslint major never
+    silently gets linted by the wrong version; the envelope's ``detail``
+    always says which one ran.
     """
     fix_arg = "--fix " if fix else ""
+    cmd, source = _resolve_js_tool(container, "eslint", workdir=workdir)
     ec, output = container.exec_run(
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}eslint {fix_arg}--format json {_quote_path(path)}",
+            f"{_SANDBOX_ENV}{cmd} {fix_arg}--format json {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,
@@ -1844,16 +1959,20 @@ def _run_eslint_verify(
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec == 127:
-        return _envelope_not_available("eslint", "eslint not installed in container")
+        return _annotate_resolution(
+            _envelope_not_available("eslint", "eslint not installed in container"), source, cmd
+        )
     if ec not in (0, 1, 2):
         # eslint exit 2 = runtime error
-        return _envelope_error("eslint", stderr_text.strip() or f"exit code {ec}", ec)
+        return _annotate_resolution(
+            _envelope_error("eslint", stderr_text.strip() or f"exit code {ec}", ec), source, cmd
+        )
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     findings = _parse_eslint_output(stdout_text, _path_display(path))
     for r in findings:
         r["severity"] = _determine_lint_severity(r.get("rule", ""))
-    return _envelope_ok("eslint", findings, ec)
+    return _annotate_resolution(_envelope_ok("eslint", findings, ec), source, cmd)
 
 
 def _run_golangci_lint_verify(container: Any, path: str | Sequence[str]) -> VerifyResult:
@@ -1980,12 +2099,20 @@ def _run_pyright_verify(
 
 
 def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
-    """Run tsc --noEmit on *path*.  Returns VerifyResult envelope."""
+    """Run tsc --noEmit on *path*.  Returns VerifyResult envelope.
+
+    Resolves ``node_modules/.bin/tsc`` before the image-baked global
+    (Issue #588); the envelope's ``detail`` always says which one ran.
+    Invokes the resolved binary directly instead of ``npx`` so the
+    resolution is explicit and identical across eslint/tsc/jest, rather
+    than relying on npx's own (differently-behaved) fallback search.
+    """
+    cmd, source = _resolve_js_tool(container, "tsc", workdir=workdir)
     ec, output = container.exec_run(
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}npx tsc --noEmit {_quote_path(path)} 2>&1",
+            f"{_SANDBOX_ENV}{cmd} --noEmit {_quote_path(path)} 2>&1",
         ],
         stdout=True,
         stderr=True,
@@ -1999,16 +2126,21 @@ def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> Ve
         combined += stderr_part.decode("utf-8", errors="replace")
 
     if ec == 127:
-        return _envelope_not_available("tsc", "typescript (tsc) not installed in container")
+        return _annotate_resolution(
+            _envelope_not_available("tsc", "typescript (tsc) not installed in container"),
+            source, cmd,
+        )
     if ec not in (0, 1, 2):
-        return _envelope_error("tsc", combined.strip() or f"exit code {ec}", ec)
+        return _annotate_resolution(
+            _envelope_error("tsc", combined.strip() or f"exit code {ec}", ec), source, cmd
+        )
 
     findings = _parse_tsc_text(combined, path)
     if not findings:
         findings = _parse_tsc_json(combined, path)
     for r in findings:
         r["severity"] = "error"
-    return _envelope_ok("tsc", findings, ec)
+    return _annotate_resolution(_envelope_ok("tsc", findings, ec), source, cmd)
 
 
 def _run_pytest_verify(
@@ -2081,12 +2213,31 @@ def _run_pytest_verify(
 def _run_jest_verify(
     container: Any, path: str, workdir: str | None = None
 ) -> VerifyResult:
-    """Run jest --json on *path*.  Returns VerifyResult envelope."""
+    """Run jest --json on *path*.  Returns VerifyResult envelope.
+
+    Discriminates jest vs vitest via ``package.json`` first (design §3,
+    Issue #588): running the jest CLI against a vitest-only project would
+    misparse vitest's own output as a crash rather than reporting the
+    real gap honestly.  Resolves ``node_modules/.bin/jest`` before the
+    image-baked global, same as eslint/tsc; the resolution is recorded
+    in the envelope's ``detail`` (as JSON fields alongside the test
+    report, since ``detail`` here is machine-parsed downstream).
+    """
+    runner = _detect_js_test_runner(container, workdir=workdir)
+    if runner == "vitest":
+        return _envelope_skipped(
+            "jest",
+            "package.json indicates vitest (no jest dependency); sunaba's "
+            "js test dispatch only runs jest today -- no VitestAdapter yet "
+            "(#588 follow-up)",
+        )
+
+    cmd, source = _resolve_js_tool(container, "jest", workdir=workdir)
     ec, output = container.exec_run(
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}npx jest --json --passWithNoTests {_quote_path(path)}",
+            f"{_SANDBOX_ENV}{cmd} --json --passWithNoTests {_quote_path(path)}",
         ],
         stdout=True,
         stderr=True,
@@ -2096,14 +2247,20 @@ def _run_jest_verify(
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec == 127:
-        return _envelope_not_available("jest", "jest not installed in container")
+        return _annotate_resolution(
+            _envelope_not_available("jest", "jest not installed in container"), source, cmd
+        )
     if ec not in (0, 1):
-        return _envelope_error("jest", stderr_text.strip() or f"exit code {ec}", ec)
+        return _annotate_resolution(
+            _envelope_error("jest", stderr_text.strip() or f"exit code {ec}", ec), source, cmd
+        )
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
 
     if not stdout_text.strip():
-        return _envelope_skipped("jest", "no test output produced")
+        return _annotate_resolution(
+            _envelope_skipped("jest", "no test output produced"), source, cmd
+        )
 
     try:
         from sunaba.test_report import JestAdapter
@@ -2111,19 +2268,20 @@ def _run_jest_verify(
         report = JestAdapter.parse_json(stdout_text)
         d = report.to_dict()
         status = d.get("status", "ok")
-        return VerifyResult(
+        result = VerifyResult(
             tool="jest",
             status="findings" if status == "failed" else "ok",
             findings=[],
             detail=json.dumps(d),
             exit_code=ec,
         )
+        return _annotate_resolution(result, source, cmd)
     except Exception:
         detail = "failed to parse jest output"
         if stdout_text.strip():
             tail = "\n".join(stdout_text.strip().split("\n")[-20:])
             detail += f"\n--- raw output tail ---\n{tail}"
-        return _envelope_error("jest", detail, ec)
+        return _annotate_resolution(_envelope_error("jest", detail, ec), source, cmd)
 
 
 def _run_go_test_verify(

@@ -19,9 +19,11 @@
 #   VCS         : git, gh
 #   高速install : uv
 #   JSON処理    : jq
-#   ランタイム  : python (base image) / node ← pyright(node アプリ) と将来の js dispatch が依存
+#   ランタイム  : python (base image) / node ← pyright(node アプリ) と js dispatch が依存
 #
-# js 開発ツール (eslint / tsc / jest) は verify の js dispatch（#104 §②/④）と同時に追加する。
+# js 開発ツール (eslint / tsc / jest) は backend レイヤ側 (Dockerfile.js /
+# Dockerfile.full が install-js-tools.sh 経由で追加、#588)。base は node
+# ランタイムと npm のグローバル書き込み先 (NPM_CONFIG_PREFIX) のみを持つ。
 
 FROM python:3.12-slim-bookworm@sha256:93ab4b7fa528b25124c97bcc755415e60eb671a86b4dbe0328df2fe2d1c1193d
 
@@ -117,6 +119,17 @@ ENV PATH="/home/sandbox/.local/bin:${PATH}"
 RUN uv venv --seed /home/sandbox/.venv
 ENV VIRTUAL_ENV="/home/sandbox/.venv" \
     PATH="/home/sandbox/.venv/bin:${PATH}"
+
+# ── npm グローバルインストール先 (非root、js 開発ツールの通し場所, #588) ──
+# Node は上で apt 経由 (root 所有の /usr/local) で入れているため、sandbox
+# ユーザーで `npm install -g` すると /usr/local/lib/node_modules への
+# 書き込みで EACCES になる。venv と同じ発想で、ユーザー所有のプレフィックス
+# を通しておくことで install-js-tools.sh が root 昇格なしにグローバル
+# インストールできる。実際の `npm install -g eslint/typescript/jest` は
+# ここでは行わない (base はランタイムのみ、js 開発ツールは backend レイヤ
+# 側の役割 -- Dockerfile.js / Dockerfile.full が install-js-tools.sh を叩く)。
+ENV NPM_CONFIG_PREFIX="/home/sandbox/.npm-global" \
+    PATH="/home/sandbox/.npm-global/bin:${PATH}"
 
 # ── ヘルスチェック (base が保有するツールのみ) ────────────────────
 # pip --version は venv の健全性を兼ねて確認する（壊れたツールを隠さない）

@@ -1364,3 +1364,176 @@ class TestVerifyDispatch:
         assert "go" in full
         assert full["js"]["status"] == "ok"
         assert full["go"]["status"] == "ok"
+
+
+# ===================================================================
+# _run_npm_test_verify
+# ===================================================================
+
+
+class TestRunNpmTestVerify:
+    """Tests for _run_npm_test_verify: package.json scripts.test dispatch.
+
+    Covers the five acceptance scenarios:
+      (a) scripts.test present + npm test ec=0    -> ok
+      (b) scripts.test present + npm test ec=1 + output -> findings
+      (c) scripts.test present + runner missing    -> not_available
+      (d) scripts.test absent  -> falls back to _run_jest_verify
+      (e) no package.json      -> falls back to _run_jest_verify
+    """
+
+    PKG_WITH_TEST = json.dumps({
+        "name": "test-project",
+        "scripts": {"test": "echo ok"},
+    })
+    PKG_WITHOUT_TEST = json.dumps({
+        "name": "test-project",
+        "scripts": {"lint": "eslint ."},
+    })
+
+    def _make_container(self, side_effects: list) -> MagicMock:
+        container = MagicMock()
+        container.exec_run.side_effect = side_effects
+        return container
+
+    # --- (a) success -------------------------------------------------------
+
+    def test_npm_test_ok(self) -> None:
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (0, (b"PASS\\n", b"")),                     # npm test
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "ok"
+        assert result.tool == "npm test"
+        assert result.exit_code == 0
+
+    # --- (b) test failure --------------------------------------------------
+
+    def test_npm_test_failure(self) -> None:
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (b"FAIL\\nsome test failed\\n", b"")),  # npm test
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "findings"
+        assert result.tool == "npm test"
+        assert result.exit_code == 1
+        assert "FAIL" in result.detail
+
+    # --- (c) runner not available ------------------------------------------
+
+    def test_npm_test_not_available_command_not_found(self) -> None:
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (127, (b"bash: npm: command not found\\n", b"")),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "not_available"
+        assert result.tool == "npm test"
+
+    def test_npm_test_not_available_missing_script(self) -> None:
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (b"Missing script: \\\"test\\\"\\n", b"")),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "not_available"
+        assert result.tool == "npm test"
+
+    def test_npm_test_not_available_npm_error_no_lifecycle(self) -> None:
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (b"npm error\\nsome npm infrastructure problem\\n", b"")),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "not_available"
+        assert result.tool == "npm test"
+
+    def test_npm_test_failure_with_lifecycle(self) -> None:
+        """npm error with ELIFECYCLE means the script ran but failed -> findings."""
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (
+                b"npm error ELIFECYCLE \\u2018test\\u2019\\n"
+                b"npm error lifecycle test failed\\n",
+                b"",
+            )),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "findings"
+        assert result.tool == "npm test"
+        assert result.exit_code == 1
+
+    # --- (d) fallback when scripts.test is absent --------------------------
+
+    def test_no_scripts_test_falls_back_to_jest(self) -> None:
+        from sunaba.edit_verify import VerifyResult, _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITHOUT_TEST.encode(), b"")),  # cat package.json
+        ])
+        with patch(
+            "sunaba.edit_verify._run_jest_verify",
+            return_value=VerifyResult(
+                tool="jest", status="ok",
+                detail=json.dumps({"status": "ok", "passed": 1}),
+            ),
+        ) as mock_jest:
+            result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+
+        mock_jest.assert_called_once_with(container, "tests/", workdir="/repo")
+        assert result.status == "ok"
+        assert result.tool == "jest"
+
+    # --- (e) fallback when package.json is missing -------------------------
+
+    def test_no_package_json_falls_back_to_jest(self) -> None:
+        from sunaba.edit_verify import VerifyResult, _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (b"", b"")),  # cat package.json (empty/not found)
+        ])
+        with patch(
+            "sunaba.edit_verify._run_jest_verify",
+            return_value=VerifyResult(
+                tool="jest", status="ok",
+                detail=json.dumps({"status": "ok", "passed": 1}),
+            ),
+        ) as mock_jest:
+            result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+
+        mock_jest.assert_called_once_with(container, "tests/", workdir="/repo")
+        assert result.status == "ok"
+        assert result.tool == "jest"
+
+    def test_bad_json_package_json_falls_back_to_jest(self) -> None:
+        from sunaba.edit_verify import VerifyResult, _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (b"not valid json", b"")),  # cat package.json (bad json)
+        ])
+        with patch(
+            "sunaba.edit_verify._run_jest_verify",
+            return_value=VerifyResult(
+                tool="jest", status="ok",
+                detail=json.dumps({"status": "ok", "passed": 1}),
+            ),
+        ) as mock_jest:
+            result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+
+        mock_jest.assert_called_once_with(container, "tests/", workdir="/repo")
+        assert result.status == "ok"
+        assert result.tool == "jest"

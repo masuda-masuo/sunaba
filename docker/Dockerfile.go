@@ -41,6 +41,6 @@ WORKDIR /workspace
 
 # ── ヘルスチェック (base 継承 + go 固有ツール) ──────────────────
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD go version && rg --version && sg --version && node --version || exit 1
+  CMD go version && rg --version && sg --version && node --version && npm --version || exit 1
 
 CMD ["bash"]

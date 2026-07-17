@@ -2284,6 +2284,82 @@ def _run_jest_verify(
         return _annotate_resolution(_envelope_error("jest", detail, ec), source, cmd)
 
 
+def _run_npm_test_verify(
+    container: Any, path: str, workdir: str | None = None
+) -> VerifyResult:
+    """Run ``npm test`` when ``package.json`` declares a ``scripts.test``.
+
+    Reads the repo-root ``package.json``, checks for ``scripts.test``,
+    and either delegates to ``npm test`` or falls back to
+    :func:`_run_jest_verify` (the previous dispatch target).
+
+    Returns a :class:`VerifyResult` envelope following the same status
+    conventions as ``_run_go_test_verify``:
+        - ``status="ok"`` on exit code 0.
+        - ``status="findings"`` on non-zero exit (test failure).
+        - ``status="not_available"`` when the runner/script is missing.
+    """
+    # 1. Read repo-root package.json
+    ec, output = container.exec_run(
+        ["/bin/sh", "-c", f"{_SANDBOX_ENV}cat package.json 2>/dev/null"],
+        stdout=True,
+        stderr=True,
+        workdir=workdir,
+    )
+    stdout_part, _stderr_part = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+
+    # 2. Parse & check for scripts.test
+    scripts_test: str | None = None
+    if stdout_text.strip():
+        try:
+            pkg = json.loads(stdout_text)
+            scripts_test = pkg.get("scripts", {}).get("test")
+        except (json.JSONDecodeError, AttributeError):
+            scripts_test = None
+
+    if not scripts_test:
+        # Fall back to jest (historical behaviour)
+        return _run_jest_verify(container, path, workdir=workdir)
+
+    # 3. Run npm test
+    ec, output = container.exec_run(
+        ["/bin/sh", "-c", f"{_SANDBOX_ENV}npm test --silent 2>&1"],
+        stdout=True,
+        stderr=True,
+        workdir=workdir,
+    )
+    stdout_part, _stderr_part = output if isinstance(output, tuple) else (output, b"")
+    combined = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+
+    if ec == 0:
+        return _envelope_ok("npm test", [], ec)
+
+    # 4. Non-zero: discriminate not_available vs findings
+    #    Conservative matching: only known "runner missing" strings
+    #    produce not_available; everything else is a test failure.
+    output_tail = "\n".join(combined.strip().split("\n")[-20:]) if combined.strip() else ""
+
+    npm_error_no_lifecycle = (
+        "npm error" in combined and "ELIFECYCLE" not in combined
+    )
+    if (
+        "command not found" in combined
+        or ": not found" in combined
+        or "Missing script" in combined
+        or "ENOENT" in combined
+        or npm_error_no_lifecycle
+    ):
+        return _envelope_not_available("npm test", output_tail)
+
+    return VerifyResult(
+        tool="npm test",
+        status="findings",
+        detail=output_tail,
+        exit_code=ec,
+    )
+
+
 def _run_go_test_verify(
     container: Any, path: str, workdir: str | None = None
 ) -> VerifyResult:
@@ -2350,12 +2426,12 @@ _DISPATCH: dict[str, dict[str, Any]] = {
     "js": {
         "lint": _run_eslint_verify,
         "type": None,  # skipped
-        "test": _run_jest_verify,
+        "test": _run_npm_test_verify,
     },
     "ts": {
         "lint": _run_eslint_verify,
         "type": _run_tsc_verify,
-        "test": _run_jest_verify,
+        "test": _run_npm_test_verify,
     },
     "go": {
         "lint": _run_golangci_lint_verify,

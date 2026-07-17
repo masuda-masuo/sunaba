@@ -30,7 +30,7 @@ def _exec_run_for(
     the file via ``put_archive``:
 
     - ``stat -c '%u %g %a'`` (existing file) -> ``uid gid mode``
-    - ``stat -c '%u %g'`` (running user via /proc/self) -> ``uid gid``
+    - ``id -u; id -g`` (running user, new file) -> ``uid`` / ``gid``
 
     Returning real ``stat`` output exercises the ownership-preservation path
     instead of letting every write fall back to ``999, 999, 0o644``.  Defaults keep
@@ -44,6 +44,8 @@ def _exec_run_for(
             return (0, (f"{uid} {gid} {mode:o}\n".encode(), b""))
         if shell.startswith("stat -c"):
             return (0, (f"{uid} {gid}\n".encode(), b""))
+        if shell.startswith("id "):  # running-user probe (Issue #642)
+            return (0, (f"{uid}\n{gid}\n".encode(), b""))
         return (0, (b"", b""))
 
     return _side_effect
@@ -1243,13 +1245,41 @@ class TestWriteFileOwnership:
             shell = cmd[2]
             if "%a" in shell:  # stat of (missing) target file
                 return (1, (b"", b"No such file"))
-            return (0, (b"999 999\n", b""))  # stat of running user (/proc/self)
+            return (0, (b"999\n999\n", b""))  # id -u; id -g (running user)
 
         container.exec_run.side_effect = _side_effect
         uid, gid, mode = _owner_for_write(
             container, "/tmp/new.py"
         )
         assert (uid, gid, mode) == (999, 999, 0o644)
+
+    def test_owner_for_write_new_file_does_not_stat_proc_self_symlink(self) -> None:
+        """Issue #642: the running-user probe must dereference, not stat the
+        root-owned ``/proc/self`` symlink.
+
+        ``stat -c '%u %g' /proc/self`` (no ``-L``) reports the symlink's owner
+        (root, 0:0), which left new files unwritable by the sandbox user.  The
+        probe must read the real uid/gid -- via ``id`` -- so a new file is owned
+        by the running user and stays writable by other uid-999 tools.
+        """
+        from sunaba.edit_verify import _owner_for_write
+
+        container = MagicMock()
+
+        def _side_effect(cmd, **kwargs):  # noqa: ANN001, ANN202
+            shell = cmd[2]
+            if "%a" in shell:  # stat of (missing) target file -> new file
+                return (1, (b"", b"No such file"))
+            # Regression guard: never stat the bare /proc/self symlink, which
+            # would return the root owner and re-introduce the bug.
+            assert not ("stat" in shell and "/proc/self" in shell and " -L" not in shell), (
+                f"running-user probe must dereference, got: {shell!r}"
+            )
+            return (0, (b"999\n999\n", b""))  # id -u; id -g
+
+        container.exec_run.side_effect = _side_effect
+        uid, gid, mode = _owner_for_write(container, "/tmp/new.py")
+        assert (uid, gid) == (999, 999)
 
     def test_owner_for_write_falls_back_when_stat_unavailable(self) -> None:
         from sunaba.edit_verify import _owner_for_write

@@ -428,12 +428,22 @@ def _owner_for_write(
         except ValueError:
             pass
 
-    running = _stat("/proc/self", "%u %g")
-    if running and len(running) == 2:
-        try:
-            return int(running[0]), int(running[1]), 0o644
-        except ValueError:
-            pass
+    # New file: own it as the running user so uid-999 tools (sandbox_exec,
+    # transform_file, git via publish) can write it afterwards.  Read the uid
+    # with ``id``, not ``stat /proc/self``: ``/proc/self`` is a root-owned
+    # symlink and ``stat`` does not dereference by default, so it reported
+    # 0:0 (root) and left new files unwritable by the sandbox user (Issue #642).
+    code, out = container.exec_run(
+        ["/bin/sh", "-c", "id -u; id -g"], stdout=True, stderr=True
+    )
+    stdout_part = out[0] if isinstance(out, tuple) else out
+    if code == 0 and stdout_part:
+        ids = stdout_part.decode("utf-8", errors="replace").split()
+        if len(ids) == 2:
+            try:
+                return int(ids[0]), int(ids[1]), 0o644
+            except ValueError:
+                pass
 
     return 999, 999, 0o644
 

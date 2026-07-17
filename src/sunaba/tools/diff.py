@@ -77,6 +77,7 @@ def diff_in_container(
     offset: int = 0,
     limit: int = 50,
     raw: bool = False,
+    worktree: bool = False,
 ) -> str:
     """Show git diff between *base* and HEAD inside the container.
 
@@ -90,10 +91,11 @@ def diff_in_container(
         base: Ref to diff against; default is the PR base branch
             recorded at pr=N checkout, else HEAD~1.
         path: Return hunks for this file only.
-        offset: Hunk paging offset in file mode (0-indexed).
-        limit: Max hunks per page in file mode.
+        offset: Hunk paging offset (0-indexed).
+        limit: Max hunks per page.
         raw: Also include the complete raw diff as raw_diff
             (escape hatch).
+        worktree: Diff working tree (uncommitted).
 
     Returns:
         JSON.  Summary: files, total_files, total_additions,
@@ -111,40 +113,58 @@ def diff_in_container(
     record_tool_use(
         container_id[:12],
         "diff_in_container",
-        {"base": base, "path": path},
+        {"base": base, "path": path, "worktree": worktree},
     )
 
     working_dir = resolve_git_root(container)
     safe_wd = shlex.quote(working_dir)
 
-    # Resolve base ref
-    if base is None:
+    # Resolve base ref (ignored when worktree=True)
+    if base is None and not worktree:
         meta = _read_container_meta(container)
         base = meta.get("base_branch", "")
-    if not base:
+    if not base and not worktree:
         base = "HEAD~1"
-
-    safe_base = shlex.quote(base)
+    safe_base = shlex.quote(base) if base else shlex.quote("HEAD")
 
     if path:
-        return _file_diff(container, safe_wd, safe_base, path, offset, limit, raw_output=raw)
-    return _summary_diff(container, safe_wd, safe_base, raw_output=raw)
+        return _file_diff(
+            container, safe_wd, safe_base, path,
+            offset, limit, raw_output=raw, worktree=worktree,
+        )
+    return _summary_diff(
+        container, safe_wd, safe_base, raw_output=raw, worktree=worktree,
+    )
 
 
-def _run_diff(container, safe_wd: str, safe_base: str, extra_args: str = "") -> tuple[int, str]:
+def _run_diff(
+    container, safe_wd: str, safe_base: str, extra_args: str = "",
+    worktree: bool = False,
+) -> tuple[int, str]:
     """Run ``git diff`` and return (exit_code, stdout)."""
-    cmd = f"cd {safe_wd} && git diff {safe_base}...HEAD {extra_args} 2>/dev/null"
+    if worktree:
+        # Compare HEAD tree against working tree (2-way, not triple-dot)
+        cmd = f"cd {safe_wd} && git diff HEAD {extra_args} 2>/dev/null"
+    else:
+        cmd = f"cd {safe_wd} && git diff {safe_base}...HEAD {extra_args} 2>/dev/null"
     ec, out = container.exec_run(["/bin/sh", "-c", cmd], stdout=True)
     stdout, _ = (out if isinstance(out, tuple) else (out, b""))
     raw = stdout.decode("utf-8", errors="replace") if stdout else ""
     return ec, raw
 
 
-def _summary_diff(container, safe_wd: str, safe_base: str, raw_output: bool = False) -> str:
+def _summary_diff(
+    container, safe_wd: str, safe_base: str, raw_output: bool = False,
+    worktree: bool = False,
+) -> str:
     """Return file-by-file diff summary via ``--numstat`` + ``--name-status``."""
     # Run both --numstat and --name-status
-    numstat_ec, numstat_raw = _run_diff(container, safe_wd, safe_base, "--numstat")
-    name_status_ec, name_status_raw = _run_diff(container, safe_wd, safe_base, "--name-status")
+    numstat_ec, numstat_raw = _run_diff(
+        container, safe_wd, safe_base, "--numstat", worktree=worktree,
+    )
+    name_status_ec, name_status_raw = _run_diff(
+        container, safe_wd, safe_base, "--name-status", worktree=worktree,
+    )
 
     if numstat_ec != 0:
         return json.dumps({
@@ -156,7 +176,9 @@ def _summary_diff(container, safe_wd: str, safe_base: str, raw_output: bool = Fa
     # Run raw diff if requested
     raw_diff_text: str | None = None
     if raw_output:
-        raw_ec, raw_diff_text = _run_diff(container, safe_wd, safe_base, "")
+        raw_ec, raw_diff_text = _run_diff(
+            container, safe_wd, safe_base, "", worktree=worktree,
+        )
         if raw_ec != 0:
             return json.dumps({
                 "status": "error",
@@ -183,6 +205,11 @@ def _summary_diff(container, safe_wd: str, safe_base: str, raw_output: bool = Fa
         else:
             f["status"] = "M"  # default: modified
 
+    # In worktree mode, also include untracked files
+    if worktree:
+        untracked = _get_untracked_files(container, safe_wd)
+        files.extend(untracked)
+
     total_additions = sum(f.get("additions", 0) for f in files)
     total_deletions = sum(f.get("deletions", 0) for f in files)
 
@@ -199,27 +226,47 @@ def _summary_diff(container, safe_wd: str, safe_base: str, raw_output: bool = Fa
     return json.dumps(result)
 
 
-def _file_diff(
-    container, safe_wd: str, safe_base: str, path: str,
-    offset: int, limit: int, raw_output: bool = False,
-) -> str:
-    """Return per-file hunks with pagination."""
+def _get_untracked_files(container, safe_wd: str) -> list[dict]:
+    """Get untracked files with line counts via ``git ls-files``."""
+    cmd = (
+        f"cd {safe_wd} && git ls-files --others --exclude-standard"
+        " | xargs -r -I{} wc -l {} 2>/dev/null"
+    )
+    ec, out = container.exec_run(["/bin/sh", "-c", cmd], stdout=True)
+    stdout, _ = (out if isinstance(out, tuple) else (out, b""))
+    raw = stdout.decode("utf-8", errors="replace") if stdout else ""
+    result: list[dict] = []
+    for line in raw.strip().split("\n"):
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        try:
+            count = int(parts[0])
+        except ValueError:
+            continue
+        fpath = parts[1]
+        result.append({
+            "path": fpath,
+            "status": "untracked",
+            "additions": count,
+            "deletions": 0,
+            "changes": count,
+        })
+    return result
+
+
+def _is_untracked(container, safe_wd: str, path: str) -> bool:
+    """Check if a path is untracked."""
     safe_path = shlex.quote(path)
-    ec, raw = _run_diff(container, safe_wd, safe_base, f"-- {safe_path}")
+    cmd = f"cd {safe_wd} && git ls-files --others --exclude-standard -- {safe_path} 2>/dev/null"
+    ec, out = container.exec_run(["/bin/sh", "-c", cmd], stdout=True)
+    stdout, _ = (out if isinstance(out, tuple) else (out, b""))
+    raw = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
+    return bool(raw)
 
-    if ec != 0:
-        return json.dumps({
-            "status": "error",
-            "error": f"git diff failed (exit {ec})",
-            "raw_output": raw.strip(),
-        })
 
-    if not raw.strip():
-        return json.dumps({
-            "status": "error",
-            "error": f"No diff for path: {path}",
-        })
-
+def _parse_hunks(raw: str) -> list[dict]:
+    """Parse ``git diff`` output into structured hunk objects."""
     hunks: list[dict] = []
     current_hunk: dict | None = None
     for line in raw.split("\n"):
@@ -240,9 +287,90 @@ def _file_diff(
         elif current_hunk is not None:
             # ``\ No newline at end of file`` is part of the previous hunk
             current_hunk["content"] += line + "\n"
-
     if current_hunk:
         hunks.append(current_hunk)
+    return hunks
+
+
+def _untracked_file_diff(
+    container, safe_wd: str, path: str, offset: int, limit: int,
+    raw_output: bool = False,
+) -> str:
+    """Return hunks for an untracked file via ``git diff --no-index``."""
+    safe_path = shlex.quote(path)
+    cmd = f"cd {safe_wd} && git diff --no-index -- /dev/null {safe_path} 2>/dev/null"
+    ec, out = container.exec_run(["/bin/sh", "-c", cmd], stdout=True)
+    stdout, _ = (out if isinstance(out, tuple) else (out, b""))
+    raw = stdout.decode("utf-8", errors="replace") if stdout else ""
+
+    # --no-index exit code 1 means files differ (normal for this comparison)
+    if ec not in (0, 1):
+        return json.dumps({
+            "status": "error",
+            "error": f"git diff failed (exit {ec})",
+            "raw_output": raw.strip(),
+        })
+
+    if not raw.strip():
+        return json.dumps({
+            "status": "error",
+            "error": f"No diff for path: {path}",
+        })
+
+    hunks = _parse_hunks(raw)
+
+    total = len(hunks)
+    truncated = (offset + limit) < total
+    page = hunks[offset:offset + limit]
+    next_offset = offset + limit if truncated else None
+
+    result: dict = {
+        "path": path,
+        "hunks": page,
+        "shown": len(page),
+        "total": total,
+        "truncated": truncated,
+        "next_offset": next_offset,
+    }
+
+    if raw_output:
+        result["raw_diff"] = raw
+
+    return json.dumps(result)
+
+
+def _file_diff(
+    container, safe_wd: str, safe_base: str, path: str,
+    offset: int, limit: int, raw_output: bool = False,
+    worktree: bool = False,
+) -> str:
+    """Return per-file hunks with pagination."""
+    safe_path = shlex.quote(path)
+    ec, raw = _run_diff(
+        container, safe_wd, safe_base, f"-- {safe_path}", worktree=worktree,
+    )
+
+    # In worktree mode, an untracked file won't appear in git diff HEAD
+    if worktree and (ec != 0 or not raw.strip()):
+        if _is_untracked(container, safe_wd, path):
+            return _untracked_file_diff(
+                container, safe_wd, path, offset, limit, raw_output,
+            )
+
+    if ec != 0:
+        return json.dumps({
+            "status": "error",
+            "error": f"git diff failed (exit {ec})",
+            "raw_output": raw.strip(),
+        })
+
+    if not raw.strip():
+        return json.dumps({
+            "status": "error",
+            "error": f"No diff for path: {path}",
+        })
+
+    hunks = _parse_hunks(raw)
 
     total = len(hunks)
     truncated = (offset + limit) < total

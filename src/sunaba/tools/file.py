@@ -573,15 +573,9 @@ def edit_file(
     returns "No changes" and a resolution failure is surfaced when
     file_contents is a complete definition (no silent fallback).
 
-    For large block operations where multi-line old_str matching is
-    brittle, prefer:
-
-      - .py file: pass the function/class signature (e.g.
-        ``def foo():``) to use AST resolution -- no multi-line
-        matching needed.
-      - Any file: use ``start_line``/``end_line`` with
-        ``file_contents`` to replace or remove a line range without
-        string matching.
+    For large blocks prefer:
+      .py: pass ``def foo():`` for AST resolution (no multi-line match).
+      Any: use ``start_line``/``end_line`` for line-range replacement.
 
     Every edit snapshots the pre-edit file; undo_file_edit restores it
     -- prefer that over repairing a broken file in place.  For bulk or
@@ -596,11 +590,9 @@ def edit_file(
         end_line: Line-range end (1-indexed, inclusive; default last line).
         append: Append to the end of the existing file.
         old_str: Exact text to replace with file_contents (matching
-            contract above).  Designed for small, targeted replacements
-            (single line or a few lines).  For large block operations
-            prefer:
-              .py file: pass ``def foo():`` for AST resolution.
-              Any file: use ``start_line``/``end_line``.
+            contract above).  For small replacements only -- large
+            blocks: use ``def foo():`` (.py, AST) or
+            ``start_line``/``end_line`` (any file).
         preserve: For old_str AST resolution on .py files, parts of
             the old definition to keep: ``"decorators+docstring"``
             (default), ``"decorators"``, ``"docstring"``, or

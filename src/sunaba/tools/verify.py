@@ -11,10 +11,10 @@ from sunaba.edit_verify import (
     _get_extension,
     apply_patch_to_file,
     lint_file,
-    search_files,
     type_check_file,
 )
 from sunaba.journal import record_tool_use
+from sunaba.search import search_files
 from sunaba.tools.common import _docker, container_not_found_error
 from sunaba.tools.vcs import resolve_git_root
 from sunaba.verify_state import record_verify_success

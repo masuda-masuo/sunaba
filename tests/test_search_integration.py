@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from src.sunaba.edit_verify import (
+from src.sunaba.search import (
     _build_rg_args,
     _search_lexical,
     search_files,

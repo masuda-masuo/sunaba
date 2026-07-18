@@ -63,7 +63,7 @@ class TestReadFileLines:
     def test_limit_negative_one_reads_all_remaining(self, monkeypatch) -> None:
         """When limit=-1, reads all lines from offset to end."""
         monkeypatch.setattr(
-            "src.sunaba.edit_verify.read_file",
+            "src.sunaba.edit_verify.fileio.read_file",
             lambda _c, _p: "a\nb\nc\nd\ne",
         )
 
@@ -80,7 +80,7 @@ class TestReadFileLines:
     def test_limit_negative_one_reads_all_from_start(self, monkeypatch) -> None:
         """When limit=-1 and offset=0, reads the entire file."""
         monkeypatch.setattr(
-            "src.sunaba.edit_verify.read_file",
+            "src.sunaba.edit_verify.fileio.read_file",
             lambda _c, _p: "a\nb\nc",
         )
 

@@ -31,7 +31,7 @@ class TestTransformFileInContainer:
     def test_applies_transform_and_returns_diff(self, tmp_path, monkeypatch) -> None:
         writes: list = []
         monkeypatch.setattr(
-            "src.sunaba.edit_verify.record_file_write",
+            "src.sunaba.edit_verify.edits.record_file_write",
             lambda *a, **k: writes.append(a),
         )
         f = tmp_path / "x.py"
@@ -49,7 +49,7 @@ class TestTransformFileInContainer:
     def test_no_change_is_reported(self, tmp_path, monkeypatch) -> None:
         writes: list = []
         monkeypatch.setattr(
-            "src.sunaba.edit_verify.record_file_write",
+            "src.sunaba.edit_verify.edits.record_file_write",
             lambda *a, **k: writes.append(a),
         )
         f = tmp_path / "x.py"

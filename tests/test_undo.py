@@ -26,10 +26,10 @@ POSIX = "/sandbox/mod.py"
 def _no_journal(monkeypatch) -> None:
     monkeypatch.setattr("sunaba.tools.file.record_tool_use", lambda *a, **k: None)
     monkeypatch.setattr(
-        "src.sunaba.edit_verify.record_file_write", lambda *a, **k: None
+        "src.sunaba.edit_verify.fileio.record_file_write", lambda *a, **k: None
     )
     monkeypatch.setattr(
-        "sunaba.edit_verify.record_file_write", lambda *a, **k: None
+        "sunaba.edit_verify.edits.record_file_write", lambda *a, **k: None
     )
 
 

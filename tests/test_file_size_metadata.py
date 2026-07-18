@@ -64,7 +64,7 @@ class TestFileSizeFromCounts:
 class TestReadFileLinesFileSize:
     def test_file_size_in_return(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "sunaba.edit_verify.read_file",
+            "sunaba.edit_verify.fileio.read_file",
             lambda _c, _p: "line1\nline2\nline3\n",
         )
         result = read_file_lines(
@@ -76,7 +76,7 @@ class TestReadFileLinesFileSize:
         """Even when only a slice is shown, file_size describes the whole file."""
         whole = "\n".join(f"line{i}" for i in range(100)) + "\n"
         monkeypatch.setattr(
-            "sunaba.edit_verify.read_file", lambda _c, _p: whole
+            "sunaba.edit_verify.fileio.read_file", lambda _c, _p: whole
         )
         result = read_file_lines(
             container=None, file_path="t.txt", offset=0, limit=5
@@ -88,7 +88,7 @@ class TestReadFileLinesFileSize:
         def _raise(*a, **k):
             raise ValueError("not found")
 
-        monkeypatch.setattr("sunaba.edit_verify.read_file", _raise)
+        monkeypatch.setattr("sunaba.edit_verify.fileio.read_file", _raise)
         result = read_file_lines(
             container=None, file_path="x.txt", offset=0, limit=10
         )
@@ -109,7 +109,7 @@ class TestTransformRunnerNewLines:
 
     def test_changed_emits_new_lines(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(
-            "sunaba.edit_verify.record_file_write", lambda *a, **k: None
+            "sunaba.edit_verify.edits.record_file_write", lambda *a, **k: None
         )
         posix, client = self._client(tmp_path, "a\nb\nc\n")
         out = transform_file_in_container(
@@ -138,7 +138,7 @@ class TestTransformFileFileSize:
         from tests.conftest import _FakeClient, _FakeContainer
 
         monkeypatch.setattr(
-            "sunaba.edit_verify.record_file_write", lambda *a, **k: None
+            "sunaba.edit_verify.edits.record_file_write", lambda *a, **k: None
         )
         posix = "/sandbox/x.py"
         f = tmp_path / "x.py"
@@ -174,7 +174,7 @@ class TestReadFileRangeFileSize:
         from tests.conftest import _FakeClient, _FakeContainer
 
         monkeypatch.setattr(
-            "sunaba.edit_verify.read_file", lambda _c, _p: "a\nb\nc\n"
+            "sunaba.edit_verify.fileio.read_file", lambda _c, _p: "a\nb\nc\n"
         )
         monkeypatch.setattr(
             "sunaba.tools.file.record_tool_use", lambda *a, **k: None

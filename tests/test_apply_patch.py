@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 class TestApplyPatchJournal:
     """Tests that apply_patch_to_file records journal entries (Issue #96)."""
 
-    @patch("sunaba.edit_verify.record_file_write")
+    @patch("sunaba.edit_verify.edits.record_file_write")
     def test_apply_patch_records_journal(
         self, mock_record: MagicMock, tmp_path
     ) -> None:

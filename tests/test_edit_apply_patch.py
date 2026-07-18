@@ -58,7 +58,7 @@ class TestApplyPatchToFile:
 
     def _apply(self, real_path, diff, monkeypatch):  # noqa: ANN001
         monkeypatch.setattr(
-            "src.sunaba.edit_verify.record_file_write",
+            "src.sunaba.edit_verify.edits.record_file_write",
             lambda *a, **k: None,
         )
         client = _FakeClient(_FakeContainer({self._POSIX: str(real_path)}))

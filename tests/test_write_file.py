@@ -1127,7 +1127,7 @@ class TestWriteFileSandboxJournal:
     """Tests that write_file/edit_file record journal entries (Issue #96)."""
 
     @patch("sunaba.tools.file._docker")
-    @patch("sunaba.edit_verify.record_file_write")
+    @patch("sunaba.edit_verify.fileio.record_file_write")
     def test_full_overwrite_records_journal(
         self, mock_record: MagicMock, mock_docker: MagicMock,
     ) -> None:
@@ -1356,7 +1356,7 @@ class TestWriteFileIsTestDetection:
         assert _is_test_file("/app/__tests__/test_main.js") is True
 
     @patch("sunaba.tools.file._docker")
-    @patch("sunaba.edit_verify.record_file_write")
+    @patch("sunaba.edit_verify.fileio.record_file_write")
     def test_write_file_detects_test_file(
         self, mock_record: MagicMock, mock_docker: MagicMock,
     ) -> None:
@@ -1376,7 +1376,7 @@ class TestWriteFileIsTestDetection:
         _, kwargs = mock_record.call_args
         assert kwargs.get("is_test") is True
 
-    @patch("sunaba.edit_verify.record_file_write")
+    @patch("sunaba.edit_verify.fileio.record_file_write")
     def test_write_file_uses_is_test(
         self, mock_record: MagicMock,
     ) -> None:

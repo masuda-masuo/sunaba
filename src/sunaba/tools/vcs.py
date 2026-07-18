@@ -32,6 +32,15 @@ from sunaba.tools.github_api import (
     _push_token_env,
     _resolve_vcs_token,
 )
+from sunaba.tools.publish_planner import (
+    build_push_command,
+    finish_json,
+    is_egress_block,
+    pr_body_validation_error,
+    push_failure_hints,
+    select_push_env,
+    verify_gate_error,
+)
 from sunaba.verify_state import has_verify_success
 
 logger = logging.getLogger(__name__)
@@ -1027,35 +1036,14 @@ def publish(
     # / skip_type_gate in verify_in_container.
     verified = has_verify_success(cid)
 
-    if not verified and not skip_verify_gate:
-        return json.dumps({
-            "status": "error",
-            "step": "verify_gate",
-            "error": (
-                "no successful verify_in_container recorded for this "
-                "container in this server session.  Pass "
-                "skip_verify_gate=True to bypass (requires human "
-                "authorization via MCP client tool-approval prompt)."
-            ),
-            "recommended_next_action": "verify_in_container",
-        })
+    gate_err = verify_gate_error(verified, skip_verify_gate)
+    if gate_err:
+        return json.dumps(gate_err)
 
     # Reject empty pr_body when creating a PR (Issue #608)
-    if create_pr and not pr_body.strip():
-        return json.dumps({
-            "status": "error",
-            "step": "validation",
-            "error": "pr_body is required when create_pr=True",
-        })
-
-    def _finish(payload: dict[str, Any]) -> str:
-        if not verified:
-            payload["warning"] = (
-                "no successful verify_in_container recorded for this "
-                "container in this server session"
-            )
-            payload["recommended_next_action"] = "verify_in_container"
-        return json.dumps(payload)
+    body_err = pr_body_validation_error(create_pr, pr_body)
+    if body_err:
+        return json.dumps(body_err)
 
     # Helper: run a shell command in the container in working_dir.
     # *env* carries a lazily-injected VCS token (Issue #347) for the push /
@@ -1094,7 +1082,7 @@ def publish(
     # closed, so surface it up front rather than mid-operation.
     proxy_err = _ensure_proxy_ready(client)
     if proxy_err:
-        return _finish({"status": "error", "step": "egress_proxy", "error": proxy_err})
+        return finish_json({"status": "error", "step": "egress_proxy", "error": proxy_err}, verified)
 
     # --- Git branch check/create ---
     _run(f"git checkout -b {shlex.quote(branch)} 2>/dev/null || git checkout {shlex.quote(branch)}")
@@ -1102,11 +1090,11 @@ def publish(
     # --- Git add / commit ---
     add_ec, add_out, add_err = _run("git add -A")
     if add_ec != 0:
-        return _finish({
+        return finish_json({
             "status": "error",
             "step": "git_add",
             "error": add_err or add_out,
-        })
+        }, verified)
 
     # --- Always squash unpushed checkpoints into a single commit ---
     track_ec, track_out, _ = _run("git rev-parse --abbrev-ref @{u} 2>/dev/null")
@@ -1115,18 +1103,18 @@ def publish(
         if unpushed_ec == 0 and unpushed_out.strip():
             reset_ec, reset_out, reset_err = _run("git reset --soft @{u}")
             if reset_ec != 0:
-                return _finish({
+                return finish_json({
                     "status": "error",
                     "step": "squash_reset",
                     "error": reset_err or reset_out,
-                })
+                }, verified)
             readd_ec, readd_out, readd_err = _run("git add -A")
             if readd_ec != 0:
-                return _finish({
+                return finish_json({
                     "status": "error",
                     "step": "squash_readd",
                     "error": readd_err or readd_out,
-                })
+                }, verified)
 
     # --- Git identity: set before commit ---
     name_to_use = author_name if author_name is not None else "sunaba[bot]"
@@ -1143,11 +1131,11 @@ def publish(
         if "nothing to commit" in (commit_out + commit_err).lower():
             pass
         else:
-            return _finish({
+            return finish_json({
                 "status": "error",
                 "step": "git_commit",
                 "error": commit_err or commit_out,
-            })
+            }, verified)
 
     # --- Lazy VCS token injection (Issue #347) ---
     # Resolve a token host-side and hand it to the push / PR / API-push
@@ -1167,7 +1155,7 @@ def publish(
     push_token = _resolve_vcs_token()
     token_env = _push_token_env(push_token)
     proxied = proxy_configured()
-    push_env = None if proxied else token_env
+    push_env = select_push_env(token_env, proxied)
 
     # Determine network state and token availability for deterministic
     # hints on push failure (Issue #577).  NETWORK_LABEL is stamped by
@@ -1178,12 +1166,7 @@ def publish(
     token_missing = not push_token
 
     # --- Git push (with transport fallback to API push) ---
-    force_flag = " --force" if allow_force_push else ""
-    push_cmd = (
-        f"git -c credential.helper= "
-        f"-c credential.helper='!f() {{ echo username=x-access-token; echo password=$GITHUB_TOKEN; }}; f' "
-        f"push origin {shlex.quote(branch)}{force_flag}"
-    )
+    push_cmd = build_push_command(branch, allow_force_push)
     # Open a short-lived push-authorization grant on the egress proxy so
     # the sidecar lets *this* push through (#356 / #357).  When no proxy is
     # configured this is a no-op, so publish behaves exactly as before.  The
@@ -1207,14 +1190,14 @@ def publish(
                 # proxy and silently hide a configuration error so that the
                 # admin never notices the allowlist is misconfigured.
                 push_error_text = (push_err or push_out or "").lower()
-                if "blocked by egress proxy" in push_error_text:
+                if is_egress_block(push_error_text):
                     record_boundary_crossing(
                         cid,
                         "publish",
                         f"repo={repo} branch={branch} push_blocked_by_egress_proxy",
                         approved=False,
                     )
-                    return _finish({
+                    return finish_json({
                         "status": "error",
                         "step": "git_push",
                         "error": push_err or push_out,
@@ -1225,7 +1208,7 @@ def publish(
                             "set SUNABA_ALLOWED_REPOS to allow "
                             "pushes to specific repositories."
                         ),
-                    })
+                    }, verified)
 
                 push_result = _try_api_push(
                     container, cid, repo, branch, working_dir, env=push_env
@@ -1240,19 +1223,7 @@ def publish(
                         f"repo={repo} branch={branch} push_failed transport=both",
                         approved=False,
                     )
-                    hints = []
-                    if network_off:
-                        hints.append(
-                            "Container was started with allow_network=False "
-                            "(no network access). Push needs network access "
-                            "to reach GitHub."
-                        )
-                    if token_missing:
-                        hints.append(
-                            "No VCS token is available on the host. "
-                            "Set GITHUB_TOKEN or GH_TOKEN in the "
-                            "server environment."
-                        )
+                    hints = push_failure_hints(network_off, token_missing)
                     payload: dict[str, Any] = {
                         "status": "error",
                         "step": "git_push",
@@ -1261,7 +1232,7 @@ def publish(
                     }
                     if hints:
                         payload["hint"] = " ".join(hints)
-                    return _finish(payload)
+                    return finish_json(payload, verified)
     except ProxyAuthError as exc:
         record_boundary_crossing(
             cid,
@@ -1269,11 +1240,11 @@ def publish(
             f"repo={repo} branch={branch} proxy_auth_failed",
             approved=False,
         )
-        return _finish({
+        return finish_json({
             "status": "error",
             "step": "proxy_auth",
             "error": str(exc),
-        })
+        }, verified)
     # --- Optionally create PR ---
     pr_url: str | None = None
     if create_pr:
@@ -1339,12 +1310,12 @@ def publish(
                 f"repo={repo} branch={branch} sha={sha} pr_create_failed",
                 approved=True,
             )
-            return _finish({
+            return finish_json({
                 "status": "pushed",
                 "branch": branch,
                 "sha": sha,
                 "pr_create_error": pr_create_error,
-            })
+            }, verified)
 
     # --- Success ---
     details = f"repo={repo} branch={branch} sha={sha}"
@@ -1371,7 +1342,7 @@ def publish(
             "one, or the branch may already have an open PR."
         )
 
-    return _finish(result)
+    return finish_json(result, verified)
 
 
 # ---------------------------------------------------------------------------

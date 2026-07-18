@@ -1486,7 +1486,7 @@ class TestRunNpmTestVerify:
             (0, (self.PKG_WITHOUT_TEST.encode(), b"")),  # cat package.json
         ])
         with patch(
-            "sunaba.edit_verify._run_jest_verify",
+            "sunaba.edit_verify.test_runners._run_jest_verify",
             return_value=VerifyResult(
                 tool="jest", status="ok",
                 detail=json.dumps({"status": "ok", "passed": 1}),
@@ -1507,7 +1507,7 @@ class TestRunNpmTestVerify:
             (0, (b"", b"")),  # cat package.json (empty/not found)
         ])
         with patch(
-            "sunaba.edit_verify._run_jest_verify",
+            "sunaba.edit_verify.test_runners._run_jest_verify",
             return_value=VerifyResult(
                 tool="jest", status="ok",
                 detail=json.dumps({"status": "ok", "passed": 1}),
@@ -1526,7 +1526,7 @@ class TestRunNpmTestVerify:
             (0, (b"not valid json", b"")),  # cat package.json (bad json)
         ])
         with patch(
-            "sunaba.edit_verify._run_jest_verify",
+            "sunaba.edit_verify.test_runners._run_jest_verify",
             return_value=VerifyResult(
                 tool="jest", status="ok",
                 detail=json.dumps({"status": "ok", "passed": 1}),

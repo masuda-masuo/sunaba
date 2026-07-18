@@ -228,7 +228,7 @@ class TestRunLintTypeGate:
     def _patch_detect(self, monkeypatch, languages={"python"}):
         from src.sunaba.edit_verify import DetectionResult
         monkeypatch.setattr(
-            "src.sunaba.edit_verify.detect_languages",
+            "src.sunaba.edit_verify.gate.detect_languages",
             lambda *a, **k: DetectionResult(
                 languages=set(languages),
                 scope={lang: "." for lang in languages},
@@ -240,11 +240,11 @@ class TestRunLintTypeGate:
         from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify.gate._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         r = run_lint_type_gate(object(), "src")
@@ -262,11 +262,11 @@ class TestRunLintTypeGate:
             "severity": "warning", "message": "Missing docstring",
         }])
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
             lambda *a, **k: d101,
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify.gate._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         r = run_lint_type_gate(object(), "src")
@@ -277,7 +277,7 @@ class TestRunLintTypeGate:
         from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         type_err = self._vr("findings", [{
@@ -285,7 +285,7 @@ class TestRunLintTypeGate:
             "severity": "error", "message": "bad type",
         }], tool="pyright")
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify.gate._gate_type_runner",
             lambda *a, **k: type_err,
         )
         r = run_lint_type_gate(object(), "src")
@@ -296,11 +296,11 @@ class TestRunLintTypeGate:
         from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
             lambda *a, **k: self._vr("not_available"),
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify.gate._gate_type_runner",
             lambda *a, **k: self._vr("not_available", tool="pyright"),
         )
         r = run_lint_type_gate(object(), "src")
@@ -315,11 +315,11 @@ class TestRunLintTypeGate:
             "message": "no linter",
         }])
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
             lambda *a, **k: sentinel,
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify.gate._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         r = run_lint_type_gate(object(), "src")
@@ -336,7 +336,7 @@ class TestRunLintTypeGate:
         from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         called = {"type": False}
@@ -346,7 +346,7 @@ class TestRunLintTypeGate:
             return self._vr("findings", [{"rule": "x", "severity": "error"}],
                             tool="pyright")
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner", _type_runner
+            "src.sunaba.edit_verify.gate._gate_type_runner", _type_runner
         )
         r = run_lint_type_gate(object(), "src", gate_on_type=False)
         assert called["type"] is False
@@ -363,7 +363,7 @@ class TestRunLintTypeGate:
             from src.sunaba.edit_verify import VerifyResult
             return VerifyResult(tool="ruff", status="ok", findings=[], exit_code=0)
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._run_ruff_verify", _fake_ruff
+            "src.sunaba.edit_verify.gate._run_ruff_verify", _fake_ruff
         )
         _gate_lint_runner(object(), "src", "python", None)
         assert captured["extra_select"] is False
@@ -385,10 +385,10 @@ class TestRunLintTypeGate:
             return self._vr("ok", tool="pyright")
 
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner", _fake_lint
+            "src.sunaba.edit_verify.gate._gate_lint_runner", _fake_lint
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner", _fake_type
+            "src.sunaba.edit_verify.gate._gate_type_runner", _fake_type
         )
         r = run_lint_type_gate(object(), "src", lint_scope=["src", "tests"])
         assert seen["lint_path"] == ["src", "tests"]
@@ -408,10 +408,10 @@ class TestRunLintTypeGate:
             return self._vr("ok")
 
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner", _fake_lint
+            "src.sunaba.edit_verify.gate._gate_lint_runner", _fake_lint
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify.gate._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         run_lint_type_gate(object(), "src")
@@ -423,11 +423,11 @@ class TestRunLintTypeGate:
         from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify.gate._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         r = run_lint_type_gate(object(), "src")
@@ -439,15 +439,15 @@ class TestRunLintTypeGate:
         from src.sunaba.edit_verify import VerifyResult, run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify.gate._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._run_patch_targets_verify",
+            "src.sunaba.edit_verify.gate._run_patch_targets_verify",
             lambda *a, **k: VerifyResult(
                 tool="check-patch-targets", status="findings",
                 findings=[{"file": "test.py", "line": 42, "rule": "patch-target",
@@ -467,15 +467,15 @@ class TestRunLintTypeGate:
         from src.sunaba.edit_verify import VerifyResult, run_lint_type_gate
         self._patch_detect(monkeypatch)
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_lint_runner",
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
             lambda *a, **k: self._vr("ok"),
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._gate_type_runner",
+            "src.sunaba.edit_verify.gate._gate_type_runner",
             lambda *a, **k: self._vr("ok", tool="pyright"),
         )
         monkeypatch.setattr(
-            "src.sunaba.edit_verify._run_patch_targets_verify",
+            "src.sunaba.edit_verify.gate._run_patch_targets_verify",
             lambda *a, **k: VerifyResult(
                 tool="check-patch-targets", status="ok",
                 findings=[], exit_code=0,

@@ -18,8 +18,9 @@ class TestCheckpoint:
     def test_checkpoint_success(self, mock_docker: MagicMock) -> None:
         """Happy path: git add + commit succeeds, returns sha."""
         container = _make_container_mock([
-            (0, b"", b""),
-            (0, b"abc1234\n", b""),
+            (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git add -A && git commit
+            (0, b"abc1234\n", b""),  # git rev-parse --short HEAD
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -32,12 +33,54 @@ class TestCheckpoint:
         assert result["status"] == "ok"
         assert result["sha"] == "abc1234"
         assert result["message"] == "my checkpoint"
+        assert result["swept_untracked"] == []
+
+    @patch("sunaba.tools.vcs._docker")
+    def test_checkpoint_swept_untracked_empty(
+        self,
+        mock_docker: MagicMock,
+    ) -> None:
+        """swept_untracked is [] when no untracked files exist."""
+        container = _make_container_mock([
+            (0, b"", b""),  # git ls-files (empty)
+            (0, b"", b""),  # git add -A && git commit
+            (0, b"abc1234\n", b""),  # git rev-parse
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint(
+            container_id="abc123def456",
+            message="cp",
+        ))
+        assert result["swept_untracked"] == []
+
+    @patch("sunaba.tools.vcs._docker")
+    def test_checkpoint_swept_untracked_with_files(
+        self,
+        mock_docker: MagicMock,
+    ) -> None:
+        """swept_untracked lists untracked files when they exist."""
+        container = _make_container_mock([
+            (0, b"newfile.py\nunused.md\n", b""),  # git ls-files
+            (0, b"", b""),  # git add -A && git commit
+            (0, b"def5678\n", b""),  # git rev-parse
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(checkpoint(
+            container_id="abc123def456",
+            message="cp",
+        ))
+        assert result["swept_untracked"] == ["newfile.py", "unused.md"]
 
     @patch("sunaba.tools.vcs._docker")
     def test_checkpoint_git_failure(self, mock_docker: MagicMock) -> None:
         """Git commit failure should return error."""
         container = _make_container_mock([
-            (1, b"fatal: not a git repository", b""),
+            (0, b"", b""),  # git ls-files succeeds
+            (1, b"fatal: not a git repository", b""),  # git add+commit fails
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client

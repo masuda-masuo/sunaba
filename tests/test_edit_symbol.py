@@ -674,7 +674,7 @@ class TestWriteFileSymbolIntegration:
     # ── _extract_symbol_from_old_str unit tests ──────────────────────
 
     def test_extract_symbol_from_def(self) -> None:
-        from sunaba.tools.file import _extract_symbol_from_old_str
+        from sunaba.tools.edit_engine import _extract_symbol_from_old_str
         assert _extract_symbol_from_old_str("def foo():") == "foo"
         assert _extract_symbol_from_old_str("async def fetch():") == "fetch"
         assert _extract_symbol_from_old_str("class Bar:") == "Bar"
@@ -687,18 +687,18 @@ class TestWriteFileSymbolIntegration:
         assert _extract_symbol_from_old_str("   def foo():") == "foo"
 
     def test_extract_symbol_from_non_py_old_str(self) -> None:
-        from sunaba.tools.file import _extract_symbol_from_old_str
+        from sunaba.tools.edit_engine import _extract_symbol_from_old_str
         assert _extract_symbol_from_old_str("def foo(): # type: ignore") == "foo"
 
     def test_extract_from_decorated_with_blank_lines(self) -> None:
-        from sunaba.tools.file import _extract_symbol_from_old_str
+        from sunaba.tools.edit_engine import _extract_symbol_from_old_str
         old = "\n\n# some comment\n@decorator\ndef foo():\n    pass\n"
         assert _extract_symbol_from_old_str(old) == "foo"
 
     # ── _is_bare_signature unit tests ────────────────────────────────
 
     def test_is_bare_signature(self) -> None:
-        from sunaba.tools.file import _is_bare_signature
+        from sunaba.tools.edit_engine import _is_bare_signature
         assert _is_bare_signature("def foo():") is True
         assert _is_bare_signature("async def fetch():") is True
         assert _is_bare_signature("class Bar:") is True

@@ -22,10 +22,10 @@ class TestSandboxInitializeCloneRepo:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for sandbox_initialize with clone_repo."""
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_clone_repo_calls_helper(
         self,
         mock_validate: MagicMock,
@@ -51,10 +51,10 @@ class TestSandboxInitializeCloneRepo:
         assert "pip install" not in result
         mock_clone.assert_called_once()
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_clone_repo_failure_non_fatal(
         self,
         mock_validate: MagicMock,
@@ -77,10 +77,10 @@ class TestSandboxInitializeCloneRepo:
         assert result.startswith("abc123def456")
         assert "clone_repo failed" in result
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_without_clone_repo_works_normally(
         self,
         mock_validate: MagicMock,
@@ -101,10 +101,10 @@ class TestSandboxInitializeCloneRepo:
         assert result == "abc123def456 [network: off]"
         mock_clone.assert_not_called()
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_clone_dest_custom(
         self,
         mock_validate: MagicMock,
@@ -133,10 +133,10 @@ class TestSandboxInitializeCloneRepo:
         assert args[3] == "/tmp/proj"
         assert "open_read_grant" in kwargs
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_network_clone_default_path(
         self,
         mock_validate: MagicMock,
@@ -172,10 +172,10 @@ class TestSandboxInitializeCloneRepoPipExtras:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for pip_extras with clone_repo (Issue #245)."""
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pip_extras_none_skips_install(
         self,
         mock_validate: MagicMock,
@@ -199,10 +199,10 @@ class TestSandboxInitializeCloneRepoPipExtras:
         assert "abc123def456" in result
         assert mock_container.exec_run.call_count == 0
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pip_extras_default_installs_dev(
         self,
         mock_validate: MagicMock,
@@ -229,10 +229,10 @@ class TestSandboxInitializeCloneRepoPipExtras:
         call_cmd = mock_container.exec_run.call_args[0][0][-1]
         assert "pip install -e '.[dev]' -q" in call_cmd
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pip_extras_installed_when_clone_repo_auto_enables_network(
         self,
         mock_validate: MagicMock,
@@ -262,10 +262,10 @@ class TestSandboxInitializeCloneRepoPipExtras:
         call_cmd = mock_container.exec_run.call_args[0][0][-1]
         assert "pip install -e '.[dev]' -q" in call_cmd
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pip_extras_custom_value(
         self,
         mock_validate: MagicMock,
@@ -291,10 +291,10 @@ class TestSandboxInitializeCloneRepoPipExtras:
         call_cmd = mock_container.exec_run.call_args[0][0][-1]
         assert "pip install -e '.[test]' -q" in call_cmd
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pip_install_failure_non_fatal(
         self,
         mock_validate: MagicMock,
@@ -320,10 +320,10 @@ class TestSandboxInitializeCloneRepoPipExtras:
         assert "clone_repo failed" not in result
         assert "pip install failed" in result
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_clone_failure_skips_pip_install(
         self,
         mock_validate: MagicMock,
@@ -371,8 +371,8 @@ class TestSandboxInitializeEgressProxy:
         return client, container
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_flag_off_keeps_plain_bridge(
         self,
         mock_validate: MagicMock,
@@ -390,11 +390,11 @@ class TestSandboxInitializeEgressProxy:
         assert run_kwargs["network_mode"] == "bridge"
         assert "HTTPS_PROXY" not in run_kwargs["environment"]
 
-    @patch("sunaba.tools.container.proxy_lifecycle.install_ca")
-    @patch("sunaba.tools.container.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle.install_ca")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle.ensure_egress_proxy")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_flag_on_wires_proxy_network_env_and_ca(
         self,
         mock_validate: MagicMock,
@@ -419,10 +419,10 @@ class TestSandboxInitializeEgressProxy:
         assert env["HTTPS_PROXY"] == "http://egress-proxy:8080"
         mock_install_ca.assert_called_once_with(container, self._CA)
 
-    @patch("sunaba.tools.container.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle.ensure_egress_proxy")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_flag_on_fails_closed_when_sidecar_unavailable(
         self,
         mock_validate: MagicMock,
@@ -440,10 +440,10 @@ class TestSandboxInitializeEgressProxy:
         assert result.startswith("Error: egress proxy is enabled but unavailable")
         client.containers.run.assert_not_called()
 
-    @patch("sunaba.tools.container.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle.ensure_egress_proxy")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_flag_on_without_network_skips_proxy(
         self,
         mock_validate: MagicMock,
@@ -461,11 +461,11 @@ class TestSandboxInitializeEgressProxy:
         mock_ensure_proxy.assert_not_called()
         assert client.containers.run.call_args.kwargs["network_mode"] == "none"
 
-    @patch("sunaba.tools.container.proxy_lifecycle.install_ca")
-    @patch("sunaba.tools.container.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle.install_ca")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle.ensure_egress_proxy")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_ca_install_failure_tears_the_sandbox_down(
         self,
         mock_validate: MagicMock,

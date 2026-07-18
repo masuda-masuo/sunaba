@@ -151,7 +151,7 @@ class TestListManagedContainers:
         assert containers == []
         assert error is not None and "docker is down" in error
 
-    @patch("sunaba.tools.container._reap_idle_containers")
+    @patch("sunaba.tools.container.reaper._reap_idle_containers")
     @patch("sunaba.tools.container._docker")
     def test_read_path_does_not_reap(
         self, mock_docker: MagicMock, mock_reap: MagicMock
@@ -163,7 +163,7 @@ class TestListManagedContainers:
 
         mock_reap.assert_not_called()
 
-    @patch("sunaba.tools.container._reap_idle_containers")
+    @patch("sunaba.tools.container.reaper._reap_idle_containers")
     @patch("sunaba.tools.container._docker")
     def test_mcp_tool_still_reaps(
         self, mock_docker: MagicMock, mock_reap: MagicMock

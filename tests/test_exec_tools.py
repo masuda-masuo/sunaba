@@ -21,10 +21,10 @@ if TYPE_CHECKING:
 class TestSandboxInitialize:
     """Tests for sandbox_initialize."""
 
-    @patch("sunaba.tools.container.proxy_lifecycle")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_proxied_container_env_carries_no_vcs_token(
         self,
         mock_validate: MagicMock,
@@ -57,12 +57,12 @@ class TestSandboxInitialize:
         # The proxy wiring itself still lands in the env.
         assert env.get("HTTPS_PROXY") == "http://egress-proxy:8080"
 
-    @patch("sunaba.tools.container._run_pip_install")
-    @patch("sunaba.tools.container._try_clone_into_container")
-    @patch("sunaba.tools.container.proxy_lifecycle")
+    @patch("sunaba.tools.container.lifecycle._run_pip_install")
+    @patch("sunaba.tools.container.lifecycle._try_clone_into_container")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_proxied_clone_goes_anonymous(
         self,
         mock_validate: MagicMock,
@@ -96,11 +96,11 @@ class TestSandboxInitialize:
         # container env (a token is never injected, #439).
         assert mock_clone.call_args.args[4] is False
 
-    @patch("sunaba.tools.container._setup_pr_branch")
-    @patch("sunaba.tools.container.proxy_lifecycle")
+    @patch("sunaba.tools.container.lifecycle._setup_pr_branch")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_proxied_pr_checkout_goes_anonymous(
         self,
         mock_validate: MagicMock,
@@ -133,8 +133,8 @@ class TestSandboxInitialize:
         assert mock_setup_pr.call_args.kwargs["authenticated"] is False
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_container_env_never_carries_vcs_token(
         self,
         mock_validate: MagicMock,

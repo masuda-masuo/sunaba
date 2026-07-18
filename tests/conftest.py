@@ -33,7 +33,7 @@ def _skip_workspace_bootstrap() -> None:
     ``exec_run`` side-effect list.  ``tests/test_workspace_root.py`` covers the
     real thing.
     """
-    with patch("sunaba.tools.container._ensure_workspace"):
+    with patch("sunaba.tools.container.lifecycle._ensure_workspace"):
         yield
 
 

@@ -56,9 +56,9 @@ class TestEnsureWorkspace:
 class TestInitializeWorkingDir:
     """sandbox_initialize records the repo root as the container's WorkingDir."""
 
-    @patch("sunaba.tools.container._ensure_workspace")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_workspace")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     @patch("sunaba.tools.container._docker")
     def _run_init(self, mock_docker, mock_validate, mock_ensure_image,
                   mock_ensure_ws, **kwargs) -> tuple[dict, MagicMock]:

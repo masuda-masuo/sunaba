@@ -38,7 +38,7 @@ class TestDockerTimeout:
 class TestSandboxStopForceKill:
     """sandbox_stop kills + force-removes instead of graceful stop."""
 
-    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.lifecycle.record_stop")
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.container._docker")
     def test_kill_then_force_remove(
@@ -69,7 +69,7 @@ class TestSandboxStopForceKill:
         mock_record.assert_called_once()
         assert "stopped and removed" in result
 
-    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.lifecycle.record_stop")
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.container._docker")
     def test_kill_apierror_still_removes(
@@ -110,10 +110,10 @@ class TestSandboxStopForceKill:
 class TestSandboxInitializeResources:
     """sandbox_initialize honours mem_limit / cpus overrides."""
 
-    @patch("sunaba.tools.container._detect_host_resources")
+    @patch("sunaba.tools.container.lifecycle._detect_host_resources")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_mem_and_cpus_passed(
         self,
         mock_validate: MagicMock,
@@ -138,10 +138,10 @@ class TestSandboxInitializeResources:
         # 2.0 cores * default cpu_period (100000us)
         assert kwargs["cpu_quota"] == 200000
 
-    @patch("sunaba.tools.container._detect_host_resources")
+    @patch("sunaba.tools.container.lifecycle._detect_host_resources")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_defaults_unchanged(
         self,
         mock_validate: MagicMock,
@@ -167,10 +167,10 @@ class TestSandboxInitializeResources:
         assert kwargs["memswap_limit"] == "512m"
         assert kwargs["cpu_quota"] == 50000
 
-    @patch("sunaba.tools.container._detect_host_resources")
+    @patch("sunaba.tools.container.lifecycle._detect_host_resources")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_invalid_cpus_rejected(
         self,
         mock_validate: MagicMock,
@@ -187,10 +187,10 @@ class TestSandboxInitializeResources:
         assert result.startswith("Error: cpus must be > 0")
         client.containers.run.assert_not_called()
 
-    @patch("sunaba.tools.container._detect_host_resources")
+    @patch("sunaba.tools.container.lifecycle._detect_host_resources")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_mem_exceeds_host_cap_rejected(
         self,
         mock_validate: MagicMock,
@@ -210,10 +210,10 @@ class TestSandboxInitializeResources:
         assert "exceeds host cap" in result
         client.containers.run.assert_not_called()
 
-    @patch("sunaba.tools.container._detect_host_resources")
+    @patch("sunaba.tools.container.lifecycle._detect_host_resources")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_mem_within_cap_passes(
         self,
         mock_validate: MagicMock,
@@ -237,8 +237,8 @@ class TestSandboxInitializeResources:
         assert kwargs["mem_limit"] == "512m"
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_cap_skipped_when_host_detection_fails(
         self,
         mock_validate: MagicMock,
@@ -259,10 +259,10 @@ class TestSandboxInitializeResources:
         kwargs = client.containers.run.call_args.kwargs
         assert kwargs["mem_limit"] == "2g"
 
-    @patch("sunaba.tools.container._detect_host_resources")
+    @patch("sunaba.tools.container.lifecycle._detect_host_resources")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_cpus_exceeds_host_rejected(
         self,
         mock_validate: MagicMock,
@@ -336,7 +336,7 @@ class TestRecoveryTimeoutConfigurable:
 class TestSandboxStopUnpushedCheckpoints:
     """sandbox_stop warns about unpushed checkpoints unless force=True."""
 
-    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.lifecycle.record_stop")
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.container._docker")
     def test_warns_without_force(
@@ -369,7 +369,7 @@ class TestSandboxStopUnpushedCheckpoints:
         container.remove.assert_not_called()
         mock_record.assert_not_called()
 
-    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.lifecycle.record_stop")
     @patch("sunaba.tools.container._docker")
     def test_force_skips_warning(self, mock_docker: MagicMock, mock_record: MagicMock) -> None:
         container = MagicMock()
@@ -386,7 +386,7 @@ class TestSandboxStopUnpushedCheckpoints:
         container.remove.assert_called_once_with(force=True)
         assert "stopped and removed" in result
 
-    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.lifecycle.record_stop")
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.container._docker")
     def test_no_unpushed_proceeds(
@@ -413,7 +413,7 @@ class TestSandboxStopUnpushedCheckpoints:
         container.remove.assert_called_once_with(force=True)
         assert "stopped and removed" in result
 
-    @patch("sunaba.tools.container.record_stop")
+    @patch("sunaba.tools.container.lifecycle.record_stop")
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.container._docker")
     def test_no_git_proceeds(
@@ -441,9 +441,9 @@ class TestSandboxStopUnpushedCheckpoints:
         assert "stopped and removed" in result
 
 
-    @patch("sunaba.tools.container.record_stop")
-    @patch("sunaba.tools.container.resolve_git_root", return_value="/tmp/repo/sunaba")
-    @patch("sunaba.tools.container.checkpoint_list")
+    @patch("sunaba.tools.container.lifecycle.record_stop")
+    @patch("sunaba.tools.container.lifecycle.resolve_git_root", return_value="/tmp/repo/sunaba")
+    @patch("sunaba.tools.container.lifecycle.checkpoint_list")
     @patch("sunaba.tools.container._docker")
     def test_working_dir_none_triggers_auto_detect(
         self,

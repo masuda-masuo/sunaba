@@ -103,7 +103,7 @@ class TestCloneRepoViaNetwork:
         cmd = c.exec_run.call_args_list[0][0][0][-1]
         assert "gh repo clone owner/repo" in cmd
 
-    @patch("sunaba.tools.container.record_boundary_crossing")
+    @patch("sunaba.tools.container.clone.record_boundary_crossing")
     def test_read_grant_success_is_journaled(self, mock_record) -> None:
         """#421: a proxy-read-grant-authorized clone records approved=True."""
         c = self._container(0, b"")
@@ -117,7 +117,7 @@ class TestCloneRepoViaNetwork:
             approved=True,
         )
 
-    @patch("sunaba.tools.container.record_boundary_crossing")
+    @patch("sunaba.tools.container.clone.record_boundary_crossing")
     def test_read_grant_failure_is_journaled(self, mock_record) -> None:
         """#421: a denied/failed proxy read grant must show up too, not just success."""
         c = self._container(1, b"fatal: could not read Username")
@@ -133,7 +133,7 @@ class TestCloneRepoViaNetwork:
             approved=False,
         )
 
-    @patch("sunaba.tools.container.record_boundary_crossing")
+    @patch("sunaba.tools.container.clone.record_boundary_crossing")
     def test_no_read_grant_is_not_journaled(self, mock_record) -> None:
         """A plain (non-proxied) clone is unaffected -- no new journal entry."""
         c = self._container(0, b"")

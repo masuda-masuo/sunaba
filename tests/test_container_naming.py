@@ -70,9 +70,9 @@ class TestSandboxInitializeName:
     """sandbox_initialize(name=...)"""
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container.build_secure_run_kwargs")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
     def test_name_label_stored(
         self,
         mock_build: MagicMock,
@@ -102,9 +102,9 @@ class TestSandboxInitializeName:
         assert "my-sandbox" in result
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container.build_secure_run_kwargs")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
     def test_name_collision_raises_error(
         self,
         mock_build: MagicMock,
@@ -126,10 +126,10 @@ class TestSandboxInitializeName:
         assert "my-sandbox" in result
         assert "already exists" in result
 
-    @patch("sunaba.tools.container.build_secure_run_kwargs")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_name_collision_stopped_container(
         self,
         mock_validate: MagicMock,
@@ -154,9 +154,9 @@ class TestSandboxInitializeName:
         assert not result.startswith("Error:")
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container.build_secure_run_kwargs")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
     def test_name_collision_exact_id_match(
         self,
         mock_build: MagicMock,
@@ -246,9 +246,9 @@ class TestSandboxListContainers:
 class TestSandboxAttach:
     """sandbox_attach"""
 
-    @patch("sunaba.tools.container.checkpoint_list")
-    @patch("sunaba.tools.container.read_journal")
-    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container.lifecycle.checkpoint_list")
+    @patch("sunaba.tools.container.lifecycle.read_journal")
+    @patch("sunaba.tools.container.lifecycle.resolve_git_root")
     @patch("sunaba.tools.container._docker")
     def test_attach_by_name(
         self,
@@ -275,9 +275,9 @@ class TestSandboxAttach:
         assert result["name"] == "my-container"
         assert result["match_type"] == "name"
 
-    @patch("sunaba.tools.container.checkpoint_list")
-    @patch("sunaba.tools.container.read_journal")
-    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container.lifecycle.checkpoint_list")
+    @patch("sunaba.tools.container.lifecycle.read_journal")
+    @patch("sunaba.tools.container.lifecycle.resolve_git_root")
     @patch("sunaba.tools.container._docker")
     def test_attach_by_id_prefix(
         self,
@@ -328,9 +328,9 @@ class TestSandboxAttach:
         assert "Ambiguous" in result["error"]
         assert "abc111" in result["error"]
 
-    @patch("sunaba.tools.container.checkpoint_list")
-    @patch("sunaba.tools.container.read_journal")
-    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container.lifecycle.checkpoint_list")
+    @patch("sunaba.tools.container.lifecycle.read_journal")
+    @patch("sunaba.tools.container.lifecycle.resolve_git_root")
     @patch("sunaba.tools.container._docker")
     def test_attach_orientation_info(
         self,
@@ -358,9 +358,9 @@ class TestSandboxAttach:
         assert result["last_checkpoint"] == "checkpoint-1"
         assert result["journal_activity"] == 2
 
-    @patch("sunaba.tools.container.checkpoint_list")
-    @patch("sunaba.tools.container.read_journal")
-    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container.lifecycle.checkpoint_list")
+    @patch("sunaba.tools.container.lifecycle.read_journal")
+    @patch("sunaba.tools.container.lifecycle.resolve_git_root")
     @patch("sunaba.tools.container._docker")
     def test_attach_orientation_no_git(
         self,
@@ -409,10 +409,10 @@ class TestSandboxAttachJournal:
         mock_journal.return_value = []
         mock_cp.return_value = json.dumps({"checkpoints": []})
 
-    @patch("sunaba.tools.container.record_tool_use")
-    @patch("sunaba.tools.container.checkpoint_list")
-    @patch("sunaba.tools.container.read_journal")
-    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container.lifecycle.record_tool_use")
+    @patch("sunaba.tools.container.lifecycle.checkpoint_list")
+    @patch("sunaba.tools.container.lifecycle.read_journal")
+    @patch("sunaba.tools.container.lifecycle.resolve_git_root")
     @patch("sunaba.tools.container._docker")
     def test_attach_is_journaled(
         self,
@@ -432,10 +432,10 @@ class TestSandboxAttachJournal:
             {"name_or_id": "my-container", "match_type": "name"},
         )
 
-    @patch("sunaba.tools.container.record_tool_use")
-    @patch("sunaba.tools.container.checkpoint_list")
-    @patch("sunaba.tools.container.read_journal")
-    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container.lifecycle.record_tool_use")
+    @patch("sunaba.tools.container.lifecycle.checkpoint_list")
+    @patch("sunaba.tools.container.lifecycle.read_journal")
+    @patch("sunaba.tools.container.lifecycle.resolve_git_root")
     @patch("sunaba.tools.container._docker")
     def test_session_label_swap_records_the_label_it_replaced(
         self,
@@ -456,10 +456,10 @@ class TestSandboxAttachJournal:
         params = mock_record.call_args_list[-1].args[2]
         assert params["previous_session_label"] == "session-a"
 
-    @patch("sunaba.tools.container.record_tool_use")
-    @patch("sunaba.tools.container.checkpoint_list")
-    @patch("sunaba.tools.container.read_journal")
-    @patch("sunaba.tools.container.resolve_git_root")
+    @patch("sunaba.tools.container.lifecycle.record_tool_use")
+    @patch("sunaba.tools.container.lifecycle.checkpoint_list")
+    @patch("sunaba.tools.container.lifecycle.read_journal")
+    @patch("sunaba.tools.container.lifecycle.resolve_git_root")
     @patch("sunaba.tools.container._docker")
     def test_attach_without_label_change_omits_previous_label(
         self,
@@ -479,7 +479,7 @@ class TestSandboxAttachJournal:
         params = mock_record.call_args_list[-1].args[2]
         assert "previous_session_label" not in params
 
-    @patch("sunaba.tools.container.record_tool_use")
+    @patch("sunaba.tools.container.lifecycle.record_tool_use")
     @patch("sunaba.tools.container._docker")
     def test_failed_attach_is_not_journaled(
         self,
@@ -499,7 +499,7 @@ class TestSandboxAttachJournal:
 class TestListContainersIdleTime:
     """sandbox_list_containers with idle time (Issue #480)."""
 
-    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container.listing.get_last_activity_per_container")
     @patch("sunaba.tools.container._docker")
     def test_idle_seconds_in_output(
         self,
@@ -518,7 +518,7 @@ class TestListContainersIdleTime:
         assert "last_activity_ts" in entry
         assert entry["last_activity_ts"] == "2026-01-01T00:00:00+00:00"
 
-    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container.reaper.get_last_activity_per_container")
     @patch("sunaba.tools.container._docker")
     def test_idle_none_when_no_activity(
         self,
@@ -564,7 +564,7 @@ class TestGetContainerTTL:
 class TestReapIdleContainers:
     """_reap_idle_containers and reap-on-list (Issue #480)."""
 
-    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container.reaper.get_last_activity_per_container")
     @patch("sunaba.tools.container._docker")
     @patch.dict(os.environ, {}, clear=True)
     def test_noop_when_ttl_not_set(
@@ -578,7 +578,7 @@ class TestReapIdleContainers:
         assert result == []
         mock_docker.assert_not_called()
 
-    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container.reaper.get_last_activity_per_container")
     @patch("sunaba.tools.container._docker")
     @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
     def test_reaps_idle_container(
@@ -598,7 +598,7 @@ class TestReapIdleContainers:
         c.kill.assert_called_once()
         assert "idle-cid" in result
 
-    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container.reaper.get_last_activity_per_container")
     @patch("sunaba.tools.container._docker")
     @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
     def test_does_not_reap_active_container(
@@ -620,7 +620,7 @@ class TestReapIdleContainers:
         assert result == []
         c.kill.assert_not_called()
 
-    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container.reaper.get_last_activity_per_container")
     @patch("sunaba.tools.container._docker")
     @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
     def test_list_reaps_idle_container(
@@ -647,7 +647,7 @@ class TestReaperNeverTouchesTheProxy:
     excluded by kind -- not merely by having no activity timestamp.
     """
 
-    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container.reaper.get_last_activity_per_container")
     @patch("sunaba.tools.container._docker")
     @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
     def test_labelled_proxy_is_not_reaped(
@@ -667,7 +667,7 @@ class TestReaperNeverTouchesTheProxy:
         assert _reap_idle_containers() == []
         proxy.kill.assert_not_called()
 
-    @patch("sunaba.tools.container.get_last_activity_per_container")
+    @patch("sunaba.tools.container.reaper.get_last_activity_per_container")
     @patch("sunaba.tools.container._docker")
     @patch.dict(os.environ, {"SUNABA_CONTAINER_TTL_SECONDS": "3600"}, clear=True)
     def test_unlabelled_legacy_proxy_is_not_reaped(
@@ -697,11 +697,11 @@ class TestReaperNeverTouchesTheProxy:
 class TestInitializeRunsIdleReap:
     """A configured TTL must fire from init, not only from list (Issue #594)."""
 
-    @patch("sunaba.tools.container._reap_idle_containers")
+    @patch("sunaba.tools.container.lifecycle._reap_idle_containers")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container.build_secure_run_kwargs")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
     def test_initialize_reaps_idle_containers(
         self,
         mock_build: MagicMock,

@@ -40,8 +40,8 @@ class TestMonotonicProgress:
             return "cid1234567890"
 
         with patch(
-            "sunaba.tools.container.sandbox_initialize", side_effect=_slow
-        ), patch("sunaba.tools.container._PROGRESS_INTERVAL_SECONDS", 0.05):
+            "sunaba.tools.container.lifecycle.sandbox_initialize", side_effect=_slow
+        ), patch("sunaba.tools.container.lifecycle._PROGRESS_INTERVAL_SECONDS", 0.05):
             result = asyncio.run(sandbox_initialize_tool(image=_IMAGE, ctx=ctx))
 
         assert result == "cid1234567890"
@@ -58,9 +58,9 @@ class TestMonotonicProgress:
 class TestPrewarmDefaultImage:
     def test_calls_ensure_image_with_default(self) -> None:
         with patch(
-            "sunaba.tools.container._ensure_image"
+            "sunaba.tools.container.image._ensure_image"
         ) as ensure, patch(
-            "sunaba.tools.container._DEFAULT_IMAGE", _IMAGE
+            "sunaba.tools.container.image._DEFAULT_IMAGE", _IMAGE
         ):
             prewarm_default_image()
         ensure.assert_any_call(_IMAGE)
@@ -72,13 +72,13 @@ class TestPrewarmDefaultImage:
         # no image= always lands on the default, and asking for a lean variant
         # explicitly is a deliberate act that can afford the pull.
         with patch(
-            "sunaba.tools.container._ensure_image"
+            "sunaba.tools.container.image._ensure_image"
         ) as ensure, patch(
-            "sunaba.tools.container._DEFAULT_IMAGE", _IMAGE
+            "sunaba.tools.container.image._DEFAULT_IMAGE", _IMAGE
         ), patch(
-            "sunaba.tools.container._PYTHON_IMAGE", "python-variant"
+            "sunaba.tools.container.image._PYTHON_IMAGE", "python-variant"
         ), patch(
-            "sunaba.tools.container._GO_IMAGE", "go-variant"
+            "sunaba.tools.container.image._GO_IMAGE", "go-variant"
         ):
             prewarm_default_image()
         called_images = {c.args[0] for c in ensure.call_args_list}
@@ -86,7 +86,7 @@ class TestPrewarmDefaultImage:
 
     def test_swallows_errors(self) -> None:
         with patch(
-            "sunaba.tools.container._ensure_image",
+            "sunaba.tools.container.lifecycle._ensure_image",
             side_effect=RuntimeError("docker down"),
         ):
             # Must not raise - prewarm failures never break startup.
@@ -96,10 +96,10 @@ class TestPrewarmDefaultImage:
         # A registry hiccup must never take the server down with it; the next
         # refresh cycle retries.
         with patch(
-            "sunaba.tools.container._ensure_image",
+            "sunaba.tools.container.image._ensure_image",
             side_effect=RuntimeError("registry hiccup"),
         ) as ensure, patch(
-            "sunaba.tools.container._DEFAULT_IMAGE", _IMAGE
+            "sunaba.tools.container.image._DEFAULT_IMAGE", _IMAGE
         ):
             prewarm_default_image()
         assert ensure.call_count == 1
@@ -110,7 +110,7 @@ class TestStartImagePrewarm:
         with patch(
             "sunaba.server.threading.Thread"
         ) as thread_cls, patch(
-            "sunaba.tools.container.prewarm_default_image"
+            "sunaba.tools.container.image.prewarm_default_image"
         ) as prewarm:
             _start_image_prewarm(0)
             _start_image_prewarm(-5)
@@ -136,7 +136,7 @@ class TestStartImagePrewarm:
         startup_ready = threading.Event()
 
         with patch(
-            "sunaba.tools.container.prewarm_default_image",
+            "sunaba.tools.container.image.prewarm_default_image",
         ):
             _start_image_prewarm(3600, startup_ready)
             assert startup_ready.wait(timeout=2.0)
@@ -145,7 +145,7 @@ class TestStartImagePrewarm:
         startup_ready = threading.Event()
 
         with patch(
-            "sunaba.tools.container.prewarm_default_image",
+            "sunaba.tools.container.image.prewarm_default_image",
             side_effect=RuntimeError("docker down"),
         ):
             _start_image_prewarm(3600, startup_ready)

@@ -42,7 +42,7 @@ class TestSetupPrBranch:
             (0, (b"", b"")),
         ])
 
-        with patch("sunaba.tools.container.logger"):
+        with patch("sunaba.tools.container.clone.logger"):
             result = _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
             )
@@ -94,7 +94,7 @@ class TestSetupPrBranch:
             (0, (b"", b"")),
         ])
 
-        with patch("sunaba.tools.container.logger") as mock_logger:
+        with patch("sunaba.tools.container.clone.logger") as mock_logger:
             result = _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
             )
@@ -134,7 +134,7 @@ class TestSetupPrBranch:
             (0, (b"Installed", b"")),
             (0, (b"", b"")),
         ]
-        with patch("sunaba.tools.container.record_copy"):
+        with patch("sunaba.tools.container.clone.record_copy"):
             result = _setup_pr_branch(
                 mock_container,
                 "abc123def456",
@@ -157,7 +157,7 @@ class TestResolvePrHeadRef:
         cm.__enter__.return_value = resp
         return cm
 
-    @patch("sunaba.tools.container._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.container.clone._resolve_vcs_token", return_value="")
     @patch("urllib.request.urlopen")
     def test_returns_head_ref(self, mock_urlopen, mock_token):
         mock_urlopen.return_value = self._mock_urlopen_response(
@@ -172,7 +172,7 @@ class TestResolvePrHeadRef:
         assert request.full_url == "https://api.github.com/repos/owner/repo/pulls/136"
         assert not request.has_header("Authorization")
 
-    @patch("sunaba.tools.container._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.container.clone._resolve_vcs_token", return_value="ghs_tok")
     @patch("urllib.request.urlopen")
     def test_attaches_host_token_when_available(self, mock_urlopen, mock_token):
         mock_urlopen.return_value = self._mock_urlopen_response(
@@ -184,7 +184,7 @@ class TestResolvePrHeadRef:
         request = mock_urlopen.call_args.args[0]
         assert request.get_header("Authorization") == "Bearer ghs_tok"
 
-    @patch("sunaba.tools.container._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.container.clone._resolve_vcs_token", return_value="")
     @patch("urllib.request.urlopen")
     def test_http_error_becomes_runtime_error(self, mock_urlopen, mock_token):
         import urllib.error
@@ -200,7 +200,7 @@ class TestResolvePrHeadRef:
         with pytest.raises(RuntimeError, match="HTTP 404"):
             _resolve_pr_head_ref("owner/repo", 999)
 
-    @patch("sunaba.tools.container._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.container.clone._resolve_vcs_token", return_value="")
     @patch("urllib.request.urlopen")
     def test_403_hints_rate_limit(self, mock_urlopen, mock_token):
         import urllib.error
@@ -216,7 +216,7 @@ class TestResolvePrHeadRef:
         with pytest.raises(RuntimeError, match="rate-limited"):
             _resolve_pr_head_ref("owner/repo", 136)
 
-    @patch("sunaba.tools.container._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.container.clone._resolve_vcs_token", return_value="")
     @patch("urllib.request.urlopen")
     def test_missing_head_ref_raises(self, mock_urlopen, mock_token):
         mock_urlopen.return_value = self._mock_urlopen_response({"head": {}})
@@ -224,7 +224,7 @@ class TestResolvePrHeadRef:
         with pytest.raises(RuntimeError, match="no head ref"):
             _resolve_pr_head_ref("owner/repo", 136)
 
-    @patch("sunaba.tools.container._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.container.clone._resolve_vcs_token", return_value="")
     @patch("urllib.request.urlopen")
     def test_missing_base_ref_raises(self, mock_urlopen, mock_token):
         mock_urlopen.return_value = self._mock_urlopen_response(
@@ -251,11 +251,11 @@ class TestSetupPrBranchAnonymous:
         ])
 
         with patch(
-            "sunaba.tools.container._resolve_pr_head_ref",
+            "sunaba.tools.container.clone._resolve_pr_head_ref",
             return_value=("feature-branch", "main"),
         ) as mock_resolve, patch(
-            "sunaba.tools.container._resolve_vcs_token", return_value=""
-        ), patch("sunaba.tools.container.logger"):
+            "sunaba.tools.container.clone._resolve_vcs_token", return_value=""
+        ), patch("sunaba.tools.container.clone.logger"):
             result = _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
                 authenticated=False,
@@ -279,11 +279,11 @@ class TestSetupPrBranchAnonymous:
         ])
 
         with patch(
-            "sunaba.tools.container._resolve_pr_head_ref",
+            "sunaba.tools.container.clone._resolve_pr_head_ref",
             return_value=("feature-branch", "main"),
         ), patch(
-            "sunaba.tools.container._resolve_vcs_token", return_value=""
-        ), patch("sunaba.tools.container.logger"):
+            "sunaba.tools.container.clone._resolve_vcs_token", return_value=""
+        ), patch("sunaba.tools.container.clone.logger"):
             with pytest.raises(RuntimeError, match="private repository"):
                 _setup_pr_branch(
                     container, "abc123def456", "owner/repo", 136, "/tmp/repo",
@@ -297,11 +297,11 @@ class TestSetupPrBranchAnonymous:
         ])
 
         with patch(
-            "sunaba.tools.container._resolve_pr_head_ref",
+            "sunaba.tools.container.clone._resolve_pr_head_ref",
             return_value=("feature-branch", "main"),
         ), patch(
-            "sunaba.tools.container._resolve_vcs_token", return_value=""
-        ), patch("sunaba.tools.container.logger"):
+            "sunaba.tools.container.clone._resolve_vcs_token", return_value=""
+        ), patch("sunaba.tools.container.clone.logger"):
             with pytest.raises(RuntimeError, match="Failed to checkout PR #136"):
                 _setup_pr_branch(
                     container, "abc123def456", "owner/repo", 136, "/tmp/repo",
@@ -312,9 +312,9 @@ class TestSetupPrBranchAnonymous:
         container = MagicMock()
 
         with patch(
-            "sunaba.tools.container._resolve_pr_head_ref",
+            "sunaba.tools.container.clone._resolve_pr_head_ref",
             side_effect=RuntimeError("GitHub API returned HTTP 404"),
-        ), patch("sunaba.tools.container._resolve_vcs_token", return_value=""):
+        ), patch("sunaba.tools.container.clone._resolve_vcs_token", return_value=""):
             with pytest.raises(RuntimeError, match="HTTP 404"):
                 _setup_pr_branch(
                     container, "abc123def456", "owner/repo", 136, "/tmp/repo",
@@ -329,7 +329,7 @@ class TestSetupPrBranchReadGrant:
     repos too (#419), the same mechanism _clone_repo_via_network already
     uses for clone_repo."""
 
-    @patch("sunaba.tools.container.record_boundary_crossing")
+    @patch("sunaba.tools.container.clone.record_boundary_crossing")
     def test_success_is_journaled(self, mock_record):
         container = _make_container_mock([
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
@@ -339,11 +339,11 @@ class TestSetupPrBranchReadGrant:
         ])
 
         with patch(
-            "sunaba.tools.container._resolve_pr_head_ref",
+            "sunaba.tools.container.clone._resolve_pr_head_ref",
             return_value=("feature-branch", "main"),
         ), patch(
-            "sunaba.tools.container._resolve_vcs_token", return_value=""
-        ), patch("sunaba.tools.container.logger"):
+            "sunaba.tools.container.clone._resolve_vcs_token", return_value=""
+        ), patch("sunaba.tools.container.clone.logger"):
             result = _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
                 authenticated=False, open_read_grant=True,
@@ -357,18 +357,18 @@ class TestSetupPrBranchReadGrant:
             approved=True,
         )
 
-    @patch("sunaba.tools.container.record_boundary_crossing")
+    @patch("sunaba.tools.container.clone.record_boundary_crossing")
     def test_clone_failure_is_journaled_with_approved_false(self, mock_record):
         container = _make_container_mock([
             (1, (b"", b"fatal: could not read Username")),
         ])
 
         with patch(
-            "sunaba.tools.container._resolve_pr_head_ref",
+            "sunaba.tools.container.clone._resolve_pr_head_ref",
             return_value=("feature-branch", "main"),
         ), patch(
-            "sunaba.tools.container._resolve_vcs_token", return_value=""
-        ), patch("sunaba.tools.container.logger"):
+            "sunaba.tools.container.clone._resolve_vcs_token", return_value=""
+        ), patch("sunaba.tools.container.clone.logger"):
             with pytest.raises(RuntimeError, match="private repository"):
                 _setup_pr_branch(
                     container, "abc123def456", "owner/repo", 136, "/tmp/repo",
@@ -382,7 +382,7 @@ class TestSetupPrBranchReadGrant:
             approved=False,
         )
 
-    @patch("sunaba.tools.container.record_boundary_crossing")
+    @patch("sunaba.tools.container.clone.record_boundary_crossing")
     def test_authenticated_path_ignores_open_read_grant(self, mock_record):
         """authenticated=True (in-container gh token) never needs the proxy
         read grant, even if the caller passes open_read_grant=True."""
@@ -394,7 +394,7 @@ class TestSetupPrBranchReadGrant:
             (0, (b"", b"")),
         ])
 
-        with patch("sunaba.tools.container.logger"):
+        with patch("sunaba.tools.container.clone.logger"):
             _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
                 authenticated=True, open_read_grant=True,
@@ -402,7 +402,7 @@ class TestSetupPrBranchReadGrant:
 
         mock_record.assert_not_called()
 
-    @patch("sunaba.tools.container.record_boundary_crossing")
+    @patch("sunaba.tools.container.clone.record_boundary_crossing")
     def test_no_read_grant_is_not_journaled(self, mock_record):
         """Default (open_read_grant=False) anonymous checkout is unaffected
         -- no new journal entry, matching pre-existing behaviour."""
@@ -414,11 +414,11 @@ class TestSetupPrBranchReadGrant:
         ])
 
         with patch(
-            "sunaba.tools.container._resolve_pr_head_ref",
+            "sunaba.tools.container.clone._resolve_pr_head_ref",
             return_value=("feature-branch", "main"),
         ), patch(
-            "sunaba.tools.container._resolve_vcs_token", return_value=""
-        ), patch("sunaba.tools.container.logger"):
+            "sunaba.tools.container.clone._resolve_vcs_token", return_value=""
+        ), patch("sunaba.tools.container.clone.logger"):
             _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
                 authenticated=False,
@@ -426,7 +426,7 @@ class TestSetupPrBranchReadGrant:
 
         mock_record.assert_not_called()
 
-    @patch("sunaba.tools.container._resolve_vcs_token")
+    @patch("sunaba.tools.container.clone._resolve_vcs_token")
     @patch("urllib.request.urlopen")
     def test_token_resolved_once_and_reused(self, mock_urlopen, mock_resolve_token):
         """#436 review: a broker-backed _resolve_vcs_token() spawns a
@@ -448,7 +448,7 @@ class TestSetupPrBranchReadGrant:
             (0, (b"", b"")),
         ])
 
-        with patch("sunaba.tools.container.logger"):
+        with patch("sunaba.tools.container.clone.logger"):
             _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
                 authenticated=False, open_read_grant=True,
@@ -467,9 +467,9 @@ class TestSandboxInitializePrParam:
     """Tests for sandbox_initialize with pr parameter."""
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container._setup_pr_branch")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._setup_pr_branch")
     def test_pr_calls_setup(
         self,
         mock_setup: MagicMock,
@@ -501,8 +501,8 @@ class TestSandboxInitializePrParam:
         assert "GITHUB_TOKEN" not in run_kwargs.get("environment", {})
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pr_without_repo_returns_warning(
         self,
         mock_validate: MagicMock,
@@ -525,9 +525,9 @@ class TestSandboxInitializePrParam:
         assert "repo is required" in result
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container._setup_pr_branch")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._setup_pr_branch")
     def test_pr_setup_failure_non_fatal(
         self,
         mock_setup: MagicMock,
@@ -552,8 +552,8 @@ class TestSandboxInitializePrParam:
         assert "pr setup failed" in result
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_without_pr_works_normally(
         self,
         mock_validate: MagicMock,
@@ -580,8 +580,8 @@ class TestRunContainerAndExecPrParam:
     """Tests for run_container_and_exec with pr parameter."""
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container._setup_pr_branch")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._setup_pr_branch")
     def test_pr_calls_setup(
         self,
         mock_setup: MagicMock,
@@ -612,7 +612,7 @@ class TestRunContainerAndExecPrParam:
         )
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pr_without_repo_returns_warning(
         self,
         mock_validate: MagicMock,
@@ -635,8 +635,8 @@ class TestRunContainerAndExecPrParam:
         assert result["pr_warning"] == "repo is required when pr is specified"
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container._setup_pr_branch")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._setup_pr_branch")
     def test_pr_error_reported(
         self,
         mock_setup: MagicMock,
@@ -662,9 +662,9 @@ class TestRunContainerAndExecPrParam:
         assert result["pr_warning"] == "network error"
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container._setup_pr_branch")
-    @patch("sunaba.tools.container.proxy_lifecycle")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._setup_pr_branch")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle")
     def test_proxied_pr_calls_setup_with_open_read_grant(
         self,
         mock_proxy_lifecycle: MagicMock,
@@ -698,9 +698,9 @@ class TestRunContainerAndExecPrParam:
         assert mock_setup.call_args.kwargs["authenticated"] is False
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container._try_clone_into_container")
-    @patch("sunaba.tools.container.proxy_lifecycle")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._try_clone_into_container")
+    @patch("sunaba.tools.container.lifecycle.proxy_lifecycle")
     def test_proxied_clone_repo_passes_open_read_grant(
         self,
         mock_proxy_lifecycle: MagicMock,
@@ -745,7 +745,7 @@ class TestPipExtrasParam:
             (0, (b"", b"")),
         ])
 
-        with patch("sunaba.tools.container.logger"):
+        with patch("sunaba.tools.container.clone.logger"):
             result = _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
                 pip_extras="[testing]",
@@ -768,7 +768,7 @@ class TestPipExtrasParam:
             (0, (b"", b"")),
         ])
 
-        with patch("sunaba.tools.container.logger"):
+        with patch("sunaba.tools.container.clone.logger"):
             result = _setup_pr_branch(
                 container, "abc123def456", "owner/repo", 136, "/tmp/repo",
                 pip_extras=None,
@@ -786,10 +786,10 @@ class TestCloneRepoPrInteraction:
     """Tests for clone_repo + pr interaction."""
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container._setup_pr_branch")
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._setup_pr_branch")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     def test_clone_repo_skipped_when_pr_set(
         self,
         mock_clone_net: MagicMock,
@@ -818,10 +818,10 @@ class TestCloneRepoPrInteraction:
         mock_setup.assert_called_once()
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container._ensure_image")
-    @patch("sunaba.tools.container.validate_image_ref")
-    @patch("sunaba.tools.container._setup_pr_branch")
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle._setup_pr_branch")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     def test_clone_repo_called_when_pr_not_set(
         self,
         mock_clone_net: MagicMock,

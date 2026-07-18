@@ -16,9 +16,9 @@ class TestRunContainerAndExecCloneRepo:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for run_container_and_exec with clone_repo."""
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_clone_repo_called_before_exec(
         self,
         mock_validate: MagicMock,
@@ -46,9 +46,9 @@ class TestRunContainerAndExecCloneRepo:
         assert result["status"] == "ok"
         mock_clone.assert_called_once()
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_clone_error_reported_in_result(
         self,
         mock_validate: MagicMock,
@@ -73,9 +73,9 @@ class TestRunContainerAndExecCloneRepo:
         assert result["status"] == "ok"
         assert result["clone_warning"] == "path not found"
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_network_clone_default_path(
         self,
         mock_validate: MagicMock,
@@ -101,9 +101,9 @@ class TestRunContainerAndExecCloneRepo:
         assert "clone_warning" not in result
         mock_clone.assert_called_once()
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_without_clone_repo_normally(
         self,
         mock_validate: MagicMock,
@@ -126,9 +126,9 @@ class TestRunContainerAndExecCloneRepo:
         mock_clone.assert_not_called()
         assert "clone_warning" not in result
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_network_clone_with_clone_repo(
         self,
         mock_validate: MagicMock,
@@ -161,9 +161,9 @@ class TestRunContainerAndExecPipExtras:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for pip_extras with clone_repo in run_container_and_exec (Issue #245)."""
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pip_extras_none_skips_install(
         self,
         mock_validate: MagicMock,
@@ -188,9 +188,9 @@ class TestRunContainerAndExecPipExtras:
         assert result["status"] == "ok"
         assert mock_container.exec_run.call_count == 1
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_default_pip_extras_installs_dev(
         self,
         mock_validate: MagicMock,
@@ -220,9 +220,9 @@ class TestRunContainerAndExecPipExtras:
         first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
         assert "pip install -e '.[dev]' -q" in first_cmd
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pip_extras_installed_when_clone_repo_auto_enables_network(
         self,
         mock_validate: MagicMock,
@@ -256,9 +256,9 @@ class TestRunContainerAndExecPipExtras:
         first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
         assert "pip install -e '.[dev]' -q" in first_cmd
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_custom_pip_extras(
         self,
         mock_validate: MagicMock,
@@ -287,9 +287,9 @@ class TestRunContainerAndExecPipExtras:
         first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
         assert "pip install -e '.[test]' -q" in first_cmd
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pip_install_failure_non_fatal(
         self,
         mock_validate: MagicMock,
@@ -318,9 +318,9 @@ class TestRunContainerAndExecPipExtras:
         assert "clone_warning" in result
         assert "pip install" in result["clone_warning"]
 
-    @patch("sunaba.tools.container._clone_repo_via_network")
+    @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_clone_failure_skips_pip_install(
         self,
         mock_validate: MagicMock,
@@ -351,7 +351,7 @@ class TestRunContainerAndExecTimeout:
     """Tests for run_container_and_exec with timeout (Issue #138)."""
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_timeout_applied_in_cmd(
         self,
         mock_validate: MagicMock,
@@ -376,7 +376,7 @@ class TestRunContainerAndExecTimeout:
         assert "timeout 5" in cmd
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_timeout_zero_not_applied(
         self,
         mock_validate: MagicMock,
@@ -400,7 +400,7 @@ class TestRunContainerAndExecTimeout:
         assert "timeout" not in cmd
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_timeout_status_on_exit_124(
         self,
         mock_validate: MagicMock,
@@ -424,7 +424,7 @@ class TestRunContainerAndExecTimeout:
         assert result["exit_code"] == 124
 
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_exit_124_without_timeout_is_error(
         self,
         mock_validate: MagicMock,
@@ -462,9 +462,9 @@ class TestPipArgs:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for pip_args propagation through _run_pip_install."""
 
-    @patch("sunaba.tools.container._try_clone_into_container", return_value=("cloned", None))
+    @patch("sunaba.tools.container.lifecycle._try_clone_into_container", return_value=("cloned", None))
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pip_args_passed_to_exec_run(
         self,
         mock_validate: MagicMock,
@@ -496,9 +496,9 @@ class TestPipArgs:
         assert "--index-url" in call_str
         assert "https://example.com" in call_str
 
-    @patch("sunaba.tools.container._try_clone_into_container", return_value=("cloned", None))
+    @patch("sunaba.tools.container.lifecycle._try_clone_into_container", return_value=("cloned", None))
     @patch("sunaba.tools.container._docker")
-    @patch("sunaba.tools.container.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
     def test_pip_args_none_omitted(
         self,
         mock_validate: MagicMock,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from src.sunaba.edit_verify import (
+from src.sunaba.search import (
     _parse_grep_output,
     _parse_rg_json,
     _parse_sg_json,

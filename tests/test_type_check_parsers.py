@@ -133,43 +133,43 @@ class TestNeedsPCRE2:
     """Tests for _needs_pcre2 helper."""
 
     def test_lookahead_positive(self) -> None:
-        from src.sunaba.edit_verify import _needs_pcre2
+        from src.sunaba.search import _needs_pcre2
         assert _needs_pcre2(r"foo(?=bar)")
 
     def test_lookahead_negative(self) -> None:
-        from src.sunaba.edit_verify import _needs_pcre2
+        from src.sunaba.search import _needs_pcre2
         assert _needs_pcre2(r"foo(?!bar)")
 
     def test_lookbehind_positive(self) -> None:
-        from src.sunaba.edit_verify import _needs_pcre2
+        from src.sunaba.search import _needs_pcre2
         assert _needs_pcre2(r"(?<=foo)bar")
 
     def test_lookbehind_negative(self) -> None:
-        from src.sunaba.edit_verify import _needs_pcre2
+        from src.sunaba.search import _needs_pcre2
         assert _needs_pcre2(r"(?<!foo)bar")
 
     def test_non_capturing_group_not_detected(self) -> None:
-        from src.sunaba.edit_verify import _needs_pcre2
+        from src.sunaba.search import _needs_pcre2
         assert not _needs_pcre2(r"(?:foo)")
 
     def test_flags_not_detected(self) -> None:
-        from src.sunaba.edit_verify import _needs_pcre2
+        from src.sunaba.search import _needs_pcre2
         assert not _needs_pcre2(r"(?i)foo")
 
     def test_named_group_not_detected(self) -> None:
-        from src.sunaba.edit_verify import _needs_pcre2
+        from src.sunaba.search import _needs_pcre2
         assert not _needs_pcre2(r"(?P<name>foo)")
 
     def test_simple_pattern_not_detected(self) -> None:
-        from src.sunaba.edit_verify import _needs_pcre2
+        from src.sunaba.search import _needs_pcre2
         assert not _needs_pcre2(r"foo.*bar")
 
     def test_atomic_group_not_detected(self) -> None:
-        from src.sunaba.edit_verify import _needs_pcre2
+        from src.sunaba.search import _needs_pcre2
         assert not _needs_pcre2(r"(?>foo)")
 
     def test_empty_pattern(self) -> None:
-        from src.sunaba.edit_verify import _needs_pcre2
+        from src.sunaba.search import _needs_pcre2
         assert not _needs_pcre2("")
 
 

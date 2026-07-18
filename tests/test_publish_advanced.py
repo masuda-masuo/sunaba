@@ -17,8 +17,8 @@ class TestPublishSquashCheckpoints:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for publish with automatic checkpoint squash."""
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_execute_squash_checkpoints(
         self,
         mock_record: MagicMock,
@@ -54,8 +54,8 @@ class TestPublishSquashCheckpoints:
         ]
         assert len(reset_calls) == 1
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_execute_squash_checkpoints_no_tracking(
         self,
         mock_record: MagicMock,
@@ -90,8 +90,8 @@ class TestPublishAllowForcePush:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for publish with allow_force_push=True."""
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_execute_allow_force_push(
         self,
         mock_record: MagicMock,
@@ -133,8 +133,8 @@ class TestPublishApiPushFallback:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
     """Tests for publish when git push fails and falls back to _try_api_push."""
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_execute_api_push_fallback_succeeds(
         self,
         mock_record: MagicMock,
@@ -166,8 +166,8 @@ class TestPublishApiPushFallback:
         assert result["status"] == "pushed"
         assert result["sha"] == "bbbbbbb"
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_execute_api_push_fallback_fails(
         self,
         mock_record: MagicMock,
@@ -228,9 +228,9 @@ class TestPublishLazyTokenInjection:
         # exec_run is called as exec_run([...], stdout=, stderr=, environment=)
         return call.kwargs.get("environment")
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._resolve_vcs_token")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_token_injected_into_push_exec_only(
         self,
         mock_record: MagicMock,
@@ -268,9 +268,9 @@ class TestPublishLazyTokenInjection:
         assert readonly_calls  # sanity
         assert all(self._env_of(c) is None for c in readonly_calls)
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._resolve_vcs_token")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_no_host_token_leaves_push_env_unset(
         self,
         mock_record: MagicMock,
@@ -299,9 +299,9 @@ class TestPublishLazyTokenInjection:
         calls = container.exec_run.call_args_list
         assert all(self._env_of(c) is None for c in calls)
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._resolve_vcs_token")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_token_injected_into_api_push_fallback(
         self,
         mock_record: MagicMock,
@@ -361,12 +361,12 @@ class TestPublishProxiedCredentialRouting:
     def _env_of(call) -> dict | None:
         return call.kwargs.get("environment")
 
-    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
-    @patch("sunaba.tools.vcs.authorized_push_grant")
-    @patch("sunaba.tools.vcs.proxy_configured", return_value=True)
-    @patch("sunaba.tools.vcs._resolve_vcs_token")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.vcs.publishing.authorized_push_grant")
+    @patch("sunaba.tools.vcs.publishing.proxy_configured", return_value=True)
+    @patch("sunaba.tools.vcs.publishing._resolve_vcs_token")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_push_exec_token_free_and_grant_carries_credential(
         self,
         mock_record: MagicMock,
@@ -399,12 +399,12 @@ class TestPublishProxiedCredentialRouting:
         assert calls  # sanity
         assert all(self._env_of(c) is None for c in calls)
 
-    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
-    @patch("sunaba.tools.vcs.authorized_push_grant")
-    @patch("sunaba.tools.vcs.proxy_configured", return_value=True)
-    @patch("sunaba.tools.vcs._resolve_vcs_token")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.vcs.publishing.authorized_push_grant")
+    @patch("sunaba.tools.vcs.publishing.proxy_configured", return_value=True)
+    @patch("sunaba.tools.vcs.publishing._resolve_vcs_token")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_pr_create_runs_host_side_no_exec_token(
         self,
         mock_record: MagicMock,
@@ -423,7 +423,7 @@ class TestPublishProxiedCredentialRouting:
         mock_docker.return_value = client
 
         with patch(
-            "sunaba.tools.vcs._create_pr_via_api",
+            "sunaba.tools.vcs.publishing._create_pr_via_api",
             return_value="https://github.com/owner/repo/pull/9",
         ) as mock_create_pr:
             result = _decode(publish(

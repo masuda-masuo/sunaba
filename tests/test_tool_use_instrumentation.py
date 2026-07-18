@@ -21,8 +21,8 @@ from tests.conftest import _make_client_mock, _make_container_mock
 
 
 class TestCheckpointListRecordsToolUse:
-    @patch("sunaba.tools.vcs.record_tool_use")
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.checkpoints.record_tool_use")
+    @patch("sunaba.tools.vcs.checkpoints._docker")
     def test_records_on_call(
         self, mock_docker: MagicMock, mock_record: MagicMock
     ) -> None:
@@ -33,8 +33,8 @@ class TestCheckpointListRecordsToolUse:
 
         mock_record.assert_called_once_with("abc123def456", "checkpoint_list")
 
-    @patch("sunaba.tools.vcs.record_tool_use")
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.checkpoints.record_tool_use")
+    @patch("sunaba.tools.vcs.checkpoints._docker")
     def test_no_record_when_container_missing(
         self, mock_docker: MagicMock, mock_record: MagicMock
     ) -> None:

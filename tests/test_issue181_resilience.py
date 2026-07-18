@@ -39,7 +39,7 @@ class TestSandboxStopForceKill:
     """sandbox_stop kills + force-removes instead of graceful stop."""
 
     @patch("sunaba.tools.container.lifecycle.record_stop")
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.checkpoints._docker")
     @patch("sunaba.tools.container._docker")
     def test_kill_then_force_remove(
         self,
@@ -70,7 +70,7 @@ class TestSandboxStopForceKill:
         assert "stopped and removed" in result
 
     @patch("sunaba.tools.container.lifecycle.record_stop")
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.checkpoints._docker")
     @patch("sunaba.tools.container._docker")
     def test_kill_apierror_still_removes(
         self,
@@ -337,7 +337,7 @@ class TestSandboxStopUnpushedCheckpoints:
     """sandbox_stop warns about unpushed checkpoints unless force=True."""
 
     @patch("sunaba.tools.container.lifecycle.record_stop")
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.checkpoints._docker")
     @patch("sunaba.tools.container._docker")
     def test_warns_without_force(
         self,
@@ -387,7 +387,7 @@ class TestSandboxStopUnpushedCheckpoints:
         assert "stopped and removed" in result
 
     @patch("sunaba.tools.container.lifecycle.record_stop")
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.checkpoints._docker")
     @patch("sunaba.tools.container._docker")
     def test_no_unpushed_proceeds(
         self,
@@ -414,7 +414,7 @@ class TestSandboxStopUnpushedCheckpoints:
         assert "stopped and removed" in result
 
     @patch("sunaba.tools.container.lifecycle.record_stop")
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.checkpoints._docker")
     @patch("sunaba.tools.container._docker")
     def test_no_git_proceeds(
         self,

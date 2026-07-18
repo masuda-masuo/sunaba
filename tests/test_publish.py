@@ -35,8 +35,8 @@ class TestPublish:
     def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_successful_push(
         self,
         mock_record: MagicMock,
@@ -67,9 +67,9 @@ class TestPublish:
         assert result["branch"] == "fix/x"
         assert result["sha"] == "abc1234"
 
-    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_recovers_proxy_env_lost_after_restart(
         self,
         mock_record: MagicMock,
@@ -109,7 +109,7 @@ class TestPublish:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        with patch("sunaba.tools.vcs.authorized_push_grant") as mock_grant:
+        with patch("sunaba.tools.vcs.publishing.authorized_push_grant") as mock_grant:
             result = _decode(publish(
                 container_id="abc123def456",
                 repo="owner/repo",
@@ -124,9 +124,9 @@ class TestPublish:
         # not silently skipped as it would be if the env stayed lost.
         mock_grant.assert_called_once()
 
-    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_fails_closed_when_proxy_env_unrecoverable(
         self,
         mock_record: MagicMock,
@@ -162,9 +162,9 @@ class TestPublish:
         assert "sidecar unreachable" in result["error"]
         container.exec_run.assert_not_called()
 
-    @patch("sunaba.tools.vcs.proxy_lifecycle.ensure_egress_proxy")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.proxy_lifecycle.ensure_egress_proxy")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_reconciles_sidecar_even_when_proxy_env_is_present(
         self,
         mock_record: MagicMock,
@@ -188,7 +188,7 @@ class TestPublish:
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
-        with patch("sunaba.tools.vcs.authorized_push_grant") as mock_grant:
+        with patch("sunaba.tools.vcs.publishing.authorized_push_grant") as mock_grant:
             result = _decode(publish(
                 container_id="abc123def456",
                 repo="owner/repo",
@@ -201,8 +201,8 @@ class TestPublish:
         mock_ensure_proxy.assert_called_once_with(client)
         mock_grant.assert_called_once()
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_pr_creation_rejects_empty_body(
         self,
         mock_record: MagicMock,
@@ -229,8 +229,8 @@ class TestPublish:
         assert "pr_body" in result["error"]
         container.exec_run.assert_not_called()
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_successful_push_with_pr(
         self,
         mock_record: MagicMock,
@@ -243,9 +243,9 @@ class TestPublish:
 
         # With a host token, PR creation runs host-side (#360) — no gh exec.
         with patch(
-            "sunaba.tools.vcs._resolve_vcs_token", return_value="ghp_test"
+            "sunaba.tools.vcs.publishing._resolve_vcs_token", return_value="ghp_test"
         ), patch(
-            "sunaba.tools.vcs._create_pr_via_api",
+            "sunaba.tools.vcs.publishing._create_pr_via_api",
             return_value="https://github.com/owner/repo/pull/99",
         ) as mock_create_pr:
             result = _decode(publish(
@@ -265,8 +265,8 @@ class TestPublish:
             "owner/repo", "fix/x", "My PR Title", "PR body here", "", "ghp_test"
         )
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_pr_host_api_failure_still_reports_push(
         self,
         mock_record: MagicMock,
@@ -278,9 +278,9 @@ class TestPublish:
         mock_docker.return_value = client
 
         with patch(
-            "sunaba.tools.vcs._resolve_vcs_token", return_value="ghp_test"
+            "sunaba.tools.vcs.publishing._resolve_vcs_token", return_value="ghp_test"
         ), patch(
-            "sunaba.tools.vcs._create_pr_via_api",
+            "sunaba.tools.vcs.publishing._create_pr_via_api",
             side_effect=RuntimeError("GitHub API POST /repos/owner/repo/pulls returned HTTP 422: A pull request already exists"),
         ):
             result = _decode(publish(
@@ -298,8 +298,8 @@ class TestPublish:
         assert result["sha"] == "abc1234"
         assert "already exists" in result["pr_create_error"]
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_pr_legacy_container_token_uses_gh_exec(
         self,
         mock_record: MagicMock,
@@ -320,9 +320,9 @@ class TestPublish:
         mock_docker.return_value = client
 
         with patch(
-            "sunaba.tools.vcs._resolve_vcs_token", return_value=""
+            "sunaba.tools.vcs.publishing._resolve_vcs_token", return_value=""
         ), patch(
-            "sunaba.tools.vcs.proxy_configured", return_value=False
+            "sunaba.tools.vcs.publishing.proxy_configured", return_value=False
         ):
             result = _decode(publish(
                 container_id="abc123def456",
@@ -345,8 +345,8 @@ class TestPublish:
         assert "--base dev" in gh_cmd
         assert gh_cmd.index("--base dev") < gh_cmd.index("; rm -f")
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_pr_proxied_without_host_token_errors(
         self,
         mock_record: MagicMock,
@@ -358,11 +358,11 @@ class TestPublish:
         mock_docker.return_value = client
 
         with patch(
-            "sunaba.tools.vcs._resolve_vcs_token", return_value=""
+            "sunaba.tools.vcs.publishing._resolve_vcs_token", return_value=""
         ), patch(
-            "sunaba.tools.vcs.proxy_configured", return_value=True
+            "sunaba.tools.vcs.publishing.proxy_configured", return_value=True
         ), patch(
-            "sunaba.tools.vcs.authorized_push_grant"
+            "sunaba.tools.vcs.publishing.authorized_push_grant"
         ):
             result = _decode(publish(
                 container_id="abc123def456",
@@ -378,8 +378,8 @@ class TestPublish:
         assert result["status"] == "pushed"
         assert "host-side token" in result["pr_create_error"]
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_commit_nothing_to_commit_is_ok(
         self,
         mock_record: MagicMock,
@@ -408,8 +408,8 @@ class TestPublish:
 
         assert result["status"] == "pushed"
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_push_failure(
         self,
         mock_record: MagicMock,
@@ -442,8 +442,8 @@ class TestPublish:
         assert result["step"] == "git_push"
         assert "permission denied" in result["error"]
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_push_blocked_by_egress_proxy_skips_api_fallback(
         self,
         mock_record: MagicMock,
@@ -489,8 +489,8 @@ class TestPublish:
         # Exactly 7 exec calls (1 git ls-files + 5 pre-push + 1 failed push) -- no _try_api_push was triggered
         assert container.exec_run.call_count == 7
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_default_working_dir(
         self,
         mock_record: MagicMock,
@@ -512,9 +512,9 @@ class TestPublish:
         first_cmd = container.exec_run.call_args_list[0][0][0][2]
         assert "cd /home/sandbox" in first_cmd
 
-    @patch("sunaba.tools.vcs.resolve_git_root")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.resolve_git_root")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_auto_resolves_working_dir_from_meta(
         self,
         mock_record: MagicMock,
@@ -544,8 +544,8 @@ class TestPublish:
                 continue
             assert "/tmp/repo/sunaba" in cmd, f"Expected resolved path in: {cmd}"
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_uses_default_identity(
         self,
         mock_record: MagicMock,
@@ -573,8 +573,8 @@ class TestPublish:
         assert "sunaba[bot]@users.noreply.github.com" in commit_cmd
         assert "'sunaba[bot]'" in commit_cmd
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_with_custom_identity(
         self,
         mock_record: MagicMock,
@@ -603,8 +603,8 @@ class TestPublish:
         assert "'Custom User'" in commit_cmd
         assert "custom@example.com" in commit_cmd
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_swept_untracked_empty(
         self,
         mock_record: MagicMock,
@@ -625,8 +625,8 @@ class TestPublish:
         assert result["status"] == "pushed"
         assert result["swept_untracked"] == []
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_swept_untracked_with_files(
         self,
         mock_record: MagicMock,

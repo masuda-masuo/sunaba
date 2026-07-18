@@ -118,8 +118,8 @@ class TestVerifyNudges:
 class TestPublishVerifyGate:
     """publish blocks with error without a recorded verify success, unless skip_verify_gate=True."""
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_block_when_no_verify_recorded(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
@@ -134,8 +134,8 @@ class TestPublishVerifyGate:
         assert "skip_verify_gate=True" in result["error"]
         assert result["recommended_next_action"] == "verify_in_container"
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_skip_verify_gate_bypasses_block(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
@@ -149,8 +149,8 @@ class TestPublishVerifyGate:
         assert "no successful verify_in_container" in result["warning"]
         assert result["recommended_next_action"] == "verify_in_container"
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_no_warning_after_verify_success(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
@@ -164,8 +164,8 @@ class TestPublishVerifyGate:
         assert "warning" not in result
         assert "recommended_next_action" not in result
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_skip_verify_gate_no_warning_after_verify(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
@@ -179,8 +179,8 @@ class TestPublishVerifyGate:
         assert "warning" not in result
         assert "recommended_next_action" not in result
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_warning_attached_to_other_errors_too(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
@@ -202,8 +202,8 @@ class TestPublishVerifyGate:
 class TestPublishPushOnlyNote:
     """create_pr=False success carries a push-only note."""
 
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_note_when_create_pr_false(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
@@ -218,12 +218,12 @@ class TestPublishPushOnlyNote:
         assert "create_pr=True" in result["note"]
 
     @patch(
-        "sunaba.tools.vcs._create_pr_via_api",
+        "sunaba.tools.vcs.publishing._create_pr_via_api",
         return_value="https://github.com/owner/repo/pull/1",
     )
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="tok")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value="tok")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_no_note_when_pr_created(
         self,
         mock_record: MagicMock,
@@ -258,7 +258,7 @@ class TestContainerNotFoundNudge:
         assert payload["gate_passed"] is False
         assert "sandbox_list_containers" in payload["recommended_next_action"]
 
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.publishing._docker")
     def test_publish_not_found_carries_nudge(self, mock_docker: MagicMock) -> None:
         client = MagicMock()
         client.containers.get.side_effect = NotFound("not found")

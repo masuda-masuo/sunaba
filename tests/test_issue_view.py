@@ -10,9 +10,9 @@ from tests.conftest import _decode, _make_client_mock, _make_container_mock
 class TestIssueView:
     """Tests for issue_view."""
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
     def test_successful_fetch(
         self,
         mock_record: MagicMock,
@@ -28,7 +28,7 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value={
                     "number": 55,
                     "title": "Implement VCS tools",
@@ -37,7 +37,7 @@ class TestIssueView:
                 },
             ) as mock_api,
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 return_value=[],
             ) as mock_comments,
         ):
@@ -63,8 +63,8 @@ class TestIssueView:
         assert call_args[0][1] == "issue_view"
         assert call_args[1]["approved"] is None
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="ghs_tok")
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs.issues._docker")
     def test_uses_host_token_when_available(
         self,
         mock_docker: MagicMock,
@@ -77,11 +77,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value={"number": 1, "title": "T", "body": "B"},
             ) as mock_api,
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 return_value=[],
             ),
         ):
@@ -89,7 +89,7 @@ class TestIssueView:
 
         mock_api.assert_called_once_with("/repos/owner/repo/issues/1", "ghs_tok")
 
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.issues._docker")
     def test_container_not_found(
         self,
         mock_docker: MagicMock,
@@ -110,8 +110,8 @@ class TestIssueView:
         assert "error" in result
         assert "not found" in result["error"]
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
     def test_api_error_is_reported(
         self,
         mock_docker: MagicMock,
@@ -123,7 +123,7 @@ class TestIssueView:
         mock_docker.return_value = client
 
         with patch(
-            "sunaba.tools.vcs._github_api_request",
+            "sunaba.tools.vcs.issues._github_api_request",
             side_effect=RuntimeError(
                 "GitHub API GET /repos/owner/repo/issues/999 returned HTTP 404: Not Found"
             ),
@@ -137,9 +137,9 @@ class TestIssueView:
         assert "error" in result
         assert "404" in result["error"]
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
     def test_custom_save_path(
         self,
         mock_record: MagicMock,
@@ -153,11 +153,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value={"number": 1, "title": "Test", "body": "Simple body"},
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 return_value=[],
             ),
         ):
@@ -172,9 +172,9 @@ class TestIssueView:
         assert result["size_bytes"] == len("Simple body".encode())
         assert result["comments"] == 0
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
     def test_empty_body(
         self,
         mock_record: MagicMock,
@@ -188,11 +188,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value={"number": 1, "title": "No content", "body": ""},
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 return_value=[],
             ),
         ):
@@ -206,8 +206,8 @@ class TestIssueView:
         assert result["size_bytes"] == 0
         assert result["comments"] == 0
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
     def test_write_failure_is_reported(
         self,
         mock_docker: MagicMock,
@@ -222,11 +222,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value={"number": 1, "title": "T", "body": "B"},
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 return_value=[],
             ),
         ):
@@ -241,9 +241,9 @@ class TestIssueView:
 
     # -- Comment-specific tests --
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
     def test_comments_appended_to_body(
         self,
         mock_record: MagicMock,
@@ -262,11 +262,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value={"number": 42, "title": "Test", "body": "Issue body."},
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 return_value=comments,
             ),
         ):
@@ -292,9 +292,9 @@ class TestIssueView:
         assert "Second comment." in written
         assert written.index("@alice") < written.index("@bob")
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
     def test_no_comments_writes_body_only(
         self,
         mock_record: MagicMock,
@@ -308,11 +308,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value={"number": 42, "title": "Test", "body": "Issue body."},
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 return_value=[],
             ),
         ):
@@ -332,9 +332,9 @@ class TestIssueView:
         assert written == "Issue body."
         assert "## Comments" not in written
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
     def test_comments_api_error(
         self,
         mock_record: MagicMock,
@@ -348,11 +348,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value={"number": 42, "title": "Test", "body": "Body."},
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 side_effect=RuntimeError(
                     "GitHub API GET /repos/owner/repo/issues/42/comments returned HTTP 403"
                 ),
@@ -377,9 +377,9 @@ class TestIssueView:
             "pull_request": {"url": "https://api.github.com/repos/owner/repo/pulls/85"},
         }
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
     def test_pr_review_comments_merged(
         self,
         mock_record: MagicMock,
@@ -412,11 +412,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value=self._make_pr_issue_response(),
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 side_effect=[
                     [issue_comment],   # issue comments
                     [pr_inline],       # PR inline comments
@@ -450,9 +450,9 @@ class TestIssueView:
         assert written.index("@alice") < written.index("@bob")
         assert written.index("@bob") < written.index("@charlie")
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
     def test_pr_review_shows_approval_state(
         self,
         mock_record: MagicMock,
@@ -473,11 +473,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value=self._make_pr_issue_response(),
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 side_effect=[
                     [],       # issue comments
                     [],       # PR inline comments
@@ -500,9 +500,9 @@ class TestIssueView:
 
         assert "(APPROVED)" in written
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
     def test_pr_review_api_fallback_silent(
         self,
         mock_record: MagicMock,
@@ -527,11 +527,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value=self._make_pr_issue_response(),
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 side_effect=side_effect,
             ),
         ):
@@ -544,9 +544,9 @@ class TestIssueView:
         assert result["comments"] == 1
         assert "error" not in result
 
-    @patch("sunaba.tools.vcs._resolve_vcs_token", return_value="")
-    @patch("sunaba.tools.vcs._docker")
-    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
     def test_pr_empty_review_body_skipped(
         self,
         mock_record: MagicMock,
@@ -572,11 +572,11 @@ class TestIssueView:
 
         with (
             patch(
-                "sunaba.tools.vcs._github_api_request",
+                "sunaba.tools.vcs.issues._github_api_request",
                 return_value=self._make_pr_issue_response(),
             ),
             patch(
-                "sunaba.tools.vcs._github_api_request_list_all",
+                "sunaba.tools.vcs.issues._github_api_request_list_all",
                 side_effect=[
                     [issue_comment],
                     [],

@@ -447,28 +447,28 @@ class TestPublishProxiedCredentialRouting:
 class TestResolvePushToken:
     """Unit tests for the host-side token resolver (Issue #347)."""
 
-    @patch("sunaba.tools.vcs.token_broker.mint_token")
+    @patch("sunaba.tools.github_api.token_broker.mint_token")
     def test_prefers_minted_broker_token(self, mock_mint: MagicMock) -> None:
-        from sunaba.tools.vcs import _resolve_vcs_token
+        from sunaba.tools.github_api import _resolve_vcs_token
 
         mock_mint.return_value = "ghs_minted"
         with patch.dict("os.environ", {"GITHUB_TOKEN": "ghs_static"}):
             assert _resolve_vcs_token() == "ghs_minted"
 
-    @patch("sunaba.tools.vcs.token_broker.mint_token")
+    @patch("sunaba.tools.github_api.token_broker.mint_token")
     def test_falls_back_to_static_env(self, mock_mint: MagicMock) -> None:
-        from sunaba.tools.vcs import _resolve_vcs_token
+        from sunaba.tools.github_api import _resolve_vcs_token
 
         mock_mint.return_value = None
         with patch.dict("os.environ", {"GITHUB_TOKEN": "ghs_static"}, clear=True):
             assert _resolve_vcs_token() == "ghs_static"
 
-    @patch("sunaba.tools.vcs.token_broker.mint_token")
-    @patch("sunaba.tools.vcs.github_auth.get_global_provider")
+    @patch("sunaba.tools.github_api.token_broker.mint_token")
+    @patch("sunaba.tools.github_api.github_auth.get_global_provider")
     def test_prefers_global_provider_over_static_env(
         self, mock_get_provider: MagicMock, mock_mint: MagicMock
     ) -> None:
-        from sunaba.tools.vcs import _resolve_vcs_token
+        from sunaba.tools.github_api import _resolve_vcs_token
 
         mock_mint.return_value = None
         mock_provider = MagicMock()
@@ -477,9 +477,9 @@ class TestResolvePushToken:
         with patch.dict("os.environ", {"GITHUB_TOKEN": "ghs_static"}, clear=True):
             assert _resolve_vcs_token() == "ghs_provider_tok"
 
-    @patch("sunaba.tools.vcs.token_broker.mint_token")
+    @patch("sunaba.tools.github_api.token_broker.mint_token")
     def test_empty_when_no_token_available(self, mock_mint: MagicMock) -> None:
-        from sunaba.tools.vcs import _resolve_vcs_token
+        from sunaba.tools.github_api import _resolve_vcs_token
 
         mock_mint.return_value = None
         with patch.dict("os.environ", {}, clear=True):

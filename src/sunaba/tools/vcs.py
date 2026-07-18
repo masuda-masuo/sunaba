@@ -32,12 +32,15 @@ from sunaba.tools.github_api import (
     _push_token_env,
     _resolve_vcs_token,
 )
+from sunaba.tools.publish_ops import (
+    create_pull_request,
+    git_prepare_commit,
+    git_push_with_fallback,
+)
 from sunaba.tools.publish_planner import (
     build_push_command,
     finish_json,
-    is_egress_block,
     pr_body_validation_error,
-    push_failure_hints,
     select_push_env,
     verify_gate_error,
 )
@@ -988,12 +991,9 @@ def publish(
 ) -> str:
     """Stage, commit, push, and optionally create a PR -- the single exit tool.
 
-    Executes in one call with no dry-run step.  Does NOT verify: call
-    verify_in_container first (edit -> verify -> publish).  Requires a
-    container started with allow_network=True.  Credentials are
-    resolved host-side at call time, so no token enters the container;
-    if git push is refused, a GitHub-API transport is tried
-    automatically.
+    Does NOT verify: call verify_in_container first.  Credentials resolved
+    host-side; no token enters the container.  Falls back to GitHub Objects
+    API on git-push refusal.
 
     Args:
         container_id: Container ID prefix.
@@ -1004,14 +1004,11 @@ def publish(
         create_pr: Open a pull request after the push.
         pr_title: PR title; required when create_pr=True.
         pr_body: PR body.
-        base_branch: PR base (default: repository default branch).
-        allow_force_push: Permit git push --force when needed.
-        author_name: Override the image-default commit author.
-        author_email: Override the image-default commit author email.
-        skip_verify_gate: Bypass the verify gate requirement (default
-            False).  When True, no error is raised even when no
-            successful verify_in_container is recorded.  Intended for
-            human-authorized bypass via MCP client tool-approval prompt.
+        base_branch: PR base (default: repo default branch).
+        allow_force_push: Permit git push --force.
+        author_name: Override commit author name.
+        author_email: Override commit author email.
+        skip_verify_gate: Bypass verify gate.
 
     Returns:
         JSON with the operation result.
@@ -1027,312 +1024,93 @@ def publish(
     cid = container_id[:12]
     working_dir = resolve_git_root(container, working_dir)
 
-    # Verify gate (Issue #615): when no successful verify_in_container is
-    # recorded for this container in this server session AND
-    # skip_verify_gate is False, publish is blocked with an error before
-    # any git operations (checkout / add / commit / push).
-    # skip_verify_gate=True is a human-authorized bypass (MCP client
-    # tool-approval prompt), following the same pattern as skip_lint_gate
-    # / skip_type_gate in verify_in_container.
     verified = has_verify_success(cid)
-
     gate_err = verify_gate_error(verified, skip_verify_gate)
     if gate_err:
         return json.dumps(gate_err)
 
-    # Reject empty pr_body when creating a PR (Issue #608)
     body_err = pr_body_validation_error(create_pr, pr_body)
     if body_err:
         return json.dumps(body_err)
 
-    # Helper: run a shell command in the container in working_dir.
-    # *env* carries a lazily-injected VCS token (Issue #347) for the push /
-    # PR execs only; it is ``None`` for the read-only git commands so no
-    # credential is ever exposed to operations that do not need it.
-    def _run(
-        cmd: str, env: dict[str, str] | None = None
-    ) -> tuple[int, str, str]:
+    def _run(cmd, env=None):
         full_cmd = f"cd {shlex.quote(working_dir)} && {cmd}"
         ec, out = container.exec_run(
             ["/bin/sh", "-c", full_cmd],
-            stdout=True,
-            stderr=True,
-            environment=env,
+            stdout=True, stderr=True, environment=env,
         )
-        out_stdout, out_stderr = (
-            out if isinstance(out, tuple) else (out, b"")
-        )
-        stdout_text = (
-            out_stdout.decode("utf-8", errors="replace") if out_stdout else ""
-        )
-        stderr_text = (
-            out_stderr.decode("utf-8", errors="replace") if out_stderr else ""
-        )
-        return ec, stdout_text, stderr_text
+        o, e = out if isinstance(out, tuple) else (out, b"")
+        return (ec,
+            (o.decode("utf-8","replace") if o else ""),
+            (e.decode("utf-8","replace") if e else ""))
 
-    # ------------------------------------------------------------------
-    # Push (one-shot).  The boundary-crossing confirmation two-step
-    # (dry_run -> token -> execute) was retired for V1.0: the human gate
-    # is the MCP client's own tool-approval prompt and the egress proxy
-    # is the structural guard, so an in-band confirmation token only added
-    # ceremony without a real guarantee once tools are auto-approved.
-    # ------------------------------------------------------------------
-    # Recover the proxy control env before touching the container's git
-    # state (#428): a stale/missing control env would make the push fail
-    # closed, so surface it up front rather than mid-operation.
     proxy_err = _ensure_proxy_ready(client)
     if proxy_err:
         return finish_json({"status": "error", "step": "egress_proxy", "error": proxy_err}, verified)
 
-    # --- Git branch check/create ---
-    _run(f"git checkout -b {shlex.quote(branch)} 2>/dev/null || git checkout {shlex.quote(branch)}")
+    commit_err = git_prepare_commit(_run, branch=branch, message=message,
+        author_name=author_name, author_email=author_email)
+    if commit_err:
+        return finish_json(commit_err, verified)
 
-    # --- Git add / commit ---
-    add_ec, add_out, add_err = _run("git add -A")
-    if add_ec != 0:
-        return finish_json({
-            "status": "error",
-            "step": "git_add",
-            "error": add_err or add_out,
-        }, verified)
-
-    # --- Always squash unpushed checkpoints into a single commit ---
-    track_ec, track_out, _ = _run("git rev-parse --abbrev-ref @{u} 2>/dev/null")
-    if track_ec == 0 and track_out.strip():
-        unpushed_ec, unpushed_out, _ = _run("git log --oneline @{u}..HEAD")
-        if unpushed_ec == 0 and unpushed_out.strip():
-            reset_ec, reset_out, reset_err = _run("git reset --soft @{u}")
-            if reset_ec != 0:
-                return finish_json({
-                    "status": "error",
-                    "step": "squash_reset",
-                    "error": reset_err or reset_out,
-                }, verified)
-            readd_ec, readd_out, readd_err = _run("git add -A")
-            if readd_ec != 0:
-                return finish_json({
-                    "status": "error",
-                    "step": "squash_readd",
-                    "error": readd_err or readd_out,
-                }, verified)
-
-    # --- Git identity: set before commit ---
-    name_to_use = author_name if author_name is not None else "sunaba[bot]"
-    email_to_use = author_email if author_email is not None else "sunaba[bot]@users.noreply.github.com"
-    safe_name = shlex.quote(name_to_use)
-    safe_email = shlex.quote(email_to_use)
-    git_commit_cmd = (
-        f"git -c user.name={safe_name} -c user.email={safe_email} commit -m {shlex.quote(message)}"
-    )
-
-    commit_ec, commit_out, commit_err = _run(git_commit_cmd)
-    if commit_ec != 0:
-        # No changes to commit is OK if everything is already committed
-        if "nothing to commit" in (commit_out + commit_err).lower():
-            pass
-        else:
-            return finish_json({
-                "status": "error",
-                "step": "git_commit",
-                "error": commit_err or commit_out,
-            }, verified)
-
-    # --- Lazy VCS token injection (Issue #347) ---
-    # Resolve a token host-side and hand it to the push / PR / API-push
-    # execs only.  The container itself never carries a VCS token (#356/
-    # #439), so any networked container can publish while containers that
-    # never publish never see a token.  When no host token is available,
-    # ``push_env`` is ``None`` and the push has no credential to fall back
-    # on (it fails cleanly rather than silently pushing unauthenticated).
-    #
-    # With the egress proxy configured (#356), the credential goes to the
-    # proxy instead, grant-scoped via ``authorized_push_grant(token=...)``:
-    # the proxy injects ``Authorization`` into the authorized push itself, so
-    # neither the git-push exec nor the API-push fallback carries a token --
-    # the container stays credential-free end to end, and the Objects API
-    # fallback cannot become a proxy bypass.  PR creation runs host-side
-    # (#360), so no exec carries a token anymore when a host token exists.
     push_token = _resolve_vcs_token()
     token_env = _push_token_env(push_token)
     proxied = proxy_configured()
     push_env = select_push_env(token_env, proxied)
-
-    # Determine network state and token availability for deterministic
-    # hints on push failure (Issue #577).  NETWORK_LABEL is stamped by
-    # security.py at container creation; empty push_token means no VCS
-    # credential is configured on the host.  Both are fact-based checks
-    # (no error-text guessing).
     network_off = container.labels.get(NETWORK_LABEL) == "false"
     token_missing = not push_token
-
-    # --- Git push (with transport fallback to API push) ---
     push_cmd = build_push_command(branch, allow_force_push)
-    # Open a short-lived push-authorization grant on the egress proxy so
-    # the sidecar lets *this* push through (#356 / #357).  When no proxy is
-    # configured this is a no-op, so publish behaves exactly as before.  The
-    # grant is revoked on exit -- including the early return below -- so a
-    # failed push (either transport) still closes it.  (PR creation below is
-    # a non-push write on api.github.com and runs host-side, #360.)
+
+    sha = ""
+
+    def _record_crossing(reason, approved):
+        record_boundary_crossing(cid, "publish", reason, approved=approved)
+
     try:
         with authorized_push_grant(repo, token=push_token or None):
-            push_ec, push_out, push_err = _run(push_cmd, env=push_env)
-
-            # Get the SHA of the pushed commit
-            sha = ""
-            sha_ec, sha_out, _ = _run("git rev-parse HEAD")
-            if sha_ec == 0:
-                sha = sha_out.strip()[:7]
-
-            # Transport fallback: git push failed -> try GitHub API push
-            if push_ec != 0:
-                # Issue #401: when the egress proxy blocks the push, do NOT
-                # fall back to the Objects API -- that would bypass the
-                # proxy and silently hide a configuration error so that the
-                # admin never notices the allowlist is misconfigured.
-                push_error_text = (push_err or push_out or "").lower()
-                if is_egress_block(push_error_text):
-                    record_boundary_crossing(
-                        cid,
-                        "publish",
-                        f"repo={repo} branch={branch} push_blocked_by_egress_proxy",
-                        approved=False,
-                    )
-                    return finish_json({
-                        "status": "error",
-                        "step": "git_push",
-                        "error": push_err or push_out,
-                        "sha": sha,
-                        "hint": (
-                            "The egress proxy blocked this push. "
-                            "When SUNABA_ENABLE_EGRESS_PROXY=true, "
-                            "set SUNABA_ALLOWED_REPOS to allow "
-                            "pushes to specific repositories."
-                        ),
-                    }, verified)
-
-                push_result = _try_api_push(
-                    container, cid, repo, branch, working_dir, env=push_env
-                )
-                if push_result.get("status") == "ok":
-                    sha = push_result.get("sha", sha)
-                    push_ec = 0  # mark success for downstream logic
-                else:
-                    record_boundary_crossing(
-                        cid,
-                        "publish",
-                        f"repo={repo} branch={branch} push_failed transport=both",
-                        approved=False,
-                    )
-                    hints = push_failure_hints(network_off, token_missing)
-                    payload: dict[str, Any] = {
-                        "status": "error",
-                        "step": "git_push",
-                        "error": push_err or push_out,
-                        "sha": sha,
-                    }
-                    if hints:
-                        payload["hint"] = " ".join(hints)
-                    return finish_json(payload, verified)
+            push_err_payload, sha = git_push_with_fallback(
+                _run,
+                repo=repo, branch=branch, cid=cid,
+                push_cmd=push_cmd, push_env=push_env,
+                network_off=network_off, token_missing=token_missing,
+                try_api_push=lambda: _try_api_push(
+                    container, cid, repo, branch, working_dir, env=push_env,
+                ),
+                record_crossing=_record_crossing,
+            )
+            if push_err_payload:
+                return finish_json(push_err_payload, verified)
     except ProxyAuthError as exc:
-        record_boundary_crossing(
-            cid,
-            "publish",
-            f"repo={repo} branch={branch} proxy_auth_failed",
-            approved=False,
+        _record_crossing(
+            f"repo={repo} branch={branch} proxy_auth_failed", False,
         )
-        return finish_json({
-            "status": "error",
-            "step": "proxy_auth",
-            "error": str(exc),
-        }, verified)
-    # --- Optionally create PR ---
+        return finish_json(
+            {"status": "error", "step": "proxy_auth", "error": str(exc)}, verified)
+
     pr_url: str | None = None
     if create_pr:
-        pr_create_error: str | None = None
-        if push_token:
-            # Host-side REST call (#360): PR creation is a non-push write on
-            # api.github.com, so keep it out of the container entirely — this
-            # exec was the last one that carried an ephemeral token.
-            try:
-                pr_url = _create_pr_via_api(
-                    repo, branch, pr_title, pr_body, base_branch, push_token
-                )
-            except RuntimeError as exc:
-                pr_create_error = str(exc)
-        elif proxied:
-            # Under the proxy the container is credential-free (#356): with
-            # no host token there is no transport left to try, and an
-            # unauthenticated in-container gh would only fail less clearly.
-            pr_create_error = (
-                "PR creation needs a host-side token (GITHUB_TOKEN / broker); "
-                "the container holds no credential under the egress proxy"
-            )
-        else:
-            # Legacy tokenless-host setup: the container may carry a
-            # startup-injected token, so the in-container gh still works.
-            pr_cmd = (
-                f"gh pr create --repo {shlex.quote(repo)}"
-                f" --head {shlex.quote(branch)}"
-                f" --title {shlex.quote(pr_title)}"
-            )
-            if base_branch:
-                pr_cmd += f" --base {shlex.quote(base_branch)}"
-            if pr_body:
-                body_encoded = base64.b64encode(
-                    pr_body.encode("utf-8")
-                ).decode("ascii")
-                pr_cmd = (
-                    f"BODY_FILE=$(mktemp) &&"
-                    f" echo {shlex.quote(body_encoded)} | base64 -d > \"$BODY_FILE\" &&"
-                    f" {pr_cmd}"
-                    f" --body-file \"$BODY_FILE\""
-                    f'; rm -f "$BODY_FILE"'
-                )
-            else:
-                pr_cmd += " --body ''"
-
-            pr_ec, pr_out, pr_err = _run(pr_cmd, env=token_env)
-            if pr_ec != 0:
-                pr_create_error = pr_err or pr_out
-            else:
-                # Extract PR URL from gh output
-                for line in (pr_out + pr_err).splitlines():
-                    line = line.strip()
-                    if line.startswith("https://github.com/"):
-                        pr_url = line
-                        break
-
+        pr_url, pr_create_error = create_pull_request(
+            _run, repo=repo, branch=branch,
+            pr_title=pr_title, pr_body=pr_body, base_branch=base_branch,
+            push_token=push_token, proxied=proxied,
+            token_env=token_env, create_pr_via_api=_create_pr_via_api)
         if pr_create_error is not None:
-            # Push succeeded but PR creation failed — still record push
-            record_boundary_crossing(
-                cid,
-                "publish",
+            _record_crossing(
                 f"repo={repo} branch={branch} sha={sha} pr_create_failed",
                 approved=True,
             )
             return finish_json({
-                "status": "pushed",
-                "branch": branch,
-                "sha": sha,
+                "status": "pushed", "branch": branch, "sha": sha,
                 "pr_create_error": pr_create_error,
             }, verified)
 
-    # --- Success ---
     details = f"repo={repo} branch={branch} sha={sha}"
     if pr_url:
         details += f" pr_url={pr_url}"
-
-    record_boundary_crossing(
-        cid,
-        "publish",
-        details,
-        approved=True,
-    )
+    _record_crossing(details, approved=True)
 
     result: dict[str, Any] = {
-        "status": "pushed",
-        "branch": branch,
-        "sha": sha,
+        "status": "pushed", "branch": branch, "sha": sha,
     }
     if pr_url:
         result["pr_url"] = pr_url
@@ -1341,7 +1119,6 @@ def publish(
             "pushed only -- no PR was created. Pass create_pr=True to open "
             "one, or the branch may already have an open PR."
         )
-
     return finish_json(result, verified)
 
 

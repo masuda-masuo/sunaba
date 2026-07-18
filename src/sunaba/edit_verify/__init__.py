@@ -27,59 +27,36 @@ import shlex
 import tarfile
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from dataclasses import dataclass
+from typing import Any
 
 from sunaba.journal import record_file_write
 
-# ===========================================================================
-# Status envelope (design-multilang-support.md S4)
-# ===========================================================================
+from .drivers import _EDIT_SYMBOL_DRIVER, _GIT_APPLY_TRANSFORM, _TRANSFORM_RUNNER
+from .parsers import (  # noqa: F401
+    _RUFF_SEVERITY_MAP,
+    _TSC_TEXT_RE,
+    _determine_lint_severity,
+    _parse_eslint_output,
+    _parse_go_vet_output,
+    _parse_golangci_lint_output,
+    _parse_pylint_output,
+    _parse_pyright_output,
+    _parse_ruff_output,
+    _parse_tsc_json,
+    _parse_tsc_text,
+)
+from .paths import ScopeWorkdir, _determine_scope, _get_extension, _is_test_file  # noqa: F401
 
-
-@dataclass
-class VerifyResult:
-    """Status envelope for a single verification layer.
-
-    Each runner (lint / type / test / scan) returns one VerifyResult
-    instead of a bare list of findings, so that errors, missing tools,
-    and intentional skips are never silently treated as "clean".
-    """
-
-    tool: str
-    status: str  # "ok" | "findings" | "not_available" | "error" | "skipped"
-    findings: list[dict[str, Any]] = field(default_factory=list)
-    detail: str = ""
-    exit_code: int = -1
-
-
-def _envelope_ok(tool: str, findings: list[dict[str, Any]] | None = None, exit_code: int = 0) -> VerifyResult:
-    if findings is None:
-        findings = []
-    return VerifyResult(
-        tool=tool,
-        status="findings" if findings else "ok",
-        findings=findings,
-        exit_code=exit_code,
-    )
-
-
-def _envelope_not_available(tool: str, detail: str = "") -> VerifyResult:
-    return VerifyResult(
-        tool=tool, status="not_available", detail=detail, exit_code=127,
-    )
-
-
-def _envelope_error(tool: str, detail: str, exit_code: int) -> VerifyResult:
-    return VerifyResult(
-        tool=tool, status="error", detail=detail, exit_code=exit_code,
-    )
-
-
-def _envelope_skipped(tool: str, reason: str) -> VerifyResult:
-    return VerifyResult(
-        tool=tool, status="skipped", detail=reason,
-    )
+# Import extracted submodules
+from .results import (
+    VerifyResult,
+    _envelope_error,
+    _envelope_not_available,
+    _envelope_ok,
+    _envelope_skipped,
+)
+from .shell import _GO_ENV, _SANDBOX_ENV, _path_display, _quote_path
 
 
 @dataclass
@@ -300,26 +277,6 @@ def _file_size_from_counts(n_bytes: int, n_lines: int) -> dict[str, int]:
     return {"lines": n_lines, "bytes": n_bytes, "approx_tokens": n_bytes // 4}
 
 
-def _is_test_file(file_path: str) -> bool:
-    """Check whether *file_path* follows test-file naming/directory conventions.
-
-    Heuristic:
-    - File basename starts with ``test_`` or contains ``_test`` in its stem (Python/Go).
-    - File basename contains ``.test.`` or ``.spec.`` (JS/TS).
-    - Path contains ``/tests/``, ``/test/``, or ``/__tests__/`` segment.
-    """
-    norm = posixpath.normpath(file_path)
-    basename = posixpath.basename(norm)
-    # Strip the extension so suffix matching works for e.g. ``utils_test.go``.
-    stem = basename.rsplit(".", 1)[0]
-    if stem.startswith("test_") or "_test" in stem:
-        return True
-    if ".test." in basename or ".spec." in basename:
-        return True
-    parts = norm.split(posixpath.sep)
-    if "tests" in parts or "test" in parts or "__tests__" in parts:
-        return True
-    return False
 
 
 def write_file(container: Any, container_id_short: str, file_path: str, content: str) -> None:
@@ -387,16 +344,8 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
     )
 
 
-def _quote_path(path: str | Sequence[str]) -> str:
-    """Shell-escape one or more file paths for use in a command string."""
-    if isinstance(path, str):
-        return shlex.quote(path)
-    return " ".join(shlex.quote(p) for p in path)
 
 
-def _path_display(path: str | Sequence[str]) -> str:
-    """Render *path* as a single string for use as a parse-fallback label."""
-    return path if isinstance(path, str) else " ".join(path)
 
 
 def _owner_for_write(
@@ -453,23 +402,6 @@ def _owner_for_write(
 #: Environment variables to set before running linters/type checkers
 #: inside sandbox containers.  Containers run as a non-root user with
 #: a read-only ``/``, so cache directories must point to ``/tmp``.
-_SANDBOX_ENV: str = (
-    "RUFF_CACHE_DIR=/tmp/.ruff_cache "
-    "mkdir -p /tmp/.ruff_cache 2>/dev/null; "
-)
-
-#: Environment prefix for *go* invocations only (Issue #584).
-#:
-#: ``GOMAXPROCS=1`` serialises the Go toolchain's compile/vet/link fan-out,
-#: which otherwise blows past the container's ``pids_limit`` of 100 and dies of
-#: fork exhaustion (#233).  It used to be baked into ``Dockerfile.go`` as an
-#: image-wide ``ENV`` -- but *every* Go binary honours ``GOMAXPROCS``, and ``gh``
-#: is written in Go, so the image-wide setting throttled unrelated tools.  Once
-#: the go toolchain lives in the all-in-one default image (``sandbox:full``)
-#: that leak reaches every container, so the guard moves to where it belongs:
-#: the go command itself.
-_GO_ENV: str = "GOMAXPROCS=1 "
-
 
 # ---------------------------------------------------------------------------
 # JS/TS tool resolution: repo node_modules/.bin wins over the baked global
@@ -612,43 +544,6 @@ def _normalize_diff_for_git(diff_content: str) -> str | None:
     return "\n".join(["--- a/target", "+++ b/target", *body]).rstrip("\n") + "\n"
 
 
-# Generated transform applied by :func:`apply_patch_to_file`.  Runs inside the
-# container via :func:`transform_file_in_container`: writes the file's text and
-# the (normalized) diff to a temp dir and lets ``git apply --recount`` apply it
-# — tolerating off-by-one ``@@`` counts that break a strict parser.
-# ``__DIFF_B64__`` is substituted on the host.
-_GIT_APPLY_TRANSFORM = r'''
-import base64, os, subprocess, tempfile
-
-DIFF = base64.b64decode("__DIFF_B64__").decode("utf-8")
-
-def transform(text):
-    d = tempfile.mkdtemp()
-    target = os.path.join(d, "target")
-    with open(target, "w", encoding="utf-8", newline="") as fh:
-        fh.write(text)
-    patch = os.path.join(d, "patch.diff")
-    with open(patch, "w", encoding="utf-8", newline="") as fh:
-        fh.write(DIFF)
-    errors = []
-    for extra in ([], ["--ignore-whitespace"]):
-        try:
-            proc = subprocess.run(
-                ["git", "apply", "--recount", "-p1", *extra, patch],
-                cwd=d, capture_output=True, text=True,
-            )
-        except FileNotFoundError:
-            raise RuntimeError("git is not available in this container")
-        if proc.returncode == 0:
-            with open(target, "r", encoding="utf-8") as fh:
-                return fh.read()
-        msg = (proc.stderr or proc.stdout).strip()
-        if msg:
-            errors.append(msg)
-    raise RuntimeError("git apply could not apply the diff: " + " | ".join(errors))
-'''
-
-
 def apply_patch_to_file(
     client: Any,
     container_id: str,
@@ -688,83 +583,6 @@ def apply_patch_to_file(
     if not result.get("changed"):
         return f"Patch applied (no changes) to {file_path} in container {container_id[:12]}"
     return f"Patch applied successfully to {file_path} in container {container_id[:12]}"
-
-
-# ---------------------------------------------------------------------------
-# Imperative (programmatic) edit: transform_file
-# ---------------------------------------------------------------------------
-
-# In-container runner.  Reads the target file, runs the caller's
-# ``transform(text) -> text`` against it, writes the result back, and emits a
-# unified diff wrapped in per-call sentinels so stray prints from the caller's
-# code cannot corrupt the result envelope.  ``__FILE_PATH_REPR__`` /
-# ``__CODE_B64__`` / ``__MARK_A__`` / ``__MARK_B__`` are substituted on the host.
-_TRANSFORM_RUNNER = r'''
-import sys, json, base64, difflib, traceback
-
-FILE_PATH = __FILE_PATH_REPR__
-USER_CODE_B64 = "__CODE_B64__"
-MARK_A = "__MARK_A__"
-MARK_B = "__MARK_B__"
-
-def emit(obj):
-    sys.stdout.write(MARK_A + json.dumps(obj) + MARK_B)
-    sys.stdout.flush()
-    sys.exit(0)
-
-try:
-    with open(FILE_PATH, "r", encoding="utf-8", newline="") as fh:
-        original = fh.read()
-except FileNotFoundError:
-    emit({"status": "error", "error": "file not found: " + FILE_PATH})
-except Exception as e:
-    emit({"status": "error", "error": "read failed: " + repr(e)})
-
-try:
-    user_code = base64.b64decode(USER_CODE_B64).decode("utf-8")
-except Exception as e:
-    emit({"status": "error", "error": "could not decode code: " + repr(e)})
-
-ns = {}
-try:
-    exec(user_code, ns)
-except Exception as e:
-    emit({"status": "error",
-          "error": "code failed at definition time: " + type(e).__name__ + ": " + str(e),
-          "traceback": traceback.format_exc()})
-
-transform = ns.get("transform")
-if not callable(transform):
-    emit({"status": "error",
-          "error": "code must define a callable `transform(text: str) -> str`"})
-
-try:
-    new = transform(original)
-except Exception as e:
-    emit({"status": "error",
-          "error": "transform() raised " + type(e).__name__ + ": " + str(e),
-          "traceback": traceback.format_exc()})
-
-if not isinstance(new, str):
-    emit({"status": "error",
-          "error": "transform() must return str, got " + type(new).__name__})
-
-if new == original:
-    orig_lines = original.count("\n") + (1 if original and not original.endswith("\n") else 0)
-    emit({"status": "ok", "changed": False, "diff": "", "new_size": len(original), "new_lines": orig_lines})
-
-try:
-    with open(FILE_PATH, "w", encoding="utf-8", newline="") as fh:
-        fh.write(new)
-except Exception as e:
-    emit({"status": "error", "error": "write failed: " + repr(e)})
-
-diff = "\n".join(difflib.unified_diff(
-    original.splitlines(), new.splitlines(),
-    fromfile=FILE_PATH, tofile=FILE_PATH, lineterm=""))
-new_lines = new.count("\n") + (1 if new and not new.endswith("\n") else 0)
-emit({"status": "ok", "changed": True, "diff": diff, "new_size": len(new), "new_lines": new_lines})
-'''
 
 
 def transform_file_in_container(
@@ -854,312 +672,6 @@ def transform_file_in_container(
             is_test=_is_test_file(file_path),
         )
     return result
-
-
-# ---------------------------------------------------------------------------
-# Symbol-granular edit: edit_symbol (issue #581)
-# ---------------------------------------------------------------------------
-
-# In-container driver for :func:`edit_symbol_in_container`.  Unlike the
-# transform runner it never executes caller-supplied code: the resolve /
-# edit / verify logic is this fixed script, parameterized via a
-# base64-encoded JSON blob, so every error message shape stays under host
-# control.  ``__PARAMS_B64__`` / ``__MARK_A__`` / ``__MARK_B__`` are
-# substituted on the host.
-_EDIT_SYMBOL_DRIVER = r'''
-import ast, base64, difflib, json, sys
-
-PARAMS = json.loads(base64.b64decode("__PARAMS_B64__").decode("utf-8"))
-MARK_A = "__MARK_A__"
-MARK_B = "__MARK_B__"
-
-FILE_PATH = PARAMS["file_path"]
-SYMBOL = PARAMS["symbol"]
-NEW_CODE = PARAMS["new_code"]
-LINE = PARAMS["line"]
-PRESERVE = PARAMS.get("preserve", "decorators+docstring")
-
-
-def emit(obj):
-    sys.stdout.write(MARK_A + json.dumps(obj) + MARK_B)
-    sys.stdout.flush()
-    sys.exit(0)
-
-
-def fail(msg):
-    emit({"status": "error", "error": msg})
-
-
-if NEW_CODE and not NEW_CODE.strip():
-    fail('Error: new_code is whitespace-only; use new_code="" to delete the symbol')
-
-try:
-    with open(FILE_PATH, "r", encoding="utf-8", newline="") as fh:
-        original = fh.read()
-except FileNotFoundError:
-    fail("Error: file not found: " + FILE_PATH)
-except Exception as e:
-    fail("Error: read failed: " + repr(e))
-
-if "\r\n" in original:
-    fail(
-        "Error: " + FILE_PATH + " contains CRLF line endings; edit_symbol"
-        " supports LF files only. Use edit_file with a complete old_str,"
-        " or transform_file."
-    )
-
-try:
-    tree = ast.parse(original)
-except SyntaxError as e:
-    fail(
-        "Error: " + FILE_PATH + " has a syntax error at line " + str(e.lineno)
-        + ": " + str(e.msg) + ". Fix it with edit_file (complete old_str) or transform_file first."
-    )
-
-lines = original.splitlines()
-had_final_nl = original.endswith("\n")
-DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-
-
-def dec_name(d):
-    target = d.func if isinstance(d, ast.Call) else d
-    parts = []
-    while isinstance(target, ast.Attribute):
-        parts.append(target.attr)
-        target = target.value
-    if isinstance(target, ast.Name):
-        parts.append(target.id)
-        return "@" + ".".join(reversed(parts))
-    return lines[d.lineno - 1].strip()
-
-
-candidates = []
-
-
-def collect(node, scope):
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, DEF_NODES):
-            starts = [child.lineno] + [d.lineno for d in child.decorator_list]
-            candidates.append({
-                "qualname": ".".join(scope + [child.name]),
-                "kind": "class" if isinstance(child, ast.ClassDef) else "function",
-                "def_line": child.lineno,
-                "start": min(starts),
-                "end": child.end_lineno,
-                "decorators": [dec_name(d) for d in child.decorator_list],
-            })
-            collect(child, scope + [child.name])
-        else:
-            collect(child, scope)
-
-
-collect(tree, [])
-
-matches = [
-    c for c in candidates
-    if c["qualname"] == SYMBOL or c["qualname"].endswith("." + SYMBOL)
-]
-
-if not matches:
-    pool = {}
-    for c in candidates:
-        pool.setdefault(c["qualname"], []).append(c)
-        pool.setdefault(c["qualname"].rsplit(".", 1)[-1], []).append(c)
-    close = difflib.get_close_matches(SYMBOL, sorted(pool), n=5, cutoff=0.6)
-    hints = []
-    for name in close:
-        for c in pool[name]:
-            if c not in hints:
-                hints.append(c)
-    msg = "Error: symbol '" + SYMBOL + "' not found in " + FILE_PATH + "."
-    if hints:
-        hints.sort(key=lambda c: c["start"])
-        msg += " Did you mean: " + ", ".join(
-            c["qualname"] + " (line " + str(c["start"]) + ")" for c in hints[:5]
-        ) + "?"
-    fail(msg)
-
-
-def describe(cands):
-    mixed = len(set(c["qualname"] for c in cands)) > 1
-    out = []
-    for c in cands:
-        text = lines[c["def_line"] - 1].strip()[:80]
-        desc = " / ".join(c["decorators"] + [text])
-        if mixed:
-            desc = c["qualname"] + ": " + desc
-        out.append("  lines " + str(c["start"]) + "-" + str(c["end"]) + ":  " + desc)
-    return "\n".join(out)
-
-
-if LINE is not None:
-    containing = [c for c in matches if c["start"] <= LINE <= c["end"]]
-    if not containing:
-        fail(
-            "Error: line=" + str(LINE) + " does not fall within any definition of '"
-            + SYMBOL + "' in " + FILE_PATH + ":\n" + describe(matches)
-            + "\nRetry with line=<start line of the intended definition>."
-        )
-    containing.sort(key=lambda c: (c["end"] - c["start"], -c["start"]))
-    target = containing[0]
-elif len(matches) > 1:
-    fail(
-        "Error: '" + SYMBOL + "' is ambiguous in " + FILE_PATH + ":\n"
-        + describe(matches)
-        + "\nRetry with line=<start line of the intended definition>."
-    )
-else:
-    target = matches[0]
-
-start, end = target["start"], target["end"]
-def_text = lines[target["def_line"] - 1]
-def_indent = len(def_text) - len(def_text.lstrip())
-
-if NEW_CODE == "":
-    before = lines[:start - 1]
-    after = lines[end:]
-    n_blank = 0
-    while before and not before[-1].strip():
-        before.pop()
-        n_blank += 1
-    while after and not after[0].strip():
-        after.pop(0)
-        n_blank += 1
-    if not after or not before:
-        new_lines = before + after
-    else:
-        max_blank = 2 if def_indent == 0 else 1
-        new_lines = before + [""] * min(n_blank, max_blank) + after
-    new = "\n".join(new_lines)
-    if new_lines and had_final_nl:
-        new += "\n"
-else:
-    code_lines = NEW_CODE.splitlines()
-    n_lead_stripped = 0
-    while code_lines and not code_lines[0].strip():
-        code_lines.pop(0)
-        n_lead_stripped += 1
-    while code_lines and not code_lines[-1].strip():
-        code_lines.pop()
-    first = code_lines[0]
-    delta = def_indent - (len(first) - len(first.lstrip()))
-    reindented = []
-    for ln in code_lines:
-        if not ln.strip():
-            reindented.append("")
-        elif delta >= 0:
-            reindented.append(" " * delta + ln)
-        else:
-            reindented.append(ln[min(-delta, len(ln) - len(ln.lstrip())):])
-
-    if PRESERVE != "none":
-        old_node = None
-        for n in ast.walk(tree):
-            if isinstance(n, DEF_NODES) and n.lineno == target["def_line"]:
-                old_node = n
-                break
-        if old_node is not None:
-            try:
-                new_tree = ast.parse(NEW_CODE)
-            except SyntaxError:
-                new_tree = None
-            if new_tree is not None:
-                new_node = None
-                for n in ast.walk(new_tree):
-                    if isinstance(n, DEF_NODES):
-                        new_node = n
-                        break
-
-                if new_node is not None:
-                    def _has_docstring(node):
-                        return (node.body
-                                and isinstance(node.body[0], ast.Expr)
-                                and isinstance(node.body[0].value, ast.Constant)
-                                and isinstance(node.body[0].value.value, str))
-
-                    preserve_decs = PRESERVE in ("decorators", "decorators+docstring")
-                    preserve_docs = PRESERVE in ("docstring", "decorators+docstring")
-
-                    dec_offset = 0
-                    if preserve_decs and old_node.decorator_list and not new_node.decorator_list:
-                        dec_lines = []
-                        for d in old_node.decorator_list:
-                            for ln in range(d.lineno, d.end_lineno + 1):
-                                dec_lines.append(lines[ln - 1])
-                        reindented = dec_lines + reindented
-                        dec_offset = len(dec_lines)
-
-                    if preserve_docs and not _has_docstring(new_node) and _has_docstring(old_node):
-                        ds = old_node.body[0]
-                        new_body = new_node.body[0]
-                        # Locate the new body's first statement in code_lines
-                        # coordinates (AST linenos count the leading blank
-                        # lines that were stripped above).  Insertion is only
-                        # possible when that statement starts its own line:
-                        # a one-liner (def f(): return 1) has nowhere to put
-                        # a docstring line.  Likewise skip when the OLD
-                        # docstring shares the def line.
-                        body_idx = new_body.lineno - 1 - n_lead_stripped
-                        body_on_own_line = (
-                            0 <= body_idx < len(code_lines)
-                            and not code_lines[body_idx][: new_body.col_offset].strip()
-                        )
-                        if ds.lineno != target["def_line"] and body_on_own_line:
-                            new_body_indent = max(0, new_body.col_offset + delta)
-                            # Shift the docstring block as a whole so nested
-                            # lines keep their relative indentation.
-                            shift = new_body_indent - ds.col_offset
-                            ds_lines = []
-                            for ln in range(ds.lineno, ds.end_lineno + 1):
-                                raw = lines[ln - 1]
-                                if not raw.strip():
-                                    ds_lines.append("")
-                                elif shift >= 0:
-                                    ds_lines.append(" " * shift + raw)
-                                else:
-                                    cut = min(-shift, len(raw) - len(raw.lstrip()))
-                                    ds_lines.append(raw[cut:])
-                            ins = body_idx + dec_offset
-                            reindented = reindented[:ins] + ds_lines + reindented[ins:]
-
-    new_lines = lines[:start - 1] + reindented + lines[end:]
-    new = "\n".join(new_lines)
-    if had_final_nl and new and not new.endswith("\n"):
-        new += "\n"
-
-try:
-    ast.parse(new)
-except SyntaxError as e:
-    fail(
-        "Error: the edited file would have a syntax error at line " + str(e.lineno)
-        + ": " + str(e.msg) + "; nothing was written. Fix new_code and retry."
-    )
-
-resolved = {
-    "qualname": target["qualname"],
-    "kind": target["kind"],
-    "start_line": start,
-    "end_line": end,
-}
-
-if new == original:
-    n_lines = original.count("\n") + (1 if original and not original.endswith("\n") else 0)
-    emit({"status": "ok", "resolved": resolved, "changed": False, "diff": "",
-          "new_size": len(original), "new_lines": n_lines})
-
-try:
-    with open(FILE_PATH, "w", encoding="utf-8", newline="") as fh:
-        fh.write(new)
-except Exception as e:
-    fail("Error: write failed: " + repr(e))
-
-diff = "\n".join(difflib.unified_diff(
-    original.splitlines(), new.splitlines(),
-    fromfile=FILE_PATH, tofile=FILE_PATH, lineterm=""))
-n_lines = new.count("\n") + (1 if new and not new.endswith("\n") else 0)
-emit({"status": "ok", "resolved": resolved, "changed": True, "diff": diff,
-      "new_size": len(new), "new_lines": n_lines})
-'''
 
 
 def edit_symbol_in_container(
@@ -1316,11 +828,6 @@ def read_file_lines(
 # ---------------------------------------------------------------------------
 
 
-def _get_extension(file_path: str) -> str:
-    """Return the lowercase file extension including the dot."""
-    _, dot_ext = file_path.rstrip("/").rsplit(".", 1) if "." in file_path else ("", "")
-    return f".{dot_ext.lower()}" if dot_ext else ""
-
 
 # ---------------------------------------------------------------------------
 # Linter / Type checker / Test / Scan runners
@@ -1368,48 +875,6 @@ _RUFF_SECURITY_IGNORE = ",".join([
     "S311",          # random — usually non-security
     "S110", "S112",  # try-except-pass / try-except-continue — style, not security
 ])
-class ScopeWorkdir(NamedTuple):
-    """``(scope, workdir)`` tuple with named field access.
-
-    Return type for :func:`_determine_scope`.
-    """
-    scope: str
-    workdir: str
-
-
-def _determine_scope(file_path: str) -> ScopeWorkdir:
-    """Determine the project scope and working directory for lint/type-check.
-
-    Returns a ``(scope, workdir)`` tuple:
-
-    * *scope* — path to pass to the tool (e.g. ``"src"``, ``"."``).
-    * *workdir* — project-root directory that should be the CWD when
-      running scope checks (e.g. ``"/app"``, ``"."``).
-
-    Both values are derived from *file_path* so callers no longer need
-    to call :func:`_resolve_workdir` separately.
-
-    Examples
-    --------
-    >>> _determine_scope("/app/src/foo.py")
-    ('src', '/app')
-    >>> _determine_scope("src/foo.py")
-    ('src', '.')
-    >>> _determine_scope("/home/foo.py")
-    ('/home', '/home')
-    >>> _determine_scope("foo.py")
-    ('.', '.')
-    """
-    normalized = file_path.replace("\\", "/")
-    idx = normalized.find("/src/")
-    if idx != -1:
-        return ScopeWorkdir("src", normalized[:idx] or ".")
-    if normalized.startswith("src/"):
-        return ScopeWorkdir("src", ".")
-    parent = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
-    scope = parent or "."
-    return ScopeWorkdir(scope, scope)
-
 
 def _run_ruff_verify(
     container: Any,
@@ -1569,43 +1034,6 @@ def _run_go_vet_verify(container: Any, path: str | Sequence[str]) -> VerifyResul
         r["severity"] = "error"
     return _envelope_ok("go vet", findings, ec)
 
-
-def _parse_golangci_lint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
-    """Parse golangci-lint JSON output (when available)."""
-    raw = raw.strip()
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return []
-    results: list[dict[str, Any]] = []
-    if isinstance(data, dict):
-        for issue in data.get("Issues", []):
-            pos = issue.get("Pos", {})
-            results.append({
-                "file": pos.get("Filename", ""),
-                "line": int(pos.get("Line", 0)),
-                "rule": issue.get("FromLinter", "unknown"),
-                "message": issue.get("Text", ""),
-            })
-    return results
-
-
-def _parse_go_vet_output(raw: str, file_path: str) -> list[dict[str, Any]]:
-    """Parse go vet text output (file:line:col: message)."""
-    results: list[dict[str, Any]] = []
-    pat = re.compile(r"^(.+?):(\d+):\d+:\s*(.+)$")
-    for line in raw.split("\n"):
-        m = pat.match(line.strip())
-        if m:
-            results.append({
-                "file": m.group(1),
-                "line": int(m.group(2)),
-                "rule": "go-vet",
-                "message": m.group(3),
-            })
-    return results
 
 
 def _run_pyright_verify(
@@ -2241,204 +1669,6 @@ def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     return _parse_pylint_output(stdout_text, file_path)
 
 
-# ---------------------------------------------------------------------------
-# Parsers (unchanged)
-# ---------------------------------------------------------------------------
-
-
-def _parse_ruff_output(raw: str, file_path: str) -> list[dict[str, Any]]:
-    """Parse ruff JSON output into the common result format."""
-    raw = raw.strip()
-    if not raw:
-        return []
-    try:
-        issues = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return []
-    if not isinstance(issues, list):
-        return []
-
-    results: list[dict[str, Any]] = []
-    for issue in issues:
-        results.append(
-            {
-                "file": issue.get("filename", file_path),
-                "line": int(issue.get("location", {}).get("row", 0)),
-                "rule": issue.get("code", "unknown"),
-                "message": issue.get("message", ""),
-            }
-        )
-    return results
-
-
-def _parse_pylint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
-    """Parse pylint JSON output into the common result format."""
-    raw = raw.strip()
-    if not raw:
-        return []
-    try:
-        issues = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return []
-    if not isinstance(issues, list):
-        return []
-
-    results: list[dict[str, Any]] = []
-    for issue in issues:
-        results.append(
-            {
-                "file": issue.get("path", file_path),
-                "line": int(issue.get("line", 0)),
-                "rule": issue.get("symbol", issue.get("message-id", "unknown")),
-                "message": issue.get("message", ""),
-            }
-        )
-    return results
-
-
-def _parse_eslint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
-    """Parse eslint JSON output into the common result format."""
-    raw = raw.strip()
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return []
-    if not isinstance(data, list):
-        return []
-
-    results: list[dict[str, Any]] = []
-    for result in data:
-        fpath = result.get("filePath", file_path)
-        for msg in result.get("messages", []):
-            results.append(
-                {
-                    "file": fpath,
-                    "line": int(msg.get("line", 0)),
-                    "rule": msg.get("ruleId", "unknown"),
-                    "message": msg.get("message", ""),
-                }
-            )
-    return results
-
-
-
-def _parse_pyright_output(raw: str, file_path: str) -> list[dict[str, Any]]:
-    """Parse pyright JSON output into the common result format."""
-    raw = raw.strip()
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return []
-
-    results: list[dict[str, Any]] = []
-    for diag in data.get("generalDiagnostics", []):
-        results.append(
-            {
-                "file": diag.get("file", file_path),
-                "line": int(diag.get("range", {}).get("start", {}).get("line", 0)) + 1,
-                "rule": diag.get("rule", "unknown"),
-                "message": diag.get("message", ""),
-            }
-        )
-    return results
-
-
-#: Regex for tsc text output: ``file(line,col): error TSXXXX: message``
-_TSC_TEXT_RE = re.compile(
-    r"^(.+?)\((\d+)(?:,\d+)?\):\s*(error|warning)\s+(TS\d+):\s*(.+)$"
-)
-
-
-def _parse_tsc_text(raw: str, file_path: str) -> list[dict[str, Any]]:
-    """Parse tsc text output into the common result format."""
-    results: list[dict[str, Any]] = []
-    for line in raw.split("\n"):
-        m = _TSC_TEXT_RE.match(line)
-        if m:
-            results.append(
-                {
-                    "file": m.group(1),
-                    "line": int(m.group(2)),
-                    "rule": m.group(4),
-                    "message": m.group(5),
-                }
-            )
-    return results
-
-
-def _parse_tsc_json(raw: str, file_path: str) -> list[dict[str, Any]]:
-    """Parse tsc JSON output (``--listFiles`` style) if available."""
-    raw = raw.strip()
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return []
-
-    results: list[dict[str, Any]] = []
-    if isinstance(data, dict):
-        for diag in data.get("diagnostics", []):
-            results.append(
-                {
-                    "file": diag.get("file", {}).get("fileName", file_path),
-                    "line": int(diag.get("file", {}).get("line", 0)),
-                    "rule": diag.get("code", "unknown"),
-                    "message": diag.get("messageText", ""),
-                }
-            )
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Severity helper for lint rules
-# ---------------------------------------------------------------------------
-
-#: Ruff rule code prefixes mapped to severity.
-_RUFF_SEVERITY_MAP: dict[str, str] = {
-    "E": "error",      # pycodestyle errors
-    "F": "error",      # Pyflakes
-    "B": "error",      # flake8-bugbear
-    "RUF": "error",    # ruff-specific rules
-    "W": "warning",    # pycodestyle warnings
-    "C90": "warning",  # mccabe complexity
-    "N": "warning",    # pep8-naming
-    "D": "warning",    # pydocstyle
-    "I": "info",       # isort
-    "SIM": "info",     # flake8-simplify
-    "PL": "info",      # Pylint
-    "UP": "info",      # pyupgrade
-    "CPY": "info",     # flake8-copyright
-    "TID": "info",     # flake8-tidy-imports
-    "TCH": "info",     # flake8-type-checking
-    "Q": "info",       # flake8-quotes
-    "RET": "info",     # flake8-return
-    "ARG": "info",     # flake8-unused-arguments
-    "PTH": "info",     # flake8-use-pathlib
-    "G": "info",       # flake8-logging-format
-    "PGH": "info",     # pygrep-hooks
-    "S": "warning",    # flake8-bandit (security)
-}
-
-
-def _determine_lint_severity(rule: str) -> str:
-    """Map a lint rule code to a severity level.
-
-    Uses rule code prefix matching against
-    :data:`_RUFF_SEVERITY_MAP`.  Falls back to ``"error"`` for
-    unrecognised codes (conservative default).
-    """
-    if not rule:
-        return "error"
-    for prefix, severity in sorted(_RUFF_SEVERITY_MAP.items(),
-                                   key=lambda x: -len(x[0])):
-        if rule.startswith(prefix):
-            return severity
-    return "error"
 
 
 # ---------------------------------------------------------------------------

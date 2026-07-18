@@ -102,13 +102,6 @@ def write_file(
     except ValueError as e:
         return f"Error: {e}"
 
-    # Auto-checkpoint after successful write (Issue #586).
-    try:
-        from sunaba.auto_checkpoint import auto_checkpoint
-        auto_checkpoint(container, container_id)
-    except Exception:
-        logger.debug("auto_checkpoint after write_file: ignored", exc_info=True)
-
     return f"Written {len(file_contents)} bytes to {dest_path}" + syntax_note
 
 
@@ -875,13 +868,6 @@ def transform_file(
     if result.get("status") == "ok" and result.get("changed"):
         if before is not None:
             undo.save_version(container_id, file_path, before)
-
-        # Auto-checkpoint after successful transform (Issue #586).
-        try:
-            from sunaba.auto_checkpoint import auto_checkpoint
-            auto_checkpoint(container, container_id)
-        except Exception:
-            logger.debug("auto_checkpoint after transform_file: ignored", exc_info=True)
 
         display, meta = truncate_output(
             result.get("diff", ""),

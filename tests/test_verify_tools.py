@@ -593,10 +593,18 @@ class TestVerifyInContainer:
         # Mock detect_languages to avoid find exec
         result = DetectionResult(languages={"python"}, scope={"python": "/repo"}, reason=None)
 
+        # detect_languages is called from verify_in_container (via
+        # __init__) AND from run_lint_type_gate (via gate module).
+        # Use a shared mock patched at both locations (#668).
+        detect_mock = MagicMock(return_value=result)
+
         with patch(
             "sunaba.edit_verify.detect_languages",
-            return_value=result,
-        ) as mock_detect:
+            detect_mock,
+        ), patch(
+            "sunaba.edit_verify.gate.detect_languages",
+            detect_mock,
+        ):
             # Mock exec_run for _run() calls (git diff, pytest)
             mock_container.exec_run.return_value = (
                 0,
@@ -612,11 +620,11 @@ class TestVerifyInContainer:
             # detect_languages runs twice now: once for the test path and
             # once for the pre-test lint/type gate scope (#293). Both calls
             # must carry working_dir.
-            assert mock_detect.call_count == 2
-            first_args, first_kwargs = mock_detect.call_args_list[0]
+            assert detect_mock.call_count == 2
+            first_args, first_kwargs = detect_mock.call_args_list[0]
             assert first_args == (mock_container, "tests/", None)
             assert first_kwargs == {"working_dir": "/tmp/repo/sunaba"}
-            for _args, _kwargs in mock_detect.call_args_list:
+            for _args, _kwargs in detect_mock.call_args_list:
                 assert _kwargs.get("working_dir") == "/tmp/repo/sunaba"
             # Verify exec_run was called with workdir=working_dir
             _, kwargs = mock_container.exec_run.call_args

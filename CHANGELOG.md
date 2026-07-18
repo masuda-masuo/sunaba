@@ -8,6 +8,25 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-18
+
+### Added
+
+- **publish/checkpoint の未追跡ファイル可視化**（#658）: publish と checkpoint が `git add -A` で巻き込む未追跡ファイルを、結果JSONの `swept_untracked`（相対パス配列）として列挙するようになった。自動除外はしない（可視化のみ）。push挙動は不変。`typings/*.pyi` のような意図しないゴミの混入をpush前に目視できる。
+- **js/ts verify が `package.json` の `scripts.test` を尊重**（#643）: js/ts の verify dispatch が、プロジェクトの `package.json` に定義された `scripts.test` を優先して実行するようになった。
+
+### Removed
+
+- **auto-checkpoint (#586) を撤去**（#657）: `write_file`/`transform_file`/明示 `checkpoint` 完了時に裏で `git add -A && git commit` を自動実行する機構を撤去した。2つの害（(1) 編集ごとの自動commitで `git status` が常にクリーンになりレビューでdiffが見えない、(2) `git add -A` が未追跡ゴミを巻き込みpublishのsquashを通ってpushされる）を解消。編集単位のロールバックは既存の `undo_file_edit` がカバーするため機能損失はない。明示 `checkpoint` ツールは維持。
+
+### Fixed
+
+- **新規ファイルが root 所有になる不具合**（#642）: 新規作成ファイルの所有者判定が root 所有の `/proc/self` symlink を辿ってしまい、コンテナ内で作られたファイルが root 所有になっていた問題を修正（`id -u`/`id -g` ベースに変更）。
+
+### Changed
+
+- **`tools/` のモジュール構造整理（EPIC #646）**（#647–#651）: 肥大化した `tools/*.py`（container.py / vcs.py / file.py）を責務別のサブパッケージ・純粋モジュールへ分割（edit_engine / github_api / container パッケージ / publish_planner / publish_ops / vcs サブパッケージ）。**挙動不変の内部リファクタ。**
+
 ## [0.10.0] - 2026-07-17
 
 ### Added

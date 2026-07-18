@@ -19,6 +19,7 @@ from tests.conftest import _decode, _make_client_mock, _make_container_mock
 # for V1.0), so every call runs this straight through.
 _PUSH_SEQUENCE = [
     (0, b"", b""),  # git checkout -b
+    (0, b"", b""),  # git ls-files --others --exclude-standard
     (0, b"", b""),  # git add
     (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
     (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
@@ -44,6 +45,7 @@ class TestPublish:
         """A successful push returns pushed status with sha."""
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
@@ -97,6 +99,7 @@ class TestPublish:
 
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
@@ -305,6 +308,7 @@ class TestPublish:
         """No host token + no proxy → the in-container gh path still works."""
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
@@ -384,6 +388,7 @@ class TestPublish:
         """git commit with 'nothing to commit' should proceed to push."""
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"nothing to commit, working tree clean", b""),  # git commit
@@ -413,6 +418,7 @@ class TestPublish:
         """Push failure (both transports) should return error status."""
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),  # git commit
@@ -457,6 +463,7 @@ class TestPublish:
         )
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),  # git commit
@@ -479,8 +486,8 @@ class TestPublish:
         assert "BLOCKED by egress proxy" in result["error"]
         assert "hint" in result
         assert "SUNABA_ALLOWED_REPOS" in result["hint"]
-        # Exactly 6 exec calls -- no _try_api_push was triggered
-        assert container.exec_run.call_count == 6
+        # Exactly 7 exec calls (1 git ls-files + 5 pre-push + 1 failed push) -- no _try_api_push was triggered
+        assert container.exec_run.call_count == 7
 
     @patch("sunaba.tools.vcs._docker")
     @patch("sunaba.tools.vcs.record_boundary_crossing")
@@ -558,7 +565,8 @@ class TestPublish:
 
         assert result["status"] == "pushed"
 
-        commit_call = container.exec_run.call_args_list[3]
+        # Index 4 because [0]=checkout, [1]=ls-files, [2]=add, [3]=rev-parse, [4]=commit
+        commit_call = container.exec_run.call_args_list[4]
         commit_cmd = commit_call[0][0][2]
         assert "user.name" in commit_cmd
         assert "sunaba[bot]" in commit_cmd
@@ -588,11 +596,64 @@ class TestPublish:
 
         assert result["status"] == "pushed"
 
-        commit_call = container.exec_run.call_args_list[3]
+        # Index 4 because [0]=checkout, [1]=ls-files, [2]=add, [3]=rev-parse, [4]=commit
+        commit_call = container.exec_run.call_args_list[4]
         commit_cmd = commit_call[0][0][2]
         assert "user.name" in commit_cmd
         assert "'Custom User'" in commit_cmd
         assert "custom@example.com" in commit_cmd
+
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    def test_swept_untracked_empty(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """swept_untracked is [] when no untracked files exist."""
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["swept_untracked"] == []
+
+    @patch("sunaba.tools.vcs._docker")
+    @patch("sunaba.tools.vcs.record_boundary_crossing")
+    def test_swept_untracked_with_files(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """swept_untracked lists untracked files when they exist."""
+        container = _make_container_mock([
+            (0, b"typings/foo.pyi\ndirty.txt\n", b""),  # git ls-files
+            (0, b"", b""),  # checkout -b
+            (0, b"", b""),  # git add
+            (1, b"", b"no upstream"),  # rev-parse @{u}
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["swept_untracked"] == ["typings/foo.pyi", "dirty.txt"]
 
 
 class TestCreatePrViaApi:

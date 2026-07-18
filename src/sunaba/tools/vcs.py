@@ -313,6 +313,17 @@ def checkpoint(
     safe_wd = shlex.quote(working_dir)
     safe_msg = shlex.quote(message)
 
+    # Capture untracked files before git add -A sweeps them in
+    ls_cmd = f"cd {safe_wd} && git ls-files --others --exclude-standard"
+    ls_ec, ls_out = container.exec_run(
+        ["/bin/sh", "-c", ls_cmd],
+        stdout=True,
+        stderr=True,
+    )
+    ls_stdout_b, _ = ls_out if isinstance(ls_out, tuple) else (ls_out, b"")
+    ls_text = ls_stdout_b.decode("utf-8", errors="replace") if ls_stdout_b else ""
+    swept_untracked = [f for f in ls_text.split("\n") if f.strip()]
+
     cmd = f"cd {safe_wd} && git add -A && git commit --allow-empty -m {safe_msg}"
     ec, out = container.exec_run(
         ["/bin/sh", "-c", cmd],
@@ -350,6 +361,7 @@ def checkpoint(
         "status": "ok",
         "sha": sha,
         "message": message,
+        "swept_untracked": swept_untracked,
     })
 
 
@@ -1040,6 +1052,10 @@ def publish(
     if proxy_err:
         return finish_json({"status": "error", "step": "egress_proxy", "error": proxy_err}, verified)
 
+    # Capture untracked files before git add -A sweeps them in
+    _, ls_out, _ = _run("git ls-files --others --exclude-standard")
+    swept_untracked = [f for f in ls_out.split("\n") if f.strip()]
+
     commit_err = git_prepare_commit(_run, branch=branch, message=message,
         author_name=author_name, author_email=author_email)
     if commit_err:
@@ -1103,6 +1119,7 @@ def publish(
 
     result: dict[str, Any] = {
         "status": "pushed", "branch": branch, "sha": sha,
+        "swept_untracked": swept_untracked,
     }
     if pr_url:
         result["pr_url"] = pr_url

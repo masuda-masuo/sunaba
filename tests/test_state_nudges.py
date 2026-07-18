@@ -41,6 +41,7 @@ def _disable_egress_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
 # Standard exec sequence for a successful one-shot push (see test_publish.py).
 _PUSH_SEQUENCE = [
     (0, b"", b""),  # git checkout -b
+    (0, b"", b""),  # git ls-files --others --exclude-standard
     (0, b"", b""),  # git add
     (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
     (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
@@ -186,6 +187,7 @@ class TestPublishVerifyGate:
         record_verify_success("abc123def456")
         container = _make_container_mock([
             (0, b"", b""),  # git checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
             (1, b"", b"add failed"),  # git add -> error return
         ])
         mock_docker.return_value = _make_client_mock(container)

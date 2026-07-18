@@ -26,15 +26,16 @@ class TestPublishSquashCheckpoints:
     ) -> None:
         """Publish should squash unpushed checkpoints with reset --soft."""
         container = _make_container_mock([
-            (0, b"", b""),
-            (0, b"", b""),
-            (0, b"main\n", b""),
-            (0, b"abc1234 First checkpoint\n", b""),
-            (0, b"", b""),
-            (0, b"", b""),
-            (0, b"[fix/x abc1234] Fix", b""),
-            (0, b"pushed", b""),
-            (0, b"abc1234def5678", b""),
+            (0, b"", b""),  # checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git add
+            (0, b"main\n", b""),  # rev-parse @{u}
+            (0, b"abc1234 First checkpoint\n", b""),  # log oneline
+            (0, b"", b""),  # reset --soft
+            (0, b"", b""),  # readd
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -62,8 +63,9 @@ class TestPublishSquashCheckpoints:
     ) -> None:
         """Publish with no tracking branch should skip squash."""
         container = _make_container_mock([
-            (0, b"", b""),
-            (0, b"", b""),
+            (0, b"", b""),  # checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
             (0, b"pushed", b""),
@@ -97,8 +99,9 @@ class TestPublishAllowForcePush:
     ) -> None:
         """allow_force_push=True should include --force in push command."""
         container = _make_container_mock([
-            (0, b"", b""),
-            (0, b"", b""),
+            (0, b"", b""),  # checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
             (0, b"pushed", b""),
@@ -140,8 +143,9 @@ class TestPublishApiPushFallback:
         """When git push fails, _try_api_push should be used as fallback."""
         push_json = json.dumps({"sha": "b" * 40}).encode()
         container = _make_container_mock([
-            (0, b"", b""),
-            (0, b"", b""),
+            (0, b"", b""),  # checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
             (1, b"", b"remote rejected: permission denied"),
@@ -171,8 +175,9 @@ class TestPublishApiPushFallback:
     ) -> None:
         """When both git push and API push fail, return error."""
         container = _make_container_mock([
-            (0, b"", b""),
-            (0, b"", b""),
+            (0, b"", b""),  # checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
             (1, b"", b"remote rejected"),
@@ -207,10 +212,11 @@ class TestPublishLazyTokenInjection:
 
     @staticmethod
     def _simple_push_returns() -> list[tuple[int, bytes, bytes]]:
-        # checkout, git add, no-upstream (skip squash), commit, push, HEAD
+        # checkout, ls-files, git add, no-upstream (skip squash), commit, push, HEAD
         return [
-            (0, b"", b""),
-            (0, b"", b""),
+            (0, b"", b""),  # checkout -b
+            (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
             (0, b"", b""),
@@ -307,7 +313,8 @@ class TestPublishLazyTokenInjection:
 
         push_json = json.dumps({"sha": "b" * 40}).encode()
         container = _make_container_mock([
-            (0, b"", b""),              # checkout
+            (0, b"", b""),              # checkout -b
+            (0, b"", b""),              # git ls-files --others --exclude-standard
             (0, b"", b""),              # git add
             (1, b"", b"no upstream"),  # skip squash
             (0, b"[fix/x abc] Fix", b""),  # commit

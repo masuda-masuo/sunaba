@@ -8,6 +8,12 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-07-18
+
+### Changed
+
+- **`edit_verify.py` 解体と `search.py` 抽出（EPIC #663 完遂）**（#664–#668）: 肥大化した `edit_verify.py`（3203行）を13モジュールへ分割し、`search.py` を独立モジュールとして抽出。**挙動不変の内部リファクタリング。**
+
 ## [0.10.1] - 2026-07-18
 
 ### Added

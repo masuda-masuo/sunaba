@@ -115,9 +115,13 @@ def git_prepare_commit(
                 ),
             }
 
-        # Stage only the declared manifest paths.
+        # Stage only the declared manifest paths.  :(literal) disables
+        # pathspec glob interpretation so each declared path stages
+        # exactly the file it literally names (add also stages deletions).
         for f in files:
-            add_ec, add_out, add_err = run(f"git add -- {shlex.quote(f)}")
+            add_ec, add_out, add_err = run(
+                "git add -- " + shlex.quote(f":(literal){f}")
+            )
             if add_ec != 0:
                 return {
                     "status": "error",

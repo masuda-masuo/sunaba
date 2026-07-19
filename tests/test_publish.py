@@ -13,14 +13,14 @@ from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProxyError
 from sunaba.tools.vcs import _create_pr_via_api, publish
 from tests.conftest import _decode, _make_client_mock, _make_container_mock
 
-# Standard execute exec sequence shared by the one-shot push tests: git
-# checkout -b, git add, rev-parse @{u} (no upstream -> skip squash), commit,
-# push, rev-parse HEAD.  publish no longer has a dry_run/token step (retired
-# for V1.0), so every call runs this straight through.
+# Standard execute exec sequence shared by the one-shot non-manifest push
+# tests.  Order matches publish()'s actual exec flow: git ls-files (capture
+# untracked before the add), checkout -b, add, rev-parse @{u} (no upstream
+# -> skip squash), commit, push, rev-parse HEAD.
 _PUSH_SEQUENCE = [
-    (0, b"", b""),  # git checkout -b
     (0, b"", b""),  # git ls-files --others --exclude-standard
-    (0, b"", b""),  # git add
+    (0, b"", b""),  # git checkout -b
+    (0, b"", b""),  # git add -A
     (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
     (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
     (0, b"pushed", b""),  # git push
@@ -650,10 +650,535 @@ class TestPublish:
             repo="owner/repo",
             branch="fix/x",
             message="Fix",
+            include_untracked=True,
         ))
 
         assert result["status"] == "pushed"
         assert result["swept_untracked"] == ["typings/foo.pyi", "dirty.txt"]
+
+
+class TestPublishManifest:
+    """Tests for manifest-based staging (files=[...] and include_untracked)."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_only_declared_staged(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Manifest with one declared file: only that file is staged and pushed.
+
+        Even though another file exists undeclared, it must not be staged.
+        The new branch (no upstream) resolves origin/HEAD as the base.
+        """
+        container = _make_container_mock([
+            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # checkout -b
+            # New path: resolve remote base
+            (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["staged_files"] == ["declared.txt"]
+        assert result["swept_untracked"] == []
+
+        # Verify 'git add --' was used, not 'git add -A'
+        add_calls = [
+            c[0][0][2]
+            for c in container.exec_run.call_args_list
+            if "git add" in str(c[0][0][2])
+        ]
+        assert any("git add --" in c and "declared.txt" in c for c in add_calls)
+        assert not any("git add -A" in c for c in add_calls)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_stages_untracked_declared_file(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Manifest mode stages a declared file that is brand new / untracked.
+
+        The existence check passes (test -e returns 0), and git add -- stages
+        it successfully.  The new branch resolves origin/HEAD as the base.
+        """
+        container = _make_container_mock([
+            (0, b"", b""),  # test -e 'newfile.py' (exists)
+            (0, b"", b""),  # checkout -b
+            # New path: resolve remote base
+            (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'newfile.py'
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["newfile.py"],
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["staged_files"] == ["newfile.py"]
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_after_checkpoint_excludes_undeclared(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """After a checkpoint that committed an undeclared file on a branch
+        with no upstream, the push must exclude that file by building the
+        commit against the remote base (origin/HEAD)."""
+        container = _make_container_mock([
+            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # checkout -b
+            # Resolve base: origin/fix/x does NOT exist on remote
+            (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (0, b"[fix/x abc1234] Msg", b""),  # commit
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Msg",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["staged_files"] == ["declared.txt"]
+
+        # Verify 'git reset --mixed origin/HEAD' was used (the new base path)
+        reset_calls = [
+            c[0][0][2]
+            for c in container.exec_run.call_args_list
+            if "git reset" in str(c[0][0][2])
+        ]
+        assert any("git reset --mixed" in c for c in reset_calls)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_rejects_absolute_path(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Absolute paths produce an error and no push."""
+        container = _make_container_mock([])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["/etc/passwd"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "validation"
+        assert "/etc/passwd" in result["error"]
+        container.exec_run.assert_not_called()
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_rejects_dot_dot_traversal(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """.. traversal produces an error and no push."""
+        container = _make_container_mock([])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["../outside.txt"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "validation"
+        container.exec_run.assert_not_called()
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_rejects_deeper_dot_dot_traversal(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """.. deeper in the path produces an error."""
+        container = _make_container_mock([])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["sub/../../secret.txt"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "validation"
+        container.exec_run.assert_not_called()
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_rejects_nonexistent_path(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """A declared path that does not exist produces an error and no push."""
+        container = _make_container_mock([
+            (1, b"", b""),  # test -e 'missing.txt' -> not found
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["missing.txt"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "validation"
+        assert "missing.txt" in result["error"]
+        # Only the existence check exec happened; nothing else should
+        assert container.exec_run.call_count == 1
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_no_manifest_untracked_rejection(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """No manifest + untracked files + no opt-in: error listing the files."""
+        container = _make_container_mock([
+            (0, b"secret.env\ndump.log\n", b""),  # git ls-files --others
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "untracked_files"
+        assert result["untracked_files"] == ["secret.env", "dump.log"]
+        assert "files=[...]" in result["error"]
+        assert "include_untracked=True" in result["error"]
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_no_manifest_no_untracked_behaves_as_before(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """No manifest + no untracked files: identical to old behaviour."""
+        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["swept_untracked"] == []
+        assert "staged_files" not in result
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_fresh_branch_leak_prevention(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Criterion 1: fresh branch, no upstream, prior checkpoint committed
+        an undeclared file.  The pushed commit must include only the declared
+        file.  The undeclared file must be absent from the pushed history and
+        still present in the worktree.
+
+        This simulates: checkpoint committed both declared.txt and
+        personal.txt, then publish with files=['declared.txt'].
+        The new base-resolution path (origin/HEAD) strips the checkpoint
+        commits, then only the declared file is staged.
+        """
+        container = _make_container_mock([
+            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # checkout -b
+            # Resolve base - branch does NOT exist on remote yet
+            (1, b"", b""),  # rev-parse --verify origin/fix/x (ec=1)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD -> found
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'declared.txt'  <-- only declarerd
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["staged_files"] == ["declared.txt"]
+        assert result["swept_untracked"] == []
+
+        # Verify only declared.txt was staged -- no personal.txt
+        add_calls = [
+            c[0][0][2]
+            for c in container.exec_run.call_args_list
+            if "git add" in str(c[0][0][2])
+        ]
+        assert len(add_calls) == 1, f"expected 1 git add call, got {len(add_calls)}"
+        assert "declared.txt" in add_calls[0]
+        assert "personal.txt" not in " ".join(add_calls)
+
+        # Verify we reset to origin/HEAD (building on remote default)
+        reset_calls = [
+            c[0][0][2]
+            for c in container.exec_run.call_args_list
+            if "git reset" in str(c[0][0][2])
+        ]
+        assert any("git reset --mixed origin/HEAD" in c for c in reset_calls)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_follow_up_push_preserves_prior_commits(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Criterion 2: follow-up publish onto a branch that already exists
+        on the remote.  The base is resolved as origin/<branch>, so
+        previously pushed commits are preserved (the new commit builds on
+        top of them).  Only the declared file is added.
+        """
+        container = _make_container_mock([
+            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # checkout -b / checkout existing
+            # Resolve base: origin/fix/x DOES exist on remote
+            (0, b"abc7890def1234", b""),  # rev-parse --verify origin/fix/x
+            # No fallback to origin/HEAD -- we use origin/fix/x
+            (0, b"", b""),  # git reset --mixed origin/fix/x
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["staged_files"] == ["declared.txt"]
+        assert result["swept_untracked"] == []
+
+        # Verify we reset to origin/fix/x (the existing remote branch),
+        # NOT to origin/HEAD -- this preserves previously pushed commits.
+        reset_calls = [
+            c[0][0][2]
+            for c in container.exec_run.call_args_list
+            if "git reset" in str(c[0][0][2])
+        ]
+        assert any("git reset --mixed origin/fix/x" in c for c in reset_calls)
+
+        # Verify no reset to origin/HEAD occurred
+        assert not any("origin/HEAD" in c for c in reset_calls)
+
+        # Verify only declared.txt was staged
+        add_calls = [
+            c[0][0][2]
+            for c in container.exec_run.call_args_list
+            if "git add" in str(c[0][0][2])
+        ]
+        assert len(add_calls) == 1
+        assert "declared.txt" in add_calls[0]
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_fallback_to_origin_main(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When origin/HEAD is absent, fallback to origin/main succeeds."""
+        container = _make_container_mock([
+            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
+            (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/main (found)
+            (0, b"", b""),  # git reset --mixed origin/main
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        reset_calls = [
+            c[0][0][2]
+            for c in container.exec_run.call_args_list
+            if "git reset" in str(c[0][0][2])
+        ]
+        assert any("git reset --mixed origin/main" in c for c in reset_calls)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_fallback_to_origin_master(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When origin/HEAD and origin/main are both absent, fallback to
+        origin/master succeeds."""
+        container = _make_container_mock([
+            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
+            (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
+            (1, b"", b""),  # rev-parse --verify origin/main (not found)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/master (found)
+            (0, b"", b""),  # git reset --mixed origin/master
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        reset_calls = [
+            c[0][0][2]
+            for c in container.exec_run.call_args_list
+            if "git reset" in str(c[0][0][2])
+        ]
+        assert any("git reset --mixed origin/master" in c for c in reset_calls)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_no_remote_ref_fails(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When no remote ref can be resolved (no origin/HEAD, origin/main,
+        or origin/master), manifest mode fails instead of silently skipping
+        the reset."""
+        container = _make_container_mock([
+            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
+            (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
+            (1, b"", b""),  # rev-parse --verify origin/main (not found)
+            (1, b"", b""),  # rev-parse --verify origin/master (not found)
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "squash_reset"
+        assert "Cannot resolve a remote base for manifest mode" in result["error"]
 
 
 class TestCreatePrViaApi:

@@ -84,6 +84,23 @@ def _gh_api(method, path, body):
         os.unlink(tmpfile)
 
 
+def _read_blob(path):
+    \"\"\"Read blob content from git (binary-safe): returns bytes of what git
+    committed for *path* at HEAD.  Git stores symlink targets as their
+    target-path string, so this is safe for symlinks too (open() follows
+    symlinks and reads the target file instead).\"\"\"
+    r = subprocess.run(
+        [\"git\", \"cat-file\", \"blob\", f\"HEAD:{path}\"],
+        capture_output=True,
+    )
+    if r.returncode != 0:
+        raise OSError(
+            r.stderr.decode(errors=\"replace\").strip()
+            or f\"git cat-file blob HEAD:{path} failed (exit {r.returncode})\"
+        )
+    return r.stdout
+
+
 repo, branch, working_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 os.chdir(working_dir)
 
@@ -107,11 +124,17 @@ files = [f for f in files_out.split("\\n") if f]
 tree_items = []
 for filepath in files:
     _, mode_line, _ = _run(f"git ls-tree HEAD -- {shlex.quote(filepath)}")
+    if not mode_line.strip():
+        print(json.dumps({"status": "error", "error": f"git ls-tree HEAD -- {filepath}: empty output"}))
+        sys.exit(1)
     parts = mode_line.split()
-    mode = parts[0] if parts else "100644"
+    if len(parts) < 3:
+        print(json.dumps({"status": "error", "error": f"unexpected ls-tree output for {filepath}: {mode_line!r}"}))
+        sys.exit(1)
+    mode = parts[0]
     try:
-        with open(filepath, "rb") as fh:
-            file_content = base64.b64encode(fh.read()).decode()
+        raw = _read_blob(filepath)
+        file_content = base64.b64encode(raw).decode()
     except OSError as e:
         print(json.dumps({"status": "error", "error": f"read {filepath}: {e}"}))
         sys.exit(1)

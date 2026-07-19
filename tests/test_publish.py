@@ -677,7 +677,7 @@ class TestPublishManifest:
         The new branch (no upstream) resolves origin/HEAD as the base.
         """
         container = _make_container_mock([
-            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # test -f 'declared.txt'
             (0, b"", b""),  # checkout -b
             # New path: resolve remote base
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -721,11 +721,11 @@ class TestPublishManifest:
     ) -> None:
         """Manifest mode stages a declared file that is brand new / untracked.
 
-        The existence check passes (test -e returns 0), and git add -- stages
+        The existence check passes (test -f returns 0), and git add -- stages
         it successfully.  The new branch resolves origin/HEAD as the base.
         """
         container = _make_container_mock([
-            (0, b"", b""),  # test -e 'newfile.py' (exists)
+            (0, b"", b""),  # test -f 'newfile.py' (exists)
             (0, b"", b""),  # checkout -b
             # New path: resolve remote base
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -761,7 +761,7 @@ class TestPublishManifest:
         with no upstream, the push must exclude that file by building the
         commit against the remote base (origin/HEAD)."""
         container = _make_container_mock([
-            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # test -f 'declared.txt'
             (0, b"", b""),  # checkout -b
             # Resolve base: origin/fix/x does NOT exist on remote
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -874,9 +874,9 @@ class TestPublishManifest:
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """A declared path that does not exist produces an error and no push."""
+        """A declared path that does not exist (or is not a regular file) produces an error and no push."""
         container = _make_container_mock([
-            (1, b"", b""),  # test -e 'missing.txt' -> not found
+            (1, b"", b""),  # test -f 'missing.txt' -> not found
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -892,6 +892,65 @@ class TestPublishManifest:
         assert result["status"] == "error"
         assert result["step"] == "validation"
         assert "missing.txt" in result["error"]
+        assert "regular file" in result["error"]
+        # Only the existence check exec happened; nothing else should
+        assert container.exec_run.call_count == 1
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_rejects_dot_directory(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Declaring \".\" as a manifest path is rejected (directory, not regular file)."""
+        container = _make_container_mock([
+            (1, b"", b""),  # test -f '.' -> not a regular file
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["."],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "validation"
+        assert "." in result["error"]
+        assert "regular file" in result["error"]
+        # Only the existence check exec happened; nothing else should
+        assert container.exec_run.call_count == 1
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_rejects_directory_path(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Declaring an existing directory produces a validation error."""
+        container = _make_container_mock([
+            (1, b"", b""),  # test -f 'some_dir' -> not a regular file
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["some_dir"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "validation"
+        assert "some_dir" in result["error"]
+        assert "regular file" in result["error"]
         # Only the existence check exec happened; nothing else should
         assert container.exec_run.call_count == 1
 
@@ -963,7 +1022,7 @@ class TestPublishManifest:
         commits, then only the declared file is staged.
         """
         container = _make_container_mock([
-            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # test -f 'declared.txt'
             (0, b"", b""),  # checkout -b
             # Resolve base - branch does NOT exist on remote yet
             (1, b"", b""),  # rev-parse --verify origin/fix/x (ec=1)
@@ -1020,7 +1079,7 @@ class TestPublishManifest:
         top of them).  Only the declared file is added.
         """
         container = _make_container_mock([
-            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # test -f 'declared.txt'
             (0, b"", b""),  # checkout -b / checkout existing
             # Resolve base: origin/fix/x DOES exist on remote
             (0, b"abc7890def1234", b""),  # rev-parse --verify origin/fix/x
@@ -1076,7 +1135,7 @@ class TestPublishManifest:
     ) -> None:
         """When origin/HEAD is absent, fallback to origin/main succeeds."""
         container = _make_container_mock([
-            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # test -f 'declared.txt'
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
@@ -1116,7 +1175,7 @@ class TestPublishManifest:
         """When origin/HEAD and origin/main are both absent, fallback to
         origin/master succeeds."""
         container = _make_container_mock([
-            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # test -f 'declared.txt'
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
@@ -1158,7 +1217,7 @@ class TestPublishManifest:
         or origin/master), manifest mode fails instead of silently skipping
         the reset."""
         container = _make_container_mock([
-            (0, b"", b""),  # test -e 'declared.txt'
+            (0, b"", b""),  # test -f 'declared.txt'
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)

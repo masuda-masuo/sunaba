@@ -245,7 +245,8 @@ def publish(
         author_email: Override commit author email.
         skip_verify_gate: Bypass verify gate.
         files: When non-empty, stage only the declared repo-relative paths
-            (manifest mode).  Undeclared files stay in the worktree.
+            (manifest mode).  Each path must be a regular file, not a
+            directory.  Undeclared files stay in the worktree.
             When None or empty, fall back to the legacy ``git add -A``
             behaviour, but only if ``include_untracked`` is True or no
             untracked files exist (see below).
@@ -310,12 +311,15 @@ def publish(
                         " (no absolute paths or .. traversal)."
                     ),
                 }, verified)
-            ec, _, _ = _run(f"test -e {shlex.quote(f)}")
+            ec, _, _ = _run(f"test -f {shlex.quote(f)}")
             if ec != 0:
                 return finish_json({
                     "status": "error",
                     "step": "validation",
-                    "error": f"Path '{f}' does not exist in the working tree.",
+                    "error": (
+                        f"Path '{f}' does not exist or is not a regular file. "
+                        "Manifests must list regular files one by one."
+                    ),
                 }, verified)
 
         swept_untracked: list[str] = []

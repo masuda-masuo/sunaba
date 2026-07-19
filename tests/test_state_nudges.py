@@ -97,6 +97,7 @@ class TestVerifyNudges:
             mock_container.exec_run.side_effect = [
                 (0, (b"", b"")),  # git diff HEAD --numstat
                 (0, (b"", b"")),  # git diff --cached --numstat
+                (0, (b"", b"")),  # git ls-files --others --exclude-standard
                 (0, (b"", b"")),  # src/tests dir probe
                 (0, (f"{json_report}{nl}---PYTEST-RAW---{nl}".encode(), b"")),  # pytest
             ]
@@ -315,6 +316,7 @@ class TestVerifyRecordsSuccess:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
             (0, (b"", b"")),  # git diff --cached --numstat
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),  # src/tests dir probe
             (0, (f"{json_report}\n---PYTEST-RAW---\n".encode(), b"")),  # pytest
         ]

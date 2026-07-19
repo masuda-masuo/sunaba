@@ -332,13 +332,19 @@ def verify_in_container(
         )
         return ec, stdout_text, stderr_text
 
-    # --- Get diff summary (structured JSON, issue #500) ---
+    # --- Get diff summary (structured JSON, issue #500, #687) ---
     unstaged_ec, unstaged_raw, _ = _run(
         "git diff HEAD --numstat 2>/dev/null"
     )
     staged_ec, staged_raw, _ = _run(
         "git diff --cached --numstat 2>/dev/null"
     )
+    _, untracked_raw, _ = _run(
+        "git ls-files --others --exclude-standard"
+    )
+    untracked_files = [
+        f for f in untracked_raw.split("\n") if f.strip()
+    ]
 
     def _build_diff_section(raw_text: str) -> dict:
         if not raw_text.strip():
@@ -359,6 +365,7 @@ def verify_in_container(
     diff_summary = {
         "unstaged": _build_diff_section(unstaged_raw),
         "staged": _build_diff_section(staged_raw),
+        "untracked": untracked_files,
     }
 
     # --- Determine if partial test run (filter provided) ---

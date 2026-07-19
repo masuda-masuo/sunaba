@@ -33,6 +33,7 @@ def git_prepare_commit(
     *,
     branch: str,
     message: str,
+    files: list[str] | None = None,
     author_name: str | None = None,
     author_email: str | None = None,
 ) -> dict | None:
@@ -40,6 +41,15 @@ def git_prepare_commit(
 
     Step names (for error reporting): ``git_add``, ``squash_reset``,
     ``squash_readd``, ``git_commit``.
+
+    Args:
+        run: Injected exec callback.
+        branch: Branch name to create or checkout.
+        message: Git commit message.
+        files: When non-None, stage only these paths (manifest mode).
+            When None, stage everything with ``git add -A`` (legacy mode).
+        author_name: Override commit author name.
+        author_email: Override commit author email.
 
     Returns an error dict on failure, or ``None`` on success (including
     "nothing to commit" which is treated as success).
@@ -50,26 +60,41 @@ def git_prepare_commit(
         f" || git checkout {shlex.quote(branch)}"
     )
 
-    # --- Git add ---
-    add_ec, add_out, add_err = run("git add -A")
-    if add_ec != 0:
-        return {
-            "status": "error",
-            "step": "git_add",
-            "error": add_err or add_out,
-        }
-
-    # --- Always squash unpushed checkpoints into a single commit ---
-    track_ec, track_out, _ = run(
-        "git rev-parse --abbrev-ref @{u} 2>/dev/null"
-    )
-    if track_ec == 0 and track_out.strip():
-        unpushed_ec, unpushed_out, _ = run(
-            "git log --oneline @{u}..HEAD"
+    if files is not None:
+        # --- Manifest mode: build the commit against the remote base ---
+        # Resolve the base: origin/<branch> if the branch already exists on
+        # the remote (follow-up push to an open PR preserves earlier commits),
+        # otherwise the remote default branch (origin/HEAD).  This prevents
+        # files a prior checkpoint committed via `git add -A` from leaking
+        # into the pushed commit -- independent of whether the local branch
+        # has an upstream configured.
+        _, remote_branch_out, _ = run(
+            f"git rev-parse --verify origin/{shlex.quote(branch)} 2>/dev/null"
         )
-        if unpushed_ec == 0 and unpushed_out.strip():
+        if remote_branch_out.strip():
+            base_ref = f"origin/{shlex.quote(branch)}"
+        else:
+            # Fallback: origin/HEAD (set by git clone) points to the
+            # remote default branch.
+            _, head_out, _ = run(
+                "git rev-parse --verify origin/HEAD 2>/dev/null"
+            )
+            if head_out.strip():
+                base_ref = "origin/HEAD"
+            else:
+                # Last-resort fallback: try well-known default names.
+                base_ref = ""
+                for default in ("main", "master"):
+                    _, default_out, _ = run(
+                        f"git rev-parse --verify origin/{default} 2>/dev/null"
+                    )
+                    if default_out.strip():
+                        base_ref = f"origin/{default}"
+                        break
+
+        if base_ref:
             reset_ec, reset_out, reset_err = run(
-                "git reset --soft @{u}"
+                f"git reset --mixed {base_ref}"
             )
             if reset_ec != 0:
                 return {
@@ -77,13 +102,63 @@ def git_prepare_commit(
                     "step": "squash_reset",
                     "error": reset_err or reset_out,
                 }
-            readd_ec, readd_out, readd_err = run("git add -A")
-            if readd_ec != 0:
+        else:
+            # No remote ref could be resolved — fail instead of silently
+            # skipping the reset, which would re-create the manifest leak.
+            return {
+                "status": "error",
+                "step": "squash_reset",
+                "error": (
+                    "Cannot resolve a remote base for manifest mode. "
+                    "Ensure the repository has been cloned from a remote "
+                    "(origin) and that the remote has a default branch."
+                ),
+            }
+
+        # Stage only the declared manifest paths.
+        for f in files:
+            add_ec, add_out, add_err = run(f"git add -- {shlex.quote(f)}")
+            if add_ec != 0:
                 return {
                     "status": "error",
-                    "step": "squash_readd",
-                    "error": readd_err or readd_out,
+                    "step": "git_add",
+                    "error": add_err or add_out,
                 }
+    else:
+        # --- Legacy mode: git add -A with upstream-aware squash ---
+        add_ec, add_out, add_err = run("git add -A")
+        if add_ec != 0:
+            return {
+                "status": "error",
+                "step": "git_add",
+                "error": add_err or add_out,
+            }
+
+        # Squash unpushed checkpoints into a single commit (upstream only).
+        track_ec, track_out, _ = run(
+            "git rev-parse --abbrev-ref @{u} 2>/dev/null"
+        )
+        if track_ec == 0 and track_out.strip():
+            unpushed_ec, unpushed_out, _ = run(
+                "git log --oneline @{u}..HEAD"
+            )
+            if unpushed_ec == 0 and unpushed_out.strip():
+                reset_ec, reset_out, reset_err = run(
+                    "git reset --soft @{u}"
+                )
+                if reset_ec != 0:
+                    return {
+                        "status": "error",
+                        "step": "squash_reset",
+                        "error": reset_err or reset_out,
+                    }
+                readd_ec, readd_out, readd_err = run("git add -A")
+                if readd_ec != 0:
+                    return {
+                        "status": "error",
+                        "step": "squash_readd",
+                        "error": readd_err or readd_out,
+                    }
 
     # --- Git identity: set before commit ---
     name_to_use = (

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import re
 import shlex
 from typing import Any
@@ -220,6 +221,8 @@ def publish(
     author_name: str | None = None,
     author_email: str | None = None,
     skip_verify_gate: bool = False,
+    files: list[str] | None = None,
+    include_untracked: bool = False,
 ) -> str:
     """Stage, commit, push, and optionally create a PR -- the single exit tool.
 
@@ -241,6 +244,15 @@ def publish(
         author_name: Override commit author name.
         author_email: Override commit author email.
         skip_verify_gate: Bypass verify gate.
+        files: When non-empty, stage only the declared repo-relative paths
+            (manifest mode).  Undeclared files stay in the worktree.
+            When None or empty, fall back to the legacy ``git add -A``
+            behaviour, but only if ``include_untracked`` is True or no
+            untracked files exist (see below).
+        include_untracked: When True and no manifest is given, stage all
+            files including untracked ones (the old default).  When False
+            (default) and no manifest is given, the call is rejected if
+            untracked files exist.
 
     Returns:
         JSON with the operation result.
@@ -280,14 +292,64 @@ def publish(
     if proxy_err:
         return finish_json({"status": "error", "step": "egress_proxy", "error": proxy_err}, verified)
 
-    # Capture untracked files before git add -A sweeps them in
-    _, ls_out, _ = _run("git ls-files --others --exclude-standard")
-    swept_untracked = [f for f in ls_out.split("\n") if f.strip()]
+    # --- Manifest mode vs fallback mode ---
+    manifest = files is not None and len(files) > 0
 
-    commit_err = git_prepare_commit(_run, branch=branch, message=message,
-        author_name=author_name, author_email=author_email)
-    if commit_err:
-        return finish_json(commit_err, verified)
+    if manifest:
+        assert files is not None  # type-narrowing hint for pyright
+        # Validate every declared path:
+        # - Must be repo-relative (no absolute, no .. traversal)
+        # - Must exist in the working tree
+        for f in files:
+            if os.path.isabs(f) or ".." in f.split("/"):
+                return finish_json({
+                    "status": "error",
+                    "step": "validation",
+                    "error": (
+                        f"Invalid path '{f}': paths must be repo-relative"
+                        " (no absolute paths or .. traversal)."
+                    ),
+                }, verified)
+            ec, _, _ = _run(f"test -e {shlex.quote(f)}")
+            if ec != 0:
+                return finish_json({
+                    "status": "error",
+                    "step": "validation",
+                    "error": f"Path '{f}' does not exist in the working tree.",
+                }, verified)
+
+        swept_untracked: list[str] = []
+        commit_err = git_prepare_commit(_run, branch=branch, message=message,
+            files=files, author_name=author_name, author_email=author_email)
+        if commit_err:
+            return finish_json(commit_err, verified)
+    else:
+        # Capture untracked files before git add -A sweeps them in
+        _, ls_out, _ = _run("git ls-files --others --exclude-standard")
+        swept_untracked = [f for f in ls_out.split("\n") if f.strip()]
+
+        # Reject if untracked files exist and caller didn't opt in
+        if swept_untracked and not include_untracked:
+            return finish_json({
+                "status": "error",
+                "step": "untracked_files",
+                "error": (
+                    "Untracked files are present in the working tree. "
+                    "Pass files=[...] with repo-relative paths to declare "
+                    "exactly what to stage, or pass include_untracked=True "
+                    "to opt in to the previous behaviour."
+                ),
+                "untracked_files": swept_untracked,
+                "hint": (
+                    "Use files=[...] to stage specific paths declaratively, "
+                    "or include_untracked=True for the old git add -A."
+                ),
+            }, verified)
+
+        commit_err = git_prepare_commit(_run, branch=branch, message=message,
+            author_name=author_name, author_email=author_email)
+        if commit_err:
+            return finish_json(commit_err, verified)
 
     push_token = _resolve_vcs_token()
     token_env = _push_token_env(push_token)
@@ -349,6 +411,8 @@ def publish(
         "status": "pushed", "branch": branch, "sha": sha,
         "swept_untracked": swept_untracked,
     }
+    if manifest:
+        result["staged_files"] = files
     if pr_url:
         result["pr_url"] = pr_url
     if not create_pr:

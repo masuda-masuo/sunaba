@@ -491,3 +491,156 @@ class TestResolvePushToken:
         mock_mint.return_value = None
         with patch.dict("os.environ", {}, clear=True):
             assert _resolve_vcs_token() == ""
+
+
+class TestApiPushBlobReading:
+    """Tests for the blob-content reading logic in the API-push fallback.
+
+    The embedded script _SANDBOX_CREATE_PR_SCRIPT reads each file's
+    content via ``_read_blob(path)`` (binary-safe call to
+    ``git cat-file blob HEAD:<path>``), so that symlinks (mode 120000)
+    upload the link target path string — not the target file's content —
+    matching what git committed.
+
+    This test extracts the actual ``_read_blob`` function from the
+    embedded script and executes it against a real (ephemeral) git
+    repository via subprocess, so the production code path is validated
+    rather than re-implemented.
+    """
+
+    def test_read_blob_respects_symlinks(self, tmp_path) -> None:
+        """The _read_blob function from the API-push script must return
+        the link target path string for symlinks, not the target file
+        content."""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        from sunaba.tools.vcs.publishing import _SANDBOX_CREATE_PR_SCRIPT
+
+        # --- Extract the real _read_blob function from the script ---
+        fn_marker = "def _read_blob(path):"
+        fn_start = _SANDBOX_CREATE_PR_SCRIPT.index(fn_marker)
+        end_marker = "\n\nrepo, branch, working_dir"
+        fn_end = _SANDBOX_CREATE_PR_SCRIPT.index(end_marker, fn_start)
+        read_blob_code = _SANDBOX_CREATE_PR_SCRIPT[fn_start:fn_end]
+
+        # --- Build a test harness that calls _read_blob ---
+        harness = (
+            "import subprocess\n"
+            "import sys\n"
+            + read_blob_code +
+            "\n"
+            "path = sys.argv[1]\n"
+            "try:\n"
+            "    result = _read_blob(path)\n"
+            "except OSError as e:\n"
+            "    sys.stderr.write(str(e))\n"
+            "    sys.exit(1)\n"
+            "sys.stdout.buffer.write(result)\n"
+        )
+        harness_path = tmp_path / "_test_read_blob.py"
+        harness_path.write_text(harness)
+
+        # --- Create a git repo with test files ---
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        def _git(*args):
+            subprocess.run(
+                ["git"] + list(args),
+                capture_output=True,
+                cwd=repo,
+                check=True,
+            )
+
+        _git("init")
+        _git("config", "user.email", "test@test")
+        _git("config", "user.name", "Test")
+
+        # Regular text file
+        regular_file = Path(repo) / "hello.txt"
+        regular_file.write_text("Hello, world!\n")
+
+        # Binary file (contains NUL byte)
+        binary_file = Path(repo) / "binary.bin"
+        binary_file.write_bytes(
+            b"\x00\x01\x02\xff\xfeHello\x00binary\x00content\n"
+        )
+
+        # Symlink pointing outside the repo
+        outside_target = "/etc/os-release"  # guaranteed to exist on Linux
+        symlink_path = Path(repo) / "link_to_etc"
+        symlink_path.symlink_to(outside_target)
+
+        _git("add", "-A")
+        _git("commit", "-m", "test commit")
+
+        # --- Helper: call the real _read_blob via subprocess ---
+        def call_read_blob(filepath: str) -> bytes:
+            r = subprocess.run(
+                [sys.executable, str(harness_path), filepath],
+                capture_output=True,
+                cwd=repo,
+            )
+            assert r.returncode == 0, (
+                f"_read_blob({filepath!r}) failed (exit {r.returncode}): "
+                f"{r.stderr.decode(errors='replace')}"
+            )
+            return r.stdout
+
+        # --- Assertions ---
+
+        # Regular file: content matches
+        regular_blob = call_read_blob("hello.txt")
+        assert regular_blob == b"Hello, world!\n", (
+            f"Regular file blob mismatch: {regular_blob!r}"
+        )
+
+        # Binary file: byte-identical (including NUL bytes)
+        binary_blob = call_read_blob("binary.bin")
+        expected_binary = (
+            b"\x00\x01\x02\xff\xfeHello\x00binary\x00content\n"
+        )
+        assert binary_blob == expected_binary, (
+            f"Binary file blob mismatch (length {len(binary_blob)}): "
+            f"{binary_blob!r}"
+        )
+
+        # Symlink: blob content is the target path string, NOT target content
+        symlink_blob = call_read_blob("link_to_etc")
+        assert symlink_blob == outside_target.encode(), (
+            f"Symlink blob should be {outside_target!r} but got "
+            f"{symlink_blob!r}"
+        )
+        # Sanity: the symlink blob is short (path string), not file content
+        assert len(symlink_blob) < 100, (
+            "Symlink blob is unreasonably large -- it likely contains the "
+            "target file content rather than the link target path"
+        )
+
+        # --- Verify git modes are preserved ---
+        r = subprocess.run(
+            ["git", "ls-tree", "HEAD"],
+            capture_output=True, text=True, cwd=repo,
+        )
+        mode_map: dict[str, str] = {}
+        for line in r.stdout.strip().split("\n"):
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                mode_map[parts[-1]] = parts[0]
+
+        assert mode_map.get("hello.txt") == "100644", (
+            f"Expected mode 100644 for hello.txt, got "
+            f"{mode_map.get('hello.txt')}"
+        )
+        assert mode_map.get("binary.bin") == "100644", (
+            f"Expected mode 100644 for binary.bin, got "
+            f"{mode_map.get('binary.bin')}"
+        )
+        assert mode_map.get("link_to_etc") == "120000", (
+            f"Expected mode 120000 for link_to_etc, got "
+            f"{mode_map.get('link_to_etc')}"
+        )

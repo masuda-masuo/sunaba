@@ -69,12 +69,20 @@ class TestServerInstructions:
 # Aggregate budgets: measured after the #550 docstring diet (desc 8249 B,
 # param descriptions 8040 B across 28 tools), capped at roughly +10% so the
 # surface cannot quietly regrow tool by tool.
-# Raised once for #675's `branch=` parameter: the measured total is 10166 B,
-# so the cap moves to the next 256 B step.  The first attempt set 11264,
-# leaving ~1.1 KB of unearned headroom -- exactly the quiet regrowth this cap
-# exists to prevent.  Move it by what a change actually needs, and record what
-# needed it.
-TOTAL_DESCRIPTION_BYTE_LIMIT = 10752
+#
+# Raised deliberately, twice, and recorded here each time -- the point of the
+# cap is that growth is a visible decision rather than the sum of many quiet
+# ones.  Raise it only for genuinely new surface, by what that surface actually
+# needs, and say what needed it:
+#
+# - descriptions 10752 -> 11264: #676 added secret_scan_override and #675 added
+#   merge_base / merge_complete / merge_abort, taking the tool count 28 -> 33.
+#   Their descriptions were trimmed first (merge_complete 302 -> 153 B) and only
+#   the remainder was budgeted.
+# - param descriptions 9984 -> 10240: #675's `branch=` parameter.  The first
+#   attempt set 11264, leaving ~1.1 KB of unearned headroom -- exactly the quiet
+#   regrowth this cap exists to prevent.
+TOTAL_DESCRIPTION_BYTE_LIMIT = 11264
 TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10240
 
 

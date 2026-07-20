@@ -63,6 +63,9 @@ from .tools.vcs import (
     checkpoint_list,
     checkpoint_restore,
     issue_view,
+    merge_abort,
+    merge_base,
+    merge_complete,
     publish,
     sandbox_issue_write,
     sandbox_pr_review_write,
@@ -107,6 +110,9 @@ sandbox_pr_review_write = mcp.tool()(sandbox_pr_review_write)
 checkpoint = mcp.tool()(checkpoint)
 checkpoint_list = mcp.tool()(checkpoint_list)
 checkpoint_restore = mcp.tool()(checkpoint_restore)
+merge_base = mcp.tool()(merge_base)
+merge_complete = mcp.tool()(merge_complete)
+merge_abort = mcp.tool()(merge_abort)
 secret_scan_override = mcp.tool()(secret_scan_override)
 
 # Container naming / discovery tools (Issue #478)

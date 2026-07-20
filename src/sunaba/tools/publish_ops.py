@@ -28,6 +28,31 @@ class RunFunc(Protocol):
         ...
 
 
+def _check_merge_in_progress(run: RunFunc) -> dict | None:
+    """Check whether a merge is in progress.
+
+    An in-progress merge (stopped on conflicts) has ``.git/MERGE_HEAD``
+    present.  Publishing during such a state would destroy the merge state
+    and any conflict resolutions via ``git reset``.
+
+    Returns:
+        An error dict if a merge is in progress, or ``None`` if not.
+    """
+    ec, out, _err = run("[ -f .git/MERGE_HEAD ] && echo 'in-progress' || echo 'none'")
+    if ec == 0 and out.strip() == "in-progress":
+        return {
+            "status": "error",
+            "step": "merge_in_progress",
+            "error": (
+                "Cannot publish during an unresolved merge. "
+                "Call merge_complete(container_id=...) to finish the merge, "
+                "or merge_abort(container_id=...) to abandon it, "
+                "then publish again."
+            ),
+        }
+    return None
+
+
 def git_prepare_commit(
     run: RunFunc,
     *,
@@ -54,6 +79,14 @@ def git_prepare_commit(
     Returns an error dict on failure, or ``None`` on success (including
     "nothing to commit" which is treated as success).
     """
+    # --- Reject publish during an unresolved merge ---
+    # When a merge stopped on conflicts, the merge is not yet committed:
+    # HEAD still has a single parent and .git/MERGE_HEAD exists.  A reset
+    # would destroy the merge state along with any resolutions.
+    merge_err = _check_merge_in_progress(run)
+    if merge_err is not None:
+        return merge_err
+
     # --- Git branch check/create ---
     run(
         f"git checkout -b {shlex.quote(branch)} 2>/dev/null"
@@ -93,6 +126,28 @@ def git_prepare_commit(
                         break
 
         if base_ref:
+            # A completed base merge (merge_base + merge_complete) must survive
+            # the reset, or the pushed branch still lacks the base's commits and
+            # GitHub keeps reporting CONFLICTING -- the whole point of #675.
+            #
+            # Preserve it only when HEAD is a merge whose *first* parent is the
+            # remote base itself: that shape can contain no local checkpoint
+            # commits, so keeping it cannot reintroduce the #679 leak.  With a
+            # checkpoint in between, fall back to the reset -- losing the merge
+            # is recoverable, leaking undeclared files is not.
+            # --verify is load-bearing: without it `git rev-parse HEAD^2`
+            # echoes the literal string "HEAD^2" on stdout for an ordinary
+            # single-parent commit, so every commit would look like a merge
+            # and the #679 reset would be skipped wholesale.
+            _, p2_out, _ = run("git rev-parse --verify HEAD^2 2>/dev/null")
+            if p2_out.strip():
+                _, p1_out, _ = run("git rev-parse --verify HEAD^1 2>/dev/null")
+                _, base_sha_out, _ = run(
+                    f"git rev-parse --verify {base_ref} 2>/dev/null"
+                )
+                if p1_out.strip() and p1_out.strip() == base_sha_out.strip():
+                    base_ref = "HEAD"
+
             reset_ec, reset_out, reset_err = run(
                 f"git reset --mixed {base_ref}"
             )

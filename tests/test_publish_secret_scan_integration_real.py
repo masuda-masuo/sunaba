@@ -19,7 +19,13 @@ import pytest
 
 from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
 from sunaba.tools.vcs.publishing import publish
-from tests.conftest import _decode, _exec_cmd, _make_client_mock, _make_publish_container
+from tests.conftest import (
+    _decode,
+    _exec_cmd,
+    _make_client_mock,
+    _make_publish_container,
+    _make_publish_container_for_scan_test,
+)
 
 # ============================================================================
 # Helpers: build fixture data at runtime (no literal secrets)
@@ -257,3 +263,494 @@ class TestPublishSecretScanReal:
         )
         assert "detect-secrets scan" in issued
         assert "declared.txt" in issued
+
+
+    # -- Criterion 1: non-zero exit blocks push ----------------------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_scan_nonzero_exit_blocks_push(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Manifest mode: detect-secrets exits non-zero --> publish blocked
+        with secret_scan_state='error' and no commit/push.
+        """
+        container = _make_publish_container_for_scan_test(
+            [(0, b"", b"")],  # test -f 'declared.txt'
+            scan_exit_code=1,
+            detect_secrets_scan_output=b"",
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "secret_scan"
+        assert result["secret_scan_state"] == "error"
+        assert "publish blocked by secret scan" in result["error"]
+
+        # Verify no commit or push was issued.
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        assert "git commit" not in issued
+        assert "git push" not in issued
+
+        # Verify the scan command actually ran.
+        assert "detect-secrets scan" in issued
+        assert "failed" in result["secret_scan"]
+
+    # -- Criterion 2: empty stdout blocks push ----------------------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_scan_empty_stdout_blocks_push(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Manifest mode: detect-secrets produces empty stdout --> blocked."""
+        # Empty scan output with exit 0: run_secret_scan returns state error.
+        container = _make_publish_container_for_scan_test(
+            [(0, b"", b"")],  # test -f 'declared.txt'
+            scan_exit_code=0,
+            detect_secrets_scan_output=b"",
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "secret_scan"
+        assert result["secret_scan_state"] == "error"
+        assert "publish blocked by secret scan" in result["error"]
+
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        assert "git commit" not in issued
+        assert "git push" not in issued
+
+        # Response must name the failure type: empty output.
+        assert "empty output" in result["secret_scan"]
+
+    # -- Criterion 3: unparseable output blocks push ----------------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_scan_unparseable_output_blocks_push(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Manifest mode: detect-secrets produces non-JSON stdout --> blocked."""
+        container = _make_publish_container_for_scan_test(
+            [(0, b"", b"")],  # test -f 'declared.txt'
+            scan_exit_code=0,
+            detect_secrets_scan_output=b"this is not valid json\n",
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "secret_scan"
+        assert result["secret_scan_state"] == "error"
+        assert "publish blocked by secret scan" in result["error"]
+
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        assert "git commit" not in issued
+        assert "git push" not in issued
+
+        # Response must name the failure type: unparseable output.
+        assert "unparseable" in result["secret_scan"]
+
+    # -- Criterion 4: three error states are distinguishable --------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_scan_error_response_names_failure_type(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Each error branch produces a distinct message that names the
+        specific failure (exit code, empty output, unparseable output)."""
+        from sunaba.tools.secret_scan import run_secret_scan as real_run
+
+        # ec != 0
+        r1 = real_run(
+            _make_publish_container_for_scan_test(
+                [], scan_exit_code=1, detect_secrets_scan_output=b"",
+            ),
+            ["f.py"], "/tmp",
+        )
+        assert "exit 1" in r1["secret_scan"] or "failed" in r1["secret_scan"]
+
+        # empty stdout
+        r2 = real_run(
+            _make_publish_container_for_scan_test(
+                [], scan_exit_code=0, detect_secrets_scan_output=b"",
+            ),
+            ["f.py"], "/tmp",
+        )
+        assert "empty output" in r2["secret_scan"]
+
+        # unparseable JSON
+        r3 = real_run(
+            _make_publish_container_for_scan_test(
+                [], scan_exit_code=0, detect_secrets_scan_output=b"garbage",
+            ),
+            ["f.py"], "/tmp",
+        )
+        assert "unparseable" in r3["secret_scan"]
+
+        # secret_scan_state is "error" for all three
+        assert r1["secret_scan_state"] == "error"
+        assert r2["secret_scan_state"] == "error"
+        assert r3["secret_scan_state"] == "error"
+
+    # -- Criterion 5: findings still block (regression) -------------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_findings_still_block_push(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Findings block with same details as before."""
+        finding_bytes = _make_finding_json(
+            "secret.txt", 5, "Private Key",
+        ).encode("utf-8")
+
+        container = _make_publish_container(
+            [(0, b"", b"")],  # test -f
+            detect_secrets_scan_output=finding_bytes,
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["secret.txt"],
+                working_dir="/root/repo",
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "secret_scan"
+        assert result["secret_scan_state"] == "findings"
+        assert "publish blocked by secret scan" in result["error"]
+        assert len(result["findings"]) > 0
+
+    # -- Criterion 8: override bypasses error block -----------------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_override_bypasses_error_block(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """``secret_scan_override`` (in-memory flag) allows publish through
+        an error block (ec != 0) when baseline is disabled.
+        """
+        from sunaba.tools.secret_scan import _OVERRIDE_MAP
+
+        container = _make_publish_container_for_scan_test(
+            [
+                (0, b"", b""),  # test -f 'declared.txt'
+                (0, b"none\n", b""),  # MERGE_HEAD check
+                (0, b"", b""),  # checkout -b
+                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                (0, b"", b""),  # git reset --mixed origin/HEAD
+                (0, b"", b""),  # git add -- 'declared.txt'
+                (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"", b""),  # git status --porcelain -z (no leftovers)
+                (0, b"pushed", b""),  # git push
+                (0, b"abc1234def5678", b""),  # rev-parse HEAD
+            ],
+            scan_exit_code=1,  # scan fails
+            detect_secrets_scan_output=b"",
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        # Set the override flag before calling publish (baseline OFF path)
+        _OVERRIDE_MAP["abc123def456"] = True
+
+        # Baseline disabled so the in-memory override is used
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=False,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        # Clean up the override flag
+        _OVERRIDE_MAP.pop("abc123def456", None)
+
+        # With override set, publish proceeds past the scan block.
+        assert result["status"] == "pushed"
+        assert result["secret_scan_state"] == "error"
+        assert "failed" in result["secret_scan"]
+
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        # The push command is ``git -c credential.helper=… push …`` so
+        # ``"git push"`` as a literal does not appear.  Check for the
+        # word ``push`` in the issued commands instead.
+        assert " push " in f" {issued} "
+        assert "detect-secrets scan" in issued
+
+    # -- Criterion 8: override bypasses findings block too ----------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_override_bypasses_findings_block(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """``secret_scan_override`` (in-memory flag) allows publish through
+        a findings block when baseline is disabled.
+        """
+        from sunaba.tools.secret_scan import _OVERRIDE_MAP
+
+        finding_bytes = _make_finding_json(
+            "secret.txt", 5, "Private Key",
+        ).encode("utf-8")
+
+        container = _make_publish_container_for_scan_test(
+            [
+                (0, b"", b""),  # test -f 'secret.txt'
+                (0, b"none\n", b""),  # MERGE_HEAD check
+                (0, b"", b""),  # checkout -b
+                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                (0, b"", b""),  # git reset --mixed origin/HEAD
+                (0, b"", b""),  # git add -- 'secret.txt'
+                (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"", b""),  # git status --porcelain -z (no leftovers)
+                (0, b"pushed", b""),  # git push
+                (0, b"abc1234def5678", b""),  # rev-parse HEAD
+            ],
+            scan_exit_code=0,
+            detect_secrets_scan_output=finding_bytes,
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        # Set the override flag before calling publish (baseline OFF path)
+        _OVERRIDE_MAP["abc123def456"] = True
+
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=False,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["secret.txt"],
+                working_dir="/root/repo",
+            ))
+
+        _OVERRIDE_MAP.pop("abc123def456", None)
+
+        assert result["status"] == "pushed"
+        assert result["secret_scan_state"] == "findings"
+
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        assert " push " in f" {issued} "
+
+    # -- Criterion 7: skipped (no detect-secrets) still publishes ---------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_skipped_still_publishes(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Container without detect-secrets: scan is skipped, publish proceeds."""
+        container = _make_publish_container_for_scan_test(
+            [
+                (0, b"", b""),  # test -f 'declared.txt'
+                (0, b"none\n", b""),  # MERGE_HEAD check
+                (0, b"", b""),  # checkout -b
+                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                (0, b"", b""),  # git reset --mixed origin/HEAD
+                (0, b"", b""),  # git add -- 'declared.txt'
+                (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"", b""),  # git status --porcelain -z (no leftovers)
+                (0, b"pushed", b""),  # git push
+                (0, b"abc1234def5678", b""),  # rev-parse HEAD
+            ],
+            detect_secrets_available=False,  # no detect-secrets in image
+            scan_exit_code=0,
+            detect_secrets_scan_output=b"",
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        assert result["status"] == "pushed"
+        assert result["secret_scan_state"] == "skipped"
+        assert "SKIPPED" in result["secret_scan"]
+        assert "unavailable" in result["secret_scan"]
+
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        assert " push " in f" {issued} "
+
+    # =====================================================================
+    # Fail-closed: unknown state and missing key block publish (issue #704)
+    # =====================================================================
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_unknown_scan_state_blocks_push(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """An unrecognised secret_scan_state value blocks the publish."""
+        container = _make_publish_container(
+            [(0, b"", b"")],  # test -f 'declared.txt'
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.secret_scan.run_secret_scan",
+            return_value={
+                "secret_scan": "some_future_feature",
+                "secret_scan_state": "future_state",
+                "files_scanned": ["declared.txt"],
+            },
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "secret_scan"
+        assert result["secret_scan_state"] == "future_state"
+        assert "publish blocked by secret scan" in result["error"]
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_missing_scan_state_key_blocks_push(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """A scan result with no secret_scan_state key blocks the publish."""
+        container = _make_publish_container(
+            [(0, b"", b"")],  # test -f 'declared.txt'
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.secret_scan.run_secret_scan",
+            return_value={
+                "secret_scan": "clean",
+                # Deliberately NO secret_scan_state key
+                "files_scanned": ["declared.txt"],
+            },
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "secret_scan"
+        # .get("secret_scan_state", "") returns "" when key absent
+        assert result["secret_scan_state"] == ""
+        assert "publish blocked by secret scan" in result["error"]
+
+    # NOTE: the no-scan default in ``publish`` is deliberately not covered by
+    # a test.  The manifest / not-manifest branches are exhaustive, so the
+    # default is unreachable today and can only be reached by adding a third
+    # branch -- and any test that forced it would have to fake a code path
+    # that does not exist.  Its intent is pinned by the comment at the
+    # declaration instead: the default is a blocking state, so a future
+    # branch that forgets to scan fails closed.

@@ -375,16 +375,33 @@ def publish(
     # result reporting "clean" and — worse — never consuming a used override,
     # so a single authorisation would silently stay live for every later
     # publish.
-    scan_result: dict[str, Any] = {"secret_scan": "clean", "files_scanned": []}
+    # Default result when no scan runs at all.  Unreachable today -- the
+    # manifest / not-manifest branches below are exhaustive -- so this is
+    # purely the safety net for a third branch added later.  It is therefore
+    # a BLOCKING state on purpose: a code path that publishes without
+    # scanning is exactly the fail-open #704 closed, so the net has to catch
+    # it rather than wave it through.  Anything that legitimately skips the
+    # scan must say so explicitly with "skipped".
+    scan_result: dict[str, Any] = {
+        "secret_scan": (
+            "ERROR: no secret scan ran for this publish. "
+            "Scan state could not be determined; publish blocked."
+        ),
+        "secret_scan_state": "unknown",
+        "files_scanned": [],
+    }
 
     if manifest:
         assert files is not None
         scan_files = [f for f in files if not os.path.isabs(f)]
         scan_result = run_secret_scan(container, scan_files, working_dir)  # noqa: F821
-        if scan_result.get("secret_scan") == "findings":
+        scan_state = scan_result.get("secret_scan_state", "")
+        # Fail-closed: proceed ONLY on known-safe states.
+        if scan_state not in ("clean", "skipped"):
             record_boundary_crossing(
                 cid, "publish",
-                f"secret_scan findings={len(scan_result.get('findings', []))}"
+                f"secret_scan state={scan_state}"
+                f" findings={len(scan_result.get('findings', []))}"
                 f" files={scan_result.get('files_scanned', [])}",
                 approved=False,
             )
@@ -394,6 +411,7 @@ def publish(
                     "status": "error",
                     "step": "secret_scan",
                     "secret_scan": scan_result.get("secret_scan"),
+                    "secret_scan_state": scan_state,
                     "findings": scan_result.get("findings"),
                     "files_scanned": scan_result.get("files_scanned"),
                     "scan_summary": scan_result.get("scan_summary"),
@@ -472,10 +490,13 @@ def publish(
         )
         scan_files = [f.strip() for f in diff_out.splitlines() if f.strip()]
         scan_result = run_secret_scan(container, scan_files, working_dir)  # noqa: F821
-        if scan_result.get("secret_scan") == "findings":
+        scan_state = scan_result.get("secret_scan_state", "")
+        # Fail-closed: proceed ONLY on known-safe states.
+        if scan_state not in ("clean", "skipped"):
             record_boundary_crossing(
                 cid, "publish",
-                f"secret_scan findings={len(scan_result.get('findings', []))}"
+                f"secret_scan state={scan_state}"
+                f" findings={len(scan_result.get('findings', []))}"
                 f" files={scan_result.get('files_scanned', [])}",
                 approved=False,
             )
@@ -485,6 +506,7 @@ def publish(
                     "status": "error",
                     "step": "secret_scan",
                     "secret_scan": scan_result.get("secret_scan"),
+                    "secret_scan_state": scan_state,
                     "findings": scan_result.get("findings"),
                     "files_scanned": scan_result.get("files_scanned"),
                     "scan_summary": scan_result.get("scan_summary"),
@@ -525,7 +547,8 @@ def publish(
 
             # Push succeeded — consume the override flag now (not before,
             # so an override is never lost on retry after a push failure).
-            if scan_result.get("secret_scan") == "findings":
+            scan_state = scan_result.get("secret_scan_state", "")
+            if scan_state not in ("clean", "skipped"):
                 consume_override(cid)  # noqa: F821
 
     except ProxyAuthError as exc:
@@ -561,6 +584,7 @@ def publish(
         "status": "pushed", "branch": branch, "sha": sha,
         "swept_untracked": swept_untracked,
         "secret_scan": scan_result.get("secret_scan", "clean"),
+        "secret_scan_state": scan_result.get("secret_scan_state", "unknown"),
         "files_scanned": scan_result.get("files_scanned", []),
     }
     if manifest:

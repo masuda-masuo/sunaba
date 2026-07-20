@@ -176,6 +176,88 @@ def _make_publish_container(
     return container
 
 
+def _make_publish_container_for_scan_test(
+    exec_returns: list[tuple[int, bytes, bytes]],
+    *,
+    detect_secrets_available: bool = True,
+    scan_exit_code: int = 0,
+    detect_secrets_scan_output: bytes | None = None,
+    git_diff_tree_output: bytes | None = None,
+):
+    """Like ``_make_publish_container`` but gives full control over the
+    detect-secrets scan responses so tests can exercise every error branch
+    of ``run_secret_scan``.
+
+    Parameters
+    ----------
+    exec_returns:
+        Same as ``_make_publish_container``.
+    detect_secrets_available:
+        When False, the ``detect-secrets --version`` probe returns exit code 1
+        (scanner absent).  Default True.
+    scan_exit_code:
+        Exit code for the ``detect-secrets scan`` command.  Default 0.
+    detect_secrets_scan_output:
+        Stdout for the scan.  Default ``None`` = clean JSON.
+    git_diff_tree_output:
+        Same as ``_make_publish_container``.  Default ``None`` = empty.
+    """
+    container = MagicMock()
+    results = [
+        (ec, (stdout, stderr)) for ec, stdout, stderr in exec_returns
+    ]
+    pos = [0]
+
+    _scan_out: bytes = (
+        detect_secrets_scan_output
+        if detect_secrets_scan_output is not None
+        else (
+            b'{"results": {},'
+            b' "generated_at": "2026-01-01T00:00:00Z",'
+            b' "plugins_used": []}'
+        )
+    )
+    _diff_out: bytes = git_diff_tree_output if git_diff_tree_output is not None else b""
+    _ds_version_ec: int = 0 if detect_secrets_available else 1
+    _ds_version_out: bytes = b"1.5.0\n" if detect_secrets_available else b""
+
+    def _side_effect(*args: object, **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
+        nonlocal pos
+        cmd = args[0] if args else kwargs.get("cmd", [])
+        if not isinstance(cmd, list):
+            cmd = []
+        cmd_str = " ".join(str(c) for c in cmd)
+
+        # --- Secret scan: detect-secrets --version ---
+        if cmd == ["detect-secrets", "--version"]:
+            return (_ds_version_ec, (_ds_version_out, b""))
+
+        # --- Secret scan: detect-secrets scan ---
+        if "detect-secrets scan" in cmd_str:
+            return (scan_exit_code, (_scan_out, b""))
+
+        # --- Secret scan: cat .secrets.baseline ---
+        if ".secrets.baseline" in cmd_str:
+            return (1, (b"", b""))
+
+        # --- exec_in_container: git diff-tree ---
+        if "git diff-tree" in cmd_str:
+            return (0, (_diff_out, b""))
+
+        # --- Regular publish _run calls: consume from positional list ---
+        if pos[0] >= len(results):
+            raise StopIteration(
+                f"Mock exec_run called {pos[0] + 1} times "
+                f"but only {len(results)} results provided"
+            )
+        result = results[pos[0]]
+        pos[0] += 1
+        return result
+
+    container.exec_run.side_effect = _side_effect
+    return container
+
+
 def _make_client_mock(container: MagicMock):
     """Build a mock Docker client that returns the given container."""
     client = MagicMock()

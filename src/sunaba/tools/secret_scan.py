@@ -208,6 +208,7 @@ def run_secret_scan(
     if not files:
         return {
             "secret_scan": "clean",
+            "secret_scan_state": "clean",
             "files_scanned": [],
             "scan_summary": "No files to scan.",
         }
@@ -220,6 +221,7 @@ def run_secret_scan(
         )
         return {
             "secret_scan": msg,
+            "secret_scan_state": "skipped",
             "files_scanned": files,
             "scan_summary": msg,
         }
@@ -252,9 +254,13 @@ def run_secret_scan(
 
     if ec != 0:
         logger.warning("detect-secrets scan failed (ec=%d)", ec)
-        msg = f"WARNING: detect-secrets scan failed (exit {ec}). Proceeding."
+        msg = (
+            f"WARNING: detect-secrets scan failed (exit {ec}). "
+            "Scan did not complete; publish blocked."
+        )
         return {
             "secret_scan": msg,
+            "secret_scan_state": "error",
             "files_scanned": files,
             "scan_summary": msg,
         }
@@ -267,6 +273,7 @@ def run_secret_scan(
                 "ERROR: detect-secrets scan produced empty output. "
                 "Scan did not complete; publish blocked."
             ),
+            "secret_scan_state": "error",
             "files_scanned": files,
             "scan_summary": (
                 "Scan produced empty output; treated as error."
@@ -282,6 +289,7 @@ def run_secret_scan(
                 "ERROR: detect-secrets scan produced unparseable output. "
                 "Scan did not complete; publish blocked."
             ),
+            "secret_scan_state": "error",
             "files_scanned": files,
             "scan_summary": "Scan produced unparseable output; treated as error.",
         }
@@ -335,6 +343,7 @@ def run_secret_scan(
         summary = f"{len(all_findings)} potential secret(s) found in {n_files} file(s)"
         return {
             "secret_scan": "findings",
+            "secret_scan_state": "findings",
             "findings": all_findings,
             "files_scanned": files,
             "scan_summary": summary,
@@ -342,6 +351,7 @@ def run_secret_scan(
 
     return {
         "secret_scan": "clean",
+        "secret_scan_state": "clean",
         "files_scanned": files,
         "scan_summary": "No secrets detected.",
     }
@@ -539,34 +549,40 @@ def secret_scan_override(
     if _baseline_enabled():
         files_to_scan = files if files else []
         err_msg = _update_baseline(container, files_to_scan, working_dir)
-        if err_msg:
-            return json.dumps({"status": "error", "error": err_msg})
-
-        return json.dumps({
-            "status": "ok",
-            "action": "baseline_updated",
-            "detail": (
-                f"Updated .secrets.baseline with findings from {len(files_to_scan)} file(s). "
-                "Run publish again; the same secrets will be suppressed."
-            ),
-        })
-    else:
-        with _OVERRIDE_LOCK:
-            _OVERRIDE_MAP[cid] = True
-
-        record_boundary_crossing(
-            cid,
-            "secret_scan_override",
-            f"baseline=disabled files={len(files)}",
-            approved=True,
+        if err_msg is None:
+            return json.dumps({
+                "status": "ok",
+                "action": "baseline_updated",
+                "detail": (
+                    f"Updated .secrets.baseline with findings from {len(files_to_scan)} file(s). "
+                    "Run publish again; the same secrets will be suppressed."
+                ),
+            })
+        # Baseline update failed (e.g. scanner error).  Fall through to
+        # in-memory override so the tool works for error blocks too.
+        logger.warning(
+            "baseline update failed, falling back to in-memory override: %s",
+            err_msg,
         )
-        return json.dumps({
-            "status": "ok",
-            "action": "override_set",
-            "detail": (
-                "Override set for the next publish. "
-                "Run publish again; the scan will be bypassed for this commit.\n\n"
-                "NOTE: This override is in-memory and server-restart volatile. "
-                "Enable SUNABA_SECRETS_BASELINE (the default) for persistent suppression."
-            ),
-        })
+
+    # In-memory override: used directly when baseline is disabled, or as a
+    # fallback when the baseline update itself failed (scanner error).
+    with _OVERRIDE_LOCK:
+        _OVERRIDE_MAP[cid] = True
+
+    record_boundary_crossing(
+        cid,
+        "secret_scan_override",
+        f"baseline={_baseline_enabled()} files={len(files)}",
+        approved=True,
+    )
+    return json.dumps({
+        "status": "ok",
+        "action": "override_set",
+        "detail": (
+            "Override set for the next publish. "
+            "Run publish again; the scan will be bypassed for this commit.\n\n"
+            "NOTE: This override is in-memory and server-restart volatile. "
+            "Enable SUNABA_SECRETS_BASELINE (the default) for persistent suppression."
+        ),
+    })

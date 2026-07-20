@@ -85,4 +85,6 @@ The proxy runs as a long-lived sidecar container (`sunaba-egress-proxy`) that re
 **Configuration:**
 
 *   `SUNABA_SECRETS_BASELINE` (default: `true`) — When enabled, a repo-local `.secrets.baseline` file suppresses known/approved findings across publishes.
-*   **Override tool**: `secret_scan_override` is a separate MCP tool (not a `publish` argument). Call it when a publish is blocked by a false-positive finding. With baseline enabled, it appends the finding to `.secrets.baseline` so it is not re-flagged; with baseline disabled, the override is one-time and in-memory.
+*   **Override tool**: `secret_scan_override` is a separate MCP tool (not a `publish` argument). Call it when a publish is blocked (by either findings or a scan error). With baseline enabled, it appends the finding to `.secrets.baseline` so it is not re-flagged; with baseline disabled, the override is one-time and in-memory.
+
+**Known gap — missing scanner:** The sandbox images sunaba provides include `detect-secrets`, but a custom image or a broken installation may lack it. When the scanner is absent, the scan is skipped and `publish` proceeds unguarded. The guard therefore assumes the sandbox images sunaba provides. Use the base/full sandbox image to ensure scan coverage.

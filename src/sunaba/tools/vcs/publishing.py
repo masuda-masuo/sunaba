@@ -323,7 +323,8 @@ def publish(
         assert files is not None  # type-narrowing hint for pyright
         # Validate every declared path:
         # - Must be repo-relative (no absolute, no .. traversal)
-        # - Must exist in the working tree
+        # - Must exist in the working tree OR be tracked in the index
+        #   (i.e. the file is known to git; deletion declaration).
         for f in files:
             if os.path.isabs(f) or ".." in f.split("/"):
                 return finish_json({
@@ -336,20 +337,51 @@ def publish(
                 }, verified)
             ec, _, _ = _run(f"test -f {shlex.quote(f)}")
             if ec != 0:
-                return finish_json({
-                    "status": "error",
-                    "step": "validation",
-                    "error": (
-                        f"Path '{f}' does not exist or is not a regular file. "
-                        "Manifests must list regular files one by one."
-                    ),
-                }, verified)
+                # Not a regular file -- allow if the path is tracked in
+                # the index (i.e. the user is declaring a deletion).
+                # :(literal) disables pathspec glob interpretation so a
+                # declared path like '*.py' cannot match tracked files it
+                # does not literally name.
+                track_ec, _, _ = _run(
+                    "git ls-files --error-unmatch -- "
+                    + shlex.quote(f":(literal){f}")
+                )
+                if track_ec != 0:
+                    return finish_json({
+                        "status": "error",
+                        "step": "validation",
+                        "error": (
+                            f"Path '{f}' does not exist or is not a regular file. "
+                            "Manifests must list regular files one by one."
+                        ),
+                    }, verified)
 
         swept_untracked: list[str] = []
         commit_err = git_prepare_commit(_run, branch=branch, message=message,
             files=files, author_name=author_name, author_email=author_email)
         if commit_err:
             return finish_json(commit_err, verified)
+
+        # Compute leftover changes (undeclared tracked modifications,
+        # untracked files) after the manifest commit so the caller can see
+        # what was left behind.
+        # -z gives NUL-delimited entries with paths verbatim (no C-quoting
+        # of non-ASCII/special characters).  Entry format: "XY <path>";
+        # a rename/copy entry is followed by the source path as its own
+        # NUL-separated token.
+        _, status_out, _ = _run("git status --porcelain -z")
+        worktree_leftover: list[str] = []
+        tokens = [t for t in status_out.split("\0") if t]
+        i = 0
+        while i < len(tokens):
+            entry = tokens[i]
+            i += 1
+            if len(entry) < 4:
+                continue
+            worktree_leftover.append(entry[3:])
+            if entry[0] in ("R", "C") and i < len(tokens):
+                worktree_leftover.append(tokens[i])
+                i += 1
     else:
         # Capture untracked files before git add -A sweeps them in
         _, ls_out, _ = _run("git ls-files --others --exclude-standard")
@@ -377,6 +409,8 @@ def publish(
             author_name=author_name, author_email=author_email)
         if commit_err:
             return finish_json(commit_err, verified)
+        # Legacy mode does not report worktree_leftover
+        worktree_leftover = []
 
     push_token = _resolve_vcs_token()
     token_env = _push_token_env(push_token)
@@ -440,6 +474,7 @@ def publish(
     }
     if manifest:
         result["staged_files"] = files
+        result["worktree_leftover"] = worktree_leftover
     if pr_url:
         result["pr_url"] = pr_url
     if not create_pr:

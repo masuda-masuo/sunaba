@@ -44,8 +44,8 @@ class TestPublish:
     ) -> None:
         """A successful push returns pushed status with sha."""
         container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
@@ -98,8 +98,8 @@ class TestPublish:
         mock_ensure_proxy.side_effect = _recover
 
         container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
@@ -307,8 +307,8 @@ class TestPublish:
     ) -> None:
         """No host token + no proxy → the in-container gh path still works."""
         container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
@@ -387,8 +387,8 @@ class TestPublish:
     ) -> None:
         """git commit with 'nothing to commit' should proceed to push."""
         container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"nothing to commit, working tree clean", b""),  # git commit
@@ -417,8 +417,8 @@ class TestPublish:
     ) -> None:
         """Push failure (both transports) should return error status."""
         container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),  # git commit
@@ -462,8 +462,8 @@ class TestPublish:
             "Push from the sandbox is only allowed via the publish tool."
         )
         container = _make_container_mock([
-            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),  # git commit
@@ -685,6 +685,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ])
@@ -702,6 +703,7 @@ class TestPublishManifest:
         assert result["status"] == "pushed"
         assert result["staged_files"] == ["declared.txt"]
         assert result["swept_untracked"] == []
+        assert result["worktree_leftover"] == []
 
         # Verify 'git add --' was used, not 'git add -A'
         add_calls = [
@@ -711,6 +713,55 @@ class TestPublishManifest:
         ]
         assert any("git add --" in c and "declared.txt" in c for c in add_calls)
         assert not any("git add -A" in c for c in add_calls)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_reports_nonempty_worktree_leftover(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Undeclared leftovers (modified, untracked, renamed) are reported.
+
+        ``git status --porcelain -z`` emits NUL-delimited verbatim paths
+        (no C-quoting of non-ASCII); a rename entry carries its source
+        path as an extra NUL-separated token.
+        """
+        porcelain = (
+            b" M undeclared.py\x00"
+            b"?? tmp/junk-\xe3\x81\x82.log\x00"
+            b"R  new.py\x00old.py\x00"
+        )
+        container = _make_container_mock([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- ':(literal)declared.txt'
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, porcelain, b""),  # git status --porcelain -z (leftovers)
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["worktree_leftover"] == [
+            "undeclared.py",
+            "tmp/junk-あ.log",
+            "new.py",
+            "old.py",
+        ]
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -733,6 +784,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'newfile.py'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ])
@@ -749,6 +801,7 @@ class TestPublishManifest:
 
         assert result["status"] == "pushed"
         assert result["staged_files"] == ["newfile.py"]
+        assert result["worktree_leftover"] == []
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -769,6 +822,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Msg", b""),  # commit
+            (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ])
@@ -785,6 +839,7 @@ class TestPublishManifest:
 
         assert result["status"] == "pushed"
         assert result["staged_files"] == ["declared.txt"]
+        assert result["worktree_leftover"] == []
 
         # Verify 'git reset --mixed origin/HEAD' was used (the new base path)
         reset_calls = [
@@ -874,9 +929,10 @@ class TestPublishManifest:
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """A declared path that does not exist (or is not a regular file) produces an error and no push."""
+        """A declared path that does not exist (or is not a regular file) and is not tracked produces an error and no push."""
         container = _make_container_mock([
             (1, b"", b""),  # test -f 'missing.txt' -> not found
+            (1, b"", b""),  # git ls-files --error-unmatch 'missing.txt' -> not tracked
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -893,8 +949,8 @@ class TestPublishManifest:
         assert result["step"] == "validation"
         assert "missing.txt" in result["error"]
         assert "regular file" in result["error"]
-        # Only the existence check exec happened; nothing else should
-        assert container.exec_run.call_count == 1
+        # Only the existence checks (test -f + git ls-files) happened; nothing else
+        assert container.exec_run.call_count == 2
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -903,9 +959,10 @@ class TestPublishManifest:
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Declaring \".\" as a manifest path is rejected (directory, not regular file)."""
+        """Declaring \".\" as a manifest path is rejected (directory, not regular file, not tracked)."""
         container = _make_container_mock([
             (1, b"", b""),  # test -f '.' -> not a regular file
+            (1, b"", b""),  # git ls-files --error-unmatch '.' -> not tracked
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -922,8 +979,8 @@ class TestPublishManifest:
         assert result["step"] == "validation"
         assert "." in result["error"]
         assert "regular file" in result["error"]
-        # Only the existence check exec happened; nothing else should
-        assert container.exec_run.call_count == 1
+        # Only the existence checks happened; nothing else
+        assert container.exec_run.call_count == 2
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -932,9 +989,10 @@ class TestPublishManifest:
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Declaring an existing directory produces a validation error."""
+        """Declaring an existing directory that is not tracked produces a validation error."""
         container = _make_container_mock([
             (1, b"", b""),  # test -f 'some_dir' -> not a regular file
+            (1, b"", b""),  # git ls-files --error-unmatch 'some_dir' -> not tracked
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -951,8 +1009,46 @@ class TestPublishManifest:
         assert result["step"] == "validation"
         assert "some_dir" in result["error"]
         assert "regular file" in result["error"]
-        # Only the existence check exec happened; nothing else should
-        assert container.exec_run.call_count == 1
+        # Only the existence checks happened; nothing else
+        assert container.exec_run.call_count == 2
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_accepts_deletion_declaration(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """A declared path that passes validation despite not being a regular
+        file because it is tracked (deletion declaration) proceeds through
+        the full publish flow.  Proves acceptance criterion #1 for #684."""
+        container = _make_container_mock([
+            (1, b"", b""),  # test -f 'deleted.txt' -> not a regular file
+            (0, b"", b""),  # git ls-files --error-unmatch 'deleted.txt' -> tracked
+            (0, b"", b""),  # checkout -b feat/del
+            (1, b"", b""),  # rev-parse --verify origin/feat/del (not on remote)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD (found)
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'deleted.txt' (stages deletion)
+            (0, b"[feat/del abc1234] Delete", b""),  # commit
+            (0, b"", b""),  # git status --porcelain (clean)
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="feat/del",
+            message="Delete todelete.txt",
+            files=["deleted.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["staged_files"] == ["deleted.txt"]
+        assert result["worktree_leftover"] == []
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -1030,6 +1126,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'  <-- only declarerd
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ])
@@ -1047,6 +1144,7 @@ class TestPublishManifest:
         assert result["status"] == "pushed"
         assert result["staged_files"] == ["declared.txt"]
         assert result["swept_untracked"] == []
+        assert result["worktree_leftover"] == []
 
         # Verify only declared.txt was staged -- no personal.txt
         add_calls = [
@@ -1087,6 +1185,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git reset --mixed origin/fix/x
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ])
@@ -1104,6 +1203,7 @@ class TestPublishManifest:
         assert result["status"] == "pushed"
         assert result["staged_files"] == ["declared.txt"]
         assert result["swept_untracked"] == []
+        assert result["worktree_leftover"] == []
 
         # Verify we reset to origin/fix/x (the existing remote branch),
         # NOT to origin/HEAD -- this preserves previously pushed commits.
@@ -1143,6 +1243,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git reset --mixed origin/main
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ])
@@ -1158,6 +1259,7 @@ class TestPublishManifest:
         ))
 
         assert result["status"] == "pushed"
+        assert result["worktree_leftover"] == []
         reset_calls = [
             c[0][0][2]
             for c in container.exec_run.call_args_list
@@ -1184,6 +1286,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git reset --mixed origin/master
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ])
@@ -1199,6 +1302,7 @@ class TestPublishManifest:
         ))
 
         assert result["status"] == "pushed"
+        assert result["worktree_leftover"] == []
         reset_calls = [
             c[0][0][2]
             for c in container.exec_run.call_args_list

@@ -17,6 +17,7 @@ from sunaba.tools.secret_scan import (  # noqa: I001, F401
     _OVERRIDE_MAP,
     _baseline_enabled,
     _check_detect_secrets,
+    _exclude_baseline,
     _update_baseline,
     check_override,
     consume_override,
@@ -121,6 +122,66 @@ def _make_container(
     container.exec_run.side_effect = results
 
     return container
+
+
+# ============================================================================
+# _exclude_baseline (issue #703)
+# ============================================================================
+
+
+class TestExcludeBaseline:
+    """_exclude_baseline filters out the repo-root .secrets.baseline path
+    with an exact match, preserving lookalike paths."""
+
+    def test_exact_baseline_is_excluded(self) -> None:
+        """.secrets.baseline alone -> removed."""
+        result = _exclude_baseline([".secrets.baseline"])
+        assert result == []
+
+    def test_ordinary_files_preserved(self) -> None:
+        """Non-baseline files are preserved."""
+        result = _exclude_baseline(["main.py", "config.json"])
+        assert result == ["main.py", "config.json"]
+
+    def test_baseline_among_ordinary_files(self) -> None:
+        """.secrets.baseline next to normal files -> only baseline removed."""
+        result = _exclude_baseline(["main.py", ".secrets.baseline", "config.json"])
+        assert result == ["main.py", "config.json"]
+
+    def test_nested_baseline_not_excluded(self) -> None:
+        """sub/dir/.secrets.baseline is NOT the repo-root baseline -> kept."""
+        result = _exclude_baseline(["sub/dir/.secrets.baseline"])
+        assert result == ["sub/dir/.secrets.baseline"]
+
+    def test_baseline_lookalike_extensions_not_excluded(self) -> None:
+        """.secrets.baseline.bak and .secrets.baseline.txt are NOT excluded."""
+        result = _exclude_baseline([
+            "notes/.secrets.baseline.bak",
+            "sub/dir/.secrets.baseline.txt",
+        ])
+        assert result == [
+            "notes/.secrets.baseline.bak",
+            "sub/dir/.secrets.baseline.txt",
+        ]
+
+    def test_baseline_only_among_lookalikes(self) -> None:
+        """Only the exact .secrets.baseline is filtered among lookalikes."""
+        result = _exclude_baseline([
+            ".secrets.baseline",
+            "notes/.secrets.baseline.bak",
+            "sub/dir/.secrets.baseline.txt",
+            "sub/dir/.secrets.baseline",
+        ])
+        assert result == [
+            "notes/.secrets.baseline.bak",
+            "sub/dir/.secrets.baseline.txt",
+            "sub/dir/.secrets.baseline",
+        ]
+
+    def test_empty_list(self) -> None:
+        """Empty list -> empty list."""
+        result = _exclude_baseline([])
+        assert result == []
 
 
 # ============================================================================
@@ -384,7 +445,7 @@ class TestRunSecretScan:
         container = _make_container([
             (0, _dummy_version_output(), ""),
             (0, _make_finding_json("keys.py", 5, "AWS Secret Key"), ""),
-            # cat .secrets.baseline → ec=1 (file not found)
+            # cat .secrets.baseline -> ec=1 (file not found)
             (1, "", "No such file"),
         ])
         with patch(
@@ -394,6 +455,132 @@ class TestRunSecretScan:
             result = run_secret_scan(container, ["keys.py"], "/tmp/repo")
         assert result["secret_scan"] == "findings"
         assert len(result["findings"]) == 1
+
+    # -------------------------------------------------------------------
+    # Baseline exclusion (issue #703): .secrets.baseline is not scanned
+    # -------------------------------------------------------------------
+
+    def test_baseline_path_excluded_from_scan(self) -> None:
+        """.secrets.baseline in the file list -> not scanned, no findings from it.
+
+        Criterion 1: publishing with .secrets.baseline is not blocked by
+        the baseline's own stored hashes.
+        """
+        # Baseline content that *would* produce findings if scanned
+        # (hashed_secret values look like hex strings to the detector).
+        baseline_content = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                ".secrets.baseline": [
+                    {
+                        "type": "Hex High Entropy String",
+                        "filename": ".secrets.baseline",
+                        "line_number": 94,
+                        "hashed_secret": "a" * 40,
+                        "is_verified": False,
+                    },
+                ],
+            },
+        })
+        container = _make_container([
+            (0, _dummy_version_output(), ""),       # check available
+            (0, baseline_content, ""),               # scan output (has baseline findings)
+            (0, baseline_content, ""),               # cat .secrets.baseline (baseline = scan)
+        ])
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = run_secret_scan(
+                container, [".secrets.baseline"], "/tmp/repo",
+            )
+        # The baseline path is excluded from the scan, so no findings.
+        assert result["secret_scan"] == "clean"
+        assert result["files_scanned"] == []
+
+    def test_ordinary_file_still_scanned_with_baseline(self) -> None:
+        """An ordinary secret file + .secrets.baseline -> finding reported.
+
+        Criterion 3: excluding the baseline must not suppress findings
+        from real source files.
+        """
+        finding_json = _make_finding_json("secret.py", 3, "Private Key")
+        container = _make_container([
+            (0, _dummy_version_output(), ""),
+            (0, finding_json, ""),                  # scan output (finding from secret.py)
+            (1, "", "No such file"),                 # cat .secrets.baseline -> absent
+        ])
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = run_secret_scan(
+                container, ["secret.py", ".secrets.baseline"], "/tmp/repo",
+            )
+        assert result["secret_scan"] == "findings"
+        assert len(result["findings"]) == 1
+        assert result["findings"][0]["file"] == "secret.py"
+        assert result["files_scanned"] == ["secret.py"]
+
+    def test_lookalike_baseline_paths_still_caught(self) -> None:
+        """Files that resemble the baseline path are still scanned.
+
+        Criterion 2: ``notes/.secrets.baseline.bak``,
+        ``sub/dir/.secrets.baseline.txt``, and a nested
+        ``sub/dir/.secrets.baseline`` with real secrets must be caught.
+        """
+        lookalikes = [
+            "notes/.secrets.baseline.bak",
+            "sub/dir/.secrets.baseline.txt",
+            "sub/dir/.secrets.baseline",
+        ]
+        # One finding per lookalike file
+        scan_data = {
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {},
+        }
+        for f in lookalikes:
+            scan_data["results"][f] = [_make_finding_json(f, 1, "Secret Keyword")]
+        # The finding_json helper returns a single-file JSON; we need multi-file
+        import hashlib
+        multi_file = {"generated_at": "2026-07-20T00:00:00Z", "plugins_used": [], "results": {}}
+        for f in lookalikes:
+            fake_secret = "".join(chr(ord(c) + i) for i, c in enumerate(f + "-secret"))
+            hashed = hashlib.sha256(fake_secret.encode()).hexdigest()
+            multi_file["results"][f] = [
+                {
+                    "type": "Secret Keyword",
+                    "filename": f,
+                    "line_number": 1,
+                    "hashed_secret": hashed,
+                    "is_verified": False,
+                }
+            ]
+        container = _make_container([
+            (0, _dummy_version_output(), ""),
+            (0, json.dumps(multi_file), ""),        # scan with all lookalikes
+            (1, "", ""),                              # cat .secrets.baseline absent
+        ])
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = run_secret_scan(
+                container, lookalikes, "/tmp/repo",
+            )
+        # All three lookalike paths should produce findings
+        assert result["secret_scan"] == "findings"
+        assert len(result["findings"]) == 3
+        found_files = {f["file"] for f in result["findings"]}
+        assert found_files == set(lookalikes), (
+            f"Expected {set(lookalikes)}, got {found_files}"
+        )
+        assert result["files_scanned"] == lookalikes
+
+
+# ============================================================================
 
 
 # ============================================================================
@@ -600,6 +787,98 @@ class TestUpdateBaseline:
         err = _update_baseline(container, ["bad.py"], "/tmp/repo")
         assert err is not None
         assert "failed" in err
+
+    # -------------------------------------------------------------------
+    # Baseline exclusion in _update_baseline (issue #703, criterion 4)
+    # -------------------------------------------------------------------
+
+    def test_baseline_excluded_from_update(self) -> None:
+        """When the file list includes .secrets.baseline, it is excluded
+        from the scan so its own hashed_secret values are not re-appended
+        to the baseline.
+
+        Criterion 4: secret_scan_override does not add the baseline's own
+        stored hashes to the baseline.
+        """
+        # A baseline that *would* produce findings if scanned
+        baseline_content = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                ".secrets.baseline": [
+                    {
+                        "type": "Hex High Entropy String",
+                        "filename": ".secrets.baseline",
+                        "line_number": 10,
+                        "hashed_secret": "a" * 40,
+                        "is_verified": False,
+                    },
+                ],
+            },
+        })
+        # The mock container has no "detect-secrets scan" calls because
+        # the baseline is the only file and gets excluded.
+        # Only "cat .secrets.baseline" is called (ec=0, returns baseline_content).
+        container = _make_container([
+            # cat .secrets.baseline -> found
+            (0, baseline_content, ""),
+        ])
+        # No detect-secrets scan calls should be made since baseline is excluded
+        err = _update_baseline(
+            container, [".secrets.baseline"], "/tmp/repo",
+        )
+        assert err is None, f"Expected success, got error: {err}"
+        # Verify no scan was requested (only the cat call)
+        scan_calls = [
+            c for c in container.exec_run.call_args_list
+            if "detect-secrets scan" in str(c)
+        ]
+        assert len(scan_calls) == 0, (
+            f"Expected no scan calls when only baseline is in file list, "
+            f"got {len(scan_calls)}"
+        )
+
+    def test_baseline_excluded_from_update_with_real_files(self) -> None:
+        """When files include both .secrets.baseline and real files, only
+        the real files are scanned.  Overriding twice does not grow the
+        baseline without bound (no self-referential ratchet).
+
+        Criterion 4: Overriding twice in a row does not grow the baseline.
+        """
+        baseline_content = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {"real.py": []},
+        })
+        finding_json = _make_finding_json("real.py", 1, "Secret Keyword")
+        container = _make_container([
+            # cat .secrets.baseline -> found
+            (0, baseline_content, ""),
+            # detect-secrets scan (only real.py, not .secrets.baseline)
+            (0, finding_json, ""),
+            # write baseline
+            (0, "", ""),
+        ])
+        err = _update_baseline(
+            container, ["real.py", ".secrets.baseline"], "/tmp/repo",
+        )
+        assert err is None
+
+        # Verify the scan command ran with only real.py (not .secrets.baseline)
+        scan_calls = [
+            c for c in container.exec_run.call_args_list
+            if "detect-secrets scan" in str(c)
+        ]
+        assert len(scan_calls) == 1
+        # scan_calls[0] is a call object; get its command list from kwargs
+        call_obj = scan_calls[0]
+        cmd_list = call_obj.kwargs.get("cmd", [])
+        scan_cmd_str = " ".join(str(x) for x in cmd_list)
+        assert "real.py" in scan_cmd_str
+        assert ".secrets.baseline" not in scan_cmd_str
+
+
+# ============================================================================
 
 
 # ============================================================================

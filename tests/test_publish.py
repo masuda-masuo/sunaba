@@ -1467,3 +1467,166 @@ class TestCreatePrViaApi:
         req2 = mock_urlopen.call_args_list[1].args[0]
         assert req2.full_url == "https://api.github.com/repos/owner/repo/pulls?head=owner:fix/x&state=open"
         assert req2.get_method() == "GET"
+
+
+class TestPublishSecretScanIntegration:
+    """publish() driven end-to-end with the secret scan (issue #676).
+
+    The scan module has its own unit tests, but nothing exercised it *through*
+    publish -- which is how a bug that reset the manifest scan result to
+    "clean" survived a green suite. These tests drive the real publish
+    control flow with the scan stubbed at its boundary.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+
+    @staticmethod
+    def _findings() -> dict:
+        return {
+            "secret_scan": "findings",
+            "files_scanned": ["declared.txt"],
+            "findings": [
+                {
+                    "path": "declared.txt",
+                    "line": 3,
+                    "type": "AWS Access Key",
+                }
+            ],
+            "scan_summary": "1 potential secret in 1 file",
+        }
+
+    @patch("sunaba.tools.secret_scan.check_override")
+    @patch("sunaba.tools.secret_scan.run_secret_scan")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_findings_block_push(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_scan: MagicMock,
+        mock_check: MagicMock,
+    ) -> None:
+        """A finding in a declared file blocks before anything is committed."""
+        mock_scan.return_value = self._findings()
+        mock_check.return_value = False
+
+        container = _make_container_mock([
+            (0, b"", b""),  # test -f 'declared.txt'
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "secret_scan"
+        assert result["findings"][0]["path"] == "declared.txt"
+        assert "secret_scan_override" in result["error"]
+
+        # Nothing may be committed or pushed.
+        issued = " ".join(
+            str(c[0][0][2]) for c in container.exec_run.call_args_list
+        )
+        assert "git commit" not in issued
+        assert "git push" not in issued
+
+    @patch("sunaba.tools.secret_scan.consume_override")
+    @patch("sunaba.tools.secret_scan.check_override")
+    @patch("sunaba.tools.secret_scan.run_secret_scan")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_override_is_consumed_after_push(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_scan: MagicMock,
+        mock_check: MagicMock,
+        mock_consume: MagicMock,
+    ) -> None:
+        """An override that let a push through must be spent, not left live.
+
+        Regression test: the manifest scan result used to be overwritten by a
+        later re-initialisation, so this consume never fired and one human
+        authorisation silently stayed valid for every subsequent publish.
+        """
+        mock_scan.return_value = self._findings()
+        mock_check.return_value = True
+
+        container = _make_container_mock([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"", b""),  # git status --porcelain -z
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        mock_consume.assert_called_once()
+        # The result must not claim the push was clean.
+        assert result["secret_scan"] == "findings"
+
+    @patch("sunaba.tools.secret_scan.consume_override")
+    @patch("sunaba.tools.secret_scan.run_secret_scan")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_clean_scan_reports_scanned_files(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_scan: MagicMock,
+        mock_consume: MagicMock,
+    ) -> None:
+        """A clean scan reports which files it actually looked at."""
+        mock_scan.return_value = {
+            "secret_scan": "clean",
+            "files_scanned": ["declared.txt"],
+        }
+
+        container = _make_container_mock([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add --
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"", b""),  # git status --porcelain -z
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["secret_scan"] == "clean"
+        assert result["files_scanned"] == ["declared.txt"]
+        # No override was involved, so none may be spent.
+        mock_consume.assert_not_called()

@@ -1,6 +1,6 @@
 """Publish tool: commit, push, PR creation."""
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import base64
 import json
@@ -356,6 +356,54 @@ def publish(
                         ),
                     }, verified)
 
+    # --- Secret scan (issue #676) ---
+    # Scan BEFORE commit in manifest mode: the declared file list is already
+    # validated and the files exist on disk.  This prevents secrets from
+    # entering local git history (issue #676 [medium]).
+    #
+    # Lazy import avoids the circular dependency:
+    #   secret_scan -> vcs.gitroot -> vcs.__init__ -> vcs.publishing -> secret_scan
+    from sunaba.tools.secret_scan import (  # fmt: skip  # pyright: ignore[reportUnusedImport]
+        check_override,
+        consume_override,
+        exec_in_container,
+        run_secret_scan,
+    )
+
+    # Declared once, before either branch: re-initialising it below the
+    # manifest branch would discard the manifest scan's outcome, leaving the
+    # result reporting "clean" and — worse — never consuming a used override,
+    # so a single authorisation would silently stay live for every later
+    # publish.
+    scan_result: dict[str, Any] = {"secret_scan": "clean", "files_scanned": []}
+
+    if manifest:
+        assert files is not None
+        scan_files = [f for f in files if not os.path.isabs(f)]
+        scan_result = run_secret_scan(container, scan_files, working_dir)  # noqa: F821
+        if scan_result.get("secret_scan") == "findings":
+            record_boundary_crossing(
+                cid, "publish",
+                f"secret_scan findings={len(scan_result.get('findings', []))}"
+                f" files={scan_result.get('files_scanned', [])}",
+                approved=False,
+            )
+            has_override = check_override(cid)  # noqa: F821  # peek, don't consume yet
+            if not has_override:
+                return finish_json({
+                    "status": "error",
+                    "step": "secret_scan",
+                    "secret_scan": scan_result.get("secret_scan"),
+                    "findings": scan_result.get("findings"),
+                    "files_scanned": scan_result.get("files_scanned"),
+                    "scan_summary": scan_result.get("scan_summary"),
+                    "error": (
+                        "publish blocked by secret scan. "
+                        "Use `secret_scan_override` MCP tool to bypass "
+                        "(requires human authorization)."
+                    ),
+                }, verified)
+
         swept_untracked: list[str] = []
         commit_err = git_prepare_commit(_run, branch=branch, message=message,
             files=files, author_name=author_name, author_email=author_email)
@@ -412,6 +460,42 @@ def publish(
         # Legacy mode does not report worktree_leftover
         worktree_leftover = []
 
+    # --- Secret scan (legacy mode, issue #676) ---
+    # In legacy mode the commit already happened.  Scan the HEAD commit
+    # files using exec_create/exec_start (does not consume mock exec_run
+    # entries).  The git diff-tree call to determine scan_files uses
+    # exec_start (not exec_run) so legacy-mode tests are unaffected.
+    if not manifest:
+        _, diff_out, _ = exec_in_container(
+            container,
+            cmd=["/bin/sh", "-c",
+                 f"cd {shlex.quote(working_dir)} && git diff-tree --no-commit-id -r --name-only HEAD 2>/dev/null"],
+        )
+        scan_files = [f.strip() for f in diff_out.splitlines() if f.strip()]
+        scan_result = run_secret_scan(container, scan_files, working_dir)  # noqa: F821
+        if scan_result.get("secret_scan") == "findings":
+            record_boundary_crossing(
+                cid, "publish",
+                f"secret_scan findings={len(scan_result.get('findings', []))}"
+                f" files={scan_result.get('files_scanned', [])}",
+                approved=False,
+            )
+            has_override = check_override(cid)  # noqa: F821
+            if not has_override:
+                return finish_json({
+                    "status": "error",
+                    "step": "secret_scan",
+                    "secret_scan": scan_result.get("secret_scan"),
+                    "findings": scan_result.get("findings"),
+                    "files_scanned": scan_result.get("files_scanned"),
+                    "scan_summary": scan_result.get("scan_summary"),
+                    "error": (
+                        "publish blocked by secret scan. "
+                        "Use `secret_scan_override` MCP tool to bypass "
+                        "(requires human authorization)."
+                    ),
+                }, verified)
+
     push_token = _resolve_vcs_token()
     token_env = _push_token_env(push_token)
     proxied = proxy_configured()
@@ -439,6 +523,12 @@ def publish(
             )
             if push_err_payload:
                 return finish_json(push_err_payload, verified)
+
+            # Push succeeded — consume the override flag now (not before,
+            # so an override is never lost on retry after a push failure).
+            if scan_result.get("secret_scan") == "findings":
+                consume_override(cid)  # noqa: F821
+
     except ProxyAuthError as exc:
         _record_crossing(
             f"repo={repo} branch={branch} proxy_auth_failed", False,
@@ -471,6 +561,8 @@ def publish(
     result: dict[str, Any] = {
         "status": "pushed", "branch": branch, "sha": sha,
         "swept_untracked": swept_untracked,
+        "secret_scan": scan_result.get("secret_scan", "clean"),
+        "files_scanned": scan_result.get("files_scanned", []),
     }
     if manifest:
         result["staged_files"] = files

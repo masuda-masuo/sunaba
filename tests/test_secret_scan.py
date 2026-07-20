@@ -20,6 +20,7 @@ from sunaba.tools.secret_scan import (  # noqa: I001, F401
     _update_baseline,
     check_override,
     consume_override,
+    exec_in_container,
     run_secret_scan,
     secret_scan_override,
 )
@@ -91,54 +92,33 @@ def _load_real_scan_fixture() -> str:
 
 
 # ============================================================================
-# Fake container with scriptable exec_create/exec_start/exec_inspect
+# Fake container with scriptable exec_run
 # ============================================================================
+
+# ExecResult is a namedtuple (exit_code, output) returned by container.exec_run.
+# Defined inline here so the test module does not depend on docker at import time.
+_ExecResult = __import__("collections").namedtuple("ExecResult", ("exit_code", "output"))
 
 
 def _make_container(
     exec_results: list[tuple[int, str, str]],
 ) -> MagicMock:
-    """Build a mock container where successive exec_create calls return
-    scripted (exit_code, stdout, stderr) via the three-step exec API.
+    """Build a mock container where successive exec_run calls return
+    scripted (exit_code, stdout, stderr).
 
-    Each call to exec_create returns an exec_id (a mock).  The exec_id is
-    paired with the result via exec_inspect (for ExitCode) and exec_start
-    (for stdout bytes).
+    Each exec_run call on the returned mock returns an ``ExecResult``
+    namedtuple whose ``.output`` is ``(stdout_bytes, stderr_bytes)``
+    (the demux=True shape).
     """
     container = MagicMock()
-    exec_ids: list[str] = []
-    results_by_id: dict[str, tuple[int, bytes]] = {}
+    results: list[_ExecResult] = []
 
     for ec, stdout, stderr in exec_results:
-        eid = f"exec_{len(exec_ids)}"
-        exec_ids.append(eid)
-        results_by_id[eid] = (ec, stdout.encode("utf-8"))
+        stdout_bytes = stdout.encode("utf-8")
+        stderr_bytes = stderr.encode("utf-8")
+        results.append(_ExecResult(ec, (stdout_bytes, stderr_bytes)))
 
-    def _exec_create(cmd=None, **kwargs):
-        # Pop the next exec_id from the front
-        if exec_ids:
-            eid = exec_ids.pop(0)
-            return eid
-        return MagicMock()
-
-    def _exec_start(exec_id, **kwargs):
-        if exec_id in results_by_id:
-            _, stdout_bytes = results_by_id[exec_id]
-            if kwargs.get("demux"):
-                # demux=True → return (stdout_bytes, stderr_bytes)
-                return (stdout_bytes, b"")
-            return stdout_bytes
-        return b""
-
-    def _exec_inspect(exec_id):
-        if exec_id in results_by_id:
-            ec, _ = results_by_id[exec_id]
-            return {"ExitCode": ec}
-        return {"ExitCode": -1}
-
-    container.exec_create.side_effect = _exec_create
-    container.exec_start.side_effect = _exec_start
-    container.exec_inspect.side_effect = _exec_inspect
+    container.exec_run.side_effect = results
 
     return container
 
@@ -702,3 +682,68 @@ class TestSecretScanOverride:
             payload = json.loads(result)
             assert payload["status"] == "error"
             assert "not available" in payload["error"]
+
+# ============================================================================
+# Regression: exec_in_container must use real Container API surface
+# ============================================================================
+
+
+class TestExecInContainerAPISurface:
+    """Verify that exec_in_container only calls methods from the real
+    ``docker.models.containers.Container`` class API (acceptance criterion 4).
+
+    These tests use ``create_autospec(Container)`` rather than checking
+    ``hasattr``, so that exec_in_container is actually exercised against a
+    mock with the **exact** interface of the real class.  If it ever calls
+    ``exec_create`` / ``exec_start`` / ``exec_inspect``, the autospec raises
+    ``AttributeError`` — a MagicMock fabricating those attributes cannot
+    make the test pass.
+    """
+
+    def test_exec_run_is_called_through_autospec(self) -> None:
+        """exec_in_container calls exec_run on an autospec(Container)."""
+        from unittest.mock import create_autospec
+
+        from docker.models.containers import Container
+
+        # autospec creates a mock that only has Container's real methods
+        mock = create_autospec(Container, instance=True)
+        mock.exec_run.return_value = _ExecResult(0, (b"1.5.0", b""))
+
+        ec, out, err = exec_in_container(mock, ["detect-secrets", "--version"])
+
+        assert ec == 0
+        assert out == "1.5.0"
+        assert err == ""
+        mock.exec_run.assert_called_once_with(
+            cmd=["detect-secrets", "--version"],
+            stdout=True,
+            stderr=True,
+            workdir=None,
+            demux=True,
+        )
+
+    def test_non_demux_fallback_is_exercised(self) -> None:
+        """When exec_run(demux=True) raises TypeError, the fallback without
+        demux is used.  This covers the non-demux fallback path (finding 3)."""
+        from unittest.mock import create_autospec
+
+        from docker.models.containers import Container
+
+        mock = create_autospec(Container, instance=True)
+        # First call (demux=True) raises TypeError
+        # Second call (no demux) succeeds with multiplexed output
+        mock.exec_run.side_effect = [
+            TypeError("demux not supported"),
+            _ExecResult(0, b"1.5.0"),
+        ]
+
+        ec, out, err = exec_in_container(mock, ["detect-secrets", "--version"])
+
+        assert ec == 0
+        assert out == "1.5.0"
+        assert err == ""  # non-demux: all output is stdout
+        assert mock.exec_run.call_count == 2
+        # Second call had no demux keyword
+        _, second_kwargs = mock.exec_run.call_args_list[1]
+        assert "demux" not in second_kwargs

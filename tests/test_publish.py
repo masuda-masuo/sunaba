@@ -11,7 +11,7 @@ import pytest
 from sunaba.proxy_client import CONTROL_SECRET_ENV, CONTROL_URL_ENV
 from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProxyError
 from sunaba.tools.vcs import _create_pr_via_api, publish
-from tests.conftest import _decode, _make_client_mock, _make_container_mock
+from tests.conftest import _decode, _exec_cmd, _make_client_mock, _make_publish_container
 
 # Standard execute exec sequence shared by the one-shot non-manifest push
 # tests.  Order matches publish()'s actual exec flow: git ls-files (capture
@@ -44,7 +44,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """A successful push returns pushed status with sha."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
@@ -99,7 +99,7 @@ class TestPublish:
 
         mock_ensure_proxy.side_effect = _recover
 
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
@@ -148,7 +148,7 @@ class TestPublish:
         monkeypatch.delenv(CONTROL_SECRET_ENV, raising=False)
         mock_ensure_proxy.side_effect = EgressProxyError("sidecar unreachable")
 
-        container = _make_container_mock([])
+        container = _make_publish_container([])
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -187,7 +187,7 @@ class TestPublish:
         monkeypatch.setenv(CONTROL_URL_ENV, "http://127.0.0.1:8768")
         monkeypatch.setenv(CONTROL_SECRET_ENV, "stale-secret")
 
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -212,7 +212,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """create_pr=True with empty pr_body returns validation error."""
-        container = _make_container_mock([])
+        container = _make_publish_container([])
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -240,7 +240,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """Successful push + PR creation should include pr_url."""
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -276,7 +276,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """A host-side PR-creation failure returns pushed + pr_create_error."""
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -309,7 +309,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """No host token + no proxy → the in-container gh path still works."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
@@ -357,7 +357,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """Proxied + no host token → clear pr_create_error, no gh exec attempt."""
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -390,7 +390,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """git commit with 'nothing to commit' should proceed to push."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
@@ -421,7 +421,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """Push failure (both transports) should return error status."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
@@ -467,7 +467,7 @@ class TestPublish:
             "push to owner/repo is not in the allowlist. "
             "Push from the sandbox is only allowed via the publish tool."
         )
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
@@ -493,9 +493,12 @@ class TestPublish:
         assert "BLOCKED by egress proxy" in result["error"]
         assert "hint" in result
         assert "SUNABA_ALLOWED_REPOS" in result["hint"]
-        # Exactly 8 exec calls (ls-files + MERGE_HEAD + 4 pre-push + failed push + rev-parse)
+        # Exactly 9 exec calls:
+        #   8 positional (ls-files + MERGE_HEAD + checkout + add + rev-parse @{u}
+        #                 + commit + failed push + rev-parse HEAD)
+        # + 1 dispatched for the secret-scan diff-tree (run_secret_scan sees no files → no-op)
         # No _try_api_push was triggered.
-        assert container.exec_run.call_count == 8
+        assert container.exec_run.call_count == 9
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -505,7 +508,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """Default working_dir (None) auto-resolves, falling back to /home/sandbox."""
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -532,7 +535,7 @@ class TestPublish:
         """Default working_dir auto-resolves from .sandbox-meta.json."""
         mock_resolve.return_value = "/tmp/repo/sunaba"
 
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -546,8 +549,7 @@ class TestPublish:
         assert result["status"] == "pushed"
         mock_resolve.assert_called_once()
         for call in container.exec_run.call_args_list:
-            args, _kwargs = call
-            cmd = args[0][2]
+            cmd = _exec_cmd(call)
             if "cd " not in cmd:
                 continue
             assert "/tmp/repo/sunaba" in cmd, f"Expected resolved path in: {cmd}"
@@ -560,7 +562,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """Default identity should be used when author_name/email are None."""
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -590,7 +592,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """Custom author_name/email should override the defaults."""
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -621,7 +623,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """swept_untracked is [] when no untracked files exist."""
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -643,7 +645,7 @@ class TestPublish:
         mock_docker: MagicMock,
     ) -> None:
         """swept_untracked lists untracked files when they exist."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"typings/foo.pyi\ndirty.txt\n", b""),  # git ls-files
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -687,7 +689,7 @@ class TestPublishManifest:
         Even though another file exists undeclared, it must not be staged.
         The new branch (no upstream) resolves origin/HEAD as the base.
         """
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -720,9 +722,9 @@ class TestPublishManifest:
 
         # Verify 'git add --' was used, not 'git add -A'
         add_calls = [
-            c[0][0][2]
+            _exec_cmd(c)
             for c in container.exec_run.call_args_list
-            if "git add" in str(c[0][0][2])
+            if "git add" in str(_exec_cmd(c))
         ]
         assert any("git add --" in c and "declared.txt" in c for c in add_calls)
         assert not any("git add -A" in c for c in add_calls)
@@ -745,7 +747,7 @@ class TestPublishManifest:
             b"?? tmp/junk-\xe3\x81\x82.log\x00"
             b"R  new.py\x00old.py\x00"
         )
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -790,7 +792,7 @@ class TestPublishManifest:
         The existence check passes (test -f returns 0), and git add -- stages
         it successfully.  The new branch resolves origin/HEAD as the base.
         """
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'newfile.py' (exists)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -830,7 +832,7 @@ class TestPublishManifest:
         """After a checkpoint that committed an undeclared file on a branch
         with no upstream, the push must exclude that file by building the
         commit against the remote base (origin/HEAD)."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -862,9 +864,9 @@ class TestPublishManifest:
 
         # Verify 'git reset --mixed origin/HEAD' was used (the new base path)
         reset_calls = [
-            c[0][0][2]
+            _exec_cmd(c)
             for c in container.exec_run.call_args_list
-            if "git reset" in str(c[0][0][2])
+            if "git reset" in str(_exec_cmd(c))
         ]
         assert any("git reset --mixed" in c for c in reset_calls)
 
@@ -876,7 +878,7 @@ class TestPublishManifest:
         mock_docker: MagicMock,
     ) -> None:
         """Absolute paths produce an error and no push."""
-        container = _make_container_mock([])
+        container = _make_publish_container([])
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -901,7 +903,7 @@ class TestPublishManifest:
         mock_docker: MagicMock,
     ) -> None:
         """.. traversal produces an error and no push."""
-        container = _make_container_mock([])
+        container = _make_publish_container([])
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -925,7 +927,7 @@ class TestPublishManifest:
         mock_docker: MagicMock,
     ) -> None:
         """.. deeper in the path produces an error."""
-        container = _make_container_mock([])
+        container = _make_publish_container([])
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -949,7 +951,7 @@ class TestPublishManifest:
         mock_docker: MagicMock,
     ) -> None:
         """A declared path that does not exist (or is not a regular file) and is not tracked produces an error and no push."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (1, b"", b""),  # test -f 'missing.txt' -> not found
             (1, b"", b""),  # git ls-files --error-unmatch 'missing.txt' -> not tracked
         ])
@@ -979,7 +981,7 @@ class TestPublishManifest:
         mock_docker: MagicMock,
     ) -> None:
         """Declaring \".\" as a manifest path is rejected (directory, not regular file, not tracked)."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (1, b"", b""),  # test -f '.' -> not a regular file
             (1, b"", b""),  # git ls-files --error-unmatch '.' -> not tracked
         ])
@@ -1009,7 +1011,7 @@ class TestPublishManifest:
         mock_docker: MagicMock,
     ) -> None:
         """Declaring an existing directory that is not tracked produces a validation error."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (1, b"", b""),  # test -f 'some_dir' -> not a regular file
             (1, b"", b""),  # git ls-files --error-unmatch 'some_dir' -> not tracked
         ])
@@ -1041,7 +1043,7 @@ class TestPublishManifest:
         """A declared path that passes validation despite not being a regular
         file because it is tracked (deletion declaration) proceeds through
         the full publish flow.  Proves acceptance criterion #1 for #684."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (1, b"", b""),  # test -f 'deleted.txt' -> not a regular file
             (0, b"", b""),  # git ls-files --error-unmatch 'deleted.txt' -> tracked
             (0, b"none\n", b""),  # MERGE_HEAD check
@@ -1079,7 +1081,7 @@ class TestPublishManifest:
         mock_docker: MagicMock,
     ) -> None:
         """No manifest + untracked files + no opt-in: error listing the files."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"secret.env\ndump.log\n", b""),  # git ls-files --others
         ])
         client = _make_client_mock(container)
@@ -1106,7 +1108,7 @@ class TestPublishManifest:
         mock_docker: MagicMock,
     ) -> None:
         """No manifest + no untracked files: identical to old behaviour."""
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -1138,7 +1140,7 @@ class TestPublishManifest:
         The new base-resolution path (origin/HEAD) strips the checkpoint
         commits, then only the declared file is staged.
         """
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -1171,9 +1173,9 @@ class TestPublishManifest:
 
         # Verify only declared.txt was staged -- no personal.txt
         add_calls = [
-            c[0][0][2]
+            _exec_cmd(c)
             for c in container.exec_run.call_args_list
-            if "git add" in str(c[0][0][2])
+            if "git add" in str(_exec_cmd(c))
         ]
         assert len(add_calls) == 1, f"expected 1 git add call, got {len(add_calls)}"
         assert "declared.txt" in add_calls[0]
@@ -1181,9 +1183,9 @@ class TestPublishManifest:
 
         # Verify we reset to origin/HEAD (building on remote default)
         reset_calls = [
-            c[0][0][2]
+            _exec_cmd(c)
             for c in container.exec_run.call_args_list
-            if "git reset" in str(c[0][0][2])
+            if "git reset" in str(_exec_cmd(c))
         ]
         assert any("git reset --mixed origin/HEAD" in c for c in reset_calls)
 
@@ -1199,7 +1201,7 @@ class TestPublishManifest:
         previously pushed commits are preserved (the new commit builds on
         top of them).  Only the declared file is added.
         """
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b / checkout existing
@@ -1233,9 +1235,9 @@ class TestPublishManifest:
         # Verify we reset to origin/fix/x (the existing remote branch),
         # NOT to origin/HEAD -- this preserves previously pushed commits.
         reset_calls = [
-            c[0][0][2]
+            _exec_cmd(c)
             for c in container.exec_run.call_args_list
-            if "git reset" in str(c[0][0][2])
+            if "git reset" in str(_exec_cmd(c))
         ]
         assert any("git reset --mixed origin/fix/x" in c for c in reset_calls)
 
@@ -1244,9 +1246,9 @@ class TestPublishManifest:
 
         # Verify only declared.txt was staged
         add_calls = [
-            c[0][0][2]
+            _exec_cmd(c)
             for c in container.exec_run.call_args_list
-            if "git add" in str(c[0][0][2])
+            if "git add" in str(_exec_cmd(c))
         ]
         assert len(add_calls) == 1
         assert "declared.txt" in add_calls[0]
@@ -1259,7 +1261,7 @@ class TestPublishManifest:
         mock_docker: MagicMock,
     ) -> None:
         """When origin/HEAD is absent, fallback to origin/main succeeds."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -1288,9 +1290,9 @@ class TestPublishManifest:
         assert result["status"] == "pushed"
         assert result["worktree_leftover"] == []
         reset_calls = [
-            c[0][0][2]
+            _exec_cmd(c)
             for c in container.exec_run.call_args_list
-            if "git reset" in str(c[0][0][2])
+            if "git reset" in str(_exec_cmd(c))
         ]
         assert any("git reset --mixed origin/main" in c for c in reset_calls)
 
@@ -1303,7 +1305,7 @@ class TestPublishManifest:
     ) -> None:
         """When origin/HEAD and origin/main are both absent, fallback to
         origin/master succeeds."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -1333,9 +1335,9 @@ class TestPublishManifest:
         assert result["status"] == "pushed"
         assert result["worktree_leftover"] == []
         reset_calls = [
-            c[0][0][2]
+            _exec_cmd(c)
             for c in container.exec_run.call_args_list
-            if "git reset" in str(c[0][0][2])
+            if "git reset" in str(_exec_cmd(c))
         ]
         assert any("git reset --mixed origin/master" in c for c in reset_calls)
 
@@ -1349,7 +1351,7 @@ class TestPublishManifest:
         """When no remote ref can be resolved (no origin/HEAD, origin/main,
         or origin/master), manifest mode fails instead of silently skipping
         the reset."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -1542,7 +1544,7 @@ class TestPublishSecretScanIntegration:
         mock_scan.return_value = self._findings()
         mock_check.return_value = False
 
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
         ])
         mock_docker.return_value = _make_client_mock(container)
@@ -1562,7 +1564,7 @@ class TestPublishSecretScanIntegration:
 
         # Nothing may be committed or pushed.
         issued = " ".join(
-            str(c[0][0][2]) for c in container.exec_run.call_args_list
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
         )
         assert "git commit" not in issued
         assert "git push" not in issued
@@ -1589,7 +1591,7 @@ class TestPublishSecretScanIntegration:
         mock_scan.return_value = self._findings()
         mock_check.return_value = True
 
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -1635,7 +1637,7 @@ class TestPublishSecretScanIntegration:
             "files_scanned": ["declared.txt"],
         }
 
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b

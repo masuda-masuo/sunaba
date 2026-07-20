@@ -462,9 +462,8 @@ def publish(
 
     # --- Secret scan (legacy mode, issue #676) ---
     # In legacy mode the commit already happened.  Scan the HEAD commit
-    # files using exec_create/exec_start (does not consume mock exec_run
-    # entries).  The git diff-tree call to determine scan_files uses
-    # exec_start (not exec_run) so legacy-mode tests are unaffected.
+    # files using exec_run (Container.exec_run, not the low-level
+    # exec_create/exec_start/exec_inspect which are APIClient methods).
     if not manifest:
         _, diff_out, _ = exec_in_container(
             container,

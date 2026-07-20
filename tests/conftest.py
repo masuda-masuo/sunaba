@@ -72,6 +72,92 @@ def _make_container_mock(exec_returns: list[tuple[int, bytes, bytes]]):
     return container
 
 
+def _make_publish_container(exec_returns: list[tuple[int, bytes, bytes]]):
+    """Build a mock container for publish tests that transparently handles
+    extra exec_run calls from the secret scan module.
+
+    The publish flow calls ``container.exec_run`` in two ways:
+
+    1. **Publish's internal ``_run()``** — positional first arg
+       ``exec_run([\"/bin/sh\", \"-c\", cmd], stdout=True, stderr=True)``
+       *(no ``demux``)*.  These consume from the positional *exec_returns*
+       list in order.
+
+    2. **``exec_in_container`` (from ``secret_scan``)** — keyword-only
+       ``exec_run(cmd=[...], demux=True, ...)``.  These are **intercepted
+       by command dispatch** so they never consume a positional entry,
+       keeping the order assertions on git commands intact.
+
+    Known secret-scan commands that are dispatched:
+
+    * ``detect-secrets --version`` → available (exit 0, version string)
+    * ``detect-secrets scan …``   → clean scan output (empty results)
+    * ``cat …/.secrets.baseline …`` → baseline absent (exit 1)
+    * ``git diff-tree …``          → returns *diff_tree_output* (default
+      ``b""`` so ``run_secret_scan`` receives no files and returns
+      immediately without further ``exec_run`` calls).
+
+    Parameters
+    ----------
+    exec_returns:
+        Same format as ``_make_container_mock`` — one ``(ec, stdout, stderr)``
+        entry per publish ``_run`` call, in order.
+    diff_tree_output:
+        Bytes that the ``git diff-tree …`` ``exec_in_container`` call returns
+        on stdout.  Default ``b""`` (empty) makes ``run_secret_scan`` a no-op.
+
+    Returns
+    -------
+    A ``MagicMock`` container whose ``exec_run`` dispatches transparently.
+    """
+    container = MagicMock()
+    results = [
+        (ec, (stdout, stderr)) for ec, stdout, stderr in exec_returns
+    ]
+    pos = [0]
+
+    def _side_effect(*args: object, **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
+        nonlocal pos
+        cmd = args[0] if args else kwargs.get("cmd", [])
+        if not isinstance(cmd, list):
+            cmd = []
+        cmd_str = " ".join(str(c) for c in cmd)
+
+        # --- Secret scan: detect-secrets --version ---
+        if cmd == ["detect-secrets", "--version"]:
+            return (0, (b"1.5.0\n", b""))
+
+        # --- Secret scan: detect-secrets scan ---
+        if "detect-secrets scan" in cmd_str:
+            clean = (
+                '{"results": {},'
+                ' "generated_at": "2026-01-01T00:00:00Z",'
+                ' "plugins_used": []}'
+            )
+            return (0, (clean.encode("utf-8"), b""))
+
+        # --- Secret scan: cat .secrets.baseline ---
+        if ".secrets.baseline" in cmd_str:
+            return (1, (b"", b""))  # baseline not found
+
+        # --- exec_in_container: git diff-tree ---
+        if "git diff-tree" in cmd_str:
+            return (0, (b"", b""))
+
+        # --- Regular publish _run calls: consume from positional list ---
+        if pos[0] >= len(results):
+            raise StopIteration(
+                f"Mock exec_run called {pos[0] + 1} times "
+                f"but only {len(results)} results provided"
+            )
+        result = results[pos[0]]
+        pos[0] += 1
+        return result
+
+    container.exec_run.side_effect = _side_effect
+    return container
+
+
 def _make_client_mock(container: MagicMock):
     """Build a mock Docker client that returns the given container."""
     client = MagicMock()
@@ -160,3 +246,25 @@ def _record_publish_verify() -> None:
     """
     from sunaba.verify_state import record_verify_success
     record_verify_success("abc123def456")
+
+
+def _exec_cmd(call) -> str:
+    """Extract the shell command string from an exec_run call.
+
+    ``publish``'s internal ``_run()`` calls ``exec_run`` with a positional
+    first argument ``[\"/bin/sh\", \"-c\", cmd_str]``, while the secret scan's
+    ``exec_in_container`` calls it with keyword ``cmd=[...]``.
+
+    This helper handles both forms, so test assertions that iterate over
+    ``call_args_list`` never crash on ``IndexError`` from a keyword-only call.
+    """
+    args, kwargs = call
+    if args:
+        # Positional: args[0] is the list ["/bin/sh", "-c", cmd_str]
+        cmd_list = args[0]
+        if isinstance(cmd_list, list) and len(cmd_list) > 2:
+            return str(cmd_list[2])
+        return " ".join(str(x) for x in cmd_list)
+    # Keyword-only: cmd= keyword
+    cmd_list = kwargs.get("cmd", [])
+    return " ".join(str(x) for x in cmd_list)

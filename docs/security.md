@@ -84,7 +84,9 @@ The proxy runs as a long-lived sidecar container (`sunaba-egress-proxy`) that re
 
 **Configuration:**
 
-*   `SUNABA_SECRETS_BASELINE` (default: `true`) — When enabled, a repo-local `.secrets.baseline` file suppresses known/approved findings across publishes.
-*   **Override tool**: `secret_scan_override` is a separate MCP tool (not a `publish` argument). Call it when a publish is blocked (by either findings or a scan error). With baseline enabled, it appends the finding to `.secrets.baseline` so it is not re-flagged; with baseline disabled, the override is one-time and in-memory.
+*   `SUNABA_SECRETS_BASELINE` (default: `true`) — When enabled, `.secrets.baseline` **as committed on the base branch** suppresses known/approved findings across publishes.
+*   **Override tool**: `secret_scan_override` is a separate MCP tool (not a `publish` argument). Call it when a publish is blocked (by either findings or a scan error). It authorises the current publish immediately, and appends the finding to the container's `.secrets.baseline` so it can be committed for future publishes.
 
-**Known gap — missing scanner:** The sandbox images sunaba provides include `detect-secrets`, but a custom image or a broken installation may lack it. When the scanner is absent, the scan is skipped and `publish` proceeds unguarded. The guard therefore assumes the sandbox images sunaba provides. Use the base/full sandbox image to ensure scan coverage.
+`publish` proceeds only on an affirmative `clean` or `skipped` scan state; anything else — including a state it does not recognise — blocks.
+
+> **See [`design_secret_scan.md`](design_secret_scan.md) for the design.** It is authoritative and carries the reasoning: the threat model, why `--baseline` is not passed and `--no-verify` is, why the suppression list is resolved host-side rather than read from the container, the known gaps, and the alternatives that were considered and rejected. Do not change the scan's behaviour without reading it — several of its decisions look wrong at a glance and are not.

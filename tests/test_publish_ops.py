@@ -587,3 +587,79 @@ class TestGitPrepareCommitAutoInclude:
         assert result is not None
         assert result["step"] == "auto_include_write"
         assert "write error" in result["error"]
+
+    def test_auto_include_delete_removes_tracked_file(self) -> None:
+        """An auto-include entry with None triggers git rm for tracked paths."""
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout feat/d
+            (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/d (empty)
+            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
+            (0, "", ""),                     # git reset --mixed origin/HEAD
+            # auto-include deletion: check existence, then rm
+            (0, "todelete.txt\n", ""),       # git ls-files --error-unmatch → tracked
+            (0, "", ""),                     # git rm todelete.txt
+            # declared file staging
+            (0, "", ""),                     # git add declared.txt
+            (0, "[feat/d abc1234] Msg\n", ""),  # commit
+        ])
+        result = git_prepare_commit(
+            run, branch="feat/d", message="Msg",
+            files=["declared.txt"],
+            base_auto_include={"todelete.txt": None},
+        )
+        assert result is None
+
+        cmd_strs = [c[0] for c in run.calls]
+        # Verify git rm was called
+        assert any("git rm --" in c and "todelete.txt" in c for c in cmd_strs)
+        # Verify ls-files error-unmatch was called
+        assert any("ls-files" in c and "error-unmatch" in c for c in cmd_strs)
+
+    def test_auto_include_delete_nonexistent_is_noop(self) -> None:
+        """Auto-include deletion of a path that was never tracked is a no-op."""
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout feat/e
+            (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/e (empty)
+            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
+            (0, "", ""),                     # git reset --mixed origin/HEAD
+            # auto-include deletion: file not tracked → ls-files fails
+            (1, "", "fatal: ..."),           # git ls-files --error-unmatch → not tracked
+            # declared file staging
+            (0, "", ""),                     # git add declared.txt
+            (0, "[feat/e abc1234] Msg\n", ""),  # commit
+        ])
+        result = git_prepare_commit(
+            run, branch="feat/e", message="Msg",
+            files=["declared.txt"],
+            base_auto_include={"notexist.txt": None},
+        )
+        assert result is None
+
+        # No git rm command should have been emitted
+        cmd_strs = [c[0] for c in run.calls]
+        assert not any("git rm" in c for c in cmd_strs), (
+            "should not run git rm for untracked path"
+        )
+
+    def test_auto_include_delete_error_step(self) -> None:
+        """git rm failure returns step=auto_include_delete."""
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout feat/f
+            (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/f (empty)
+            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
+            (0, "", ""),                     # git reset --mixed origin/HEAD
+            # auto-include deletion: tracked, but git rm fails
+            (0, "gone.txt\n", ""),           # git ls-files --error-unmatch → tracked
+            (1, "", "git rm failed"),        # git rm fails
+        ])
+        result = git_prepare_commit(
+            run, branch="feat/f", message="Msg",
+            files=["declared.txt"],
+            base_auto_include={"gone.txt": None},
+        )
+        assert result is not None
+        assert result["step"] == "auto_include_delete"
+        assert "git rm failed" in result["error"]

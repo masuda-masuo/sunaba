@@ -100,7 +100,7 @@ class TestFetchBaseAutoInclude:
                 _make_compare_response([                   # 3: compare
                     _make_file_entry("added.txt", "added"),
                     _make_file_entry("modified.txt", "modified"),
-                    _make_file_entry("deleted.txt", "removed"),    # should be filtered
+                    _make_file_entry("deleted.txt", "removed"),    # → None (issue #715)
                     _make_file_entry("renamed.txt", "renamed"),    # should be filtered
                 ]),
                 _make_content_response("added content\n"),       # 4: content for added.txt
@@ -129,13 +129,14 @@ class TestFetchBaseAutoInclude:
         # Contents API calls (only for added + modified, 2 calls)
         assert mock_api.call_count == 6  # repo + 2 refs + compare + 2 contents
 
-        # Result contains only added/modified files
+        # Result: added/modified get content; removed (deleted.txt) gets None;
+        # renamed is still filtered out.
         assert result is not None
         assert result == {
             "added.txt": "added content\n",
             "modified.txt": "modified content\n",
+            "deleted.txt": None,  # issue #715: deletion marker, not filtered
         }
-        assert "deleted.txt" not in result
         assert "renamed.txt" not in result
 
     def test_explicit_base_branch_skips_resolution(self) -> None:

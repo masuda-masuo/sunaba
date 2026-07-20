@@ -418,9 +418,10 @@ class TestRunSecretScan:
         ):
             result = run_secret_scan(
                 container, ["safe.py"], "/tmp/repo",
+                baseline_hashes={known_hash},
             )
         assert result["secret_scan"] == "clean", (
-            "Known finding in baseline should be suppressed"
+            "Known finding in the host-resolved baseline should be suppressed"
         )
 
         # CASE 2: both known AND new finding → only new is reported
@@ -435,6 +436,7 @@ class TestRunSecretScan:
         ):
             result2 = run_secret_scan(
                 container2, ["safe.py", "new.py"], "/tmp/repo",
+                baseline_hashes={known_hash},
             )
         assert result2["secret_scan"] == "findings"
         assert len(result2["findings"]) == 1
@@ -1171,3 +1173,150 @@ class TestAWSKeyPairDetection:
         for f in result["findings"]:
             assert "AWS" in f["type"]
             assert f["file"] == "secrets.py"
+
+
+# ============================================================================
+# baseline_hashes parameter (host-side baseline, issue #708)
+# ============================================================================
+
+
+class TestBaselineHashesParameter:
+    """Tests for the ``baseline_hashes`` keyword parameter.
+
+    When ``baseline_hashes`` is provided (not ``None``), it is used directly
+    for subtraction instead of reading the baseline from the container.
+    This is the mechanism that fixes the #708 bypass.
+    """
+
+    def test_host_side_hashes_suppress_known_finding(self) -> None:
+        """Host-side hashes set containing the finding hash -> suppressed."""
+        import hashlib
+        fake_secret = "".join(
+            chr(ord(c) + 1) for c in "known-secret-for-hashes"
+        )
+        known_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+
+        # Scan has one finding with a known hash
+        scan_json = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                "safe.py": [
+                    {
+                        "type": "Secret Keyword",
+                        "filename": "safe.py",
+                        "line_number": 10,
+                        "hashed_secret": known_hash,
+                        "is_verified": False,
+                    }
+                ]
+            },
+        })
+        container = _make_container([
+            (0, _dummy_version_output(), ""),       # check available
+            (0, scan_json, ""),                      # scan output
+            # NOTE: no cat .secrets.baseline call because
+            # baseline_hashes is provided (not None).
+        ])
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = run_secret_scan(
+                container, ["safe.py"], "/tmp/repo",
+                baseline_hashes={known_hash},
+            )
+        assert result["secret_scan"] == "clean", (
+            "Known hash in baseline_hashes should be suppressed; "
+            f"got {result['secret_scan']}"
+        )
+
+    def test_host_side_empty_hashes_no_suppression(self) -> None:
+        """Empty set from host-side = no suppression, all findings reported."""
+        import hashlib
+        fake_secret = "".join(
+            chr(ord(c) + 1) for c in "unmatched-secret"
+        )
+        finding_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+
+        scan_json = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                "keys.py": [
+                    {
+                        "type": "AWS Secret Key",
+                        "filename": "keys.py",
+                        "line_number": 5,
+                        "hashed_secret": finding_hash,
+                        "is_verified": False,
+                    }
+                ]
+            },
+        })
+        container = _make_container([
+            (0, _dummy_version_output(), ""),
+            (0, scan_json, ""),
+        ])
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = run_secret_scan(
+                container, ["keys.py"], "/tmp/repo",
+                baseline_hashes=set(),  # empty set = no known hashes
+            )
+        assert result["secret_scan"] == "findings"
+        assert len(result["findings"]) == 1
+
+    def test_host_side_hashes_ignore_container_baseline(self) -> None:
+        """When baseline_hashes is provided, container's baseline is NOT read.
+
+        This is the core of the #708 fix: even if the container's
+        .secrets.baseline contains the finding hash, an empty host-side
+        set means no suppression.  The mock container would return the
+        hash if read, but since baseline_hashes is provided, the cat
+        command is never issued.
+        """
+        import hashlib
+        fake_secret = "".join(
+            chr(ord(c) + 1) for c in "tampered-secret"
+        )
+        tampered_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+        scan_json = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                "keys.py": [
+                    {
+                        "type": "Secret Keyword",
+                        "filename": "keys.py",
+                        "line_number": 5,
+                        "hashed_secret": tampered_hash,
+                        "is_verified": False,
+                    }
+                ]
+            },
+        })
+        # The mock container has the baseline content ready, but since
+        # baseline_hashes is provided (empty set = no known hashes),
+        # the cat command is NEVER called.
+        container = _make_container([
+            (0, _dummy_version_output(), ""),       # check available
+            (0, scan_json, ""),                      # scan output (finding matches)
+            # NOTE: no cat .secrets.baseline at all
+        ])
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = run_secret_scan(
+                container, ["keys.py"], "/tmp/repo",
+                baseline_hashes=set(),  # empty = no known hashes
+            )
+        # Finding is NOT suppressed because host-side set is empty
+        assert result["secret_scan"] == "findings", (
+            "Container baseline must be ignored when baseline_hashes is set; "
+            f"got {result['secret_scan']}"
+        )
+        assert len(result["findings"]) == 1

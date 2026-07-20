@@ -988,3 +988,386 @@ class TestPublishSecretScanReal:
     # that does not exist.  Its intent is pinned by the comment at the
     # declaration instead: the default is a blocking state, so a future
     # branch that forgets to scan fails closed.
+
+
+# ============================================================================
+# Host-side baseline (issue #708): container baseline tamper has no effect
+# ============================================================================
+
+
+class TestPublishHostSideBaseline:
+    """Publish with the host-side baseline fetch (issue #708).
+
+    The suppression list is fetched from the remote base branch via the
+    GitHub API, never from the container filesystem.  When the fetch
+    fails (no token, no network, no baseline on branch), an empty set is
+    used — meaning no suppressions (safe direction).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+
+    # ------------------------------------------------------------------
+    # Criterion 1: #708 bypass — container baseline tamper does NOT
+    # suppress.  This reproduces the exact attack from issue #708.
+    # ------------------------------------------------------------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_baseline_tamper_in_container_does_not_suppress(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Issue #708 reproduction: writing a finding's hashed_secret into the
+        container's .secrets.baseline does NOT suppress that finding.
+
+        The host-side fetch (mocked to return None, meaning no baseline on
+        the remote base branch) provides an empty hash set, so the
+        tampered container baseline is never consulted.
+        """
+        import hashlib
+
+        # Build a finding hash (at runtime, no literal secrets)
+        fake_secret = "".join(
+            chr(ord(c) + 1) for c in "probe-bypass-value"
+        )
+        tampered_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+
+        # Scan output: one finding
+        finding_bytes = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [{"name": "AWSKeyDetector"}],
+            "results": {
+                "declared.txt": [
+                    {
+                        "type": "AWS Access Key",
+                        "filename": "declared.txt",
+                        "line_number": 3,
+                        "hashed_secret": tampered_hash,
+                        "is_verified": False,
+                    }
+                ]
+            },
+        }).encode("utf-8")
+
+        # The mock container has a .secrets.baseline file that includes
+        # the finding hash (agent tampered with it).  With the old code
+        # this would suppress the finding; with the fix it should not.
+        container = _make_publish_container(
+            [(0, b"", b"")],  # test -f 'declared.txt'
+            detect_secrets_scan_output=finding_bytes,
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        # The host-side fetch returns None (no baseline on remote base
+        # branch).  This is the critical mock: it simulates the real
+        # scenario where the finding hash is only in the container's
+        # copy, not on the remote base branch.
+        with (
+            patch(
+                "sunaba.tools.secret_scan._baseline_enabled",
+                return_value=True,
+            ),
+            patch(
+                "sunaba.tools.secret_scan._fetch_baseline_from_base_branch",
+                return_value=None,
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        # The finding MUST be reported — container tamper must not suppress.
+        assert result["status"] == "error", (
+            f"Expected error (blocked by secret scan), "
+            f"got {result.get('status')}: {result.get('error', '(none)')}"
+        )
+        assert result["step"] == "secret_scan"
+        assert result["secret_scan_state"] == "findings"
+        assert len(result["findings"]) == 1
+        assert result["findings"][0]["hashed_secret"] == tampered_hash
+
+        # No git commit or push was issued
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        assert "detect-secrets scan" in issued
+        assert "git commit" not in issued
+        assert "git push" not in issued
+
+    # ------------------------------------------------------------------
+    # Criterion 2: a hash committed on the base branch IS suppressed.
+    # ------------------------------------------------------------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_committed_baseline_suppresses_finding(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """A hash present in the baseline on the remote base branch IS
+        suppressed, even when the container's .secrets.baseline is absent.
+        """
+        import hashlib
+
+        fake_secret = "".join(
+            chr(ord(c) + 1) for c in "approved-secret"
+        )
+        known_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+
+        # Scan output: one finding
+        finding_bytes = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                "approved.txt": [
+                    {
+                        "type": "Secret Keyword",
+                        "filename": "approved.txt",
+                        "line_number": 3,
+                        "hashed_secret": known_hash,
+                        "is_verified": False,
+                    }
+                ]
+            },
+        }).encode("utf-8")
+
+        # The mock container's scan output contains the finding, but
+        # the host-side baseline set should suppress it.
+        container = _make_publish_container(
+            [
+                (0, b"", b""),  # test -f 'declared.txt'
+                (0, b"none\n", b""),  # MERGE_HEAD check
+                (0, b"", b""),  # checkout -b
+                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                (0, b"", b""),  # git reset --mixed origin/HEAD
+                (0, b"", b""),  # git add -- 'declared.txt'
+                (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"", b""),  # git status --porcelain -z (no leftovers)
+                (0, b"pushed", b""),  # git push
+                (0, b"abc1234def5678", b""),  # rev-parse HEAD
+            ],
+            detect_secrets_scan_output=finding_bytes,
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        # Host-side baseline data that contains the known hash
+        baseline_data = {
+            "generated_at": "2026-01-01T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                "approved.txt": [
+                    {
+                        "type": "Secret Keyword",
+                        "filename": "approved.txt",
+                        "line_number": 3,
+                        "hashed_secret": known_hash,
+                        "is_verified": False,
+                    }
+                ]
+            },
+        }
+
+        with (
+            patch(
+                "sunaba.tools.secret_scan._baseline_enabled",
+                return_value=True,
+            ),
+            patch(
+                "sunaba.tools.secret_scan._fetch_baseline_from_base_branch",
+                return_value=baseline_data,
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        # The finding should be suppressed (host-side baseline covers it)
+        assert result["status"] == "pushed", (
+            f"Expected pushed, got {result.get('status')}: "
+            f"error={result.get('error', '(none)')} "
+            f"step={result.get('step', '(none)')}"
+        )
+        assert result["secret_scan"] == "clean", (
+            "Finding should be suppressed by host-side baseline; "
+            f"got {result['secret_scan']}"
+        )
+
+    # ------------------------------------------------------------------
+    # Criterion 3: secret_scan_override still works.
+    # ------------------------------------------------------------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_override_still_works_with_host_side_baseline(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """secret_scan_override (in-memory flag) still lets a publish through
+        a findings block even with the host-side baseline fetch.
+        """
+        import hashlib
+
+        from sunaba.tools.secret_scan import _OVERRIDE_MAP
+        fake_secret = "".join(
+            chr(ord(c) + 1) for c in "override-test-secret"
+        )
+        finding_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+
+        finding_bytes = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                "declared.txt": [
+                    {
+                        "type": "Secret Keyword",
+                        "filename": "declared.txt",
+                        "line_number": 3,
+                        "hashed_secret": finding_hash,
+                        "is_verified": False,
+                    }
+                ]
+            },
+        }).encode("utf-8")
+
+        container = _make_publish_container_for_scan_test(
+            [
+                (0, b"", b""),  # test -f 'declared.txt'
+                (0, b"none\n", b""),  # MERGE_HEAD check
+                (0, b"", b""),  # checkout -b
+                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                (0, b"", b""),  # git reset --mixed origin/HEAD
+                (0, b"", b""),  # git add -- 'declared.txt'
+                (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"", b""),  # git status --porcelain -z (no leftovers)
+                (0, b"pushed", b""),  # git push
+                (0, b"abc1234def5678", b""),  # rev-parse HEAD
+            ],
+            scan_exit_code=0,
+            detect_secrets_scan_output=finding_bytes,
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        # Set the override flag before calling publish
+        _OVERRIDE_MAP["abc123def456"] = True
+
+        with (
+            patch(
+                "sunaba.tools.secret_scan._baseline_enabled",
+                return_value=True,
+            ),
+            patch(
+                "sunaba.tools.secret_scan._fetch_baseline_from_base_branch",
+                return_value=None,  # no baseline on remote
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        _OVERRIDE_MAP.pop("abc123def456", None)
+
+        # Override lets the publish through despite the finding
+        assert result["status"] == "pushed", (
+            f"Override should bypass finding block, "
+            f"got {result.get('status')}: {result.get('error', '(none)')}"
+        )
+        assert result["secret_scan_state"] == "findings"
+
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        assert " push " in f" {issued} "
+
+    # ------------------------------------------------------------------
+    # Criterion 4: fetch failure uses empty set (safe direction).
+    # ------------------------------------------------------------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_fetch_failure_uses_empty_set_safe(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When the host-side baseline fetch raises an exception, the
+        empty set is used (no suppressions).  The container's copy is
+        NOT consulted.
+        """
+        import hashlib
+        fake_secret = "".join(
+            chr(ord(c) + 1) for c in "fetch-failure-secret"
+        )
+        finding_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+
+        finding_bytes = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                "declared.txt": [
+                    {
+                        "type": "Secret Keyword",
+                        "filename": "declared.txt",
+                        "line_number": 3,
+                        "hashed_secret": finding_hash,
+                        "is_verified": False,
+                    }
+                ]
+            },
+        }).encode("utf-8")
+
+        container = _make_publish_container(
+            [(0, b"", b"")],  # test -f 'declared.txt'
+            detect_secrets_scan_output=finding_bytes,
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        # The host-side fetch raises an exception (network error)
+        with (
+            patch(
+                "sunaba.tools.secret_scan._baseline_enabled",
+                return_value=True,
+            ),
+            patch(
+                "sunaba.tools.secret_scan._fetch_baseline_from_base_branch",
+                side_effect=RuntimeError("GitHub API unreachable"),
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        # The finding is reported (not suppressed) — safe direction.
+        assert result["status"] == "error"
+        assert result["step"] == "secret_scan"
+        assert result["secret_scan_state"] == "findings"
+        assert len(result["findings"]) == 1
+        assert result["findings"][0]["hashed_secret"] == finding_hash

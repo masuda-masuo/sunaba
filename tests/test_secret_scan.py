@@ -747,3 +747,148 @@ class TestExecInContainerAPISurface:
         # Second call had no demux keyword
         _, second_kwargs = mock.exec_run.call_args_list[1]
         assert "demux" not in second_kwargs
+
+# ============================================================================
+# --no-verify flag (issue #701)
+# ============================================================================
+
+
+class TestNoVerifyFlag:
+    """The scan command must include ``--no-verify`` so that verification
+    plugins (aws, cloudant, …) cannot make outbound calls.  Inside the
+    sandbox the egress proxy blocks all such calls, and detect-secrets
+    silently treats a non-200 as "not a secret", dropping findings.
+    """
+
+    @staticmethod
+    def _scan_command_contains_no_verify(scan_calls, expected: bool) -> None:
+        """Assert that at least one exec_run call contains --no-verify
+        (or, when *expected* is False, that none do).  Searches ALL calls
+        rather than hardcoding an index so the assertion survives
+        refactoring that reorders or adds exec_run invocations."""
+        matching = [
+            c for c in scan_calls
+            if isinstance(c.kwargs.get("cmd"), list)
+            and "--no-verify" in " ".join(c.kwargs["cmd"])
+        ]
+        if expected:
+            assert matching, (
+                "No exec_run call contained --no-verify. "
+                f"Calls: {[c.kwargs.get('cmd') for c in scan_calls]}"
+            )
+        else:
+            assert not matching, (
+                "Found --no-verify in exec_run call when it should be absent. "
+                f"Calls: {[c.kwargs.get('cmd') for c in scan_calls]}"
+            )
+
+    def test_scan_command_includes_no_verify(self) -> None:
+        """The detect-secrets scan command issued by run_secret_scan
+        includes ``--no-verify``."""
+        container = _make_container([
+            (0, _dummy_version_output(), ""),        # --version check
+            (0, _make_clean_scan_json(), ""),         # scan output
+        ])
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=False,
+        ):
+            run_secret_scan(container, ["file.py"], "/tmp/repo")
+
+        self._scan_command_contains_no_verify(
+            container.exec_run.call_args_list, expected=True,
+        )
+
+    def test_baseline_update_includes_no_verify(self) -> None:
+        """The detect-secrets scan command issued by _update_baseline
+        also includes ``--no-verify``."""
+        container = _make_container([
+            # cat .secrets.baseline -> ec=1 (not found)
+            (1, "", "No such file"),
+            # detect-secrets scan
+            (0, _make_clean_scan_json(), ""),
+            # write baseline
+            (0, "", ""),
+        ])
+        from sunaba.tools.secret_scan import _update_baseline
+        _update_baseline(container, ["file.py"], "/tmp/repo")
+
+        self._scan_command_contains_no_verify(
+            container.exec_run.call_args_list, expected=True,
+        )
+
+# ============================================================================
+# AWS key pair detection (issue #701 regression guard)
+# ============================================================================
+
+
+def _make_aws_key_pair_json(filename: str) -> str:
+    """Build detect-secrets JSON output representing an AWS access key ID
+    AND a secret access key in the same file — the scenario that was silently
+    dropped before --no-verify.
+
+    All values are constructed at runtime so no literal credentials are
+    committed.
+    """
+    import hashlib
+
+    # Build two distinct fake secrets
+    fake_access_key = "".join(
+        chr(ord(c) + 1) for c in "no-real-access-key"
+    )
+    fake_secret_key = "".join(
+        chr(ord(c) + 2) for c in "no-real-secret-key"
+    )
+    hashed_access = hashlib.sha256(fake_access_key.encode()).hexdigest()
+    hashed_secret = hashlib.sha256(fake_secret_key.encode()).hexdigest()
+
+    return json.dumps({
+        "generated_at": "2026-07-20T00:00:00Z",
+        "plugins_used": [{"name": "AWSKeyDetector"}],
+        "results": {
+            filename: [
+                {
+                    "type": "AWS Secret Key",
+                    "filename": filename,
+                    "line_number": 5,
+                    "hashed_secret": hashed_access,
+                    "is_verified": False,
+                },
+                {
+                    "type": "AWS Secret Key",
+                    "filename": filename,
+                    "line_number": 6,
+                    "hashed_secret": hashed_secret,
+                    "is_verified": False,
+                },
+            ]
+        },
+    })
+
+
+class TestAWSKeyPairDetection:
+    """An AWS access key combined with a secret key must produce a blocking
+    result — the scenario that --no-verify fixes (issue #701)."""
+
+    def test_aws_key_pair_findings_survive(self) -> None:
+        """Two AWS findings (access key + secret key) both survive parsing."""
+        container = _make_container([
+            (0, _dummy_version_output(), ""),
+            (0, _make_aws_key_pair_json("secrets.py"), ""),
+        ])
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=False,
+        ):
+            result = run_secret_scan(
+                container, ["secrets.py"], "/tmp/repo",
+            )
+        assert result["secret_scan"] == "findings", (
+            f"AWS key pair should produce findings, got: {result['secret_scan']}"
+        )
+        assert len(result["findings"]) == 2, (
+            f"Expected 2 AWS findings, got {len(result.get('findings', []))}"
+        )
+        for f in result["findings"]:
+            assert "AWS" in f["type"]
+            assert f["file"] == "secrets.py"

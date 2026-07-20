@@ -229,10 +229,20 @@ def run_secret_scan(
     # with --baseline writes to the baseline file and emits nothing on stdout,
     # which makes the scan result invisible.  Instead we scan plainly and
     # subtract known findings from the baseline ourselves (see below).
+    # NOTE: --no-verify is required because verification plugins make outbound
+    # calls that are always blocked by the sandbox egress proxy.  detect-secrets
+    # reads the proxy's non-200 response as "verified: not a secret" and drops
+    # the finding, making the guard fail open (issue #701).
+    # The flag is not probed for.  Falling back to a scan without it would
+    # restore exactly the fail-open this fixes, and a warning in a container
+    # log is not a control.  --no-verify has existed since the verification
+    # feature landed upstream (Yelp/detect-secrets#194, 2019) and the image
+    # pins detect-secrets, so an image lacking it is a broken image: let the
+    # scan fail loudly rather than quietly scan the wrong way.
     safe_wd = shlex.quote(working_dir)
     escaped_files = " ".join(shlex.quote(f) for f in files)
     shell_cmd = (
-        f"cd {safe_wd} && detect-secrets scan {escaped_files}"
+        f"cd {safe_wd} && detect-secrets scan --no-verify {escaped_files}"
     )
     ec, stdout, _ = exec_in_container(
         container,
@@ -403,8 +413,9 @@ def _update_baseline(
             pass
 
     # Run fresh scan (no baseline, so we capture all findings)
+    # --no-verify: verification blocked by sandbox egress proxy (issue #701)
     shell_cmd = (
-        f"cd {safe_wd} && detect-secrets scan {escaped_files}"
+        f"cd {safe_wd} && detect-secrets scan --no-verify {escaped_files}"
     )
     ec, stdout, _ = exec_in_container(
         container,

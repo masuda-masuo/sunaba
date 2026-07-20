@@ -745,6 +745,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
             (0, (b"", b"")),  # git diff --cached --numstat
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"src\ntests\n", b"")),  # src/tests existence probe
             (5, (b"collected 0 items\n", b"")),  # pytest
         ]
@@ -783,6 +784,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
             (0, (b"", b"")),  # git diff --cached --numstat
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),  # src/tests existence probe: neither exists
             (5, (b"collected 0 items\n", b"")),  # pytest
         ]
@@ -819,6 +821,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
             (2, (b"---PYTEST-RAW---\nImportError: No module named 'foo'\n", b"")),
         ]
@@ -859,6 +862,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
             (5, (b"collected 0 items\n", b"")),
         ]
@@ -899,6 +903,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
             (5, (b"collected 0 items\n", b"")),
         ]
@@ -945,6 +950,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
             (0, (f"{json_report}\n---PYTEST-RAW---\n".encode(), b"")),
         ]
@@ -985,6 +991,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
             (2, (b"---PYTEST-RAW---\nImportError: No module named 'bar'\n", b"")),
         ]
@@ -1027,6 +1034,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
             (1, (
                 b"---PYTEST-RAW---\n"
@@ -1071,6 +1079,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
             (1, (
                 b"---PYTEST-RAW---\n"
@@ -1122,6 +1131,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
             (4, (
                 b"---PYTEST-RAW---\n"
@@ -1173,6 +1183,7 @@ class TestVerifyInContainer:
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
             (3, (b"---PYTEST-RAW---\nINTERNALERROR> boom\n", b"")),
         ]
@@ -1198,6 +1209,146 @@ class TestVerifyInContainer:
         tests = result["tests"]["full"]
         assert tests["status"] == "error"
         assert result["gate_passed"] is False
+
+    @patch("sunaba.tools.verify._docker")
+    def test_diff_summary_includes_untracked(self, mock_docker: MagicMock) -> None:
+        """diff_summary always has an 'untracked' key (Issue #687)."""
+        from sunaba.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),  # git diff HEAD --numstat
+            (0, (b"", b"")),  # git diff --cached --numstat
+            (0, (b"new_file.py\ndirty.txt\n", b"")),  # git ls-files --others --exclude-standard
+            (0, (b"", b"")),  # src/tests dir probe
+            (5, (b"collected 0 items\n", b"")),  # pytest
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "sunaba.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "sunaba.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+            ))
+
+        ds = result["diff_summary"]
+        assert "untracked" in ds
+        assert ds["untracked"] == ["new_file.py", "dirty.txt"]
+
+    @patch("sunaba.tools.verify._docker")
+    def test_diff_summary_untracked_empty_when_clean(self, mock_docker: MagicMock) -> None:
+        """diff_summary untracked is empty list when tree is clean."""
+        from sunaba.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),  # git diff HEAD --numstat
+            (0, (b"", b"")),  # git diff --cached --numstat
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard (empty)
+            (0, (b"", b"")),  # src/tests dir probe
+            (5, (b"collected 0 items\n", b"")),  # pytest
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "sunaba.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "sunaba.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+            ))
+
+        ds = result["diff_summary"]
+        assert "untracked" in ds
+        assert ds["untracked"] == []
+
+    @patch("sunaba.tools.verify._docker")
+    def test_untracked_query_uses_exclude_standard(self, mock_docker: MagicMock) -> None:
+        """The untracked query uses --exclude-standard so .gitignore is
+        respected — same flag as publish's rejection path (#679)."""
+        from sunaba.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        # Use a function-based side_effect to capture every exec_run call.
+        calls: list[str] = []
+        ls_files_reply: list[tuple[int, tuple[bytes, bytes]]] = [
+            (0, (b"", b"")),   # numstat1 (fallback)
+            (0, (b"", b"")),   # numstat2 (fallback)
+            (0, (b"", b"")),   # the ls-files reply
+            (0, (b"", b"")),   # dir probe
+            (5, (b"collected 0 items\n", b"")),  # pytest
+        ]
+        _replies = iter(ls_files_reply)
+
+        def _side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes)
+                else str(cmd[-1])
+            )
+            calls.append(cmd_str)
+            return next(_replies)
+
+        mock_container.exec_run.side_effect = _side_effect
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "sunaba.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "sunaba.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+            ))
+
+        # The third exec_run call is the ls-files untracked query
+        untracked_calls = [
+            c for c in calls
+            if "ls-files" in c and "--exclude-standard" in c
+        ]
+        assert untracked_calls, (
+            "expected git ls-files --others --exclude-standard; "
+            f"got: {calls}"
+        )
 
 
 # ===================================================================

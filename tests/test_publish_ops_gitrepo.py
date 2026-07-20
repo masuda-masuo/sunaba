@@ -357,14 +357,23 @@ class TestManifestPreservesBaseMerge:
             origin_dir, "rev-parse", f"refs/heads/{base_branch}",
         ).stdout.strip()
 
-        # --diff-filter=AM: only added / modified files (not deleted).
-        diff = _git(
-            origin_dir, "diff-tree", "-r", "--name-status",
-            "--diff-filter=AM", feature_sha, base_sha,
-        )
+        # Use the merge base (common ancestor) as the reference so that
+        # deletions only capture files that existed in the shared history
+        # and were removed from main — not files the feature branch added
+        # independently (which would also show as "D" in a direct
+        # feature→base diff, issue #715).
+        merge_base = _git(
+            origin_dir, "merge-base", feature_sha, base_sha,
+        ).stdout.strip()
 
-        auto: dict[str, str] = {}
-        for line in diff.stdout.strip().splitlines():
+        auto: dict[str, str | None] = {}
+
+        # --- Added / modified (what base_sha has that merge_base didn't) ---
+        diff_am = _git(
+            origin_dir, "diff-tree", "-r", "--name-status",
+            "--diff-filter=AM", merge_base, base_sha,
+        )
+        for line in diff_am.stdout.strip().splitlines():
             if not line.strip():
                 continue
             try:
@@ -376,6 +385,22 @@ class TestManifestPreservesBaseMerge:
                     origin_dir, "show", f"{base_sha}:{path}",
                 ).stdout
                 auto[path] = content
+
+        # --- Deleted (files present in merge_base but absent from base_sha) ---
+        diff_d = _git(
+            origin_dir, "diff-tree", "-r", "--name-status",
+            "--diff-filter=D", merge_base, base_sha,
+        )
+        for line in diff_d.stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            try:
+                status, path = line.split("\t", 1)
+            except ValueError:
+                continue
+            if status == "D":
+                auto[path] = None  # deletion marker (issue #715)
+
         return auto
 
     def test_completed_merge_survives(self, repo_setup: dict[str, Any]) -> None:
@@ -617,4 +642,201 @@ class TestAutoIncludeBaseAdvance:
         actual_a = _git(clone, "show", "HEAD:added_a.txt").stdout
         assert actual_a == expected_a, (
             "auto-included content must match remote"
+        )
+
+
+# ============================================================================
+# Test g: auto-include covers base-advance deletions (issue #715)
+# ============================================================================
+
+
+class TestAutoIncludeBaseDeletion:
+    """Issue #715 AC 2: files deleted from the base branch must be removed
+    from the feature branch's pushed commit via auto-include."""
+
+    def test_base_deleted_file_removed(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """Base branch deletes a file the feature branch still has.
+        Feature merges base.  Publish declares unrelated file only.
+        The deleted file must be absent from the pushed tree."""
+        clone = repo_setup["clone_dir"]
+        origin = repo_setup["origin_dir"]
+        run = _make_run(clone)
+
+        # Feature branch pushed with inherited and new files.
+        _git(clone, "checkout", "-b", "feat/del")
+        (Path(clone) / "feature.txt").write_text("feature\n")
+        _git(clone, "add", "feature.txt")
+        _git(clone, "commit", "-m", "feature work")
+        # The initial README.md is also inherited from main into the
+        # feature branch — call it "inherited.txt" for clarity.
+        assert _git(clone, "push", "origin", "feat/del").returncode == 0
+
+        # Main deletes README.md in a new commit.
+        other = Path(clone).parent / "other_del"
+        _git(str(Path(clone).parent), "clone", origin, str(other))
+        _git(str(other), "config", "user.email", "other@example.com")
+        _git(str(other), "config", "user.name", "other")
+        _git(str(other), "rm", "README.md")
+        _git(str(other), "commit", "-m", "main deletes README.md")
+        assert _git(str(other), "push", "origin", "main").returncode == 0
+
+        # Also add a new file to main so there is something to auto-include
+        # besides the deletion — verifying both directions coexist.
+        (other / "added_by_main.txt").write_text("added by main\n")
+        _git(str(other), "add", "added_by_main.txt")
+        _git(str(other), "commit", "-m", "main adds a file")
+        assert _git(str(other), "push", "origin", "main").returncode == 0
+
+        # Feature merges main (this creates the merge commit that publish
+        # detects via HEAD^2).
+        _git(clone, "fetch", "origin")
+        merge = _git(clone, "merge", "origin/main", "--no-edit")
+        assert merge.returncode == 0, f"merge failed: {merge.stderr}"
+
+        # After the real merge, README.md is gone from the worktree because
+        # git merge applied the deletion.  The auto-include deletion entry
+        # will try to git rm it, which must be a no-op since the file is
+        # already gone from both the index and worktree.
+
+        # Auto-include from origin (host-side).
+        auto_include = TestManifestPreservesBaseMerge._compute_auto_include(
+            origin, "feat/del", "main",
+        )
+
+        # Verify that ._compute_auto_include now has the deletion entry.
+        assert "README.md" in auto_include, (
+            "auto_include should contain README.md (removed by main)"
+        )
+        assert auto_include["README.md"] is None, (
+            "README.md should be marked as deletion (None)"
+        )
+        assert "added_by_main.txt" in auto_include, (
+            "auto_include should contain added_by_main.txt"
+        )
+
+        # Manifest publish with only declared.txt.
+        (Path(clone) / "declared.txt").write_text("declared\n")
+        err = git_prepare_commit(
+            run, branch="feat/del",
+            message="Manifest push after base deletion merge",
+            files=["declared.txt"],
+            base_auto_include=auto_include,
+        )
+        assert err is None, f"git_prepare_commit failed: {err}"
+
+        tree = _git(clone, "ls-tree", "--name-only", "HEAD").stdout.split()
+        assert "declared.txt" in tree, "declared file should be present"
+        assert "added_by_main.txt" in tree, (
+            "base-advance added file should be auto-included"
+        )
+        assert "README.md" not in tree, (
+            "README.md should be absent (deleted by base, auto-include removal)"
+        )
+        # Feature's own file must still be present.
+        assert "feature.txt" in tree, (
+            "feature branch's own file should survive"
+        )
+
+        # Verify content provenance for the added file.
+        base_sha = _git(origin, "rev-parse", "refs/heads/main").stdout.strip()
+        expected_added = _git(
+            origin, "show", f"{base_sha}:added_by_main.txt",
+        ).stdout
+        actual_added = _git(clone, "show", "HEAD:added_by_main.txt").stdout
+        assert actual_added == expected_added, (
+            "auto-included added content must match remote"
+        )
+
+    def test_base_deleted_file_independently_removed(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """Edge case: both branches independently delete the same file.
+        The auto-include deletion entry arrives for a file that is already
+        gone from the feature branch's index/worktree; the handler must
+        be a no-op, not an error."""
+        clone = repo_setup["clone_dir"]
+        origin = repo_setup["origin_dir"]
+        run = _make_run(clone)
+
+        # Feature branch pushed after independently deleting the very file
+        # that main will also delete (README.md).
+        _git(clone, "checkout", "-b", "feat/also_del")
+        _git(clone, "rm", "README.md")
+        _git(clone, "commit", "-m", "feature also deletes README.md")
+        (Path(clone) / "feature.txt").write_text("feature\n")
+        _git(clone, "add", "feature.txt")
+        _git(clone, "commit", "-m", "feature work")
+        assert _git(clone, "push", "origin", "feat/also_del").returncode == 0
+
+        # Main also deletes README.md.
+        other = Path(clone).parent / "other_also_del"
+        _git(str(Path(clone).parent), "clone", origin, str(other))
+        _git(str(other), "config", "user.email", "other@example.com")
+        _git(str(other), "config", "user.name", "other")
+        _git(str(other), "rm", "README.md")
+        _git(str(other), "commit", "-m", "main deletes README.md")
+        assert _git(str(other), "push", "origin", "main").returncode == 0
+
+        # Feature merges main (merge is clean — same file deleted on both).
+        _git(clone, "fetch", "origin")
+        merge = _git(clone, "merge", "origin/main", "--no-edit")
+        assert merge.returncode == 0, f"merge failed: {merge.stderr}"
+
+        # Auto-include from origin (host-side).
+        auto_include = TestManifestPreservesBaseMerge._compute_auto_include(
+            origin, "feat/also_del", "main",
+        )
+
+        # README.md should appear with None.
+        assert "README.md" in auto_include, (
+            "README.md should be in auto_include as a deletion"
+        )
+        assert auto_include["README.md"] is None
+
+        # Also add a new file to main to verify both directions coexist.
+        other2 = Path(clone).parent / "other_also_del_a"
+        _git(str(Path(clone).parent), "clone", origin, str(other2))
+        _git(str(other2), "config", "user.email", "other@example.com")
+        _git(str(other2), "config", "user.name", "other")
+        (other2 / "added_by_main.txt").write_text("added by main\n")
+        _git(str(other2), "add", "added_by_main.txt")
+        _git(str(other2), "commit", "-m", "main adds a file")
+        assert _git(str(other2), "push", "origin", "main").returncode == 0
+
+        # Re-fetch and re-merge to pick up the new file.
+        _git(clone, "fetch", "origin")
+        merge2 = _git(clone, "merge", "origin/main", "--no-edit")
+        assert merge2.returncode == 0, f"second merge failed: {merge2.stderr}"
+
+        # Recompute auto-include (includes both the deletion and the add).
+        auto_include = TestManifestPreservesBaseMerge._compute_auto_include(
+            origin, "feat/also_del", "main",
+        )
+        assert "added_by_main.txt" in auto_include
+        assert auto_include["added_by_main.txt"] is not None
+
+        # Manifest publish — the deletion of README.md must not error
+        # even though the file is already gone from the feature branch.
+        (Path(clone) / "declared.txt").write_text("declared\n")
+        err = git_prepare_commit(
+            run, branch="feat/also_del",
+            message="Manifest push after independent-deletion merge",
+            files=["declared.txt"],
+            base_auto_include=auto_include,
+        )
+        assert err is None, f"git_prepare_commit failed: {err}"
+
+        tree = _git(clone, "ls-tree", "--name-only", "HEAD").stdout.split()
+        assert "declared.txt" in tree, "declared file should be present"
+        assert "added_by_main.txt" in tree, (
+            "base-advance added file should be auto-included"
+        )
+        assert "README.md" not in tree, (
+            "README.md should be absent (deleted by both branches)"
+        )
+        # feature.txt should survive (feature branch's own file).
+        assert "feature.txt" in tree, (
+            "feature branch's own file should survive"
         )

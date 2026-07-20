@@ -235,7 +235,7 @@ def _fetch_base_auto_include(
     token: str,
     branch: str,
     base_branch: str = "",
-) -> dict[str, str] | None:
+) -> dict[str, str | None] | None:
     """Fetch files that the base branch advanced since *branch* was last pushed.
 
     Host-side read via GitHub REST API, never from the container
@@ -256,9 +256,11 @@ def _fetch_base_auto_include(
 
     Returns
     -------
-    A ``dict`` of ``path -> content`` for files that the base branch
-    advanced since *branch* was last pushed.  Only files with status
-    ``\"added\"`` or ``\"modified\"`` are included.  Returns ``None`` on
+    A ``dict`` of ``path -> content_or_None`` for files that the base branch
+    advanced since *branch* was last pushed.  Files with status ``\"added\"``
+    or ``\"modified\"`` get their *content* (a ``str``); files with status
+    ``\"removed\"`` get ``None``, signalling that the path should be
+    deleted from the feature branch (issue #715).  Returns ``None`` on
     any error (safe fallback: no auto-include).
     """
     from sunaba.tools.github_api import _github_api_request
@@ -328,13 +330,19 @@ def _fetch_base_auto_include(
     if not files:
         return {}
 
-    result: dict[str, str] = {}
+    result: dict[str, str | None] = {}
     for f in files:
         status = f.get("status", "")
-        if status not in ("added", "modified"):
-            continue
         filename = f.get("filename", "")
         if not filename:
+            continue
+
+        if status == "removed":
+            # Base branch deleted this file -- signal deletion (issue #715).
+            result[filename] = None
+            continue
+
+        if status not in ("added", "modified"):
             continue
 
         # Fetch the file content from the base branch tip.
@@ -606,7 +614,7 @@ def publish(
         # override.
         # AC 4: on any failure fall back to None (safe: plain reset,
         # no auto-include).
-        base_auto_include: dict[str, str] | None = None
+        base_auto_include: dict[str, str | None] | None = None
         merge_ec, merge_out, _ = _run(
             "git rev-parse --verify HEAD^2 2>/dev/null"
         )

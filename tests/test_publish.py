@@ -11,6 +11,7 @@ import pytest
 from sunaba.proxy_client import CONTROL_SECRET_ENV, CONTROL_URL_ENV
 from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProxyError
 from sunaba.tools.vcs import _create_pr_via_api, publish
+from sunaba.tools.vcs.publishing import AutoIncludeResult
 from tests.conftest import _decode, _exec_cmd, _make_client_mock, _make_publish_container
 
 # Standard execute exec sequence shared by the one-shot non-manifest push
@@ -68,6 +69,11 @@ class TestPublish:
         assert result["status"] == "pushed"
         assert result["branch"] == "fix/x"
         assert result["sha"] == "abc1234"
+        assert result["push_transport"] == "native"
+        # No merge fields in non-merge publish
+        assert "merge_discarded_sha" not in result
+        assert "auto_include_applied" not in result
+        assert "merge_discarded_undeclared" not in result
 
     @patch("sunaba.tools.vcs.publishing.proxy_lifecycle.ensure_egress_proxy")
     @patch("sunaba.tools.vcs.publishing._docker")
@@ -1050,11 +1056,11 @@ class TestPublishManifest:
         container = _make_publish_container([
             (1, b"", b""),  # test -f 'deleted.txt' -> not a regular file
             (0, b"", b""),  # git ls-files --error-unmatch 'deleted.txt' -> tracked
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (NOT merge)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b feat/del
             (1, b"", b""),  # rev-parse --verify origin/feat/del (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD (found)
-            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'deleted.txt' (stages deletion)
             (0, b"[feat/del abc1234] Delete", b""),  # commit
@@ -1709,13 +1715,21 @@ class TestPublishBaseAutoInclude:
         """When HEAD is a merge (HEAD^2 exists), publish() calls
         _fetch_base_auto_include and passes its return value as the
         base_auto_include argument to git_prepare_commit."""
-        auto_include_data = {"moved.txt": "moved content from host\n"}
+        auto_include_data = AutoIncludeResult(
+            included={"moved.txt": "moved content from host\n"},
+            skipped=[],
+        )
 
         # exec_run sequence: HEAD^2 exists (ec=0), so the merge branch
         # is entered and _fetch_base_auto_include is invoked.
         container = _make_publish_container([
             (0, b"", b""),                # test -f 'declared.txt'
             (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
+            # Merge info capture (issue #711):
+            (0, b"merge1234def5678\n", b""),  # rev-parse HEAD (merge SHA)
+            (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
+            (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
+            (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
             (1, b"", b""),                # rev-parse --verify origin/fix/x
@@ -1773,6 +1787,14 @@ class TestPublishBaseAutoInclude:
         assert "moved.txt" in add_calls[0], "auto-include must be staged first"
         assert "declared.txt" in add_calls[1], "declared must be staged second"
 
+        # Verify merge report fields (issue #711 AC 1-5)
+        assert result["merge_discarded_sha"] == "merge12"
+        assert result["merge_parents"] == ["parent1", "parent2"]
+        assert result["auto_include_applied"] == ["moved.txt"]
+        assert result["auto_include_skipped"] == []
+        assert result["merge_discarded_undeclared"] == []
+        assert result["push_transport"] == "native"
+
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_no_merge_does_not_call_fetch(
@@ -1817,3 +1839,207 @@ class TestPublishBaseAutoInclude:
 
         assert result["status"] == "pushed"
         mock_fetch.assert_not_called()
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_merge_with_nonempty_undeclared_set(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When the merge touched paths beyond both the manifest and
+        auto-include, merge_discarded_undeclared reports them (AC 4/5)."""
+        auto_include_data = AutoIncludeResult(
+            included={"base_advance.txt": "base content\n"},
+            skipped=[],
+        )
+
+        # exec_run: merge, diff shows 3 paths.  manifest declares
+        # declared.txt.  auto_include has base_advance.txt.  The third
+        # path (checkpoint.txt) is neither → AC 4 set.
+        container = _make_publish_container([
+            (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
+            # Merge info capture
+            (0, b"mrg0000111aaaa\n", b""),   # rev-parse HEAD
+            (0, b"p1aaaa1111bbb\n", b""),    # rev-parse HEAD^1
+            (0, b"p2bbbb2222ccc\n", b""),    # rev-parse HEAD^2
+            (0, b"declared.txt\nbase_advance.txt\ncheckpoint.txt\n", b""),  # diff HEAD^1 HEAD
+            (0, b"none\n", b""),          # MERGE_HEAD check
+            (0, b"", b""),                # checkout -b
+            (1, b"", b""),                # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),         # rev-parse --verify origin/HEAD
+            (0, b"", b""),                # git reset --mixed origin/HEAD
+            # auto-include: write base_advance.txt
+            (0, b"", b""),                # echo | base64 -d > base_advance.txt
+            (0, b"", b""),                # git add -- :(literal)base_advance.txt
+            # declared file staging
+            (0, b"", b""),                # git add -- :(literal)declared.txt
+            (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+            (0, b"", b""),                # git status --porcelain -z
+            (0, b"pushed", b""),          # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="ghp_test",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+                return_value=auto_include_data,
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "pushed"
+        # AC 4: checkpoint.txt is in the merge diff but neither declared
+        # nor auto-included → appears in merge_discarded_undeclared.
+        assert result["merge_discarded_undeclared"] == ["checkpoint.txt"]
+        # AC 2: base_advance.txt was auto-included
+        assert "base_advance.txt" in result["auto_include_applied"]
+        # AC 5: non-empty set is reported as a non-empty list
+        assert len(result["merge_discarded_undeclared"]) == 1
+        assert result["push_transport"] == "native"
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_merge_with_auto_include_skipped(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Auto-include with skipped paths reports them in the response."""
+        auto_include_data = AutoIncludeResult(
+            included={"good.txt": "good content\n"},
+            skipped=["renamed.txt", "noencoding.txt"],
+        )
+
+        container = _make_publish_container([
+            (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
+            # Merge info capture
+            (0, b"mrg0000111aaaa\n", b""),   # rev-parse HEAD
+            (0, b"p1aaaa1111bbb\n", b""),    # rev-parse HEAD^1
+            (0, b"p2bbbb2222ccc\n", b""),    # rev-parse HEAD^2
+            (0, b"good.txt\nrenamed.txt\nnoencoding.txt\ndeclared.txt\n", b""),
+            (0, b"none\n", b""),          # MERGE_HEAD check
+            (0, b"", b""),                # checkout -b
+            (1, b"", b""),                # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),         # rev-parse --verify origin/HEAD
+            (0, b"", b""),                # git reset --mixed origin/HEAD
+            # auto-include: write good.txt
+            (0, b"", b""),                # echo | base64 -d > good.txt
+            (0, b"", b""),                # git add -- :(literal)good.txt
+            # declared file staging
+            (0, b"", b""),                # git add -- :(literal)declared.txt
+            (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+            (0, b"", b""),                # git status --porcelain -z
+            (0, b"pushed", b""),          # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="ghp_test",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+                return_value=auto_include_data,
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "pushed"
+        # AC 3: skipped paths reported
+        assert set(result["auto_include_skipped"]) == {"renamed.txt", "noencoding.txt"}
+        # AC 2: good.txt was included
+        assert "good.txt" in result["auto_include_applied"]
+        # AC 4: declared.txt is in manifest so not in undeclared
+        # renamed.txt and noencoding.txt are in merge diff but they are
+        # reported as skipped, not as undeclared
+        assert "declared.txt" not in result["merge_discarded_undeclared"]
+        assert result["push_transport"] == "native"
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_merge_with_api_push_transport(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When git push fails and API fallback succeeds, push_transport
+        is \"api\" (AC 7)."""
+        auto_include_data = AutoIncludeResult(
+            included={"base.txt": "base\n"},
+            skipped=[],
+        )
+
+        container = _make_publish_container([
+            (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
+            # Merge info capture
+            (0, b"mrg0000111aaaa\n", b""),   # rev-parse HEAD
+            (0, b"p1aaaa1111bbb\n", b""),    # rev-parse HEAD^1
+            (0, b"p2bbbb2222ccc\n", b""),    # rev-parse HEAD^2
+            (0, b"base.txt\ndeclared.txt\n", b""),
+            (0, b"none\n", b""),          # MERGE_HEAD check
+            (0, b"", b""),                # checkout -b
+            (1, b"", b""),                # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),         # rev-parse --verify origin/HEAD
+            (0, b"", b""),                # git reset --mixed origin/HEAD
+            # auto-include: write base.txt
+            (0, b"", b""),                # echo | base64 -d > base.txt
+            (0, b"", b""),                # git add -- :(literal)base.txt
+            # declared file staging
+            (0, b"", b""),                # git add -- :(literal)declared.txt
+            (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+            (0, b"", b""),                # git status --porcelain -z
+            (1, b"", b"remote rejected"), # git push FAILS → API fallback
+            (0, b"apisha1234567", b""),   # rev-parse HEAD (used for sha on failure)
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="ghp_test",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+                return_value=auto_include_data,
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._try_api_push",
+                return_value={"status": "ok", "sha": "apisha9"},
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "pushed"
+        assert result["push_transport"] == "api"
+        # Merge fields should still be present
+        assert "merge_discarded_sha" in result
+        assert "auto_include_applied" in result

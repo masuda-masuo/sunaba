@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import shlex
-from typing import Any
+from typing import Any, NamedTuple
 
 from docker.errors import NotFound
 
@@ -42,6 +42,27 @@ from sunaba.tools.vcs.gitroot import resolve_git_root
 from sunaba.verify_state import has_verify_success
 
 logger = logging.getLogger(__name__)
+
+
+class AutoIncludeResult(NamedTuple):
+    """Result of a host-side base auto-include fetch (issue #712 Candidate C).
+
+    Attributes
+    ----------
+    included:
+        ``path -> content_or_None`` for files that were successfully fetched
+        (or signalled as a deletion) from the base branch.  ``str`` = UTF-8
+        text, ``bytes`` = binary/non-UTF-8 content, ``None`` = deletion
+        (issue #715).
+    skipped:
+        Paths that appeared in the Compare API diff but could **not** be
+        auto-included (``"renamed"`` status, per-file Contents API fetch
+        failure, or non-``base64`` encoding).  These are the invisible gaps
+        that issue #711 makes visible.
+    """
+    included: dict[str, str | bytes | None]
+    skipped: list[str]
+
 
 # ---------------------------------------------------------------------------
 # Validation regexes
@@ -235,7 +256,7 @@ def _fetch_base_auto_include(
     token: str,
     branch: str,
     base_branch: str = "",
-) -> dict[str, str | bytes | None] | None:
+) -> AutoIncludeResult | None:
     """Fetch files that the base branch advanced since *branch* was last pushed.
 
     Host-side read via GitHub REST API, never from the container
@@ -256,13 +277,11 @@ def _fetch_base_auto_include(
 
     Returns
     -------
-    A ``dict`` of ``path -> content_or_None`` for files that the base branch
-    advanced since *branch* was last pushed.  Files with status ``\"added\"``
-    or ``\"modified\"`` get their *content* (a ``str`` for UTF-8 text, or
-    ``bytes`` for binary/non-UTF-8 content); files with status
-    ``\"removed\"`` get ``None``, signalling that the path should be
-    deleted from the feature branch (issue #715).  Returns ``None`` on
-    any error (safe fallback: no auto-include).
+    An ``AutoIncludeResult`` with ``included`` (dict of ``path -> content_or_None``)
+    for files that were successfully fetched, and ``skipped`` (list of paths that
+    appeared in the Compare API diff but could not be auto-included due to
+    rename status, Contents API fetch failure, or non-base64 encoding).
+    Returns ``None`` on any error (safe fallback: no auto-include).
     """
     from sunaba.tools.github_api import _github_api_request
 
@@ -296,7 +315,7 @@ def _fetch_base_auto_include(
 
     if not feature_sha:
         # Branch doesn't exist on remote yet -- no auto-include needed.
-        return {}
+        return AutoIncludeResult(included={}, skipped=[])
 
     # Get the base branch's tip SHA.
     try:
@@ -329,9 +348,10 @@ def _fetch_base_auto_include(
 
     files = compare.get("files", [])
     if not files:
-        return {}
+        return AutoIncludeResult(included={}, skipped=[])
 
     result: dict[str, str | bytes | None] = {}
+    skipped: list[str] = []
     for f in files:
         status = f.get("status", "")
         filename = f.get("filename", "")
@@ -344,6 +364,8 @@ def _fetch_base_auto_include(
             continue
 
         if status not in ("added", "modified"):
+            # e.g. "renamed" -- track as skipped (issue #711).
+            skipped.append(filename)
             continue
 
         # Fetch the file content from the base branch tip.
@@ -357,11 +379,13 @@ def _fetch_base_auto_include(
                 "Could not fetch content for %s@%s: %s",
                 filename, base_sha, exc,
             )
+            skipped.append(filename)
             continue
 
         content_b64 = content_resp.get("content", "")
         encoding = content_resp.get("encoding", "")
         if not content_b64 or encoding != "base64":
+            skipped.append(filename)
             continue
 
         raw = base64.b64decode(content_b64)
@@ -373,7 +397,7 @@ def _fetch_base_auto_include(
         else:
             result[filename] = decoded
 
-    return result
+    return AutoIncludeResult(included=result, skipped=skipped)
 
 
 # The single exit tool (docs/design.md section 11.1).  Two transports: git
@@ -608,26 +632,47 @@ def publish(
 
         swept_untracked: list[str] = []
 
-        # --- Host-side merge auto-include (issue #712 Candidate C) ---
-        # When HEAD is a merge (a base merge was performed), use the
-        # GitHub Compare API to determine which files the base branch
-        # advanced since the feature branch was last pushed, and fetch
-        # their content host-side (never from the container).  These
-        # files are applied before declared files so declarations
-        # override.
-        # AC 4: on any failure fall back to None (safe: plain reset,
-        # no auto-include).
+        # --- Merge detection and auto-include (issue #712/#711) ---
+        # When HEAD is a merge (a base merge was performed), capture the
+        # discarded merge commit's SHA/parents for the response, compute the
+        # set of paths the merge touched, and run the host-side auto-include.
+        # These values are set independently so they survive even when
+        # auto-include itself fails entirely (base_auto_include stays None,
+        # but merge info is still reported).
+        merge_discarded_sha: str | None = None
+        merge_parents: list[str] = []
+        merge_touched_paths: set[str] = set()
+        auto_include_skipped: list[str] = []
+        auto_include_included: dict[str, str | bytes | None] | None = None
+
         base_auto_include: dict[str, str | bytes | None] | None = None
         merge_ec, merge_out, _ = _run(
             "git rev-parse --verify HEAD^2 2>/dev/null"
         )
         if merge_ec == 0 and merge_out.strip():
+            # Capture the merge commit info *before* git_prepare_commit
+            # resets HEAD away.
+            _, _sha_out, _ = _run("git rev-parse HEAD")
+            merge_discarded_sha = _sha_out.strip()[:7]
+            _, p1_out, _ = _run("git rev-parse HEAD^1")
+            _, p2_out, _ = _run("git rev-parse HEAD^2")
+            merge_parents = [p1_out.strip()[:7], p2_out.strip()[:7]]
+
+            # Compute merge-touched paths (diagnostic only -- no security
+            # decision depends on this; see #712 principle).
+            _, diff_out, _ = _run(
+                "git diff --name-only HEAD^1 HEAD"
+            )
+            merge_touched_paths = set(
+                p.strip() for p in diff_out.split("\n") if p.strip()
+            )
+
             # HEAD is a merge -- the container signals this but the
             # auto-include content always comes from the host's own
             # API call, never from the container's working tree.
             git_token = _resolve_vcs_token()
             try:
-                auto = _fetch_base_auto_include(
+                auto_result = _fetch_base_auto_include(
                     repo, git_token, branch, base_branch,
                 )
             except Exception as exc:
@@ -635,14 +680,30 @@ def publish(
                     "Failed to fetch base auto-include for %s: %s",
                     repo, exc,
                 )
-                auto = None
-            base_auto_include = auto
+                auto_result = None
+
+            if auto_result is not None:
+                base_auto_include = auto_result.included
+                auto_include_skipped = auto_result.skipped
+                auto_include_included = auto_result.included
 
         commit_err = git_prepare_commit(_run, branch=branch, message=message,
             files=files, author_name=author_name, author_email=author_email,
             base_auto_include=base_auto_include)
         if commit_err:
             return finish_json(commit_err, verified)
+
+        # Compute AC-4 set: paths the merge touched that are explained
+        # by neither the manifest nor the base's auto-include.
+        # These are the "real accident" candidates (issue #711).
+        merge_discarded_undeclared: list[str] = []
+        if merge_touched_paths:
+            declared_or_auto = set(files or [])
+            if auto_include_included is not None:
+                declared_or_auto |= set(auto_include_included.keys())
+            merge_discarded_undeclared = sorted(
+                merge_touched_paths - declared_or_auto
+            )
 
         # Compute leftover changes (undeclared tracked modifications,
         # untracked files) after the manifest commit so the caller can see
@@ -665,6 +726,15 @@ def publish(
                 worktree_leftover.append(tokens[i])
                 i += 1
     else:
+        # Legacy mode defaults for merge-report fields (always empty --
+        # merge detection only runs in manifest mode).
+        merge_discarded_sha = None
+        merge_parents = []
+        merge_touched_paths = set()
+        merge_discarded_undeclared = []
+        auto_include_skipped = []
+        auto_include_included = None
+
         # Capture untracked files before git add -A sweeps them in
         _, ls_out, _ = _run("git ls-files --others --exclude-standard")
         swept_untracked = [f for f in ls_out.split("\n") if f.strip()]
@@ -751,7 +821,7 @@ def publish(
 
     try:
         with authorized_push_grant(repo, token=push_token or None):
-            push_err_payload, sha = git_push_with_fallback(
+            push_err_payload, sha, push_transport = git_push_with_fallback(
                 _run,
                 repo=repo, branch=branch, cid=cid,
                 push_cmd=push_cmd, push_env=push_env,
@@ -805,10 +875,23 @@ def publish(
         "secret_scan": scan_result.get("secret_scan", "clean"),
         "secret_scan_state": scan_result.get("secret_scan_state", "unknown"),
         "files_scanned": scan_result.get("files_scanned", []),
+        "push_transport": push_transport,
     }
     if manifest:
         result["staged_files"] = files
         result["worktree_leftover"] = worktree_leftover
+    if merge_discarded_sha:
+        # Merge report fields (issue #711): present only when a merge
+        # commit was detected at HEAD before git_prepare_commit reset it.
+        result["merge_discarded_sha"] = merge_discarded_sha
+        result["merge_parents"] = merge_parents
+        result["auto_include_applied"] = (
+            list(auto_include_included.keys())
+            if auto_include_included is not None
+            else []
+        )
+        result["auto_include_skipped"] = auto_include_skipped
+        result["merge_discarded_undeclared"] = merge_discarded_undeclared
     if pr_url:
         result["pr_url"] = pr_url
     if not create_pr:

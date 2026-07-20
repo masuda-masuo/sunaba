@@ -76,6 +76,9 @@ Integrate with GitHub issues, check out pull requests, and commit/publish change
 | `secret_scan_override` | `container_id`, `files` (opt), `working_dir` (opt) | Override the secret scan for a publish blocked by findings. Requires human authorization (the host must permit this tool). When `SUNABA_SECRETS_BASELINE` is enabled (default), appends findings to `.secrets.baseline`. |
 | `sandbox_issue_write` | `container_id`, `repo`, `method` (create/comment), `title` (opt), `body` (opt), `issue_number` (opt) | Creates a GitHub issue (`method="create"`, needs `title`) or comments on an existing issue or PR (`method="comment"`, needs `issue_number`). Called host-side; no token reaches the container. |
 | `sandbox_pr_review_write` | `container_id`, `repo`, `pr`, `event`, `body` (opt), `comments` (opt) | Submits a PR review (approves/requests changes/comments) with optional inline line comments from the host. |
+| `merge_base` | `container_id`, `base_branch` (opt), `repo` (opt), `working_dir` (opt) | Fetches and merges the remote base branch into the current branch. On conflicts, the worktree is left in its conflicted state; resolve with `edit_file` then call `merge_complete`. |
+| `merge_complete` | `container_id`, `working_dir` (opt) | Stages all resolved files (auto `git add -A`) and completes an in-progress merge after conflicts have been resolved. Returns the merge commit sha. |
+| `merge_abort` | `container_id`, `working_dir` (opt) | Aborts an in-progress merge and returns the worktree to its pre-merge state. |
 
 ---
 

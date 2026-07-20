@@ -321,3 +321,96 @@ class TestManifestUntrackedPathRejection:
         )
         assert err is not None, "glob pathspec must not stage README.md"
         assert err.get("step") == "git_add", f"unexpected error shape: {err}"
+
+
+# ============================================================================
+# Test: a completed base merge survives manifest publish (#675)
+# ============================================================================
+
+
+class TestManifestPreservesBaseMerge:
+    """A merge of the base branch must not be reset away by manifest publish.
+
+    Without this, `merge_base` + `merge_complete` accomplish nothing: the
+    manifest reset rebuilds the commit on the remote base and the merge
+    lineage disappears, so GitHub still reports the PR as CONFLICTING.
+    """
+
+    def test_completed_merge_survives(self, repo_setup: dict[str, Any]) -> None:
+        clone = repo_setup["clone_dir"]
+        origin = repo_setup["origin_dir"]
+        run = _make_run(clone)
+
+        # A feature branch, pushed, so origin/<branch> exists.
+        _git(clone, "checkout", "-b", "feat/x")
+        (Path(clone) / "feature.txt").write_text("feature\n")
+        _git(clone, "add", "feature.txt")
+        _git(clone, "commit", "-m", "feature work")
+        assert _git(clone, "push", "origin", "feat/x").returncode == 0
+
+        # main moves on independently.
+        other = Path(clone).parent / "other"
+        _git(str(Path(clone).parent), "clone", origin, str(other))
+        _git(str(other), "config", "user.email", "other@example.com")
+        _git(str(other), "config", "user.name", "other")
+        (other / "moved.txt").write_text("moved\n")
+        _git(str(other), "add", "moved.txt")
+        _git(str(other), "commit", "-m", "main moves")
+        assert _git(str(other), "push", "origin", "main").returncode == 0
+
+        # Bring the base in, exactly as merge_base/merge_complete would.
+        _git(clone, "fetch", "origin")
+        merge = _git(clone, "merge", "origin/main", "--no-edit")
+        assert merge.returncode == 0, f"fixture merge failed: {merge.stderr}"
+        merge_sha = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+        # Now an ordinary manifest publish of an unrelated declared file.
+        (Path(clone) / "declared.txt").write_text("declared\n")
+        err = git_prepare_commit(
+            run, branch="feat/x", message="Manifest push after merge",
+            files=["declared.txt"],
+        )
+        assert err is None, f"git_prepare_commit failed: {err}"
+
+        # The merge must be an ancestor of what we are about to push, and
+        # main's commit must be reachable -- that is what makes the PR
+        # mergeable again.
+        anc = _git(clone, "merge-base", "--is-ancestor", merge_sha, "HEAD")
+        assert anc.returncode == 0, "the merge commit was reset away"
+        reach = _git(clone, "merge-base", "--is-ancestor", "origin/main", "HEAD")
+        assert reach.returncode == 0, "base commits are not in the pushed branch"
+
+        tree = _git(clone, "ls-tree", "--name-only", "HEAD").stdout.split()
+        assert "declared.txt" in tree
+        assert "moved.txt" in tree, "the merged-in base file should be present"
+
+    def test_checkpoint_before_merge_still_cannot_leak(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """With a local checkpoint under the merge, the reset still wins.
+
+        Losing a merge is recoverable (merge again); pushing an undeclared
+        file is not. So the ambiguous shape must fall back to the #679 reset.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_run(clone)
+
+        _git(clone, "checkout", "-b", "feat/y")
+        undeclared = Path(clone) / "undeclared.txt"
+        undeclared.write_text("secret\n")
+        _git(clone, "add", "-A")
+        _git(clone, "commit", "-m", "checkpoint with undeclared file")
+
+        _git(clone, "fetch", "origin")
+        _git(clone, "merge", "origin/main", "--no-edit")
+
+        (Path(clone) / "declared.txt").write_text("declared\n")
+        err = git_prepare_commit(
+            run, branch="feat/y", message="Manifest push",
+            files=["declared.txt"],
+        )
+        assert err is None, f"git_prepare_commit failed: {err}"
+
+        tree = _git(clone, "ls-tree", "--name-only", "HEAD").stdout.split()
+        assert "declared.txt" in tree
+        assert "undeclared.txt" not in tree, "#679 leak reintroduced"

@@ -69,8 +69,15 @@ class TestServerInstructions:
 # Aggregate budgets: measured after the #550 docstring diet (desc 8249 B,
 # param descriptions 8040 B across 28 tools), capped at roughly +10% so the
 # surface cannot quietly regrow tool by tool.
-TOTAL_DESCRIPTION_BYTE_LIMIT = 10752
-TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 9984
+#
+# Raised once since, deliberately: #676 added secret_scan_override and #675
+# added merge_base / merge_complete / merge_abort, taking the tool count from
+# 28 to 33.  Their descriptions were trimmed first (merge_complete 302 -> 153 B)
+# and only the remainder was budgeted.  Raise this again only for genuinely new
+# tools, and say so here -- the point of the cap is that growth is a visible
+# decision rather than the sum of many quiet ones.
+TOTAL_DESCRIPTION_BYTE_LIMIT = 11264
+TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10240
 
 
 def _param_desc_bytes(tool) -> int:

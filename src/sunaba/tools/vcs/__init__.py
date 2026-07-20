@@ -41,6 +41,13 @@ from sunaba.tools.vcs.issues import (
     sandbox_pr_review_write,
 )
 
+# -- merge.py ---------------------------------------------------------------
+from sunaba.tools.vcs.merge_base import (
+    merge_abort,
+    merge_base,
+    merge_complete,
+)
+
 # -- publishing.py ----------------------------------------------------------
 from sunaba.tools.vcs.publishing import (
     _BRANCH_RE,

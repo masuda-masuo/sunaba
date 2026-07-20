@@ -19,6 +19,7 @@ from tests.conftest import _decode, _make_client_mock, _make_container_mock
 # -> skip squash), commit, push, rev-parse HEAD.
 _PUSH_SEQUENCE = [
     (0, b"", b""),  # git ls-files --others --exclude-standard
+    (0, b"none\n", b""),  # MERGE_HEAD check
     (0, b"", b""),  # git checkout -b
     (0, b"", b""),  # git add -A
     (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
@@ -45,6 +46,7 @@ class TestPublish:
         """A successful push returns pushed status with sha."""
         container = _make_container_mock([
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
@@ -99,6 +101,7 @@ class TestPublish:
 
         container = _make_container_mock([
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
@@ -308,6 +311,7 @@ class TestPublish:
         """No host token + no proxy → the in-container gh path still works."""
         container = _make_container_mock([
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
@@ -388,6 +392,7 @@ class TestPublish:
         """git commit with 'nothing to commit' should proceed to push."""
         container = _make_container_mock([
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
@@ -418,6 +423,7 @@ class TestPublish:
         """Push failure (both transports) should return error status."""
         container = _make_container_mock([
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
@@ -463,6 +469,7 @@ class TestPublish:
         )
         container = _make_container_mock([
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
@@ -486,8 +493,9 @@ class TestPublish:
         assert "BLOCKED by egress proxy" in result["error"]
         assert "hint" in result
         assert "SUNABA_ALLOWED_REPOS" in result["hint"]
-        # Exactly 7 exec calls (1 git ls-files + 5 pre-push + 1 failed push) -- no _try_api_push was triggered
-        assert container.exec_run.call_count == 7
+        # Exactly 8 exec calls (ls-files + MERGE_HEAD + 4 pre-push + failed push + rev-parse)
+        # No _try_api_push was triggered.
+        assert container.exec_run.call_count == 8
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -565,8 +573,9 @@ class TestPublish:
 
         assert result["status"] == "pushed"
 
-        # Index 4 because [0]=checkout, [1]=ls-files, [2]=add, [3]=rev-parse, [4]=commit
-        commit_call = container.exec_run.call_args_list[4]
+        # Index 5: [0]=ls-files, [1]=MERGE_HEAD, [2]=checkout, [3]=add,
+        # [4]=rev-parse, [5]=commit
+        commit_call = container.exec_run.call_args_list[5]
         commit_cmd = commit_call[0][0][2]
         assert "user.name" in commit_cmd
         assert "sunaba[bot]" in commit_cmd
@@ -596,8 +605,9 @@ class TestPublish:
 
         assert result["status"] == "pushed"
 
-        # Index 4 because [0]=checkout, [1]=ls-files, [2]=add, [3]=rev-parse, [4]=commit
-        commit_call = container.exec_run.call_args_list[4]
+        # Index 5: [0]=ls-files, [1]=MERGE_HEAD, [2]=checkout, [3]=add,
+        # [4]=rev-parse, [5]=commit
+        commit_call = container.exec_run.call_args_list[5]
         commit_cmd = commit_call[0][0][2]
         assert "user.name" in commit_cmd
         assert "'Custom User'" in commit_cmd
@@ -635,6 +645,7 @@ class TestPublish:
         """swept_untracked lists untracked files when they exist."""
         container = _make_container_mock([
             (0, b"typings/foo.pyi\ndirty.txt\n", b""),  # git ls-files
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # rev-parse @{u}
@@ -678,10 +689,12 @@ class TestPublishManifest:
         """
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # New path: resolve remote base
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -734,9 +747,11 @@ class TestPublishManifest:
         )
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- ':(literal)declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -777,10 +792,12 @@ class TestPublishManifest:
         """
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'newfile.py' (exists)
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # New path: resolve remote base
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'newfile.py'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -815,10 +832,12 @@ class TestPublishManifest:
         commit against the remote base (origin/HEAD)."""
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # Resolve base: origin/fix/x does NOT exist on remote
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Msg", b""),  # commit
@@ -1025,9 +1044,11 @@ class TestPublishManifest:
         container = _make_container_mock([
             (1, b"", b""),  # test -f 'deleted.txt' -> not a regular file
             (0, b"", b""),  # git ls-files --error-unmatch 'deleted.txt' -> tracked
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b feat/del
             (1, b"", b""),  # rev-parse --verify origin/feat/del (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD (found)
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'deleted.txt' (stages deletion)
             (0, b"[feat/del abc1234] Delete", b""),  # commit
@@ -1119,10 +1140,12 @@ class TestPublishManifest:
         """
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # Resolve base - branch does NOT exist on remote yet
             (1, b"", b""),  # rev-parse --verify origin/fix/x (ec=1)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD -> found
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'  <-- only declarerd
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1178,10 +1201,12 @@ class TestPublishManifest:
         """
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b / checkout existing
             # Resolve base: origin/fix/x DOES exist on remote
             (0, b"abc7890def1234", b""),  # rev-parse --verify origin/fix/x
             # No fallback to origin/HEAD -- we use origin/fix/x
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/fix/x
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1236,10 +1261,12 @@ class TestPublishManifest:
         """When origin/HEAD is absent, fallback to origin/main succeeds."""
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
             (0, b"abc1234", b""),  # rev-parse --verify origin/main (found)
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/main
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1278,11 +1305,13 @@ class TestPublishManifest:
         origin/master succeeds."""
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
             (1, b"", b""),  # rev-parse --verify origin/main (not found)
             (0, b"abc1234", b""),  # rev-parse --verify origin/master (found)
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/master
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1322,6 +1351,7 @@ class TestPublishManifest:
         the reset."""
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
@@ -1561,9 +1591,11 @@ class TestPublishSecretScanIntegration:
 
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1605,9 +1637,11 @@ class TestPublishSecretScanIntegration:
 
         container = _make_container_mock([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add --
             (0, b"[fix/x abc1234] Fix", b""),  # commit

@@ -69,8 +69,13 @@ class TestServerInstructions:
 # Aggregate budgets: measured after the #550 docstring diet (desc 8249 B,
 # param descriptions 8040 B across 28 tools), capped at roughly +10% so the
 # surface cannot quietly regrow tool by tool.
+# Raised once for #675's `branch=` parameter: the measured total is 10166 B,
+# so the cap moves to the next 256 B step.  The first attempt set 11264,
+# leaving ~1.1 KB of unearned headroom -- exactly the quiet regrowth this cap
+# exists to prevent.  Move it by what a change actually needs, and record what
+# needed it.
 TOTAL_DESCRIPTION_BYTE_LIMIT = 10752
-TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 9984
+TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10240
 
 
 def _param_desc_bytes(tool) -> int:

@@ -64,6 +64,7 @@ from sunaba.tools.vcs import (
 from .clone import (
     _normalize_pip_extras,
     _run_pip_install,
+    _setup_branch,
     _setup_pr_branch,
     _try_clone_into_container,
 )
@@ -322,6 +323,7 @@ def sandbox_initialize(
     clone_dest: str = WORKSPACE,
     repo: str | None = None,
     pr: int | None = None,
+    branch: str | None = None,
     pip_extras: str | None = "[dev]",
     pip_args: str | None = None,
     mem_limit: str | None = None,
@@ -365,8 +367,17 @@ def sandbox_initialize(
                every command runs inside the repo by default
                (default: the workspace, ``/workspace``).
         repo: Repository in ``"owner/name"`` format.
-               Required when *pr* is specified.
+               Required when *pr* or *branch* is specified.
         pr: Pull request number to clone and check out.
+               Mutually exclusive with *branch*.
+        branch: Branch name to clone and check out.
+               When set, clones the repository (via ``clone_repo=``) and
+               checks out the specified branch.  Mutually exclusive with
+               *pr*.  A non-existent branch produces an error naming the
+               branch (not a silent fallback to the default branch).
+               Uses the same anonymous-git / read-authorization grant
+               model as the PR path, so private repos work with no token
+               inside the container when the egress proxy is configured.
                When set, implicitly enables ``allow_network=True``,
                clones the repository
                inside the container, checks out the PR head branch,
@@ -416,6 +427,8 @@ def sandbox_initialize(
         is appended (and dev install if pip_extras is set).
         If *pr* is specified, a message about the PR branch setup
         is appended.
+        If *branch* is specified, a message about the branch checkout
+        is appended.
 
     """
     from sunaba.tools.container import _docker
@@ -436,12 +449,38 @@ def sandbox_initialize(
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("idle reap failed: %s", e)
 
+    # branch and pr are mutually exclusive (Issue #675b).
+    if branch is not None and pr is not None:
+        return (
+            "Error: branch and pr are mutually exclusive; "
+            "a PR already determines its own head branch."
+        )
+
+    # An empty branch string lets git clone silently land on the default
+    # branch (acceptance criterion #3).  Reject it explicitly.
+    if branch is not None and not branch:
+        return "Error: branch must not be empty (empty string would clone the default branch)"
+
     # When pr is specified, implicitly enable network access.
     if pr is not None:
         allow_network = True
 
+    # When branch is specified, implicitly enable network access.
+    if branch is not None:
+        allow_network = True
+        logger.info(
+            "branch=%r: auto-enabling network access",
+            branch,
+        )
+        # branch composes with clone_repo; require it.
+        if clone_repo is None:
+            return (
+                "Error: branch requires clone_repo to be set; "
+                "use clone_repo= to specify the repository."
+            )
+
     # Auto-enable network for clone_repo (Issue #146)
-    if clone_repo and pr is None:
+    if clone_repo and pr is None and branch is None:
         allow_network = True
         logger.info(
             "clone_repo=%r: auto-enabling network access",
@@ -579,7 +618,26 @@ def sandbox_initialize(
     # grant (#419) whenever the container is networked; public reads are
     # unaffected.
     open_read_grant = proxied and not container_has_token
-    if clone_repo and pr is None:
+    if clone_repo and branch:
+        # Branch checkout path (Issue #675b): _setup_branch handles its
+        # own clone with the branch parameter.
+        try:
+            clone_msg = " " + _setup_branch(
+                container,
+                cid,
+                clone_repo,
+                branch,
+                clone_dest,
+                pip_extras,
+                authenticated=container_has_token,
+                open_read_grant=open_read_grant,
+                pip_args=pip_args,
+            )
+        except Exception as e:
+            # Branch setup failure is non-fatal: the container is still usable.
+            logger.warning("Branch setup failed: %s", e)
+            clone_msg = f" (branch setup failed: {e})"
+    elif clone_repo and pr is None:
         msg, err = _try_clone_into_container(
             container,
             cid,
@@ -666,6 +724,7 @@ async def sandbox_initialize_tool(
     clone_dest: str = WORKSPACE,
     repo: str | None = None,
     pr: int | None = None,
+    branch: str | None = None,
     pip_extras: str | None = "[dev]",
     pip_args: str | None = None,
     mem_limit: str | None = None,
@@ -694,6 +753,9 @@ async def sandbox_initialize_tool(
         repo: 'owner/name'; required with pr.
         pr: PR number to clone and check out (implies allow_network;
             anonymous checkout, no token enters the container).
+            Mutually exclusive with *branch*.
+        branch: Branch name to clone and check out.  Mutually exclusive
+            with *pr*.  Requires ``clone_repo=`` to specify the repository.
         pip_extras: Extras for dev install, e.g. '[dev]'. None skips pip
             install; also auto-skipped without network.
         pip_args: Extra pip arguments; ignored when pip_extras is None.
@@ -713,6 +775,7 @@ async def sandbox_initialize_tool(
             clone_dest=clone_dest,
             repo=repo,
             pr=pr,
+            branch=branch,
             pip_extras=pip_extras,
             pip_args=pip_args,
             mem_limit=mem_limit,
@@ -733,17 +796,10 @@ async def sandbox_initialize_tool(
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - start
             try:
-                # Progress value must increase every notification (MCP spec
-                # "SHOULD increase, even if total is unknown"); a constant 0
-                # can be ignored by clients that only reset their request
-                # timeout on advancing progress (Issue #303).  Elapsed seconds
-                # is monotonically increasing.
                 await ctx.report_progress(
                     elapsed, None, f"sandbox_initialize running... ({elapsed:.0f}s)"
                 )
-            except Exception as e:  # pragma: no cover - defensive
-                # A dropped connection must not strand the in-flight future;
-                # keep waiting for the work to finish and return its result.
+            except Exception as e:
                 logger.warning("report_progress failed: %s", e)
     return await future
 
@@ -829,6 +885,7 @@ def run_container_and_exec(
     clone_dest: str = WORKSPACE,
     repo: str | None = None,
     pr: int | None = None,
+    branch: str | None = None,
     pip_extras: str | None = "[dev]",
     pip_args: str | None = None,
     timeout: int = 0,
@@ -858,6 +915,9 @@ def run_container_and_exec(
         repo: 'owner/name'; required with pr.
         pr: PR number to clone and check out (implies allow_network;
             anonymous checkout, no token enters the container).
+            Mutually exclusive with *branch*.
+        branch: Branch name to clone and check out.  Mutually exclusive
+            with *pr*.  Requires ``clone_repo=`` to specify the repo.
         pip_extras: Extras for dev install, e.g. '[dev]'. None skips pip
             install; also auto-skipped without network.
         pip_args: Extra pip arguments; ignored when pip_extras is None.
@@ -881,12 +941,46 @@ def run_container_and_exec(
     if timeout < 0:
         return json.dumps({"status": "error", "error": "timeout must be >= 0"})
 
+    # branch and pr are mutually exclusive (Issue #675b).
+    if branch is not None and pr is not None:
+        return json.dumps({
+            "status": "error",
+            "error": (
+                "branch and pr are mutually exclusive; "
+                "a PR already determines its own head branch."
+            ),
+        })
+
+    # An empty branch string lets git clone silently land on the default
+    # branch (acceptance criterion #3).  Reject it explicitly.
+    if branch is not None and not branch:
+        return json.dumps({
+            "status": "error",
+            "error": "branch must not be empty (empty string would clone the default branch)",
+        })
+
     # When pr is specified, implicitly enable network access.
     if pr is not None:
         allow_network = True
 
+    # When branch is specified, implicitly enable network access.
+    if branch is not None:
+        allow_network = True
+        logger.info(
+            "branch=%r: auto-enabling network access",
+            branch,
+        )
+        if clone_repo is None:
+            return json.dumps({
+                "status": "error",
+                "error": (
+                    "branch requires clone_repo to be set; "
+                    "use clone_repo= to specify the repository."
+                ),
+            })
+
     # Auto-enable network for clone_repo (Issue #146)
-    if clone_repo and pr is None:
+    if clone_repo and pr is None and branch is None:
         allow_network = True
         logger.info(
             "clone_repo=%r: auto-enabling network access",
@@ -968,12 +1062,29 @@ def run_container_and_exec(
 
     # --- Clone via network (Issue #146) ---
     # When pr is set, _setup_pr_branch handles its own clone.
+    # When branch is set, _setup_branch handles its own clone.
     clone_error: str | None = None
     # Same ground truth as sandbox_initialize: a proxied container holds no
     # token (#356), so the network clone must go anonymous (#403 fallout).
     container_has_token = "GITHUB_TOKEN" in env or "GH_TOKEN" in env
     open_read_grant = proxied and not container_has_token
-    if clone_repo and pr is None:
+    if clone_repo and branch:
+        try:
+            _setup_branch(
+                container,
+                container_id,
+                clone_repo,
+                branch,
+                clone_dest,
+                pip_extras,
+                authenticated=container_has_token,
+                open_read_grant=open_read_grant,
+                pip_args=pip_args,
+            )
+        except Exception as e:
+            logger.warning("Branch setup failed: %s", e)
+            clone_error = str(e)
+    elif clone_repo and pr is None:
         _, clone_error = _try_clone_into_container(
             container,
             container_id,
@@ -1138,4 +1249,3 @@ def run_container_and_exec(
 
     record_stop(container_id)
     return json.dumps(result)
-

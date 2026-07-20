@@ -61,7 +61,7 @@ def git_prepare_commit(
     files: list[str] | None = None,
     author_name: str | None = None,
     author_email: str | None = None,
-    base_auto_include: dict[str, str | None] | None = None,
+    base_auto_include: dict[str, str | bytes | None] | None = None,
 ) -> dict | None:
     """Checkout branch, stage, squash unpushed checkpoints, then commit.
 
@@ -78,11 +78,12 @@ def git_prepare_commit(
         author_email: Override commit author email.
         base_auto_include: Optional dict of path -> content_or_None for files
             that the base branch advanced since the feature branch was last
-            pushed (Candidate C, issue #712).  A ``str`` value is content to
-            write and stage; ``None`` signals the path should be deleted
-            (deletion auto-include, issue #715).  Content is sourced host-side
-            from GitHub API, never from the container.  Applied before declared
-            files (declared files override).
+            pushed (Candidate C, issue #712).  A ``str`` value is UTF-8 text to
+            write and stage; ``bytes`` is binary/non-UTF-8 content; ``None``
+            signals the path should be deleted (deletion auto-include, issue
+            #715).  Content is sourced host-side from GitHub API, never from
+            the container.  Applied before declared files (declared files
+            override).
 
     Returns an error dict on failure, or ``None`` on success (including
     "nothing to commit" which is treated as success).
@@ -191,9 +192,12 @@ def git_prepare_commit(
                             }
                     continue
                 # Write content via base64 to safely pass through the shell
-                encoded = base64.b64encode(
-                    content.encode("utf-8")
-                ).decode("ascii")
+                if isinstance(content, bytes):
+                    encoded = base64.b64encode(content).decode("ascii")
+                else:
+                    encoded = base64.b64encode(
+                        content.encode("utf-8")
+                    ).decode("ascii")
                 write_ec, write_out, write_err = run(
                     f"echo {shlex.quote(encoded)} | base64 -d"
                     f" > {shlex.quote(path)}"

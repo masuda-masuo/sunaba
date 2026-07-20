@@ -663,3 +663,31 @@ class TestGitPrepareCommitAutoInclude:
         assert result is not None
         assert result["step"] == "auto_include_delete"
         assert "git rm failed" in result["error"]
+
+    def test_auto_include_binary_content(self) -> None:
+        """Bytes values (non-UTF-8 binary content) are written via base64
+        without a UTF-8 round-trip (issue #716)."""
+        raw_bytes = b"\xff\xfe\x00"  # never valid UTF-8
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout feat/g
+            (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/g (empty)
+            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
+            (0, "", ""),                     # git reset --mixed origin/HEAD
+            (0, "", ""),                     # echo+base64 for binary.bin
+            (0, "", ""),                     # git add binary.bin
+            (0, "", ""),                     # git add declared.txt
+            (0, "[feat/g abc1234] Msg\n", ""),  # commit
+        ])
+        result = git_prepare_commit(
+            run, branch="feat/g", message="Msg",
+            files=["declared.txt"],
+            base_auto_include={"binary.bin": raw_bytes},
+        )
+        assert result is None, f"git_prepare_commit failed: {result}"
+
+        cmd_strs = [c[0] for c in run.calls]
+        # The base64 command should have been emitted
+        assert any("binary.bin" in c and "base64" in c for c in cmd_strs), (
+            "binary content should be written via base64"
+        )

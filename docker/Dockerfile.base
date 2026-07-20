@@ -131,9 +131,13 @@ ENV VIRTUAL_ENV="/home/sandbox/.venv" \
 ENV NPM_CONFIG_PREFIX="/home/sandbox/.npm-global" \
     PATH="/home/sandbox/.npm-global/bin:${PATH}"
 
+# pip install detect-secrets (issue #676)
+RUN uv pip install detect-secrets==1.5.0
+
 # ── ヘルスチェック (base が保有するツールのみ) ────────────────────
 # pip --version は venv の健全性を兼ねて確認する（壊れたツールを隠さない）
+# detect-secrets --version はシークレットスキャンツールがイメージに含まれていることを確認 (issue #676)
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD rg --version && sg --version && node --version && npm --version && pip --version || exit 1
+  CMD rg --version && sg --version && node --version && npm --version && pip --version && detect-secrets --version || exit 1
 
 CMD ["bash"]

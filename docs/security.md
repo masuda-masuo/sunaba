@@ -75,3 +75,14 @@ SUNABA_ALLOWED_EGRESS_HOSTS="mirror.internal, .example.com"
 
 ### Applying changes
 The proxy runs as a long-lived sidecar container (`sunaba-egress-proxy`) that reads these variables once, at its own startup. You do not need to restart or remove it by hand: the next `sandbox_initialize` or `publish` compares the sidecar's baked-in configuration against the current environment and recreates it when they differ. Recreation does not disturb running sandboxes — the proxy CA is persisted in a named volume and stays the same.
+
+---
+
+## 4. Secret Scan (Issue #676)
+
+`publish` automatically scans manifest-declared files for potential secrets using Yelp's `detect-secrets` before pushing. The scanner is baked into the base Docker image and runs inside the container.
+
+**Configuration:**
+
+*   `SUNABA_SECRETS_BASELINE` (default: `true`) — When enabled, a repo-local `.secrets.baseline` file suppresses known/approved findings across publishes.
+*   **Override tool**: `secret_scan_override` is a separate MCP tool (not a `publish` argument). Call it when a publish is blocked by a false-positive finding. With baseline enabled, it appends the finding to `.secrets.baseline` so it is not re-flagged; with baseline disabled, the override is one-time and in-memory.

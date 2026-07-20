@@ -55,6 +55,9 @@ from .tools.journal import (
 from .tools.package import (
     package_install,
 )
+from .tools.secret_scan import (
+    secret_scan_override,
+)
 from .tools.vcs import (
     checkpoint,
     checkpoint_list,
@@ -104,6 +107,7 @@ sandbox_pr_review_write = mcp.tool()(sandbox_pr_review_write)
 checkpoint = mcp.tool()(checkpoint)
 checkpoint_list = mcp.tool()(checkpoint_list)
 checkpoint_restore = mcp.tool()(checkpoint_restore)
+secret_scan_override = mcp.tool()(secret_scan_override)
 
 # Container naming / discovery tools (Issue #478)
 sandbox_list_containers = mcp.tool()(sandbox_list_containers)

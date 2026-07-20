@@ -50,15 +50,30 @@ def repo_setup(tmp_path: Path):
 
     # Create a clone, add an initial file, and push
     _git(str(tmp_path), "clone", str(origin_dir), str(clone_dir))
+
+    # CI runners carry no global git identity; without a repo-level one
+    # every commit in this fixture and in the tests fails with
+    # "empty ident name".
+    _git(str(clone_dir), "config", "user.email", "gitrepo-fixture@example.com")
+    _git(str(clone_dir), "config", "user.name", "gitrepo fixture")
+
     initial = clone_dir / "README.md"
     initial.write_text("# Initial\n")
     _git(str(clone_dir), "add", "README.md")
-    _git(str(clone_dir), "commit", "-m", "Initial commit")
-    _git(str(clone_dir), "push", "origin", "main")
+    commit = _git(str(clone_dir), "commit", "-m", "Initial commit")
+    assert commit.returncode == 0, f"fixture commit failed: {commit.stderr}"
+    push = _git(str(clone_dir), "push", "origin", "main")
+    assert push.returncode == 0, f"fixture push failed: {push.stderr}"
 
-    # Ensure origin/HEAD exists in the clone so git_prepare_commit can resolve it
+    # Ensure origin/HEAD exists in the clone so git_prepare_commit can
+    # resolve it.  Set it explicitly -- deterministic, unlike
+    # `remote set-head --auto` which queries the remote's HEAD.
     _git(str(clone_dir), "fetch", "origin")
-    _git(str(clone_dir), "remote", "set-head", "origin", "--auto")
+    head = _git(
+        str(clone_dir), "symbolic-ref",
+        "refs/remotes/origin/HEAD", "refs/remotes/origin/main",
+    )
+    assert head.returncode == 0, f"fixture set origin/HEAD failed: {head.stderr}"
 
     return {
         "origin_dir": str(origin_dir),

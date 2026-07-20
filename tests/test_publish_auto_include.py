@@ -130,14 +130,15 @@ class TestFetchBaseAutoInclude:
         assert mock_api.call_count == 6  # repo + 2 refs + compare + 2 contents
 
         # Result: added/modified get content; removed (deleted.txt) gets None;
-        # renamed is still filtered out.
+        # renamed.txt is now in result.skipped (issue #711).
         assert result is not None
-        assert result == {
+        assert result.included == {
             "added.txt": "added content\n",
             "modified.txt": "modified content\n",
             "deleted.txt": None,  # issue #715: deletion marker, not filtered
         }
-        assert "renamed.txt" not in result
+        assert "renamed.txt" not in result.included
+        assert "renamed.txt" in result.skipped
 
     def test_explicit_base_branch_skips_resolution(self) -> None:
         """When base_branch is provided, no default-branch resolution call."""
@@ -168,7 +169,9 @@ class TestFetchBaseAutoInclude:
         # Feature and base branch refs were called
         assert "refs/heads/feat/x" in mock_api.call_args_list[0][0][0]
         assert "refs/heads/develop" in mock_api.call_args_list[1][0][0]
-        assert result == {}
+        assert result is not None
+        assert result.included == {}
+        assert result.skipped == []
 
     def test_repo_resolution_failure_returns_none(self) -> None:
         """When the repo-info call raises, return None (safe)."""
@@ -205,7 +208,8 @@ class TestFetchBaseAutoInclude:
         assert result is None
 
     def test_feature_branch_does_not_exist_returns_empty(self) -> None:
-        """When the feature branch has no remote ref yet, return {}."""
+        """When the feature branch has no remote ref yet, return empty
+        AutoIncludeResult."""
         with patch(
             "sunaba.tools.github_api._github_api_request",
         ) as mock_api:
@@ -221,7 +225,9 @@ class TestFetchBaseAutoInclude:
                 base_branch="",
             )
 
-        assert result == {}
+        assert result is not None
+        assert result.included == {}
+        assert result.skipped == []
 
     def test_base_branch_ref_failure_returns_none(self) -> None:
         """When the base-branch ref call raises, return None (safe).
@@ -293,7 +299,9 @@ class TestFetchBaseAutoInclude:
             )
 
         assert result is not None
-        assert result == {"good.txt": "good content\n"}
+        assert result.included == {"good.txt": "good content\n"}
+        # bad.txt's content fetch failed -- it goes to result.skipped (issue #711)
+        assert "bad.txt" in result.skipped
 
     def test_compare_with_no_files_returns_empty(self) -> None:
         """When Compare API returns no files, return empty dict."""
@@ -314,7 +322,9 @@ class TestFetchBaseAutoInclude:
                 base_branch="",
             )
 
-        assert result == {}
+        assert result is not None
+        assert result.included == {}
+        assert result.skipped == []
         assert mock_api.call_count == 4  # repo + 2 refs + compare
 
     def test_non_base64_encoding_skipped(self) -> None:
@@ -353,8 +363,9 @@ class TestFetchBaseAutoInclude:
 
         assert result is not None
         # utf8.txt was decoded, utf16.txt was skipped (wrong encoding)
-        assert "utf8.txt" in result
-        assert "utf16.txt" not in result
+        assert "utf8.txt" in result.included
+        assert "utf16.txt" not in result.included
+        assert "utf16.txt" in result.skipped
 
     def test_non_utf8_content_preserved(self) -> None:
         """Binary (non-UTF-8) content is preserved as ``bytes`` in the
@@ -395,10 +406,10 @@ class TestFetchBaseAutoInclude:
             )
 
         assert result is not None
-        assert "good.txt" in result
-        assert "binary.bin" in result  # no longer silently dropped (#716)
-        assert isinstance(result["binary.bin"], bytes)
-        assert result["binary.bin"] == b"\xff\xfe"
+        assert "good.txt" in result.included
+        assert "binary.bin" in result.included  # no longer silently dropped (#716)
+        assert isinstance(result.included["binary.bin"], bytes)
+        assert result.included["binary.bin"] == b"\xff\xfe"
 
     def test_empty_base_branch_after_resolution_returns_none(self) -> None:
         """When repo info returns no default_branch, return None."""

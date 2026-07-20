@@ -312,7 +312,7 @@ def git_push_with_fallback(
     token_missing: bool,
     try_api_push: Callable[[], dict[str, str]],
     record_crossing: Callable[[str, bool], None],
-) -> tuple[dict | None, str]:
+) -> tuple[dict | None, str, str]:
     """Push with transport fallback to GitHub Objects API.
 
     ``try_api_push`` is a zero-argument callable that runs the API push
@@ -320,9 +320,12 @@ def git_push_with_fallback(
     ``record_crossing(reason, approved)`` records a boundary-crossing
     journal entry.
 
-    Returns ``(error_payload_or_None, sha)``.  On success ``error_payload``
-    is ``None``; on failure it is an error dict with ``status``, ``step``,
-    ``error``, ``sha`` and optionally ``hint``.
+    Returns ``(error_payload_or_None, sha, transport)``.  On success
+    ``error_payload`` is ``None``, ``sha`` is the pushed commit SHA
+    (first 7 chars), and ``transport`` is ``"native"`` (git push) or
+    ``"api"`` (GitHub Objects API fallback).  On failure it returns an
+    error dict with ``status``, ``step``, ``error``, ``sha`` and
+    optionally ``hint``; ``transport`` is ``""`` on failure.
     """
     push_ec, push_out, push_err = run(push_cmd, env=push_env)
 
@@ -331,6 +334,8 @@ def git_push_with_fallback(
     sha_ec, sha_out, _ = run("git rev-parse HEAD")
     if sha_ec == 0:
         sha = sha_out.strip()[:7]
+
+    transport = ""
 
     # Transport fallback: git push failed -> try GitHub API push
     if push_ec != 0:
@@ -356,11 +361,13 @@ def git_push_with_fallback(
                     ),
                 },
                 sha,
+                transport,
             )
 
         push_result = try_api_push()
         if push_result.get("status") == "ok":
             sha = push_result.get("sha", sha)
+            transport = "api"
             push_ec = 0  # mark success for downstream logic
         else:
             record_crossing(
@@ -376,9 +383,12 @@ def git_push_with_fallback(
             }
             if hints:
                 payload["hint"] = " ".join(hints)
-            return (payload, sha)
+            return (payload, sha, transport)
 
-    return (None, sha)
+    if not transport:
+        transport = "native"
+
+    return (None, sha, transport)
 
 
 def create_pull_request(

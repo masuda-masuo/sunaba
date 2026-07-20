@@ -248,13 +248,13 @@ class TestGitPushWithFallback:
     """Push logic with API fallback, egress block detection, error hints."""
 
     def test_successful_push(self) -> None:
-        """Happy path: push succeeds, returns (None, sha)."""
+        """Happy path: push succeeds, returns (None, sha, transport)."""
         run = RecordingRun([
             (0, "pushed", ""),           # git push
             (0, "abc1234def5678", ""),   # git rev-parse HEAD
         ])
 
-        error_payload, sha = git_push_with_fallback(
+        error_payload, sha, transport = git_push_with_fallback(
             run,
             repo="owner/repo", branch="topic", cid="abc123",
             push_cmd="git push origin topic",
@@ -265,6 +265,7 @@ class TestGitPushWithFallback:
         )
         assert error_payload is None
         assert sha == "abc1234"
+        assert transport == "native"
 
     def test_egress_block_returns_error_no_fallback(self) -> None:
         """Egress-proxy block -> error with hint, no API fallback."""
@@ -285,7 +286,7 @@ class TestGitPushWithFallback:
         def _record(reason: str, approved: bool) -> None:
             crossings.append((reason, approved))
 
-        error_payload, sha = git_push_with_fallback(
+        error_payload, sha, transport = git_push_with_fallback(
             run,
             repo="owner/repo", branch="topic", cid="abc123",
             push_cmd="git push origin topic",
@@ -301,6 +302,7 @@ class TestGitPushWithFallback:
         assert "BLOCKED by egress proxy" in error_payload["error"]
         assert "hint" in error_payload
         assert sha == "abc1234"
+        assert transport == ""
 
         # Boundary crossing recorded with approved=False
         assert len(crossings) == 1
@@ -308,13 +310,13 @@ class TestGitPushWithFallback:
         assert "push_blocked_by_egress_proxy" in crossings[0][0]
 
     def test_api_fallback_succeeds(self) -> None:
-        """Push fails, API fallback succeeds -> (None, new_sha)."""
+        """Push fails, API fallback succeeds -> (None, new_sha, "api")."""
         run = RecordingRun([
             (1, "", "remote rejected: permission denied"),  # push fails
             (0, "oldsha1234567", ""),  # rev-parse HEAD
         ])
 
-        error_payload, sha = git_push_with_fallback(
+        error_payload, sha, transport = git_push_with_fallback(
             run,
             repo="owner/repo", branch="topic", cid="abc123",
             push_cmd="git push origin topic",
@@ -325,6 +327,7 @@ class TestGitPushWithFallback:
         )
         assert error_payload is None
         assert sha == "newsha9"
+        assert transport == "api"
 
     def test_both_push_and_api_fallback_fail(self) -> None:
         """Both transports fail -> error payload with hints."""
@@ -338,7 +341,7 @@ class TestGitPushWithFallback:
         def _record(reason: str, approved: bool) -> None:
             crossings.append((reason, approved))
 
-        error_payload, sha = git_push_with_fallback(
+        error_payload, sha, transport = git_push_with_fallback(
             run,
             repo="owner/repo", branch="topic", cid="abc123",
             push_cmd="git push origin topic",
@@ -352,6 +355,7 @@ class TestGitPushWithFallback:
         assert error_payload["step"] == "git_push"
         assert "permission denied" in error_payload["error"]
         assert sha == "abc1234"
+        assert transport == ""
         # Both hints present
         assert "allow_network=False" in error_payload["hint"]
         assert "No VCS token" in error_payload["hint"]

@@ -9,6 +9,7 @@ import logging
 import os
 import posixpath
 import shlex
+import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
@@ -519,12 +520,91 @@ def undo_file_edit(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Helpers for copy_project / copy_file
+# ---------------------------------------------------------------------------
+
+_GIT_TIMEOUT = 30  # seconds for git subprocess calls
+
+
+def _walk_files(base_path: Path) -> list[str]:
+    """Walk *base_path* and return all file paths relative to it."""
+    files: list[str] = []
+    for dirpath, _dirnames, filenames in os.walk(str(base_path)):
+        for fn in filenames:
+            rel = os.path.relpath(os.path.join(dirpath, fn), str(base_path))
+            files.append(rel)
+    return files
+
+
+def _get_container_user_uidgid(container) -> tuple[int, int]:
+    """Return (uid, gid) of the container's default user.
+
+    Raises ``RuntimeError`` when the information cannot be obtained.
+    """
+    uid_ec, uid_b = container.exec_run(["id", "-u"])
+    gid_ec, gid_b = container.exec_run(["id", "-g"])
+    if uid_ec != 0 or gid_ec != 0:
+        raise RuntimeError(
+            f"id -u returned exit {uid_ec}, id -g returned exit {gid_ec}"
+        )
+    try:
+        uid = int(uid_b.decode("utf-8").strip())
+        gid = int(gid_b.decode("utf-8").strip())
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(f"Could not parse container user id: {e}") from e
+    return uid, gid
+
+
+def _normalize_ownership(container, dest_path: str) -> str | None:
+    """Chown *dest_path* so the container user owns everything.
+
+    Returns ``None`` on success, or an error message on failure.
+    """
+    try:
+        uid, gid = _get_container_user_uidgid(container)
+    except Exception as e:
+        return f"Error: Failed to determine container user id: {e}"
+
+    try:
+        chown_ec, chown_out = container.exec_run(
+            ["chown", "-R", f"{uid}:{gid}", dest_path],
+            user="root",
+        )
+    except Exception as e:
+        return (
+            f"Error: Failed to set ownership on {dest_path}: {e}. "
+            f"Files were copied to the container but may not be writable. "
+            f"Run 'chown -R {uid}:{gid} {dest_path}' as root inside the container."
+        )
+
+    if chown_ec != 0:
+        return (
+            f"Error: Failed to set ownership on {dest_path} (exit {chown_ec}): "
+            f"{chown_out.decode('utf-8').strip()}. "
+            f"Files were copied to the container but may not be writable. "
+            f"Run 'chown -R {uid}:{gid} {dest_path}' as root inside the container."
+        )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# copy_project
+# ---------------------------------------------------------------------------
+
+
 def copy_project(
     container_id: str,
     local_src_dir: str,
     dest_dir: str = WORKSPACE,
+    include_untracked: bool = False,
 ) -> str:
     """Copy a local directory into the container as a tar archive.
+
+    By default only git-tracked files (plus ``.git/``) are transferred.
+    Untracked and gitignored files are left behind.  Pass
+    ``include_untracked=True`` to opt in to copying untracked files too.
 
     The directory's *contents* land in *dest_dir*, so the copied project
     becomes the git root the container already works in -- verify and publish
@@ -532,7 +612,7 @@ def copy_project(
 
     .. note::
 
-       After copying, files are ``chown``-ed to the container's running
+       After copying, every file is ``chown``-ed to the container's running
        user so they remain writable by the file-editing tools.
 
     Args:
@@ -540,6 +620,12 @@ def copy_project(
         local_src_dir: Path to the local directory to copy.
         dest_dir: Destination directory in the container (default: the
             workspace, ``/workspace``).
+        include_untracked: If ``True``, untracked files are copied alongside
+            tracked ones.  Gitignored files are still left behind (the
+            enumeration honours ``.gitignore``), so build output and virtual
+            environments do not come along.  For a directory that is not a git
+            repository at all, this flag is required and copies it wholesale.
+            Default ``False``.
 
     Returns:
         Success or error message.
@@ -559,11 +645,118 @@ def copy_project(
     if not src_path.is_dir():
         return f"Error: {local_src_dir} is not a directory"
 
+    # -- Decide whether this is a git repository ---------------------------------
+    git_dir = src_path / ".git"
+    is_git_repo = git_dir.exists()
+
+    if is_git_repo and git_dir.is_file():
+        # File-based .git (git worktree / submodule worktree).
+        # The pointer would resolve to a path that does not exist inside the
+        # container, producing a broken repository.  Refuse.
+        return (
+            f"Error: {local_src_dir} has a file-based .git pointer "
+            f"(worktree checkout or submodule worktree). "
+            f"copy_project cannot copy this reliably because the gitdir "
+            f"pointer resolves to a host-only path. "
+            f"Use a non-worktree clone instead."
+        )
+
+    # -- Build file list ---------------------------------------------------------
+    tracked_files: list[str] = []
+    untracked_files: list[str] = []
+
+    if is_git_repo:
+        try:
+            # Tracked files (all states in the index), with stage info so we
+            # can filter out submodule gitlinks (mode 160000).
+            proc = subprocess.run(
+                ["git", "ls-files", "--cached", "--stage"],
+                cwd=src_path,
+                capture_output=True,
+                text=True,
+                timeout=_GIT_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: git ls-files timed out (possible stalled filesystem)"
+        except FileNotFoundError:
+            return "Error: git not found in PATH"
+
+        if proc.returncode != 0:
+            return f"Error: git ls-files failed: {proc.stderr.strip()}"
+
+        for raw_line in proc.stdout.strip().split("\n"):
+            line = raw_line.strip()
+            if not line:
+                continue
+            # Format: "100644 <sha> <stage>\t<path>" or "160000 <sha> <stage>\t<path>"
+            meta_part, _, filepath = line.partition("\t")
+            if not filepath:
+                continue
+            mode = meta_part.split(maxsplit=1)[0] if meta_part else ""
+            if mode == "160000":
+                # Submodule gitlink -- do not recurse into it
+                continue
+            tracked_files.append(filepath)
+
+        # Always enumerate untracked files for reporting.
+        try:
+            proc2 = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=src_path,
+                capture_output=True,
+                text=True,
+                timeout=_GIT_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: git ls-files --others timed out"
+        except FileNotFoundError:
+            return "Error: git not found in PATH"
+        if proc2.returncode == 0:
+            untracked_files = [
+                f for f in proc2.stdout.strip().split("\n") if f.strip()
+            ]
+    elif include_untracked:
+        # Not a git repository: there is no notion of "tracked" here, so the
+        # only honest options are to copy everything or to refuse.  The caller
+        # has explicitly opted in, so copy everything.
+        tracked_files = _walk_files(src_path)
+    else:
+        # Not a git repository and no opt-in.  Copying everything is exactly
+        # the incident this issue exists to prevent (#678), and without git we
+        # cannot tell an operator's private files from the project's own.
+        # Refuse rather than silently degrading the guarantee.
+        return (
+            f"Error: {local_src_dir} is not a git repository, so copy_project "
+            f"cannot tell tracked files from untracked ones. Refusing rather "
+            f"than copying everything, which risks transferring private files. "
+            f"Pass include_untracked=True to copy the directory wholesale."
+        )
+
+    # -- Build count summary for the result message ------------------------------
+    tracked_count = len(tracked_files)
+    untracked_count = len(untracked_files)
+    skipped_untracked_count = untracked_count if not include_untracked else 0
+    total = tracked_count + (untracked_count if include_untracked else 0)
+
+    # -- Create tar archive ------------------------------------------------------
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar")
     try:
         with tarfile.open(fileobj=tmp.file, mode="w") as tar:
-            tar.add(src_path, arcname=".")
+            if is_git_repo:
+                # Include the .git metadata directory
+                tar.add(str(git_dir), arcname=".git")
+            for filepath in tracked_files:
+                full_path = src_path / filepath
+                if full_path.exists():
+                    tar.add(str(full_path), arcname=f"./{filepath}")
+            if include_untracked:
+                for filepath in untracked_files:
+                    full_path = src_path / filepath
+                    if full_path.exists():
+                        tar.add(str(full_path), arcname=f"./{filepath}")
         tmp.file.close()
+
+        # -- Transfer into container ---------------------------------------------
         with open(tmp.name, "rb") as f:
             data = f.read()
         buf = io.BytesIO(data)
@@ -571,19 +764,32 @@ def copy_project(
             container.put_archive(dest_dir, buf)
         except APIError as e:
             return f"Error: {e}"
-        dest_path = dest_dir
-        try:
-            container.exec_run(
-                ["sh", "-c", f"chown -R $(id -u):$(id -g) {shlex.quote(dest_path)}"]
-            )
-        except Exception as e:
-            logger.debug("chown failed for %s: %s", dest_path, e)
+
+        # -- Normalise ownership --------------------------------------------------
+        own_err = _normalize_ownership(container, dest_dir)
+        if own_err is not None:
+            # Files have already landed; the caller must fix ownership manually.
+            return own_err
+
         record_copy(
-            container_id[:12], "copy_project", local_src_dir, dest_path
+            container_id[:12], "copy_project", local_src_dir, dest_dir
         )
+
+        # -- Build success message ------------------------------------------------
+        summary_parts: list[str] = []
+        if is_git_repo:
+            summary_parts.append(f"{tracked_count} tracked files")
+            if include_untracked and untracked_count:
+                summary_parts.append(f"{untracked_count} untracked files")
+            elif skipped_untracked_count:
+                summary_parts.append(f"{skipped_untracked_count} untracked skipped")
+        else:
+            summary_parts.append(f"{total} files (not a git repository)")
+
         return (
-            f"Copied {local_src_dir} to {dest_path} "
-            f"in container {container_id[:12]}"
+            f"Copied {local_src_dir} to {dest_dir} "
+            f"in container {container_id[:12]} "
+            f"({'; '.join(summary_parts)})"
         )
     finally:
         os.unlink(tmp.name)
@@ -600,6 +806,9 @@ def copy_file(
     dest_path: str = WORKSPACE,
 ) -> str:
     """Copy a single local file into the container.
+
+    After copying, the file is ``chown``-ed to the container's running
+    user so it remains writable by the file-editing tools.
 
     Args:
         container_id: 12-character container ID prefix.
@@ -645,12 +854,11 @@ def copy_file(
         container.put_archive(parent_dir, tar_stream.getvalue())
     except APIError as e:
         return f"Error: {e}"
-    try:
-        container.exec_run(
-            ["sh", "-c", f"chown -R $(id -u):$(id -g) {shlex.quote(dest)}"]
-        )
-    except Exception as e:
-        logger.debug("chown failed for %s: %s", dest, e)
+
+    own_err = _normalize_ownership(container, dest)
+    if own_err is not None:
+        return own_err
+
     record_copy(container_id[:12], "copy_file", local_src_file, dest)
     return f"Copied {local_src_file} to {dest} in container {container_id[:12]}"
 

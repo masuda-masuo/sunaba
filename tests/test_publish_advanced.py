@@ -8,7 +8,7 @@ import pytest
 
 from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
 from sunaba.tools.vcs import publish
-from tests.conftest import _decode, _make_client_mock, _make_container_mock
+from tests.conftest import _decode, _exec_cmd, _make_client_mock, _make_publish_container
 
 
 class TestPublishSquashCheckpoints:
@@ -25,7 +25,7 @@ class TestPublishSquashCheckpoints:
         mock_docker: MagicMock,
     ) -> None:
         """Publish should squash unpushed checkpoints with reset --soft."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -50,8 +50,8 @@ class TestPublishSquashCheckpoints:
 
         assert result["status"] == "pushed"
         reset_calls = [
-            c[0][0][2] for c in container.exec_run.call_args_list
-            if "reset --soft" in c[0][0][2]
+            _exec_cmd(c) for c in container.exec_run.call_args_list
+            if "reset --soft" in _exec_cmd(c)
         ]
         assert len(reset_calls) == 1
 
@@ -63,7 +63,7 @@ class TestPublishSquashCheckpoints:
         mock_docker: MagicMock,
     ) -> None:
         """Publish with no tracking branch should skip squash."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -100,7 +100,7 @@ class TestPublishAllowForcePush:
         mock_docker: MagicMock,
     ) -> None:
         """allow_force_push=True should include --force in push command."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -123,8 +123,8 @@ class TestPublishAllowForcePush:
 
         assert result["status"] == "pushed"
         push_calls = [
-            c[0][0][2] for c in container.exec_run.call_args_list
-            if "push origin" in c[0][0][2]
+            _exec_cmd(c) for c in container.exec_run.call_args_list
+            if "push origin" in _exec_cmd(c)
         ]
         assert len(push_calls) == 1
         assert "--force" in push_calls[0]
@@ -145,7 +145,7 @@ class TestPublishApiPushFallback:
     ) -> None:
         """When git push fails, _try_api_push should be used as fallback."""
         push_json = json.dumps({"sha": "b" * 40}).encode()
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -178,7 +178,7 @@ class TestPublishApiPushFallback:
         mock_docker: MagicMock,
     ) -> None:
         """When both git push and API push fail, return error."""
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
@@ -246,7 +246,7 @@ class TestPublishLazyTokenInjection:
         """A host-resolved token reaches the push exec but not read-only execs."""
         mock_resolve.return_value = "ghs_lazytoken"
 
-        container = _make_container_mock(self._simple_push_returns())
+        container = _make_publish_container(self._simple_push_returns())
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -259,7 +259,7 @@ class TestPublishLazyTokenInjection:
         assert result["status"] == "pushed"
 
         calls = container.exec_run.call_args_list
-        push_calls = [c for c in calls if "push origin" in c.args[0][2]]
+        push_calls = [c for c in calls if "push origin" in _exec_cmd(c)]
         assert len(push_calls) == 1
         push_env = self._env_of(push_calls[0])
         assert push_env == {
@@ -269,7 +269,7 @@ class TestPublishLazyTokenInjection:
 
         # Least-privilege: read-only git execs carry no credential.
         readonly_calls = [
-            c for c in calls if "push origin" not in c.args[0][2]
+            c for c in calls if "push origin" not in _exec_cmd(c)
         ]
         assert readonly_calls  # sanity
         assert all(self._env_of(c) is None for c in readonly_calls)
@@ -290,7 +290,7 @@ class TestPublishLazyTokenInjection:
         """
         mock_resolve.return_value = ""
 
-        container = _make_container_mock(self._simple_push_returns())
+        container = _make_publish_container(self._simple_push_returns())
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -318,7 +318,7 @@ class TestPublishLazyTokenInjection:
         mock_resolve.return_value = "ghs_lazytoken"
 
         push_json = json.dumps({"sha": "b" * 40}).encode()
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),              # git ls-files --others --exclude-standard
             (0, b"none\n", b""),              # MERGE_HEAD check
             (0, b"", b""),              # checkout -b
@@ -344,8 +344,9 @@ class TestPublishLazyTokenInjection:
 
         calls = container.exec_run.call_args_list
         script_calls = [
-            c for c in calls if "_sandbox_create_pr.py" in c.args[0][-1]
-            and "python3" in c.args[0][-1]
+            c for c in calls
+            if "_sandbox_create_pr.py" in _exec_cmd(c)
+            and "python3" in _exec_cmd(c)
         ]
         assert len(script_calls) == 1
         assert script_calls[0].kwargs.get("environment") == {
@@ -385,7 +386,7 @@ class TestPublishProxiedCredentialRouting:
     ) -> None:
         mock_resolve.return_value = "ghs_lazytoken"
 
-        container = _make_container_mock(
+        container = _make_publish_container(
             TestPublishLazyTokenInjection._simple_push_returns()
         )
         client = _make_client_mock(container)
@@ -425,7 +426,7 @@ class TestPublishProxiedCredentialRouting:
         mock_resolve.return_value = "ghs_lazytoken"
 
         returns = TestPublishLazyTokenInjection._simple_push_returns()
-        container = _make_container_mock(returns)
+        container = _make_publish_container(returns)
         client = _make_client_mock(container)
         mock_docker.return_value = client
 
@@ -452,9 +453,9 @@ class TestPublishProxiedCredentialRouting:
         calls = container.exec_run.call_args_list
         # ...no gh exec ran in the container, and no exec carried a token —
         # the container stays credential-free end to end under the proxy.
-        assert not [c for c in calls if "gh pr create" in c.args[0][2]]
+        assert not [c for c in calls if "gh pr create" in _exec_cmd(c)]
         assert all(self._env_of(c) is None for c in calls)
-        push_calls = [c for c in calls if "push origin" in c.args[0][2]]
+        push_calls = [c for c in calls if "push origin" in _exec_cmd(c)]
         assert len(push_calls) == 1
 
 

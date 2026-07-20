@@ -22,7 +22,7 @@ from sunaba.tools.common import (
 from sunaba.tools.vcs import publish
 from sunaba.tools.verify import verify_in_container
 from sunaba.verify_state import has_verify_success, record_verify_success
-from tests.conftest import _decode, _make_client_mock, _make_container_mock
+from tests.conftest import _decode, _make_client_mock, _make_publish_container
 
 
 @pytest.fixture(autouse=True)
@@ -125,7 +125,7 @@ class TestPublishVerifyGate:
     def test_block_when_no_verify_recorded(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         mock_docker.return_value = _make_client_mock(container)
 
         result = _run_publish()
@@ -141,7 +141,7 @@ class TestPublishVerifyGate:
     def test_skip_verify_gate_bypasses_block(
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         mock_docker.return_value = _make_client_mock(container)
 
         result = _run_publish(skip_verify_gate=True)
@@ -157,7 +157,7 @@ class TestPublishVerifyGate:
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
         record_verify_success("abc123def456")
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         mock_docker.return_value = _make_client_mock(container)
 
         result = _run_publish()
@@ -172,7 +172,7 @@ class TestPublishVerifyGate:
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
         record_verify_success("abc123def456")
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         mock_docker.return_value = _make_client_mock(container)
 
         result = _run_publish(skip_verify_gate=True)
@@ -187,7 +187,7 @@ class TestPublishVerifyGate:
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
         record_verify_success("abc123def456")
-        container = _make_container_mock([
+        container = _make_publish_container([
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # git checkout -b
@@ -211,7 +211,7 @@ class TestPublishPushOnlyNote:
         self, mock_record: MagicMock, mock_docker: MagicMock
     ) -> None:
         record_verify_success("abc123def456")
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         mock_docker.return_value = _make_client_mock(container)
 
         result = _run_publish()
@@ -235,7 +235,7 @@ class TestPublishPushOnlyNote:
         mock_pr: MagicMock,
     ) -> None:
         record_verify_success("abc123def456")
-        container = _make_container_mock(list(_PUSH_SEQUENCE))
+        container = _make_publish_container(list(_PUSH_SEQUENCE))
         mock_docker.return_value = _make_client_mock(container)
 
         result = _run_publish(create_pr=True, pr_title="t", pr_body="PR body")

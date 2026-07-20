@@ -3,8 +3,7 @@
 Public symbols
 --------------
 - ``run_secret_scan(container, files, working_dir)`` — run detect-secrets
-  on files using container-level exec API (not exec_run, to avoid
-  disrupting mock-based tests).
+  on files via ``container.exec_run``.
 - ``secret_scan_override(container_id, ...)`` — MCP tool to bypass findings.
 - ``check_override(container_id)`` — check/consume one-time override flag.
 
@@ -26,12 +25,6 @@ Override semantics
 ------------------
 - Baseline ON  → append to ``.secrets.baseline`` (permanent for this repo).
 - Baseline OFF → one-time in-memory flag for this container + HEAD commit.
-
-Exec API
---------
-This module uses ``container.exec_create`` + ``exec_start`` + ``exec_inspect``
-rather than ``container.exec_run`` so that the scan never consumes entries
-from the ``exec_run`` mock side_effect in existing tests.
 """
 
 from __future__ import annotations
@@ -91,61 +84,68 @@ def exec_in_container(
     cmd: list[str],
     workdir: str | None = None,
 ) -> tuple[int, str, str]:
-    """Run *cmd* inside *container* using exec_create + exec_start.
+    """Run *cmd* inside *container* using ``container.exec_run``.
 
     Returns ``(exit_code, stdout_text, stderr_text)``.
 
-    Uses ``exec_create`` / ``exec_start`` / ``exec_inspect`` so the call
-    does NOT go through ``exec_run``, which means it never consumes entries
-    from an ``exec_run`` mock side_effect (existing test pattern).
+    Uses ``exec_run(\u2026, demux=True)`` so stdout and stderr are separated
+    by docker-py rather than multiplexed together.  If demux is not
+    supported (older docker-py), falls back to undemuxed output where
+    all output is returned as stdout.
 
-    When *demux* is True (the default) ``exec_create`` passes ``stdout=True,
-    stderr=True`` and ``exec_start`` demuxes the multiplexed stream into
-    separate stdout/stderr bytes.  When *demux* is False (e.g. the container
-    library does not support it) the raw output is returned as stdout with
-    empty stderr — sufficient for detect-secrets, which writes JSON solely
-    to stdout on success.
+    This function does NOT use ``exec_create`` / ``exec_start`` / ``exec_inspect``
+    because those are low-level ``docker.api.APIClient`` methods, not methods
+    of ``docker.models.containers.Container``.
     """
     try:
-        exec_id = container.exec_create(
+        exec_result = container.exec_run(
             cmd=cmd,
             stdout=True,
             stderr=True,
             workdir=workdir,
+            demux=True,
         )
-    except Exception as exc:
-        logger.debug("exec_create failed: %s", exc)
-        return (127, "", str(exc))
-
-    try:
-        raw = container.exec_start(exec_id, demux=True)
-    except TypeError:
-        # Older docker-py (or mock container) — fall back to undemuxed
+    except TypeError as exc:
+        # Fallback: older docker-py that does not support demux parameter.
+        # Only catch TypeError caused by the demux keyword itself — an
+        # unexpected TypeError from deeper in docker-py (e.g. a bug in
+        # cmd handling) is re-raised so it is not silently retried.
+        if "demux" not in str(exc):
+            raise
         try:
-            raw = container.exec_start(exec_id)
+            exec_result = container.exec_run(
+                cmd=cmd,
+                stdout=True,
+                stderr=True,
+                workdir=workdir,
+            )
         except Exception as exc:
-            logger.debug("exec_start failed: %s", exc)
-            return (127, "", str(exc))
-        demuxed = False
+            logger.warning(
+                "exec_run (fallback) failed (unexpected): %s", exc, exc_info=True,
+            )
+            return (-1, "", f"[exec_run exception] {exc}")
+        exit_code = exec_result[0] if isinstance(exec_result, tuple) else -1
+        raw = exec_result[1] if isinstance(exec_result, tuple) else exec_result
+        if isinstance(raw, bytes):
+            stdout_text = raw.decode("utf-8", errors="replace")
+        else:
+            stdout_text = str(raw) if raw else ""
+        return (exit_code, stdout_text, "")
     except Exception as exc:
-        logger.debug("exec_start failed: %s", exc)
-        return (127, "", str(exc))
-    else:
-        demuxed = True
+        logger.warning("exec_run failed (unexpected): %s", exc, exc_info=True)
+        return (-1, "", f"[exec_run exception] {exc}")
 
-    try:
-        inspect = container.exec_inspect(exec_id)
-    except Exception as exc:
-        logger.debug("exec_inspect failed: %s", exc)
-        exit_code = -1
-    else:
-        exit_code = inspect.get("ExitCode", -1) if isinstance(inspect, dict) else -1
+    # exec_result is a namedtuple (exit_code, output)
+    # with demux=True, output is (stdout_bytes, stderr_bytes)
+    exit_code = exec_result[0] if isinstance(exec_result, tuple) else -1
+    raw = exec_result[1] if isinstance(exec_result, tuple) else exec_result
 
-    if demuxed and isinstance(raw, tuple) and len(raw) == 2:
+    if isinstance(raw, tuple) and len(raw) == 2:
         stdout_bytes, stderr_bytes = raw
-        stdout_text = stdout_bytes.decode("utf-8", errors="replace") if isinstance(stdout_bytes, bytes) else str(stdout_bytes)
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace") if isinstance(stderr_bytes, bytes) else str(stderr_bytes)
+        stdout_text = stdout_bytes.decode("utf-8", errors="replace") if isinstance(stdout_bytes, bytes) else str(stdout_bytes) if stdout_bytes else ""
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace") if isinstance(stderr_bytes, bytes) else str(stderr_bytes) if stderr_bytes else ""
     else:
+        # Undemuxed: all output is multiplexed as bytes
         if isinstance(raw, bytes):
             stdout_text = raw.decode("utf-8", errors="replace")
         else:

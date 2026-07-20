@@ -72,14 +72,18 @@ def _make_container_mock(exec_returns: list[tuple[int, bytes, bytes]]):
     return container
 
 
-def _make_publish_container(exec_returns: list[tuple[int, bytes, bytes]]):
+def _make_publish_container(
+    exec_returns: list[tuple[int, bytes, bytes]],
+    detect_secrets_scan_output: bytes | None = None,
+    git_diff_tree_output: bytes | None = None,
+):
     """Build a mock container for publish tests that transparently handles
     extra exec_run calls from the secret scan module.
 
     The publish flow calls ``container.exec_run`` in two ways:
 
     1. **Publish's internal ``_run()``** — positional first arg
-       ``exec_run([\"/bin/sh\", \"-c\", cmd], stdout=True, stderr=True)``
+       ``exec_run(["/bin/sh", "-c", cmd], stdout=True, stderr=True)``
        *(no ``demux``)*.  These consume from the positional *exec_returns*
        list in order.
 
@@ -91,20 +95,27 @@ def _make_publish_container(exec_returns: list[tuple[int, bytes, bytes]]):
     Known secret-scan commands that are dispatched:
 
     * ``detect-secrets --version`` → available (exit 0, version string)
-    * ``detect-secrets scan …``   → clean scan output (empty results)
+    * ``detect-secrets scan …``   → uses *detect_secrets_scan_output*
+      (default clean JSON with empty results; pass ``b"..."`` with a
+      finding to produce a blocking result).
     * ``cat …/.secrets.baseline …`` → baseline absent (exit 1)
-    * ``git diff-tree …``          → returns *diff_tree_output* (default
-      ``b""`` so ``run_secret_scan`` receives no files and returns
-      immediately without further ``exec_run`` calls).
+    * ``git diff-tree …``          → uses *git_diff_tree_output*
+      (default ``b""`` so ``run_secret_scan`` receives no files and
+      returns immediately without further ``exec_run`` calls).
 
     Parameters
     ----------
     exec_returns:
         Same format as ``_make_container_mock`` — one ``(ec, stdout, stderr)``
         entry per publish ``_run`` call, in order.
-    diff_tree_output:
+    detect_secrets_scan_output:
+        Bytes that the ``detect-secrets scan`` ``exec_in_container`` call
+        returns on stdout.  Default ``None`` = clean scan (empty results),
+        preserving the existing behaviour.
+    git_diff_tree_output:
         Bytes that the ``git diff-tree …`` ``exec_in_container`` call returns
-        on stdout.  Default ``b""`` (empty) makes ``run_secret_scan`` a no-op.
+        on stdout.  Default ``None`` = ``b""`` (empty), which makes
+        ``run_secret_scan`` receive no files and return immediately.
 
     Returns
     -------
@@ -115,6 +126,18 @@ def _make_publish_container(exec_returns: list[tuple[int, bytes, bytes]]):
         (ec, (stdout, stderr)) for ec, stdout, stderr in exec_returns
     ]
     pos = [0]
+
+    # Resolve defaults once at construction time
+    _scan_out: bytes = (
+        detect_secrets_scan_output
+        if detect_secrets_scan_output is not None
+        else (
+            b'{"results": {},'
+            b' "generated_at": "2026-01-01T00:00:00Z",'
+            b' "plugins_used": []}'
+        )
+    )
+    _diff_out: bytes = git_diff_tree_output if git_diff_tree_output is not None else b""
 
     def _side_effect(*args: object, **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
         nonlocal pos
@@ -129,20 +152,15 @@ def _make_publish_container(exec_returns: list[tuple[int, bytes, bytes]]):
 
         # --- Secret scan: detect-secrets scan ---
         if "detect-secrets scan" in cmd_str:
-            clean = (
-                '{"results": {},'
-                ' "generated_at": "2026-01-01T00:00:00Z",'
-                ' "plugins_used": []}'
-            )
-            return (0, (clean.encode("utf-8"), b""))
+            return (0, (_scan_out, b""))
 
         # --- Secret scan: cat .secrets.baseline ---
         if ".secrets.baseline" in cmd_str:
-            return (1, (b"", b""))  # baseline not found
+            return (1, (b"", b""))
 
         # --- exec_in_container: git diff-tree ---
         if "git diff-tree" in cmd_str:
-            return (0, (b"", b""))
+            return (0, (_diff_out, b""))
 
         # --- Regular publish _run calls: consume from positional list ---
         if pos[0] >= len(results):

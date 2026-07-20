@@ -1518,6 +1518,7 @@ class TestPublishSecretScanIntegration:
     def _findings() -> dict:
         return {
             "secret_scan": "findings",
+            "secret_scan_state": "findings",
             "files_scanned": ["declared.txt"],
             "findings": [
                 {
@@ -1634,6 +1635,7 @@ class TestPublishSecretScanIntegration:
         """A clean scan reports which files it actually looked at."""
         mock_scan.return_value = {
             "secret_scan": "clean",
+            "secret_scan_state": "clean",
             "files_scanned": ["declared.txt"],
         }
 

@@ -295,6 +295,8 @@ This MCP provides direct access to the **ingress (cloning/issues)** and **egress
 
 *   **Squashing**: `publish` squashes all local checkpoints into a single git commit before pushing.
 
+> **See [`design_merge_auto_include.md`](design_merge_auto_include.md) for the merge-handling design.** When a merge has been performed inside the sandbox (`merge_base` → conflict resolution → `merge_complete`), `publish`'s manifest mode must discard the merge commit (which may contain undeclared container-local changes) while still carrying forward the base branch's legitimate advances. The design covers the threat model (container-supplied git refs are forgeable), the three candidates evaluated and two rejected (with concrete reproductions), the host-side auto-include mechanism that resolves file content directly from GitHub's API, and the response fields that make the outcome visible. Do not change the merge-handling behaviour in `publish_ops.py` or `publishing.py` without reading it — the design that looks wrong at a glance (unconditionally throwing away merge commits) is correct, and the two alternatives that look more obvious are both wrong in different ways.
+
 ### 11.2 Host-Side Token Resolution
 To support persistent connections when running under systemd services, tokens are resolved on the host side:
 

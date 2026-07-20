@@ -363,7 +363,10 @@ def publish(
     #
     # Lazy import avoids the circular dependency:
     #   secret_scan -> vcs.gitroot -> vcs.__init__ -> vcs.publishing -> secret_scan
-    from sunaba.tools.secret_scan import (  # fmt: skip  # pyright: ignore[reportUnusedImport]
+    from sunaba.tools.secret_scan import (  # fmt: skip  # noqa: I001  # pyright: ignore[reportUnusedImport]
+        _baseline_enabled,
+        _fetch_baseline_from_base_branch,
+        _extract_baseline_hashes,
         check_override,
         consume_override,
         exec_in_container,
@@ -391,10 +394,40 @@ def publish(
         "files_scanned": [],
     }
 
+    # --- Host-side baseline fetch (issue #708) ---
+    # The suppression list is fetched from the base branch on GitHub via the
+    # REST API, NOT from the container filesystem (which the agent can write
+    # to).  When the fetch fails, we pass an empty set (no suppressions),
+    # which is the recoverable direction: it blocks more rather than silently
+    # passing a finding.  We NEVER fall back to the container's copy.
+    baseline_hashes_arg: set[str] | None = None
+    if _baseline_enabled():  # noqa: F821
+        git_token = _resolve_vcs_token()
+        try:
+            baseline_data = _fetch_baseline_from_base_branch(  # noqa: F821
+                repo, git_token, base_branch,
+            )
+            if baseline_data is not None:
+                baseline_hashes_arg = _extract_baseline_hashes(  # noqa: F821
+                    baseline_data,
+                )
+            else:
+                # No baseline on the base branch: no suppressions (safe).
+                baseline_hashes_arg = set()
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch baseline from base branch: %s", exc,
+            )
+            # Safe: no suppressions, all findings reported
+            baseline_hashes_arg = set()
+
     if manifest:
         assert files is not None
         scan_files = [f for f in files if not os.path.isabs(f)]
-        scan_result = run_secret_scan(container, scan_files, working_dir)  # noqa: F821
+        scan_result = run_secret_scan(
+            container, scan_files, working_dir,
+            baseline_hashes=baseline_hashes_arg,
+        )  # noqa: F821
         scan_state = scan_result.get("secret_scan_state", "")
         # Fail-closed: proceed ONLY on known-safe states.
         if scan_state not in ("clean", "skipped"):
@@ -489,7 +522,10 @@ def publish(
                  f"cd {shlex.quote(working_dir)} && git diff-tree --no-commit-id -r --name-only HEAD 2>/dev/null"],
         )
         scan_files = [f.strip() for f in diff_out.splitlines() if f.strip()]
-        scan_result = run_secret_scan(container, scan_files, working_dir)  # noqa: F821
+        scan_result = run_secret_scan(
+            container, scan_files, working_dir,
+            baseline_hashes=baseline_hashes_arg,
+        )  # noqa: F821
         scan_state = scan_result.get("secret_scan_state", "")
         # Fail-closed: proceed ONLY on known-safe states.
         if scan_state not in ("clean", "skipped"):

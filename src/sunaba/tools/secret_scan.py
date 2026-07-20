@@ -29,6 +29,7 @@ Override semantics
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -84,6 +85,141 @@ def _baseline_enabled() -> bool:
     """Return True when the baseline feature is enabled (default)."""
     val = os.environ.get(SUNABA_SECRETS_BASELINE_ENV, "true").strip().lower()
     return val not in ("false", "0", "no")
+
+
+# ---------------------------------------------------------------------------
+# Host-side baseline fetch (issue #708)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_baseline_from_base_branch(
+    repo: str,
+    token: str,
+    base_branch: str = "",
+) -> dict | None:
+    """Fetch ``.secrets.baseline`` from the base branch on GitHub, host-side.
+
+    Uses the GitHub Contents API (``GET /repos/{repo}/contents/{path}``)
+    to read the file as committed on the remote base branch.  The API call
+    is made from the host process (not inside the container) so the result
+    cannot be tampered with by an agent in the sandbox.
+
+    Parameters
+    ----------
+    repo:
+        ``"owner/repo"``.
+    token:
+        VCS token for authentication (may be empty for public repos).
+    base_branch:
+        Branch to read the baseline from.  When empty, resolves to the
+        repo's default branch.
+
+    Returns
+    -------
+    The parsed JSON baseline ``dict``, or ``None`` when:
+    - ``.secrets.baseline`` does not exist on the base branch (HTTP 404).
+    - The file exists but is not valid JSON.
+    - Any network or API error occurs.
+
+    Never raises: all errors are caught, logged, and return ``None``.
+    """
+    from sunaba.tools.github_api import _github_api_request
+
+    # Resolve base branch when not given
+    branch = base_branch
+    if not branch:
+        try:
+            repo_info = _github_api_request(f"/repos/{repo}", token)
+            branch = str(repo_info.get("default_branch") or "")
+        except Exception as exc:
+            logger.warning(
+                "Could not resolve default branch for %s: %s",
+                repo, exc,
+            )
+            return None
+
+    if not branch:
+        logger.warning(
+            "Cannot fetch baseline: no base branch for %s",
+            repo,
+        )
+        return None
+
+    try:
+        response = _github_api_request(
+            f"/repos/{repo}/contents/{_BASELINE_FILENAME}?ref={branch}",
+            token,
+        )
+    except RuntimeError as exc:
+        err_msg = str(exc)
+        # HTTP 404 means file does not exist on that branch — not an error
+        if "HTTP 404" in err_msg:
+            logger.info(
+                "No .secrets.baseline on %s/%s: %s",
+                repo, branch, err_msg,
+            )
+            return None
+        logger.warning(
+            "Failed to fetch .secrets.baseline from %s/%s: %s",
+            repo, branch, exc,
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "Unexpected error fetching .secrets.baseline from %s/%s: %s",
+            repo, branch, exc,
+        )
+        return None
+
+    if not isinstance(response, dict):
+        logger.warning(
+            "Unexpected response type fetching .secrets.baseline: %s",
+            type(response).__name__,
+        )
+        return None
+
+    # The Contents API returns a dict with base64-encoded ``content``
+    content_b64 = response.get("content", "")
+    encoding = response.get("encoding", "")
+    if not content_b64 or encoding != "base64":
+        logger.warning(
+            "Unexpected .secrets.baseline response: encoding=%s",
+            encoding,
+        )
+        return None
+
+    try:
+        raw = base64.b64decode(content_b64)
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "Could not parse .secrets.baseline from %s/%s: %s",
+            repo, branch, exc,
+        )
+        return None
+
+
+def _extract_baseline_hashes(baseline_data: dict) -> set[str]:
+    """Extract all ``hashed_secret`` values from a parsed baseline dict.
+
+    Parameters
+    ----------
+    baseline_data:
+        A parsed ``.secrets.baseline`` JSON dict (same shape as
+        detect-secrets output).
+
+    Returns
+    -------
+    A ``set`` of ``hashed_secret`` strings found in the baseline.
+    Never raises; returns an empty set on any structural issue.
+    """
+    hashes: set[str] = set()
+    for file_findings in baseline_data.get("results", {}).values():
+        for bf in file_findings:
+            hs = bf.get("hashed_secret", "")
+            if hs:
+                hashes.add(hs)
+    return hashes
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +326,8 @@ def run_secret_scan(
     container: Any,
     files: list[str],
     working_dir: str,
+    *,
+    baseline_hashes: set[str] | None = None,
 ) -> dict[str, Any]:
     """Run detect-secrets over *files* and return a structured result.
 
@@ -335,31 +473,26 @@ def run_secret_scan(
 
     # Subtract baseline-known findings (baseline ON path)
     if _baseline_enabled():
-        baseline_path = os.path.join(working_dir, _BASELINE_FILENAME)
-        ec_base, baseline_str, _ = exec_in_container(
-            container,
-            cmd=["/bin/sh", "-c",
-                 f"cat {shlex.quote(baseline_path)} 2>/dev/null || true"],
-            workdir=working_dir,
-        )
-        if ec_base == 0 and baseline_str.strip():
-            try:
-                baseline_data = json.loads(baseline_str)
-            except json.JSONDecodeError:
-                baseline_data = {}
-            # Build a set of hashed_secret values already in the baseline
-            baseline_hashes: set[str] = set()
-            for file_findings in baseline_data.get("results", {}).values():
-                for bf in file_findings:
-                    hs = bf.get("hashed_secret", "")
-                    if hs:
-                        baseline_hashes.add(hs)
-            # Keep only findings NOT in the baseline
+        if baseline_hashes is not None:
+            # Host-side baseline hashes (issue #708): the set was fetched
+            # from the remote base branch via the GitHub API by the caller
+            # (publish), so the container agent cannot influence it.
             all_findings = [
                 f for f in raw_findings
                 if f["hashed_secret"] not in baseline_hashes
             ]
         else:
+            # No host-resolved hashes supplied: apply NO suppressions.
+            #
+            # The container's .secrets.baseline is deliberately NOT read here.
+            # It is agent-writable, and trusting it IS the bypass #708 closed:
+            # take the hashed_secret out of the block response, write it into
+            # the file, publish again, pass -- with the override tool's
+            # permission gate never firing.
+            #
+            # publish always supplies a host-resolved set (empty when the
+            # fetch fails), so this branch is only reachable by direct callers.
+            # They get more findings, never fewer: the recoverable direction.
             all_findings = raw_findings
     else:
         all_findings = raw_findings

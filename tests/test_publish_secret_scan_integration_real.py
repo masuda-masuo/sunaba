@@ -747,6 +747,240 @@ class TestPublishSecretScanReal:
         assert result["secret_scan_state"] == ""
         assert "publish blocked by secret scan" in result["error"]
 
+    # =====================================================================
+    # Baseline exclusion (issue #703, criteria 1, 3, 5)
+    # =====================================================================
+
+    @staticmethod
+    def _make_baseline_container(exec_returns, scan_output=b""):
+        """Like _make_publish_container but allows ``test -f .secrets.baseline``
+        to succeed (the baseline file exists).
+
+        The shared ``_make_publish_container`` returns exit 1 for *any* command
+        mentioning ``.secrets.baseline``, which is correct for ``cat`` in
+        ``run_secret_scan`` but blocks ``test -f .secrets.baseline`` in
+        publish's manifest validation.  This wrapper patches the side_effect
+        so that ``test -f`` passes through before the original dispatch fires.
+        """
+        base = _make_publish_container(
+            exec_returns,
+            detect_secrets_scan_output=scan_output,
+        )
+        original_side_effect = base.exec_run.side_effect
+
+        def patched(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("cmd", [])
+            if isinstance(cmd, list):
+                cmd_str = " ".join(str(c) for c in cmd)
+                # Let test -f .secrets.baseline succeed (file exists)
+                if "test -f" in cmd_str and ".secrets.baseline" in cmd_str:
+                    return (0, (b"", b""))
+                # Let git ls-files for .secrets.baseline succeed (file tracked)
+                if "git ls-files" in cmd_str and ".secrets.baseline" in cmd_str:
+                    return (0, (b".secrets.baseline\n", b""))
+                # Let git add for .secrets.baseline succeed
+                if "git add" in cmd_str and ".secrets.baseline" in cmd_str:
+                    return (0, (b"", b""))
+            return original_side_effect(*args, **kwargs)
+
+        base.exec_run.side_effect = patched
+        return base
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_baseline_only_in_manifest_succeeds(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Criterion 1 + 5: A publish whose manifest is only
+        ``.secrets.baseline`` succeeds.  The baseline's own stored hashes
+        do not block the publish.
+        """
+        clean_bytes = _make_clean_scan_json().encode("utf-8")
+
+        container = self._make_baseline_container(
+            [
+                (0, b"", b""),  # test -f '.secrets.baseline'
+                (0, b"none\n", b""),  # MERGE_HEAD check
+                (0, b"", b""),  # checkout -b
+                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                (0, b"", b""),  # git reset --mixed origin/HEAD
+                (0, b"", b""),  # git add -- '.secrets.baseline'
+                (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"", b""),  # git status --porcelain -z (no leftovers)
+                (0, b"pushed", b""),  # git push
+                (0, b"abc1234def5678", b""),  # rev-parse HEAD
+            ],
+            scan_output=clean_bytes,
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=[".secrets.baseline"],
+                working_dir="/root/repo",
+            ))
+
+
+
+        # Baseline-only publish succeeds (baseline excluded from scan)
+        assert result["status"] == "pushed", (
+            f"Expected pushed, got {result.get('status')}: "
+            f"error={result.get('error', '(none)')} "
+            f"step={result.get('step', '(none)')} "
+            f"secret_scan_state={result.get('secret_scan_state', '(none)')} "
+            f"full={json.dumps(result)}"
+        )
+        assert result["secret_scan"] == "clean"
+        assert result["files_scanned"] == []
+
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        assert "detect-secrets scan" not in issued, (
+            "Baseline should be excluded from scan; no scan expected"
+        )
+        assert " push " in f" {issued} "
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_baseline_with_real_file_reports_finding(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Criterion 3: A real secret in an ordinary file is still reported
+        when the manifest also contains the baseline.
+        """
+        finding_bytes = _make_finding_json(
+            "secret.txt", 5, "Private Key",
+        ).encode("utf-8")
+
+        container = self._make_baseline_container(
+            [
+                (0, b"", b""),  # test -f 'secret.txt'
+                (0, b"", b""),  # test -f '.secrets.baseline'
+            ],
+            scan_output=finding_bytes,
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["secret.txt", ".secrets.baseline"],
+                working_dir="/root/repo",
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "secret_scan"
+        assert result["secret_scan_state"] == "findings"
+        assert len(result["findings"]) == 1
+        assert result["findings"][0]["file"] == "secret.txt"
+
+        # Verify the scan ran only for the real file (not .secrets.baseline)
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        assert "detect-secrets scan" in issued
+        assert "secret.txt" in issued
+        # The baseline path is still present in "cat .secrets.baseline" (the
+        # suppression check inside run_secret_scan).  What matters is that
+        # the *scan command* never mentions it.
+        scan_calls = [
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+            if "detect-secrets scan" in str(_exec_cmd(c))
+        ]
+        assert len(scan_calls) >= 1
+        assert ".secrets.baseline" not in " ".join(scan_calls), (
+            "Baseline path must not appear in the detect-secrets scan command"
+        )
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_baseline_only_nonzero_exit_not_scanned(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Criterion 5 edge case: publish whose manifest is only
+        ``.secrets.baseline`` — even if detect-secrets would have failed,
+        the baseline is excluded so no scan runs and the publish proceeds.
+        """
+        # Even if detect-secrets scan would crash, it is never called
+        # because baseline is excluded.
+        container = self._make_baseline_container(
+            [
+                (0, b"", b""),  # test -f '.secrets.baseline'
+                (0, b"none\n", b""),  # MERGE_HEAD check
+                (0, b"", b""),  # checkout -b
+                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                (0, b"", b""),  # git reset --mixed origin/HEAD
+                (0, b"", b""),  # git add -- '.secrets.baseline'
+                (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"", b""),  # git status --porcelain -z (no leftovers)
+                (0, b"pushed", b""),  # git push
+                (0, b"abc1234def5678", b""),  # rev-parse HEAD
+            ],
+            # If scan were called, it would fail with exit 1
+            scan_output=b"",
+        )
+        # But the scan output is never used because baseline is excluded.
+        # Monkey-patch the check to require a version check that would fail.
+        import sunaba.tools.secret_scan as ss_mod
+
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.secret_scan._baseline_enabled",
+                return_value=True,
+            ),
+            patch.object(
+                ss_mod, "_check_detect_secrets", return_value=False,
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=[".secrets.baseline"],
+                working_dir="/root/repo",
+            ))
+
+        # Even if detect-secrets is "unavailable", the baseline is excluded
+        # so no scan is attempted.
+        assert result["status"] == "pushed", (
+            f"Expected pushed, got {result.get('status')}: {result.get('error', '')}"
+        )
+        assert result["secret_scan"] == "clean"
+        assert result["files_scanned"] == []
+
+        # No scan was invoked
+        issued = " ".join(
+            str(_exec_cmd(c)) for c in container.exec_run.call_args_list
+        )
+        assert "detect-secrets scan" not in issued
+
     # NOTE: the no-scan default in ``publish`` is deliberately not covered by
     # a test.  The manifest / not-manifest branches are exhaustive, so the
     # default is unreachable today and can only be reached by adding a third

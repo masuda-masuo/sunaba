@@ -58,7 +58,19 @@ logger = logging.getLogger(__name__)
 #: findings" would turn the whole guard into a silent pass.
 SUNABA_SECRETS_BASELINE_ENV = "SUNABA_SECRETS_BASELINE"
 
+
 _BASELINE_FILENAME = ".secrets.baseline"
+
+
+def _exclude_baseline(files: list[str]) -> list[str]:
+    """Filter out the repo-root .secrets.baseline path from *files*.
+
+    The match is exact — only the literal file name ``.secrets.baseline``
+    at the repo root is excluded, not lookalikes in subdirectories or with
+    extras/ extensions/substrings.
+    """
+    return [f for f in files if f != _BASELINE_FILENAME]
+
 
 # ---------------------------------------------------------------------------
 # In-memory override state (baseline OFF path)
@@ -211,6 +223,20 @@ def run_secret_scan(
             "secret_scan_state": "clean",
             "files_scanned": [],
             "scan_summary": "No files to scan.",
+        }
+
+    # Exclude the baseline path from scanning: the baseline stores hashed
+    # secrets by design, and scanning them produces false-positive findings
+    # (HexHighEntropyString / KeywordDetector on every hashed_secret value).
+    # An exact-path match is used so that lookalike files in subdirectories
+    # (e.g. sub/dir/.secrets.baseline) are still scanned normally.
+    files = _exclude_baseline(files)
+    if not files:
+        return {
+            "secret_scan": "clean",
+            "secret_scan_state": "clean",
+            "files_scanned": [],
+            "scan_summary": "No files to scan (baseline excluded).",
         }
 
     available = _check_detect_secrets(container)
@@ -405,6 +431,16 @@ def _update_baseline(
 
     Returns None on success, or an error message on failure.
     """
+    # Exclude the baseline path from the scan so its own stored hashes are
+    # not re-appended to the baseline on every override (self-referential
+    # ratchet described in issue #703).
+    files = _exclude_baseline(files)
+    if not files:
+        logger.info(
+            "No files to scan for baseline update (baseline was the only file)."
+        )
+        return None
+
     safe_wd = shlex.quote(working_dir)
     escaped_files = " ".join(shlex.quote(f) for f in files)
     baseline_path = os.path.join(working_dir, _BASELINE_FILENAME)

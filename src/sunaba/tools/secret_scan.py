@@ -9,22 +9,34 @@ Public symbols
 
 Design
 ------
+**docs/design_secret_scan.md is authoritative.**  This docstring summarises;
+that document carries the reasoning, the threat model, the known gaps and the
+alternatives already considered and rejected.  If the two disagree, the
+document is right and this file has drifted.
+
 The scanner is Yelp's ``detect-secrets`` (Apache-2.0), baked into the base
 image.  It is never vendored so sunaba stays MIT.
 
 Scan scope is the *manifest diff* / *commit* files only — never the whole
 tree.  This keeps the scan cheap and avoids resurfacing approved secrets.
 
-Missing scanner: **proceed, but flag prominently**.  The override is a
-separate MCP tool, NOT a ``publish`` argument.
+``run_secret_scan`` reports one state: ``clean`` / ``findings`` / ``error`` /
+``skipped``.  ``publish`` proceeds only on ``clean`` or ``skipped``, so an
+unrecognised or absent state blocks (#704).
 
-Baseline (``SUNABA_SECRETS_BASELINE``, default ``true``): when enabled
-a repo ``.secrets.baseline`` file suppresses known findings.
+Missing scanner → ``skipped``, and publish proceeds.  A deliberate, named
+exception, not an accident; see the known gap in the design document.
 
-Override semantics
-------------------
-- Baseline ON  → append to ``.secrets.baseline`` (permanent for this repo).
-- Baseline OFF → one-time in-memory flag for this container + HEAD commit.
+Suppressions have two separate authorities (#708):
+
+- **immediate** — a host-held one-time flag, gated by the tool-approval
+  prompt.  ``secret_scan_override`` sets it; it authorises one publish.
+- **durable** — ``.secrets.baseline`` **as committed on the base branch**,
+  fetched host-side, gated by PR review.
+
+The container's ``.secrets.baseline`` is a *proposal* for a human to commit.
+It carries no authority: it is agent-writable, and trusting it was a working
+bypass of the permission gate (#708).
 """
 
 from __future__ import annotations
@@ -391,20 +403,19 @@ def run_secret_scan(
         }
 
     # Run scan via shell (detect-secrets needs shell for file globbing/quoting)
-    # NOTE: we deliberately do NOT pass --baseline here.  detect-secrets scan
-    # with --baseline writes to the baseline file and emits nothing on stdout,
-    # which makes the scan result invisible.  Instead we scan plainly and
-    # subtract known findings from the baseline ourselves (see below).
-    # NOTE: --no-verify is required because verification plugins make outbound
-    # calls that are always blocked by the sandbox egress proxy.  detect-secrets
-    # reads the proxy's non-200 response as "verified: not a secret" and drops
-    # the finding, making the guard fail open (issue #701).
-    # The flag is not probed for.  Falling back to a scan without it would
-    # restore exactly the fail-open this fixes, and a warning in a container
-    # log is not a control.  --no-verify has existed since the verification
-    # feature landed upstream (Yelp/detect-secrets#194, 2019) and the image
-    # pins detect-secrets, so an image lacking it is a broken image: let the
-    # scan fail loudly rather than quietly scan the wrong way.
+    #
+    # Two invocation decisions here look wrong at a glance and are not.  The
+    # reasoning lives in docs/design_secret_scan.md (Part 1) -- read it before
+    # changing either, and do not re-derive it from these comments.
+    #
+    # No --baseline: with it, the scan ADDS newly found secrets to the baseline
+    # and prints nothing.  Running the scan would be the act of suppressing, so
+    # a blocked publish would pass on retry (#703, and the threat model).
+    #
+    # --no-verify, never probed for: AWSKeyDetector reads HTTP 403 as "not a
+    # secret", and the egress proxy answers blocked hosts with 403, so a real
+    # key pair comes back clean (#701, upstream Yelp/detect-secrets#976).
+    # Falling back to a scan without the flag would restore that fail-open.
     safe_wd = shlex.quote(working_dir)
     escaped_files = " ".join(shlex.quote(f) for f in files)
     shell_cmd = (

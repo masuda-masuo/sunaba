@@ -26,8 +26,9 @@ class TestPublishSquashCheckpoints:
     ) -> None:
         """Publish should squash unpushed checkpoints with reset --soft."""
         container = _make_container_mock([
-            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git add
             (0, b"main\n", b""),  # rev-parse @{u}
             (0, b"abc1234 First checkpoint\n", b""),  # log oneline
@@ -63,8 +64,9 @@ class TestPublishSquashCheckpoints:
     ) -> None:
         """Publish with no tracking branch should skip squash."""
         container = _make_container_mock([
-            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
@@ -99,8 +101,9 @@ class TestPublishAllowForcePush:
     ) -> None:
         """allow_force_push=True should include --force in push command."""
         container = _make_container_mock([
-            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
@@ -143,8 +146,9 @@ class TestPublishApiPushFallback:
         """When git push fails, _try_api_push should be used as fallback."""
         push_json = json.dumps({"sha": "b" * 40}).encode()
         container = _make_container_mock([
-            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
@@ -175,8 +179,9 @@ class TestPublishApiPushFallback:
     ) -> None:
         """When both git push and API push fail, return error."""
         container = _make_container_mock([
-            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
@@ -214,8 +219,9 @@ class TestPublishLazyTokenInjection:
     def _simple_push_returns() -> list[tuple[int, bytes, bytes]]:
         # checkout, ls-files, git add, no-upstream (skip squash), commit, push, HEAD
         return [
-            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
@@ -313,8 +319,9 @@ class TestPublishLazyTokenInjection:
 
         push_json = json.dumps({"sha": "b" * 40}).encode()
         container = _make_container_mock([
-            (0, b"", b""),              # checkout -b
             (0, b"", b""),              # git ls-files --others --exclude-standard
+            (0, b"none\n", b""),              # MERGE_HEAD check
+            (0, b"", b""),              # checkout -b
             (0, b"", b""),              # git add
             (1, b"", b"no upstream"),  # skip squash
             (0, b"[fix/x abc] Fix", b""),  # commit

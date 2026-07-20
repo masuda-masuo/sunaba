@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from sunaba.tools.publish_ops import (
+    _check_merge_in_progress,
     create_pull_request,
     git_prepare_commit,
     git_push_with_fallback,
@@ -43,6 +44,30 @@ class RecordingRun:
 
 
 # ============================================================================
+# _check_merge_in_progress
+# ============================================================================
+
+
+class TestCheckMergeInProgress:
+    """_check_merge_in_progress detects an unresolved merge."""
+
+    def test_no_merge_in_progress(self) -> None:
+        """Returns None when .git/MERGE_HEAD does not exist."""
+        run = RecordingRun([(0, "none\n", "")])
+        result = _check_merge_in_progress(run)
+        assert result is None
+
+    def test_merge_in_progress(self) -> None:
+        """Returns error dict when .git/MERGE_HEAD exists."""
+        run = RecordingRun([(0, "in-progress\n", "")])
+        result = _check_merge_in_progress(run)
+        assert result is not None
+        assert result["status"] == "error"
+        assert result["step"] == "merge_in_progress"
+        assert "unresolved merge" in result["error"]
+
+
+# ============================================================================
 # git_prepare_commit
 # ============================================================================
 
@@ -50,9 +75,23 @@ class RecordingRun:
 class TestGitPrepareCommit:
     """git_prepare_commit covers checkout, add, squash, commit."""
 
+    def test_merge_in_progress_rejected(self) -> None:
+        """git_prepare_commit returns error when merge is in progress."""
+        run = RecordingRun([
+            (0, "in-progress\n", ""),  # MERGE_HEAD check
+        ])
+        result = git_prepare_commit(
+            run, branch="topic", message="Msg",
+        )
+        assert result is not None
+        assert result["status"] == "error"
+        assert result["step"] == "merge_in_progress"
+        assert "unresolved merge" in result["error"]
+
     def test_success_no_squash(self) -> None:
         """Happy path: checkout, add, no upstream, commit."""
         run = RecordingRun([
+            (0, "none\n", ""),  # MERGE_HEAD check
             (0, "", ""),                # checkout
             (0, "", ""),                # git add -A
             (1, "", "no upstream"),     # rev-parse @{u} -> no tracking
@@ -66,6 +105,7 @@ class TestGitPrepareCommit:
     def test_git_add_failure(self) -> None:
         """git add -A error returns error dict."""
         run = RecordingRun([
+            (0, "none\n", ""),  # MERGE_HEAD check
             (0, "", ""),                    # checkout
             (1, "", "fatal: not a git repo"),  # git add fails
         ])
@@ -80,6 +120,7 @@ class TestGitPrepareCommit:
     def test_squash_path(self) -> None:
         """When @{u} tracks and unpushed commits exist, squash runs."""
         run = RecordingRun([
+            (0, "none\n", ""),  # MERGE_HEAD check
             (0, "", ""),                # checkout
             (0, "", ""),                # git add -A
             (0, "main\n", ""),          # rev-parse @{u} -> tracked
@@ -101,6 +142,7 @@ class TestGitPrepareCommit:
     def test_squash_reset_fails(self) -> None:
         """squash reset failure returns step=squash_reset."""
         run = RecordingRun([
+            (0, "none\n", ""),  # MERGE_HEAD check
             (0, "", ""),                # checkout
             (0, "", ""),                # git add -A
             (0, "main\n", ""),          # rev-parse @{u}
@@ -117,6 +159,7 @@ class TestGitPrepareCommit:
     def test_squash_readd_fails(self) -> None:
         """squash readd failure returns step=squash_readd."""
         run = RecordingRun([
+            (0, "none\n", ""),  # MERGE_HEAD check
             (0, "", ""),                # checkout
             (0, "", ""),                # git add -A
             (0, "main\n", ""),          # rev-parse @{u}
@@ -134,6 +177,7 @@ class TestGitPrepareCommit:
     def test_nothing_to_commit(self) -> None:
         """'nothing to commit' is treated as success."""
         run = RecordingRun([
+            (0, "none\n", ""),  # MERGE_HEAD check
             (0, "", ""),                    # checkout
             (0, "", ""),                    # git add -A
             (1, "", "no upstream"),         # rev-parse @{u}
@@ -147,6 +191,7 @@ class TestGitPrepareCommit:
     def test_commit_failure(self) -> None:
         """Real commit failure returns step=git_commit."""
         run = RecordingRun([
+            (0, "none\n", ""),  # MERGE_HEAD check
             (0, "", ""),                    # checkout
             (0, "", ""),                    # git add -A
             (1, "", "no upstream"),         # rev-parse @{u}
@@ -164,6 +209,7 @@ class TestGitPrepareCommit:
         # The commit command in the ops function embeds identity in the
         # git -c flags.  We verify by inspecting the recorded calls.
         run = RecordingRun([
+            (0, "none\n", ""),  # MERGE_HEAD check
             (0, "", ""),
             (0, "", ""),
             (1, "", "no upstream"),
@@ -173,13 +219,14 @@ class TestGitPrepareCommit:
             run, branch="topic", message="Msg",
             author_name="Custom User", author_email="user@ex.com",
         )
-        commit_cmd = run.calls[3][0]
+        commit_cmd = run.calls[4][0]
         assert "Custom User" in commit_cmd
         assert "user@ex.com" in commit_cmd
 
     def test_uses_default_identity(self) -> None:
         """Default identity (sunaba[bot]) when not overridden."""
         run = RecordingRun([
+            (0, "none\n", ""),  # MERGE_HEAD check
             (0, "", ""),
             (0, "", ""),
             (1, "", "no upstream"),
@@ -188,7 +235,7 @@ class TestGitPrepareCommit:
         git_prepare_commit(
             run, branch="topic", message="Msg",
         )
-        commit_cmd = run.calls[3][0]
+        commit_cmd = run.calls[4][0]
         assert "sunaba[bot]" in commit_cmd
 
 

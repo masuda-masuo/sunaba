@@ -329,12 +329,54 @@ class TestManifestUntrackedPathRejection:
 
 
 class TestManifestPreservesBaseMerge:
-    """A merge of the base branch must not be reset away by manifest publish.
+    """A merge of the base branch must not lose base-advance files (issue #712).
 
-    Without this, `merge_base` + `merge_complete` accomplish nothing: the
-    manifest reset rebuilds the commit on the remote base and the merge
-    lineage disappears, so GitHub still reports the PR as CONFLICTING.
+    Candidate C: the merge commit itself is intentionally reset away and
+    not preserved in the pushed lineage (that was forgeable).  Instead,
+    files that the base branch advanced since the feature was last pushed
+    are auto-included from a host-side fetch.  The observable outcome is
+    that ``moved.txt`` (from main's advance) is present in the pushed
+    tree alongside the declared file.
     """
+
+    @staticmethod
+    def _compute_auto_include(
+        origin_dir: str, feature_branch: str, base_branch: str = "main",
+    ) -> dict[str, str]:
+        """Simulate a host-side fetch by reading directly from the bare origin.
+
+        This is the faithful local analogue of ``_fetch_base_auto_include``:
+        it reads from *origin_dir* (the remote), not from the clone's
+        working tree, so a container that forges its local refs cannot
+        influence the result.
+        """
+        feature_sha = _git(
+            origin_dir, "rev-parse", f"refs/heads/{feature_branch}",
+        ).stdout.strip()
+        base_sha = _git(
+            origin_dir, "rev-parse", f"refs/heads/{base_branch}",
+        ).stdout.strip()
+
+        # --diff-filter=AM: only added / modified files (not deleted).
+        diff = _git(
+            origin_dir, "diff-tree", "-r", "--name-status",
+            "--diff-filter=AM", feature_sha, base_sha,
+        )
+
+        auto: dict[str, str] = {}
+        for line in diff.stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            try:
+                status, path = line.split("\t", 1)
+            except ValueError:
+                continue
+            if status in ("A", "M"):
+                content = _git(
+                    origin_dir, "show", f"{base_sha}:{path}",
+                ).stdout
+                auto[path] = content
+        return auto
 
     def test_completed_merge_survives(self, repo_setup: dict[str, Any]) -> None:
         clone = repo_setup["clone_dir"]
@@ -362,27 +404,35 @@ class TestManifestPreservesBaseMerge:
         _git(clone, "fetch", "origin")
         merge = _git(clone, "merge", "origin/main", "--no-edit")
         assert merge.returncode == 0, f"fixture merge failed: {merge.stderr}"
-        merge_sha = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+        # Compute auto-include from origin_dir (host-side, not container).
+        auto_include = self._compute_auto_include(origin, "feat/x", "main")
 
         # Now an ordinary manifest publish of an unrelated declared file.
         (Path(clone) / "declared.txt").write_text("declared\n")
         err = git_prepare_commit(
             run, branch="feat/x", message="Manifest push after merge",
             files=["declared.txt"],
+            base_auto_include=auto_include,
         )
         assert err is None, f"git_prepare_commit failed: {err}"
 
-        # The merge must be an ancestor of what we are about to push, and
-        # main's commit must be reachable -- that is what makes the PR
-        # mergeable again.
-        anc = _git(clone, "merge-base", "--is-ancestor", merge_sha, "HEAD")
-        assert anc.returncode == 0, "the merge commit was reset away"
-        reach = _git(clone, "merge-base", "--is-ancestor", "origin/main", "HEAD")
-        assert reach.returncode == 0, "base commits are not in the pushed branch"
-
+        # The observable outcome: both the declared file and the
+        # base-advance file (moved.txt) must be present in the pushed
+        # tree.  With Candidate C the merge commit is intentionally
+        # not preserved in the lineage -- moved.txt survives via
+        # host-fetched auto-include instead.
         tree = _git(clone, "ls-tree", "--name-only", "HEAD").stdout.split()
         assert "declared.txt" in tree
         assert "moved.txt" in tree, "the merged-in base file should be present"
+
+        # Verify moved.txt content matches origin/main (host-side sourced)
+        base_sha = _git(origin, "rev-parse", "refs/heads/main").stdout.strip()
+        expected_moved = _git(origin, "show", f"{base_sha}:moved.txt").stdout
+        actual_moved = _git(clone, "show", "HEAD:moved.txt").stdout
+        assert actual_moved == expected_moved, (
+            "auto-included content must match remote (host-side sourced)"
+        )
 
     def test_checkpoint_before_merge_still_cannot_leak(
         self, repo_setup: dict[str, Any],
@@ -414,3 +464,157 @@ class TestManifestPreservesBaseMerge:
         tree = _git(clone, "ls-tree", "--name-only", "HEAD").stdout.split()
         assert "declared.txt" in tree
         assert "undeclared.txt" not in tree, "#679 leak reintroduced"
+
+
+# ============================================================================
+# Test e: forgery of remote-tracking ref cannot leak undeclared files (AC 1)
+# ============================================================================
+
+
+class TestForgeRemoteRefCannotLeak:
+    """Issue #712 AC 1: forging ``refs/remotes/origin/<branch>`` to make
+    the old skip-the-reset check pass must not allow undeclared files to
+    ride along in the pushed commit.
+
+    With Candidate C there is no skip-the-reset check anymore, so the
+    forgery is structurally impossible.
+    """
+
+    def test_forged_origin_ref_still_blocks_secret(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """After a merge that brought in a secret checkpoint, forging
+        origin/<branch> to match the checkpoint SHA must NOT leak the
+        secret file into the pushed commit.
+        """
+        clone = repo_setup["clone_dir"]
+        origin = repo_setup["origin_dir"]
+        run = _make_run(clone)
+
+        # Create a feature branch and push it.
+        _git(clone, "checkout", "-b", "feat/secret")
+        (Path(clone) / "legit.txt").write_text("legit\n")
+        _git(clone, "add", "legit.txt")
+        _git(clone, "commit", "-m", "legit commit")
+        assert _git(clone, "push", "origin", "feat/secret").returncode == 0
+
+        # Create a secret file and checkpoint it locally.
+        (Path(clone) / ".env").write_text("SECRET=leaked\n")
+        _git(clone, "add", "-A")
+        _git(clone, "commit", "-m", "checkpoint with secret")
+
+        # Merge origin/main (the checkpoint's parent becomes P1).
+        _git(clone, "fetch", "origin")
+        merge = _git(clone, "merge", "origin/main", "--no-edit")
+        assert merge.returncode == 0, f"merge failed: {merge.stderr}"
+
+        # Forge: make origin/feat/secret point to the checkpoint SHA
+        # (which is HEAD^1 = the checkpoint commit with .env).
+        checkpoint_sha = _git(clone, "rev-parse", "HEAD^1").stdout.strip()
+        _git(clone, "update-ref", "refs/remotes/origin/feat/secret",
+             checkpoint_sha)
+
+        # Compute auto-include from origin_dir (host-side, not container).
+        auto_include = TestManifestPreservesBaseMerge._compute_auto_include(
+            origin, "feat/secret", "main",
+        )
+
+        # Manifest publish of only legit.txt.
+        (Path(clone) / "declared.txt").write_text("declared\n")
+        err = git_prepare_commit(
+            run, branch="feat/secret",
+            message="Manifest push after forged merge",
+            files=["declared.txt"],
+            base_auto_include=auto_include,
+        )
+        assert err is None, f"git_prepare_commit failed: {err}"
+
+        tree = _git(clone, "ls-tree", "--name-only", "HEAD").stdout.split()
+        assert "declared.txt" in tree
+        # The secret .env must NOT be in the pushed tree.
+        assert ".env" not in tree, (
+            "secret file leaked despite forged origin ref"
+        )
+
+
+# ============================================================================
+# Test f: auto-include covers base-advance files (AC 2)
+# ============================================================================
+
+
+class TestAutoIncludeBaseAdvance:
+    """Issue #712 AC 2: files that the base branch advanced independently
+    must be auto-included in the pushed commit via host-side fetch.
+    """
+
+    def test_base_advance_files_auto_included(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """Main adds multiple files; feature branch merges and then
+        publishes a manifest declaring only one unrelated file.  All
+        base-advance files must appear in the pushed tree."""
+        clone = repo_setup["clone_dir"]
+        origin = repo_setup["origin_dir"]
+        run = _make_run(clone)
+
+        # Feature branch pushed.
+        _git(clone, "checkout", "-b", "feat/adv")
+        (Path(clone) / "feature.txt").write_text("feature\n")
+        _git(clone, "add", "feature.txt")
+        _git(clone, "commit", "-m", "feature work")
+        assert _git(clone, "push", "origin", "feat/adv").returncode == 0
+
+        # Main advances with two new files and one modified file.
+        other = Path(clone).parent / "other2"
+        _git(str(Path(clone).parent), "clone", origin, str(other))
+        _git(str(other), "config", "user.email", "other@example.com")
+        _git(str(other), "config", "user.name", "other")
+        (other / "added_a.txt").write_text("added A\n")
+        (other / "added_b.txt").write_text("added B\n")
+        readme = other / "README.md"
+        original_readme = readme.read_text()
+        readme.write_text(original_readme + "main edit\n")
+        _git(str(other), "add", "added_a.txt", "added_b.txt", "README.md")
+        _git(str(other), "commit", "-m", "main adds files")
+        assert _git(str(other), "push", "origin", "main").returncode == 0
+
+        # Feature merges main.
+        _git(clone, "fetch", "origin")
+        merge = _git(clone, "merge", "origin/main", "--no-edit")
+        assert merge.returncode == 0, f"merge failed: {merge.stderr}"
+
+        # Auto-include from origin (host-side).
+        auto_include = TestManifestPreservesBaseMerge._compute_auto_include(
+            origin, "feat/adv", "main",
+        )
+
+        # Manifest publish with only declared.txt.
+        (Path(clone) / "declared.txt").write_text("declared\n")
+        err = git_prepare_commit(
+            run, branch="feat/adv",
+            message="Manifest push after merge",
+            files=["declared.txt"],
+            base_auto_include=auto_include,
+        )
+        assert err is None, f"git_prepare_commit failed: {err}"
+
+        tree = _git(clone, "ls-tree", "--name-only", "HEAD").stdout.split()
+        assert "declared.txt" in tree
+        # Base-advance files must be present (auto-included).
+        assert "added_a.txt" in tree, "base-advance added file missing"
+        assert "added_b.txt" in tree, "base-advance added file missing"
+        # README.md was modified by main -- the auto-included version
+        # should be present (main's version).
+        readme_content = _git(clone, "show", "HEAD:README.md").stdout
+        assert "main edit" in readme_content, (
+            "base-advance modified file should be auto-included"
+        )
+
+        # Verify content provenance: auto-included files match origin,
+        # not whatever the container's working tree has.
+        base_sha = _git(origin, "rev-parse", "refs/heads/main").stdout.strip()
+        expected_a = _git(origin, "show", f"{base_sha}:added_a.txt").stdout
+        actual_a = _git(clone, "show", "HEAD:added_a.txt").stdout
+        assert actual_a == expected_a, (
+            "auto-included content must match remote"
+        )

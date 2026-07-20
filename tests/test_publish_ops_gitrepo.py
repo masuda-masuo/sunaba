@@ -39,6 +39,15 @@ def _git(working_dir: str, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _git_raw_bytes(working_dir: str, *args: str) -> bytes:
+    """Run a git command and return raw stdout bytes (no text decoding)."""
+    result = subprocess.run(
+        ["git", "-C", working_dir, *args],
+        capture_output=True,
+    )
+    return result.stdout
+
+
 @pytest.fixture
 def repo_setup(tmp_path: Path):
     """Create a bare origin + working clone with an initial commit."""
@@ -342,7 +351,7 @@ class TestManifestPreservesBaseMerge:
     @staticmethod
     def _compute_auto_include(
         origin_dir: str, feature_branch: str, base_branch: str = "main",
-    ) -> dict[str, str]:
+    ) -> dict[str, str | bytes | None]:
         """Simulate a host-side fetch by reading directly from the bare origin.
 
         This is the faithful local analogue of ``_fetch_base_auto_include``:
@@ -366,7 +375,7 @@ class TestManifestPreservesBaseMerge:
             origin_dir, "merge-base", feature_sha, base_sha,
         ).stdout.strip()
 
-        auto: dict[str, str | None] = {}
+        auto: dict[str, str | bytes | None] = {}
 
         # --- Added / modified (what base_sha has that merge_base didn't) ---
         diff_am = _git(
@@ -381,10 +390,14 @@ class TestManifestPreservesBaseMerge:
             except ValueError:
                 continue
             if status in ("A", "M"):
-                content = _git(
+                raw = _git_raw_bytes(
                     origin_dir, "show", f"{base_sha}:{path}",
-                ).stdout
-                auto[path] = content
+                )
+                try:
+                    auto[path] = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    # Binary content: preserve as bytes (issue #716)
+                    auto[path] = raw
 
         # --- Deleted (files present in merge_base but absent from base_sha) ---
         diff_d = _git(
@@ -839,4 +852,75 @@ class TestAutoIncludeBaseDeletion:
         # feature.txt should survive (feature branch's own file).
         assert "feature.txt" in tree, (
             "feature branch's own file should survive"
+        )
+
+
+# ============================================================================
+# Test h: auto-include preserves binary content (issue #716)
+# ============================================================================
+
+
+class TestAutoIncludeBaseBinary:
+    """Issue #716: binary (non-UTF-8) content from the base branch must
+    survive auto-include byte-for-byte identical."""
+
+    def test_binary_content_survives_auto_include(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """Base branch adds a binary file with non-UTF-8 bytes; feature
+        merges, publishes only declared.txt.  The binary file must be present
+        in the pushed tree with identical content."""
+        clone = repo_setup["clone_dir"]
+        origin = repo_setup["origin_dir"]
+        run = _make_run(clone)
+
+        # Feature branch pushed.
+        _git(clone, "checkout", "-b", "feat/bin")
+        (Path(clone) / "feature.txt").write_text("feature\n")
+        _git(clone, "add", "feature.txt")
+        _git(clone, "commit", "-m", "feature work")
+        assert _git(clone, "push", "origin", "feat/bin").returncode == 0
+
+        # Main advances with a binary file.
+        other = Path(clone).parent / "other_bin"
+        _git(str(Path(clone).parent), "clone", origin, str(other))
+        _git(str(other), "config", "user.email", "other@example.com")
+        _git(str(other), "config", "user.name", "other")
+        # Write binary content that is never valid UTF-8
+        binary_content = b"\\xff\\xfe\\x00\\x01\\x02GIF89a"  # GIF-like
+        (other / "image.bin").write_bytes(binary_content)
+        _git(str(other), "add", "image.bin")
+        _git(str(other), "commit", "-m", "main adds binary file")
+        assert _git(str(other), "push", "origin", "main").returncode == 0
+
+        # Feature merges main.
+        _git(clone, "fetch", "origin")
+        merge = _git(clone, "merge", "origin/main", "--no-edit")
+        assert merge.returncode == 0, f"merge failed: {merge.stderr}"
+
+        # Auto-include from origin (host-side analogue).
+        auto_include = TestManifestPreservesBaseMerge._compute_auto_include(
+            origin, "feat/bin", "main",
+        )
+
+        # Manifest publish with only declared.txt.
+        (Path(clone) / "declared.txt").write_text("declared\n")
+        err = git_prepare_commit(
+            run, branch="feat/bin",
+            message="Manifest push after binary merge",
+            files=["declared.txt"],
+            base_auto_include=auto_include,
+        )
+        assert err is None, f"git_prepare_commit failed: {err}"
+
+        tree = _git(clone, "ls-tree", "--name-only", "HEAD").stdout.split()
+        assert "declared.txt" in tree
+        assert "image.bin" in tree, "binary base-advance file missing"
+
+        # Compare bytes, not text
+        actual = _git_raw_bytes(clone, "show", "HEAD:image.bin")
+        assert actual == binary_content, (
+            f"binary content mismatch: got {len(actual)} bytes, "
+
+            f"expected {len(binary_content)} bytes"
         )

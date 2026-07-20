@@ -235,7 +235,7 @@ def _fetch_base_auto_include(
     token: str,
     branch: str,
     base_branch: str = "",
-) -> dict[str, str | None] | None:
+) -> dict[str, str | bytes | None] | None:
     """Fetch files that the base branch advanced since *branch* was last pushed.
 
     Host-side read via GitHub REST API, never from the container
@@ -258,7 +258,8 @@ def _fetch_base_auto_include(
     -------
     A ``dict`` of ``path -> content_or_None`` for files that the base branch
     advanced since *branch* was last pushed.  Files with status ``\"added\"``
-    or ``\"modified\"`` get their *content* (a ``str``); files with status
+    or ``\"modified\"`` get their *content* (a ``str`` for UTF-8 text, or
+    ``bytes`` for binary/non-UTF-8 content); files with status
     ``\"removed\"`` get ``None``, signalling that the path should be
     deleted from the feature branch (issue #715).  Returns ``None`` on
     any error (safe fallback: no auto-include).
@@ -330,7 +331,7 @@ def _fetch_base_auto_include(
     if not files:
         return {}
 
-    result: dict[str, str | None] = {}
+    result: dict[str, str | bytes | None] = {}
     for f in files:
         status = f.get("status", "")
         filename = f.get("filename", "")
@@ -363,12 +364,14 @@ def _fetch_base_auto_include(
         if not content_b64 or encoding != "base64":
             continue
 
+        raw = base64.b64decode(content_b64)
         try:
-            decoded = base64.b64decode(content_b64).decode("utf-8")
-        except Exception:
-            continue
-
-        result[filename] = decoded
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            # Binary content: keep as bytes (issue #716, non-UTF-8 files).
+            result[filename] = raw
+        else:
+            result[filename] = decoded
 
     return result
 
@@ -614,7 +617,7 @@ def publish(
         # override.
         # AC 4: on any failure fall back to None (safe: plain reset,
         # no auto-include).
-        base_auto_include: dict[str, str | None] | None = None
+        base_auto_include: dict[str, str | bytes | None] | None = None
         merge_ec, merge_out, _ = _run(
             "git rev-parse --verify HEAD^2 2>/dev/null"
         )

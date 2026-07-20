@@ -356,9 +356,10 @@ class TestFetchBaseAutoInclude:
         assert "utf8.txt" in result
         assert "utf16.txt" not in result
 
-    def test_non_utf8_content_skipped(self) -> None:
-        """Base64 content that isn't valid UTF-8 after decoding is silently
-        skipped (see 'Not done' section in the report)."""
+    def test_non_utf8_content_preserved(self) -> None:
+        """Binary (non-UTF-8) content is preserved as ``bytes`` in the
+        auto-include result, not silently dropped (fix for #716, replacing
+        the previous skip behaviour)."""
         import base64
 
         encoded = base64.b64encode(b"valid utf-8").decode("ascii")
@@ -395,7 +396,9 @@ class TestFetchBaseAutoInclude:
 
         assert result is not None
         assert "good.txt" in result
-        assert "binary.bin" not in result  # silently dropped
+        assert "binary.bin" in result  # no longer silently dropped (#716)
+        assert isinstance(result["binary.bin"], bytes)
+        assert result["binary.bin"] == b"\xff\xfe"
 
     def test_empty_base_branch_after_resolution_returns_none(self) -> None:
         """When repo info returns no default_branch, return None."""

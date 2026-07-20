@@ -70,14 +70,21 @@ class TestServerInstructions:
 # param descriptions 8040 B across 28 tools), capped at roughly +10% so the
 # surface cannot quietly regrow tool by tool.
 #
-# Raised once since, deliberately: #676 added secret_scan_override and #675
-# added merge_base / merge_complete / merge_abort, taking the tool count from
-# 28 to 33.  Their descriptions were trimmed first (merge_complete 302 -> 153 B)
-# and only the remainder was budgeted.  Raise this again only for genuinely new
-# tools, and say so here -- the point of the cap is that growth is a visible
-# decision rather than the sum of many quiet ones.
+# Raised deliberately, twice, and recorded here each time -- the point of the
+# cap is that growth is a visible decision rather than the sum of many quiet
+# ones.  Raise it only for genuinely new surface, by what that surface actually
+# needs, and say what needed it:
+#
+# - descriptions 10752 -> 11264: #676 added secret_scan_override and #675 added
+#   merge_base / merge_complete / merge_abort, taking the tool count 28 -> 33.
+#   Their descriptions were trimmed first (merge_complete 302 -> 153 B) and only
+#   the remainder was budgeted.
+# - param descriptions 9984 -> 10496: #675's `branch=` parameter, plus the
+#   parameters of the three merge tools above (measured 10390 B).  An earlier
+#   attempt set 11264, leaving ~1.1 KB of unearned headroom -- exactly the quiet
+#   regrowth this cap exists to prevent.
 TOTAL_DESCRIPTION_BYTE_LIMIT = 11264
-TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10240
+TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10496
 
 
 def _param_desc_bytes(tool) -> int:

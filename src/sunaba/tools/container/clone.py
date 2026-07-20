@@ -567,3 +567,280 @@ def _setup_pr_branch(
 
     return f"PR #{pr_number} ({head_ref}) → {clone_dest} in container {cid}{pip_msg}"
 
+
+def _resolve_default_branch(repo: str, *, token: str | None = None) -> str:
+    """Resolve the default branch of a repository via the GitHub REST API.
+
+    Returns the default branch name (e.g. ``"main"``).
+
+    The same host-side auth model as :func:`_resolve_pr_head_ref`: the host
+    resolves the API call with its own token (or anonymously for public repos).
+
+    *token*, when given, is used as-is instead of calling
+    :func:`_resolve_vcs_token` again.  A broker-backed resolution spawns a
+    subprocess per call (no caching, up to a 30s timeout) -- callers that
+    already resolved a token for this same operation should pass it through
+    here instead of paying for a second mint.
+
+    Raises:
+        RuntimeError: If the API call fails or returns no default branch.
+    """
+    import urllib.error
+    import urllib.request
+
+    _validate_clone_repo(repo)
+    url = f"https://api.github.com/repos/{repo}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "sunaba",
+    }
+    if token is None:
+        token = _resolve_vcs_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        hint = ""
+        if e.code in (403, 429):
+            # Anonymous requests share the 60 req/h per-IP budget, so this
+            # is the failure mode a token-less host hits first.
+            hint = (
+                " (possibly rate-limited: anonymous GitHub API requests are"
+                " capped at 60/h per IP; configuring a host token raises it)"
+            )
+        raise RuntimeError(
+            f"Failed to resolve default branch for {repo}:"
+            f" GitHub API returned HTTP {e.code}{hint}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"Failed to resolve default branch for {repo}: {e.reason}"
+        ) from e
+    default_branch = data.get("default_branch", "")
+    if not default_branch:
+        raise RuntimeError(
+            f"GitHub API returned no default_branch for {repo}"
+        )
+    return default_branch
+
+
+def _setup_branch(
+    container: Any,
+    container_id: str,
+    repo: str,
+    branch_name: str,
+    clone_dest: str,
+    pip_extras: str | None = "[dev]",
+    *,
+    authenticated: bool = False,
+    open_read_grant: bool = False,
+    pip_args: str | None = None,
+) -> str:
+    """Clone repo and check out a named branch inside the container.
+
+    Two transports, chosen by *authenticated* (mirroring
+    :func:`_setup_pr_branch` and :func:`_build_clone_command`):
+
+    - **authenticated** (the container env carries a VCS token): ``gh repo
+      clone`` with ``-- -b <branch>`` passed to the underlying git clone.
+    - **anonymous** (no token, the default for proxied containers per #356):
+      a plain ``git clone -b <branch>`` over HTTPS.
+
+    A branch that does not exist on the remote produces an error naming the
+    branch, rather than silently falling back to the default branch.
+
+    The default branch of the repository is resolved via the GitHub API and
+    recorded as the *base_branch* in the clone metadata, so tools like
+    :func:`diff_in_container` know what this branch is based on.
+
+    Args:
+        container: Docker container object.
+        container_id: 12-char container ID prefix.
+        repo: Repository in ``"owner/name"`` format.
+        branch_name: Branch name to check out.
+        clone_dest: Destination directory inside the container.
+        pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
+            Pass ``None`` to skip pip install entirely.
+        authenticated: Whether the container env actually carries a VCS
+            token (ground truth: the env actually built, #356).
+        open_read_grant: When ``True`` and *authenticated* is ``False``,
+            wrap the anonymous clone in a short-lived egress-proxy
+            read-authorization grant (#419) with a host-resolved token
+            -- the same mechanism :func:`_clone_repo_via_network` and
+            :func:`_setup_pr_branch` use for private repos under the proxy.
+        pip_args: Additional pip arguments (e.g.
+            ``"--index-url https://..."``).  Ignored when *pip_extras* is
+            ``None`` since pip install is skipped entirely.
+
+    Returns:
+        Success message string.
+    """
+    cid = container_id[:12]
+    safe_dest = shlex.quote(clone_dest)
+    safe_repo = shlex.quote(repo)
+    safe_branch = shlex.quote(branch_name)
+
+    # Resolve a host token once and reuse for both the default-branch API
+    # call and (when applicable) the read grant, avoiding a second expensive
+    # broker-backed subprocess spawn per #436.
+    anon_token: str | None = None
+    if not authenticated:
+        anon_token = _resolve_vcs_token()
+
+    # Build the clone command with branch parameter.
+    # _build_clone_command already handles -b <branch> for both auth paths.
+    clone_cmd = _build_clone_command(
+        repo, clone_dest, branch=branch_name, authenticated=authenticated,
+    )
+
+    # Open read-authorization grant for private repos under the proxy (#419).
+    grant_open = open_read_grant and not authenticated
+    grant = (
+        authorized_read_grant(repo, token=anon_token or None)
+        if grant_open
+        else contextlib.nullcontext()
+    )
+    journal_detail = (
+        f"repo={repo} branch={branch_name} dest={clone_dest}"
+        f" proxy_read_grant=True"
+    )
+
+    try:
+        with grant:
+            exit_code, output = container.exec_run(
+                ["/bin/sh", "-c", clone_cmd],
+                stdout=True,
+                stderr=True,
+                demux=True,
+            )
+            stdout_part, stderr_part = output or (b"", b"")
+            clone_output = (
+                stdout_part.decode("utf-8", errors="replace")
+                if stdout_part else ""
+            )
+            stderr_text = (
+                stderr_part.decode("utf-8", errors="replace")
+                if stderr_part else ""
+            )
+
+            if exit_code != 0:
+                hint = (
+                    ""
+                    if authenticated
+                    else (
+                        " (anonymous clone: the container holds no VCS token"
+                        " (#356); if this is a private repository, ensure the"
+                        " egress proxy has a host-resolvable token for the"
+                        " read-authorization grant, see #419)"
+                    )
+                )
+                raise RuntimeError(
+                    f"Failed to clone repo {repo} on branch {branch_name}:"
+                    f" {stderr_text or clone_output}{hint}"
+                )
+
+            logger.info(
+                "Cloned %s (branch=%s) → %s in container %s",
+                safe_repo,
+                safe_branch,
+                safe_dest,
+                cid,
+            )
+    except Exception:
+        if grant_open:
+            record_boundary_crossing(
+                cid, "setup_branch", journal_detail, approved=False,
+            )
+        raise
+    if grant_open:
+        record_boundary_crossing(
+            cid, "setup_branch", journal_detail, approved=True,
+        )
+
+    # Verify the working tree is on the requested branch.
+    # git clone silently lands on the default branch when the -b argument
+    # names a branch that does not exist; git clone exits 0 even then.  An
+    # explicit check catches the mismatch early (acceptance criterion #3).
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", f"cd {safe_dest} && git rev-parse --abbrev-ref HEAD"],
+        stdout=True,
+        stderr=True,
+        demux=True,
+    )
+    stdout_part, _ = output or (b"", b"")
+    actual_branch = (
+        stdout_part.decode("utf-8", errors="replace").strip()
+        if stdout_part else ""
+    )
+
+    if exit_code != 0 or actual_branch != branch_name:
+        raise RuntimeError(
+            f"Branch mismatch after clone: expected {branch_name!r},"
+            f" working tree is on {actual_branch!r}"
+            f" (exit {exit_code})"
+        )
+
+    # Resolve the default branch via GitHub API for clone metadata.
+    # Non-fatal: if it fails, metadata records no base_branch.
+    base_branch = ""
+    try:
+        base_branch = _resolve_default_branch(repo, token=anon_token or None)
+    except Exception:
+        logger.warning(
+            "Failed to resolve default branch for %s", repo, exc_info=True,
+        )
+
+    _write_clone_meta(
+        container, clone_dest, base_branch=base_branch or None,
+    )
+
+    # Install dev dependencies (non-fatal)
+    pip_msg = ""
+    local_pip_args = pip_args or ""
+    if pip_extras is not None:
+        install_cmd = (
+            f"cd {safe_dest}"
+            f" && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
+        )
+        exit_code, output = container.exec_run(
+            ["/bin/sh", "-c", install_cmd],
+            stdout=True,
+            stderr=True,
+            demux=True,
+        )
+        stdout_part, stderr_part = output or (b"", b"")
+        install_output = (
+            stdout_part.decode("utf-8", errors="replace")
+            if stdout_part else ""
+        )
+        stderr_text = (
+            stderr_part.decode("utf-8", errors="replace")
+            if stderr_part else ""
+        )
+
+        if exit_code != 0:
+            detail = (stderr_text or install_output).strip()
+            logger.warning(
+                "pip install deps failed (extras=%s, exit=%d): %s",
+                pip_extras,
+                exit_code,
+                detail,
+            )
+            pip_msg = (
+                f" (pip install -e .{pip_extras} failed"
+                f" (exit {exit_code}): {detail})"
+            )
+
+    record_copy(
+        cid,
+        "setup_branch",
+        f"repo={repo} branch={branch_name}",
+        safe_dest,
+    )
+
+    return (
+        f"Branch {branch_name} → {clone_dest} in container {cid}{pip_msg}"
+    )

@@ -689,14 +689,15 @@ class TestPublishManifest:
         Even though another file exists undeclared, it must not be staged.
         The new branch (no upstream) resolves origin/HEAD as the base.
         """
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # New path: resolve remote base
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -747,13 +748,14 @@ class TestPublishManifest:
             b"?? tmp/junk-\xe3\x81\x82.log\x00"
             b"R  new.py\x00old.py\x00"
         )
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- ':(literal)declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -792,14 +794,15 @@ class TestPublishManifest:
         The existence check passes (test -f returns 0), and git add -- stages
         it successfully.  The new branch resolves origin/HEAD as the base.
         """
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'newfile.py' (exists)
+        container = _make_publish_container([(0, b"", b""),  # test -f 'newfile.py' (exists)
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # New path: resolve remote base
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'newfile.py'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -832,14 +835,15 @@ class TestPublishManifest:
         """After a checkpoint that committed an undeclared file on a branch
         with no upstream, the push must exclude that file by building the
         commit against the remote base (origin/HEAD)."""
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # Resolve base: origin/fix/x does NOT exist on remote
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Msg", b""),  # commit
@@ -1050,7 +1054,7 @@ class TestPublishManifest:
             (0, b"", b""),  # checkout -b feat/del
             (1, b"", b""),  # rev-parse --verify origin/feat/del (not on remote)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD (found)
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'deleted.txt' (stages deletion)
             (0, b"[feat/del abc1234] Delete", b""),  # commit
@@ -1140,14 +1144,15 @@ class TestPublishManifest:
         The new base-resolution path (origin/HEAD) strips the checkpoint
         commits, then only the declared file is staged.
         """
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # Resolve base - branch does NOT exist on remote yet
             (1, b"", b""),  # rev-parse --verify origin/fix/x (ec=1)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD -> found
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'  <-- only declarerd
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1201,14 +1206,15 @@ class TestPublishManifest:
         previously pushed commits are preserved (the new commit builds on
         top of them).  Only the declared file is added.
         """
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b / checkout existing
             # Resolve base: origin/fix/x DOES exist on remote
             (0, b"abc7890def1234", b""),  # rev-parse --verify origin/fix/x
             # No fallback to origin/HEAD -- we use origin/fix/x
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/fix/x
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1261,14 +1267,15 @@ class TestPublishManifest:
         mock_docker: MagicMock,
     ) -> None:
         """When origin/HEAD is absent, fallback to origin/main succeeds."""
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
             (0, b"abc1234", b""),  # rev-parse --verify origin/main (found)
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/main
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1305,15 +1312,16 @@ class TestPublishManifest:
     ) -> None:
         """When origin/HEAD and origin/main are both absent, fallback to
         origin/master succeeds."""
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
             (1, b"", b""),  # rev-parse --verify origin/main (not found)
             (0, b"abc1234", b""),  # rev-parse --verify origin/master (found)
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/master
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1351,8 +1359,9 @@ class TestPublishManifest:
         """When no remote ref can be resolved (no origin/HEAD, origin/main,
         or origin/master), manifest mode fails instead of silently skipping
         the reset."""
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -1545,8 +1554,9 @@ class TestPublishSecretScanIntegration:
         mock_scan.return_value = self._findings()
         mock_check.return_value = False
 
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
         ])
         mock_docker.return_value = _make_client_mock(container)
 
@@ -1592,13 +1602,14 @@ class TestPublishSecretScanIntegration:
         mock_scan.return_value = self._findings()
         mock_check.return_value = True
 
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1639,13 +1650,14 @@ class TestPublishSecretScanIntegration:
             "files_scanned": ["declared.txt"],
         }
 
-        container = _make_publish_container([
-            (0, b"", b""),  # test -f 'declared.txt'
+        container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
+
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add --
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1668,3 +1680,140 @@ class TestPublishSecretScanIntegration:
         assert result["files_scanned"] == ["declared.txt"]
         # No override was involved, so none may be spent.
         mock_consume.assert_not_called()
+
+
+# ============================================================================
+# publish integration: _fetch_base_auto_include (issue #712 Candidate C)
+# ============================================================================
+
+
+class TestPublishBaseAutoInclude:
+    """Integration tests for ``_fetch_base_auto_include`` in the publish flow.
+
+    Follows the mock-at-the-call-site pattern from
+    ``TestPublishHostSideBaseline``, which mocks
+    ``_fetch_baseline_from_base_branch`` to verify host-side fetch behaviour.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_merge_triggers_fetch_and_threads_result(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When HEAD is a merge (HEAD^2 exists), publish() calls
+        _fetch_base_auto_include and passes its return value as the
+        base_auto_include argument to git_prepare_commit."""
+        auto_include_data = {"moved.txt": "moved content from host\n"}
+
+        # exec_run sequence: HEAD^2 exists (ec=0), so the merge branch
+        # is entered and _fetch_base_auto_include is invoked.
+        container = _make_publish_container([
+            (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
+            (0, b"none\n", b""),          # MERGE_HEAD check
+            (0, b"", b""),                # checkout -b
+            (1, b"", b""),                # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),         # rev-parse --verify origin/HEAD
+            (0, b"", b""),                # git reset --mixed origin/HEAD
+            # auto-include: write moved.txt via base64+echo
+            (0, b"", b""),                # echo | base64 -d > moved.txt
+            (0, b"", b""),                # git add -- :(literal)moved.txt
+            # declared file staging
+            (0, b"", b""),                # git add -- :(literal)declared.txt
+            (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+            (0, b"", b""),                # git status --porcelain -z
+            (0, b"pushed", b""),          # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="ghp_test",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+                return_value=auto_include_data,
+            ) as mock_fetch,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "pushed"
+
+        # Verify _fetch_base_auto_include was called exactly once,
+        # with the right arguments.
+        mock_fetch.assert_called_once()
+        call_args, call_kwargs = mock_fetch.call_args
+        assert call_args == ("owner/repo", "ghp_test", "fix/x", "")
+        assert call_kwargs == {}
+
+        # The auto-included file is staged before the declared file.
+        add_calls = [
+            _exec_cmd(c)
+            for c in container.exec_run.call_args_list
+            if "git add" in str(_exec_cmd(c))
+        ]
+        assert len(add_calls) == 2, (
+            f"expected 2 git add calls (auto-include + declared), "
+            f"got {len(add_calls)}"
+        )
+        assert "moved.txt" in add_calls[0], "auto-include must be staged first"
+        assert "declared.txt" in add_calls[1], "declared must be staged second"
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_no_merge_does_not_call_fetch(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When HEAD^2 does not exist (not a merge), _fetch_base_auto_include
+        is never called."""
+        container = _make_publish_container([
+            (0, b"", b""),                # test -f 'declared.txt'
+            (1, b"", b""),                # rev-parse --verify HEAD^2 (NOT merge)
+            (0, b"none\n", b""),          # MERGE_HEAD check
+            (0, b"", b""),                # checkout -b
+            (1, b"", b""),                # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),         # rev-parse --verify origin/HEAD
+            (0, b"", b""),                # git reset --mixed origin/HEAD
+            (0, b"", b""),                # git add -- :(literal)declared.txt
+            (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+            (0, b"", b""),                # git status --porcelain -z
+            (0, b"pushed", b""),          # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="ghp_test",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+            ) as mock_fetch,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "pushed"
+        mock_fetch.assert_not_called()

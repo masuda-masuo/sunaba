@@ -61,6 +61,7 @@ def git_prepare_commit(
     files: list[str] | None = None,
     author_name: str | None = None,
     author_email: str | None = None,
+    base_auto_include: dict[str, str] | None = None,
 ) -> dict | None:
     """Checkout branch, stage, squash unpushed checkpoints, then commit.
 
@@ -75,6 +76,11 @@ def git_prepare_commit(
             When None, stage everything with ``git add -A`` (legacy mode).
         author_name: Override commit author name.
         author_email: Override commit author email.
+        base_auto_include: Optional dict of path -> content for files that
+            the base branch advanced since the feature branch was last pushed
+            (Candidate C, issue #712).  Content is sourced host-side from
+            GitHub API, never from the container.  Applied to the working
+            tree and staged before declared files (declared files override).
 
     Returns an error dict on failure, or ``None`` on success (including
     "nothing to commit" which is treated as success).
@@ -126,28 +132,12 @@ def git_prepare_commit(
                         break
 
         if base_ref:
-            # A completed base merge (merge_base + merge_complete) must survive
-            # the reset, or the pushed branch still lacks the base's commits and
-            # GitHub keeps reporting CONFLICTING -- the whole point of #675.
-            #
-            # Preserve it only when HEAD is a merge whose *first* parent is the
-            # remote base itself: that shape can contain no local checkpoint
-            # commits, so keeping it cannot reintroduce the #679 leak.  With a
-            # checkpoint in between, fall back to the reset -- losing the merge
-            # is recoverable, leaking undeclared files is not.
-            # --verify is load-bearing: without it `git rev-parse HEAD^2`
-            # echoes the literal string "HEAD^2" on stdout for an ordinary
-            # single-parent commit, so every commit would look like a merge
-            # and the #679 reset would be skipped wholesale.
-            _, p2_out, _ = run("git rev-parse --verify HEAD^2 2>/dev/null")
-            if p2_out.strip():
-                _, p1_out, _ = run("git rev-parse --verify HEAD^1 2>/dev/null")
-                _, base_sha_out, _ = run(
-                    f"git rev-parse --verify {base_ref} 2>/dev/null"
-                )
-                if p1_out.strip() and p1_out.strip() == base_sha_out.strip():
-                    base_ref = "HEAD"
-
+            # Always reset to the remote base (issue #712 Candidate C).
+            # The skip-the-reset merge-preservation branch is removed:
+            # its inputs were all container-supplied and forgeable via
+            # `git update-ref refs/remotes/origin/<branch>`.  Merged-in
+            # base-advance files are recovered host-side via
+            # base_auto_include instead (see below).
             reset_ec, reset_out, reset_err = run(
                 f"git reset --mixed {base_ref}"
             )
@@ -169,6 +159,40 @@ def git_prepare_commit(
                     "(origin) and that the remote has a default branch."
                 ),
             }
+
+        # --- Host-side auto-include (issue #712 Candidate C) ---
+        # These are files that the base branch advanced since the feature
+        # branch was last pushed.  Content is sourced host-side from the
+        # GitHub API, never from the container.  Declared files (staged
+        # after this block) override any auto-included path with the same
+        # name.
+        if base_auto_include:
+            for path, content in base_auto_include.items():
+                # Write content via base64 to safely pass through the shell
+                encoded = base64.b64encode(
+                    content.encode("utf-8")
+                ).decode("ascii")
+                write_ec, write_out, write_err = run(
+                    f"echo {shlex.quote(encoded)} | base64 -d"
+                    f" > {shlex.quote(path)}"
+                )
+                if write_ec != 0:
+                    return {
+                        "status": "error",
+                        "step": "auto_include_write",
+                        "error": write_err or write_out,
+                    }
+                # Stage the auto-included file
+                add_ec, add_out, add_err = run(
+                    "git add -- "
+                    + shlex.quote(f":(literal){path}")
+                )
+                if add_ec != 0:
+                    return {
+                        "status": "error",
+                        "step": "auto_include_add",
+                        "error": add_err or add_out,
+                    }
 
         # Stage only the declared manifest paths.  :(literal) disables
         # pathspec glob interpretation so each declared path stages

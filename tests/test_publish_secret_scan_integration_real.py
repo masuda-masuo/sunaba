@@ -218,13 +218,14 @@ class TestPublishSecretScanReal:
         clean_bytes = _make_clean_scan_json().encode("utf-8")
 
         container = _make_publish_container(
-            [
-                (0, b"", b""),  # test -f 'declared.txt'
+            [(0, b"", b""),  # test -f 'declared.txt'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
@@ -501,13 +502,14 @@ class TestPublishSecretScanReal:
         from sunaba.tools.secret_scan import _OVERRIDE_MAP
 
         container = _make_publish_container_for_scan_test(
-            [
-                (0, b"", b""),  # test -f 'declared.txt'
+            [(0, b"", b""),  # test -f 'declared.txt'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
@@ -573,13 +575,14 @@ class TestPublishSecretScanReal:
         ).encode("utf-8")
 
         container = _make_publish_container_for_scan_test(
-            [
-                (0, b"", b""),  # test -f 'secret.txt'
+            [(0, b"", b""),  # test -f 'secret.txt'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'secret.txt'
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
@@ -629,13 +632,14 @@ class TestPublishSecretScanReal:
     ) -> None:
         """Container without detect-secrets: scan is skipped, publish proceeds."""
         container = _make_publish_container_for_scan_test(
-            [
-                (0, b"", b""),  # test -f 'declared.txt'
+            [(0, b"", b""),  # test -f 'declared.txt'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
@@ -800,13 +804,14 @@ class TestPublishSecretScanReal:
         clean_bytes = _make_clean_scan_json().encode("utf-8")
 
         container = self._make_baseline_container(
-            [
-                (0, b"", b""),  # test -f '.secrets.baseline'
+            [(0, b"", b""),  # test -f '.secrets.baseline'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- '.secrets.baseline'
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
@@ -867,9 +872,11 @@ class TestPublishSecretScanReal:
         ).encode("utf-8")
 
         container = self._make_baseline_container(
-            [
-                (0, b"", b""),  # test -f 'secret.txt'
-                (0, b"", b""),  # test -f '.secrets.baseline'
+            [(0, b"", b""),  # test -f 'secret.txt'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712](0, b"", b""),  # test -f '.secrets.baseline'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
             ],
             scan_output=finding_bytes,
         )
@@ -926,13 +933,14 @@ class TestPublishSecretScanReal:
         # Even if detect-secrets scan would crash, it is never called
         # because baseline is excluded.
         container = self._make_baseline_container(
-            [
-                (0, b"", b""),  # test -f '.secrets.baseline'
+            [(0, b"", b""),  # test -f '.secrets.baseline'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- '.secrets.baseline'
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
@@ -1143,13 +1151,14 @@ class TestPublishHostSideBaseline:
         # The mock container's scan output contains the finding, but
         # the host-side baseline set should suppress it.
         container = _make_publish_container(
-            [
-                (0, b"", b""),  # test -f 'declared.txt'
+            [(0, b"", b""),  # test -f 'declared.txt'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
@@ -1247,13 +1256,14 @@ class TestPublishHostSideBaseline:
         }).encode("utf-8")
 
         container = _make_publish_container_for_scan_test(
-            [
-                (0, b"", b""),  # test -f 'declared.txt'
+            [(0, b"", b""),  # test -f 'declared.txt'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+                # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit

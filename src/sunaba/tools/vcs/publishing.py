@@ -225,6 +225,146 @@ def _ensure_proxy_ready(client: Any) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Host-side merge auto-include (issue #712 Candidate C)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_base_auto_include(
+    repo: str,
+    token: str,
+    branch: str,
+    base_branch: str = "",
+) -> dict[str, str] | None:
+    """Fetch files that the base branch advanced since *branch* was last pushed.
+
+    Host-side read via GitHub REST API, never from the container
+    (Candidate C, issue #712).  This closes the forgeable skip-the-reset
+    branch in ``git_prepare_commit``.
+
+    Parameters
+    ----------
+    repo:
+        ``\"owner/repo\"``.
+    token:
+        VCS token for authentication (may be empty for public repos).
+    branch:
+        The feature branch name (used to determine its current remote tip).
+    base_branch:
+        The merge-source branch.  When empty, resolves to the repo's
+        default branch.
+
+    Returns
+    -------
+    A ``dict`` of ``path -> content`` for files that the base branch
+    advanced since *branch* was last pushed.  Only files with status
+    ``\"added\"`` or ``\"modified\"`` are included.  Returns ``None`` on
+    any error (safe fallback: no auto-include).
+    """
+    from sunaba.tools.github_api import _github_api_request
+
+    # Resolve the base branch (default branch if not given).
+    if not base_branch:
+        try:
+            repo_info = _github_api_request(f"/repos/{repo}", token)
+            base_branch = str(repo_info.get("default_branch") or "")
+        except Exception as exc:
+            logger.warning(
+                "Could not resolve default branch for %s: %s",
+                repo, exc,
+            )
+            return None
+
+    if not base_branch:
+        return None
+
+    # Get the feature branch's remote tip SHA.
+    try:
+        ref_info = _github_api_request(
+            f"/repos/{repo}/git/refs/heads/{branch}", token,
+        )
+        feature_sha = str(ref_info.get("object", {}).get("sha") or "")
+    except Exception as exc:
+        logger.warning(
+            "Could not get remote ref for branch %s in %s: %s",
+            branch, repo, exc,
+        )
+        return None
+
+    if not feature_sha:
+        # Branch doesn't exist on remote yet -- no auto-include needed.
+        return {}
+
+    # Get the base branch's tip SHA.
+    try:
+        ref_info = _github_api_request(
+            f"/repos/{repo}/git/refs/heads/{base_branch}", token,
+        )
+        base_sha = str(ref_info.get("object", {}).get("sha") or "")
+    except Exception as exc:
+        logger.warning(
+            "Could not get remote ref for base branch %s in %s: %s",
+            base_branch, repo, exc,
+        )
+        return None
+
+    if not base_sha:
+        return None
+
+    # Compare: what changed between feature_sha and base_sha?
+    try:
+        compare = _github_api_request(
+            f"/repos/{repo}/compare/{feature_sha}...{base_sha}",
+            token,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Compare API failed for %s...%s in %s: %s",
+            feature_sha, base_sha, repo, exc,
+        )
+        return None
+
+    files = compare.get("files", [])
+    if not files:
+        return {}
+
+    result: dict[str, str] = {}
+    for f in files:
+        status = f.get("status", "")
+        if status not in ("added", "modified"):
+            continue
+        filename = f.get("filename", "")
+        if not filename:
+            continue
+
+        # Fetch the file content from the base branch tip.
+        try:
+            content_resp = _github_api_request(
+                f"/repos/{repo}/contents/{filename}?ref={base_sha}",
+                token,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not fetch content for %s@%s: %s",
+                filename, base_sha, exc,
+            )
+            continue
+
+        content_b64 = content_resp.get("content", "")
+        encoding = content_resp.get("encoding", "")
+        if not content_b64 or encoding != "base64":
+            continue
+
+        try:
+            decoded = base64.b64decode(content_b64).decode("utf-8")
+        except Exception:
+            continue
+
+        result[filename] = decoded
+
+    return result
+
+
 # The single exit tool (docs/design.md section 11.1).  Two transports: git
 # push with credential helper, then GitHub Objects API
 # (blob->tree->commit->ref) as automatic fallback.  Host-side token
@@ -456,8 +596,40 @@ def publish(
                 }, verified)
 
         swept_untracked: list[str] = []
+
+        # --- Host-side merge auto-include (issue #712 Candidate C) ---
+        # When HEAD is a merge (a base merge was performed), use the
+        # GitHub Compare API to determine which files the base branch
+        # advanced since the feature branch was last pushed, and fetch
+        # their content host-side (never from the container).  These
+        # files are applied before declared files so declarations
+        # override.
+        # AC 4: on any failure fall back to None (safe: plain reset,
+        # no auto-include).
+        base_auto_include: dict[str, str] | None = None
+        merge_ec, merge_out, _ = _run(
+            "git rev-parse --verify HEAD^2 2>/dev/null"
+        )
+        if merge_ec == 0 and merge_out.strip():
+            # HEAD is a merge -- the container signals this but the
+            # auto-include content always comes from the host's own
+            # API call, never from the container's working tree.
+            git_token = _resolve_vcs_token()
+            try:
+                auto = _fetch_base_auto_include(
+                    repo, git_token, branch, base_branch,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch base auto-include for %s: %s",
+                    repo, exc,
+                )
+                auto = None
+            base_auto_include = auto
+
         commit_err = git_prepare_commit(_run, branch=branch, message=message,
-            files=files, author_name=author_name, author_email=author_email)
+            files=files, author_name=author_name, author_email=author_email,
+            base_auto_include=base_auto_include)
         if commit_err:
             return finish_json(commit_err, verified)
 

@@ -500,3 +500,90 @@ class TestCreatePullRequest:
 def _noop_record(reason: str, approved: bool) -> None:
     """No-op boundary-crossing record callback for tests."""
     pass
+
+
+# ============================================================================
+# git_prepare_commit with base_auto_include (issue #712 Candidate C)
+# ============================================================================
+
+
+class TestGitPrepareCommitAutoInclude:
+    """base_auto_include writes host-fetched files before staging declared ones."""
+
+    def test_auto_include_applied_before_declared(
+        self,
+    ) -> None:
+        """Auto-included files are written and staged, declared files override."""
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout feat/a
+            (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/a (empty)
+            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
+            (0, "", ""),                     # git reset --mixed origin/HEAD
+            # auto_include writes for two files
+            (0, "", ""),                     # echo+base64 for moved.txt
+            (0, "", ""),                     # git add moved.txt
+            (0, "", ""),                     # echo+base64 for added.txt
+            (0, "", ""),                     # git add added.txt
+            # declared file staging
+            (0, "", ""),                     # git add declared.txt
+            (0, "[feat/a abc1234] Msg\n", ""),  # commit
+        ])
+        result = git_prepare_commit(
+            run, branch="feat/a", message="Msg",
+            files=["declared.txt"],
+            base_auto_include={
+                "moved.txt": "moved content\n",
+                "added.txt": "added content\n",
+            },
+        )
+        assert result is None
+
+        # Verify auto-include writes happened
+        cmd_strs = [c[0] for c in run.calls]
+        # Check that moved.txt write happens before git add for moved.txt
+        assert any("moved.txt" in c and "base64" in c for c in cmd_strs)
+        assert any(":(literal)moved.txt" in c for c in cmd_strs)
+        # Declared file staged after auto-include
+        assert any(":(literal)declared.txt" in c for c in cmd_strs)
+
+    def test_auto_include_none_no_op(self) -> None:
+        """When base_auto_include is None or empty, no extra ops happen."""
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout
+            (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/x (empty)
+            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
+            (0, "", ""),                     # git reset --mixed origin/HEAD
+            # no auto-include writes (None -> skipped)
+            (0, "", ""),                     # git add declared.txt
+            (0, "[feat/x abc1234] Msg\n", ""),  # commit
+        ])
+        result = git_prepare_commit(
+            run, branch="feat/x", message="Msg",
+            files=["declared.txt"],
+            base_auto_include=None,
+        )
+        assert result is None
+        cmd_strs = [c[0] for c in run.calls]
+        # No base64 operations
+        assert not any("base64" in c for c in cmd_strs)
+
+    def test_auto_include_error_step(self) -> None:
+        """Write failure returns step=auto_include_write."""
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout
+            (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/z (empty)
+            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
+            (0, "", ""),                     # git reset --mixed origin/HEAD
+            (1, "", "write error"),          # echo+base64 fails
+        ])
+        result = git_prepare_commit(
+            run, branch="feat/z", message="Msg",
+            files=["declared.txt"],
+            base_auto_include={"bad.txt": "content"},
+        )
+        assert result is not None
+        assert result["step"] == "auto_include_write"
+        assert "write error" in result["error"]

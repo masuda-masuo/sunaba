@@ -896,6 +896,12 @@ def publish(
         "secret_scan_state": scan_result.get("secret_scan_state", "unknown"),
         "files_scanned": scan_result.get("files_scanned", []),
         "push_transport": push_transport,
+        "suppressed_count": scan_result.get("suppressed_count", 0),
+        # No reassuring default: every run_secret_scan branch supplies
+        # scan_summary, so a missing one means an unexpected path, and the
+        # envelope must not assert cleanliness on its behalf (cf. the
+        # "unknown" state above, which blocks rather than waving through).
+        "scan_summary": scan_result.get("scan_summary"),
     }
     if manifest:
         result["staged_files"] = files

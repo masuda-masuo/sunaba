@@ -1381,3 +1381,199 @@ class TestPublishHostSideBaseline:
         assert result["secret_scan_state"] == "findings"
         assert len(result["findings"]) == 1
         assert result["findings"][0]["hashed_secret"] == finding_hash
+
+
+# ============================================================================
+# Regression: success envelope carries suppressed_count and scan_summary
+# (issue #725)
+# ============================================================================
+
+
+class TestPublishSuccessEnvelopeSuppressionInfo:
+    """Verify the success envelope includes suppression info.
+
+    The blocked path already reports ``scan_summary``.  The success path was
+    dropping it (issue #725), making a baseline-suppressed publish
+    indistinguishable from a genuinely clean one.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+
+    # -- Criterion 1: suppressed findings in success envelope ---------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_suppressed_findings_carry_suppressed_count(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """A publish whose scan found findings suppressed by a host-side
+        baseline returns ``suppressed_count`` > 0 and a ``scan_summary``
+        that names the suppression.
+        """
+        import hashlib
+
+        # Build a finding hash at runtime (no literal secrets)
+        fake_secret = "".join(
+            chr(ord(c) + 1) for c in "suppressed-secret-count"
+        )
+        known_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+
+        # Scan output: one finding whose hash IS in the baseline
+        finding_bytes = json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                "declared.txt": [{
+                    "type": "Secret Keyword",
+                    "filename": "declared.txt",
+                    "line_number": 3,
+                    "hashed_secret": known_hash,
+                    "is_verified": False,
+                }],
+            },
+        }).encode("utf-8")
+
+        container = _make_publish_container(
+            [(0, b"", b""),  # test -f 'declared.txt'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+                (0, b"none\n", b""),  # MERGE_HEAD check
+                (0, b"", b""),  # checkout -b
+                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+                (0, b"", b""),  # git reset --mixed origin/HEAD
+                (0, b"", b""),  # git add -- 'declared.txt'
+                (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"", b""),  # git status --porcelain -z (no leftovers)
+                (0, b"pushed", b""),  # git push
+                (0, b"abc1234def5678", b""),  # rev-parse HEAD
+            ],
+            detect_secrets_scan_output=finding_bytes,
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        # Host-side baseline data containing the known hash
+        baseline_data = {
+            "generated_at": "2026-01-01T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                "declared.txt": [{
+                    "type": "Secret Keyword",
+                    "filename": "declared.txt",
+                    "line_number": 3,
+                    "hashed_secret": known_hash,
+                    "is_verified": False,
+                }],
+            },
+        }
+
+        with (
+            patch(
+                "sunaba.tools.secret_scan._baseline_enabled",
+                return_value=True,
+            ),
+            patch(
+                "sunaba.tools.secret_scan._fetch_baseline_from_base_branch",
+                return_value=baseline_data,
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        # The publish succeeds (finding suppressed)
+        assert result["status"] == "pushed", (
+            f"Expected pushed, got {result.get('status')}: "
+            f"error={result.get('error', '(none)')}"
+        )
+        assert result["secret_scan"] == "clean"
+
+        # *** The bugfix: these fields must be present in the success envelope ***
+        assert result["suppressed_count"] == 1, (
+            f"Expected suppressed_count=1, got {result.get('suppressed_count')}"
+        )
+        assert "suppressed" in result.get("scan_summary", ""), (
+            f"scan_summary should mention suppression: {result.get('scan_summary')}"
+        )
+
+        # All pre-existing fields are still present
+        assert "secret_scan_state" in result
+        assert "files_scanned" in result
+        assert "push_transport" in result
+        assert "branch" in result
+        assert "sha" in result
+
+    # -- Criterion 2: genuinely clean scan ---------------------------------
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_genuinely_clean_scan_reports_zero_suppressed(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """A genuinely clean scan (no findings at all) returns
+        ``suppressed_count=0`` and a ``scan_summary`` that does NOT
+        mention suppression.
+        """
+        clean_bytes = _make_clean_scan_json().encode("utf-8")
+
+        container = _make_publish_container(
+            [(0, b"", b""),  # test -f 'declared.txt'
+
+                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+                (0, b"none\n", b""),  # MERGE_HEAD check
+                (0, b"", b""),  # checkout -b
+                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+                (0, b"", b""),  # git reset --mixed origin/HEAD
+                (0, b"", b""),  # git add -- 'declared.txt'
+                (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"", b""),  # git status --porcelain -z (no leftovers)
+                (0, b"pushed", b""),  # git push
+                (0, b"abc1234def5678", b""),  # rev-parse HEAD
+            ],
+            detect_secrets_scan_output=clean_bytes,
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                working_dir="/root/repo",
+            ))
+
+        # Publish succeeded, clean scan
+        assert result["status"] == "pushed"
+        assert result["secret_scan"] == "clean"
+
+        # *** The bugfix: these fields must be present ***
+        assert result["suppressed_count"] == 0, (
+            f"Expected suppressed_count=0, got {result.get('suppressed_count')}"
+        )
+        assert "No secrets detected" in result.get("scan_summary", ""), (
+            f"scan_summary should indicate clean scan: {result.get('scan_summary')}"
+        )
+
+        # All pre-existing fields are still present
+        assert "secret_scan_state" in result
+        assert "files_scanned" in result
+        assert "push_transport" in result
+        assert "branch" in result
+        assert "sha" in result

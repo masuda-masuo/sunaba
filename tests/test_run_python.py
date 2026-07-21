@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from io import StringIO
 
@@ -31,10 +32,21 @@ class _FakeRunPythonClient:
 
 
 class _FakeRunPythonContainer:
-    """Emulates the in-container shell for the run_python runner."""
+    """Emulates the in-container shell for the run_python runner.
+
+    The runner is executed on the host, where the container's working
+    directory (``/workspace``) does not exist -- it does inside a sandbox
+    image but not on a CI runner.  So the resolved working dir is captured
+    for assertions and then neutralised before execution; tests check the
+    captured value instead of relying on the host filesystem layout.
+    """
+
+    def __init__(self) -> None:
+        self.captured_working_dir: str | None = None
 
     def exec_run(self, cmd, **kwargs):
         import base64 as _b64
+        import re as _re
         import sys
 
         shell_cmd = cmd[-1]
@@ -44,6 +56,14 @@ class _FakeRunPythonContainer:
             .strip("'\"")
         )
         runner_src = _b64.b64decode(blob).decode("utf-8")
+
+        match = _re.search(r"^WORKING_DIR = (.+)$", runner_src, _re.M)
+        if match:
+            self.captured_working_dir = ast.literal_eval(match.group(1))
+            runner_src = _re.sub(
+                r"^WORKING_DIR = .+$", "WORKING_DIR = None", runner_src, count=1,
+                flags=_re.M,
+            )
 
         runner_globals = {}
         buf = StringIO()
@@ -68,9 +88,16 @@ class TestRunPython:
     """Tests for run_python execution inside the sandbox container."""
 
     @staticmethod
-    def _run(code: str, monkeypatch, *, working_dir: str = "", **kwargs) -> dict:
-        """Invoke run_python with a patched _docker via monkeypatch."""
-        fake_c = _FakeRunPythonClient(_FakeRunPythonContainer())
+    def _run(
+        code: str, monkeypatch, *, working_dir: str = "",
+        container: _FakeRunPythonContainer | None = None, **kwargs,
+    ) -> dict:
+        """Invoke run_python with a patched _docker via monkeypatch.
+
+        Pass *container* to inspect what the runner received (e.g. the
+        resolved working directory).
+        """
+        fake_c = _FakeRunPythonClient(container or _FakeRunPythonContainer())
         monkeypatch.setattr(
             "src.sunaba.tools.run_python._docker",
             lambda: fake_c,
@@ -212,20 +239,20 @@ class TestRunPython:
 
     def test_working_dir_default(self, monkeypatch) -> None:
         """Default working_dir is the repo root (/workspace)."""
-        result = self._run("import os; print(os.getcwd())", monkeypatch)
+        fake = _FakeRunPythonContainer()
+        result = self._run("x = 1", monkeypatch, container=fake)
         assert result["status"] == "ok"
-        cwd = result["stdout"].strip()
-        assert cwd == "/workspace", f"Expected /workspace, got {cwd!r}"
+        assert fake.captured_working_dir == "/workspace"
 
     def test_working_dir_custom(self, monkeypatch) -> None:
-        """Custom working_dir changes the cwd for execution."""
+        """Custom working_dir is what the runner receives."""
+        fake = _FakeRunPythonContainer()
         result = self._run(
-            "import os; print(os.getcwd())", monkeypatch,
-            working_dir="/tmp",
+            "x = 1", monkeypatch, working_dir="/tmp/custom-wd",
+            container=fake,
         )
         assert result["status"] == "ok"
-        cwd = result["stdout"].strip()
-        assert cwd == "/tmp", f"Expected /tmp, got {cwd!r}"
+        assert fake.captured_working_dir == "/tmp/custom-wd"
 
     # ------------------------------------------------------------------
     # Output truncation

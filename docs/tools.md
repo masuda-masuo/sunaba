@@ -31,6 +31,7 @@ Run commands and manage packages inside the container.
 | `sandbox_exec_background` | `container_id`, `commands`, `working_dir` (opt) | Spawns commands in the background. Returns a `job_id` immediately. |
 | `sandbox_exec_check` | `container_id`, `job_id` | Checks the status of a background job. Returns output if finished, or `"running"`. |
 | `package_install` | `container_id`, `packages` (opt), `editable` (opt), `requirements` (opt), `extras` (opt), `constraints` (opt), `upgrade` (opt) | Structured wrapper for package installs (`pip`/`uv`). Returns installed package versions and avoids log pollution. |
+| `run_python` | `container_id`, `code`, `working_dir` (opt) | Executes arbitrary Python code inside the container. Base64-transported (no quoting hell). Returns stdout/stderr/exit_code. |
 
 ---
 

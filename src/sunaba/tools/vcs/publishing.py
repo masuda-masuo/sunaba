@@ -545,7 +545,9 @@ def publish(
         check_override,
         consume_override,
         exec_in_container,
+        get_override_registry_hashes,
         run_secret_scan,
+        should_consume_override,
     )
 
     # Declared once, before either branch: re-initialising it below the
@@ -595,6 +597,19 @@ def publish(
             )
             # Safe: no suppressions, all findings reported
             baseline_hashes_arg = set()
+
+    # --- Union with override registry (issue #722) ---
+    # The override registry is populated by secret_scan_override (MCP tool
+    # requiring human authorization) and lives in host process memory.
+    # Both sources — remote baseline fetch (#708) and override registry
+    # (#722) — are host-side.  Nothing inside the container can grow
+    # the suppression set.  See the design doc § "Suppressions: two
+    # mechanisms, two authorities".
+    registry_hashes = get_override_registry_hashes(cid)  # noqa: F821
+    if registry_hashes:
+        if baseline_hashes_arg is None:
+            baseline_hashes_arg = set()
+        baseline_hashes_arg = baseline_hashes_arg | registry_hashes
 
     if manifest:
         assert files is not None
@@ -836,8 +851,13 @@ def publish(
 
             # Push succeeded — consume the override flag now (not before,
             # so an override is never lost on retry after a push failure).
+            # A registry/baseline-suppressed publish counts as override use:
+            # a stale flag would authorize a future publish with new
+            # findings without re-authorization (#722 review).
             scan_state = scan_result.get("secret_scan_state", "")
-            if scan_state not in ("clean", "skipped"):
+            if should_consume_override(  # noqa: F821
+                scan_state, scan_result.get("suppressed_count", 0),
+            ):
                 consume_override(cid)  # noqa: F821
 
     except ProxyAuthError as exc:

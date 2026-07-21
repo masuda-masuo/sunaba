@@ -100,6 +100,40 @@ def _baseline_enabled() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# In-memory override registry (hashed-secret-level, issue #722)
+# ---------------------------------------------------------------------------
+# Maps container_id → set[hashed_secret] for findings the operator has
+# overridden via the secret_scan_override MCP tool.  Lives in server process
+# memory only — server restart loses it, but re-running the override restores
+# it.  The publish path unions this set with the remote-base-branch baseline
+# hashes, so the override takes effect immediately for THIS container without
+# waiting for .secrets.baseline to land on the remote base branch.
+_OVERRIDE_REGISTRY: dict[str, set[str]] = {}
+_REGISTRY_LOCK = threading.Lock()
+
+
+def get_override_registry_hashes(container_id: str) -> set[str]:
+    """Return the hashed_secret values overridden for *container_id*.
+
+    Returns a copy so callers can mutate it safely.  Never raises.
+    """
+    with _REGISTRY_LOCK:
+        return _OVERRIDE_REGISTRY.get(container_id[:12], set()).copy()
+
+
+def _add_to_override_registry(container_id: str, hashes: set[str]) -> None:
+    """Add *hashes* to the override registry for *container_id*."""
+    cid = container_id[:12]
+    with _REGISTRY_LOCK:
+        existing = _OVERRIDE_REGISTRY.get(cid, set())
+        _OVERRIDE_REGISTRY[cid] = existing | hashes
+    logger.info(
+        "Override registry updated for %s: %d hashes total",
+        cid, len(_OVERRIDE_REGISTRY.get(cid, set())),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Host-side baseline fetch (issue #708)
 # ---------------------------------------------------------------------------
 
@@ -482,31 +516,34 @@ def run_secret_scan(
                 "hashed_secret": finding.get("hashed_secret", ""),
             })
 
-    # Subtract baseline-known findings (baseline ON path)
-    if _baseline_enabled():
-        if baseline_hashes is not None:
-            # Host-side baseline hashes (issue #708): the set was fetched
-            # from the remote base branch via the GitHub API by the caller
-            # (publish), so the container agent cannot influence it.
-            all_findings = [
-                f for f in raw_findings
-                if f["hashed_secret"] not in baseline_hashes
-            ]
-        else:
-            # No host-resolved hashes supplied: apply NO suppressions.
-            #
-            # The container's .secrets.baseline is deliberately NOT read here.
-            # It is agent-writable, and trusting it IS the bypass #708 closed:
-            # take the hashed_secret out of the block response, write it into
-            # the file, publish again, pass -- with the override tool's
-            # permission gate never firing.
-            #
-            # publish always supplies a host-resolved set (empty when the
-            # fetch fails), so this branch is only reachable by direct callers.
-            # They get more findings, never fewer: the recoverable direction.
-            all_findings = raw_findings
+    # Subtract baseline-known findings
+    if baseline_hashes is not None:
+        # Host-side suppression set: remote baseline hashes (#708) +
+        # override registry hashes (#722).  Applied regardless of
+        # _baseline_enabled() — the caller (publish) constructs the set
+        # from host-side sources only.  Nothing inside the container can
+        # grow the suppression set (threat model preserved).
+        all_findings = [
+            f for f in raw_findings
+            if f["hashed_secret"] not in baseline_hashes
+        ]
+    elif _baseline_enabled():
+        # No host-resolved hashes supplied: apply NO suppressions.
+        #
+        # The container's .secrets.baseline is deliberately NOT read here.
+        # It is agent-writable, and trusting it IS the bypass #708 closed:
+        # take the hashed_secret out of the block response, write it into
+        # the file, publish again, pass -- with the override tool's
+        # permission gate never firing.
+        #
+        # publish always supplies a host-resolved set (empty when the
+        # fetch fails), so this branch is only reachable by direct callers.
+        # They get more findings, never fewer: the recoverable direction.
+        all_findings = raw_findings
     else:
         all_findings = raw_findings
+
+    suppressed_count = len(raw_findings) - len(all_findings)
 
     if all_findings:
         n_files = len({f["file"] for f in all_findings})
@@ -517,19 +554,38 @@ def run_secret_scan(
             "findings": all_findings,
             "files_scanned": files,
             "scan_summary": summary,
+            "suppressed_count": suppressed_count,
         }
 
+    clean_summary = (
+        f"No secrets detected ({suppressed_count} finding(s) suppressed"
+        " by baseline/override)."
+        if suppressed_count else "No secrets detected."
+    )
     return {
         "secret_scan": "clean",
         "secret_scan_state": "clean",
         "files_scanned": files,
-        "scan_summary": "No secrets detected.",
+        "scan_summary": clean_summary,
+        "suppressed_count": suppressed_count,
     }
 
 
 # ---------------------------------------------------------------------------
 # Override checking (publish-side)
 # ---------------------------------------------------------------------------
+
+
+def should_consume_override(scan_state: str, suppressed_count: int) -> bool:
+    """Decide whether a successful push must burn the one-time override flag.
+
+    A publish that needed the override machinery — a blocked-state scan or a
+    registry/baseline suppression that turned findings into "clean" — must
+    consume the flag; otherwise the stale flag would silently authorize a
+    FUTURE publish with new findings without re-authorization (#722 review).
+    A genuinely clean publish (nothing suppressed) keeps the unused flag.
+    """
+    return scan_state not in ("clean", "skipped") or suppressed_count > 0
 
 
 def check_override(container_id: str) -> bool:
@@ -570,10 +626,14 @@ def _update_baseline(
     container: Any,
     files: list[str],
     working_dir: str,
-) -> str | None:
+) -> tuple[str | None, set[str]]:
     """Run the scan and merge results into ``.secrets.baseline``.
 
-    Returns None on success, or an error message on failure.
+    Returns ``(None, hashes_found)`` on success, or
+    ``(error_message, set())`` on failure.
+    The returned hashes are the hashed_secret values from the CURRENT scan
+    (before merging with any old baseline), so the caller can register them
+    for immediate suppression.
     """
     # Exclude the baseline path from the scan so its own stored hashes are
     # not re-appended to the baseline on every override (self-referential
@@ -583,7 +643,7 @@ def _update_baseline(
         logger.info(
             "No files to scan for baseline update (baseline was the only file)."
         )
-        return None
+        return None, set()
 
     safe_wd = shlex.quote(working_dir)
     escaped_files = " ".join(shlex.quote(f) for f in files)
@@ -613,12 +673,12 @@ def _update_baseline(
         workdir=working_dir,
     )
     if ec != 0:
-        return f"detect-secrets scan failed (exit {ec})"
+        return f"detect-secrets scan failed (exit {ec})", set()
 
     try:
         scan_data = json.loads(stdout)
     except json.JSONDecodeError:
-        return "detect-secrets output is not valid JSON"
+        return "detect-secrets output is not valid JSON", set()
 
     # Merge: for files in the new scan, replace; keep the rest.
     new_results: dict = scan_data.get("results", {})
@@ -626,6 +686,14 @@ def _update_baseline(
     merged_results = dict(old_results)
     for fname, findings in new_results.items():
         merged_results[fname] = findings
+
+    # Extract hashed_secrets from the fresh scan for the override registry
+    new_hashes: set[str] = set()
+    for fname, findings in new_results.items():
+        for finding in findings:
+            hs = finding.get("hashed_secret", "")
+            if hs:
+                new_hashes.add(hs)
 
     merged: dict[str, Any] = {
         "generated_at": scan_data.get("generated_at", ""),
@@ -646,10 +714,10 @@ def _update_baseline(
         workdir=working_dir,
     )
     if ec != 0:
-        return f"failed to write {_BASELINE_FILENAME}: {stderr}"
+        return f"failed to write {_BASELINE_FILENAME}: {stderr}", set()
 
     logger.info("Updated .secrets.baseline (%d files)", len(merged_results))
-    return None
+    return None, new_hashes
 
 
 # ---------------------------------------------------------------------------
@@ -664,20 +732,15 @@ def secret_scan_override(
 ) -> str:
     """Override the secret scan for a publish that was blocked by findings.
 
-    This is a *separate* MCP tool (not a ``publish`` argument) so the host
-    can gate it by permission.  An agent that hits a finding cannot simply
-    set a flag and carry on — the human decides whether the override is
-    available at all.
+    A separate MCP tool (not a ``publish`` argument) so the host can gate
+    it by permission — the human decides whether an override is available.
 
-    Semantics depend on the ``SUNABA_SECRETS_BASELINE`` environment variable:
-
-    - **Enabled** (default): the override appends the current findings to
-      the repo's ``.secrets.baseline`` file so the same secret is not
-      re-flagged on later publishes.
-
-    - **Disabled**: the override is one-time and in-memory — the current
-      publish proceeds, but the next publish on a different diff will scan
-      fresh.
+    With ``SUNABA_SECRETS_BASELINE`` enabled (default) it writes the
+    findings into ``.secrets.baseline`` (durable once merged to the base
+    branch) AND registers their hashes host-side, so the next publish from
+    THIS container suppresses them immediately (registry is lost on server
+    restart; re-run to restore).  Disabled: one-time flag — the current
+    publish passes the scan block; the next one scans fresh.
 
     Args:
         container_id: 12-character container ID prefix.
@@ -728,14 +791,28 @@ def secret_scan_override(
 
     if _baseline_enabled():
         files_to_scan = files if files else []
-        err_msg = _update_baseline(container, files_to_scan, working_dir)
+        err_msg, new_hashes = _update_baseline(
+            container, files_to_scan, working_dir,
+        )
         if err_msg is None:
+            # Register hashes for immediate suppression in THIS container
+            # (host-side, in-process-memory).  The durable path requires
+            # .secrets.baseline to be committed and merged to the base branch.
+            if new_hashes:
+                _add_to_override_registry(cid, new_hashes)
             return json.dumps({
                 "status": "ok",
                 "action": "baseline_updated",
                 "detail": (
-                    f"Updated .secrets.baseline with findings from {len(files_to_scan)} file(s). "
-                    "Run publish again; the same secrets will be suppressed."
+                    f"Updated .secrets.baseline with findings from "
+                    f"{len(files_to_scan)} file(s). "
+                    f"Override registered ({len(new_hashes)} hash(es)) "
+                    f"for this container: the same secrets will be suppressed "
+                    f"on the next publish from THIS container (immediate, "
+                    f"in-process-memory). "
+                    f"For durable suppression across future containers, "
+                    f"include .secrets.baseline in your publish manifest "
+                    f"and merge it to the base branch."
                 ),
             })
         # Baseline update failed (e.g. scanner error).  Fall through to

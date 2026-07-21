@@ -15,6 +15,9 @@ import pytest
 from sunaba.tools.secret_scan import (  # noqa: I001, F401
     _OVERRIDE_LOCK,
     _OVERRIDE_MAP,
+    _OVERRIDE_REGISTRY,
+    _REGISTRY_LOCK,
+    _add_to_override_registry,
     _baseline_enabled,
     _check_detect_secrets,
     _exclude_baseline,
@@ -22,6 +25,7 @@ from sunaba.tools.secret_scan import (  # noqa: I001, F401
     check_override,
     consume_override,
     exec_in_container,
+    get_override_registry_hashes,
     run_secret_scan,
     secret_scan_override,
 )
@@ -762,7 +766,7 @@ class TestUpdateBaseline:
             # cat > .secrets.baseline (write)
             (0, "", ""),
         ])
-        err = _update_baseline(container, ["secret.py"], "/tmp/repo")
+        err, _ = _update_baseline(container, ["secret.py"], "/tmp/repo")
         assert err is None
 
     def test_update_merge_existing(self) -> None:
@@ -777,7 +781,7 @@ class TestUpdateBaseline:
             (0, _make_finding_json("new.py", 1, "AWS Secret Key"), ""),
             (0, "", ""),                               # write
         ])
-        err = _update_baseline(container, ["new.py"], "/tmp/repo")
+        err, _ = _update_baseline(container, ["new.py"], "/tmp/repo")
         assert err is None
 
     def test_update_scan_fails(self) -> None:
@@ -786,7 +790,7 @@ class TestUpdateBaseline:
             (1, "", "No such file"),
             (1, "", "detect-secrets crashed"),
         ])
-        err = _update_baseline(container, ["bad.py"], "/tmp/repo")
+        err, _ = _update_baseline(container, ["bad.py"], "/tmp/repo")
         assert err is not None
         assert "failed" in err
 
@@ -826,7 +830,7 @@ class TestUpdateBaseline:
             (0, baseline_content, ""),
         ])
         # No detect-secrets scan calls should be made since baseline is excluded
-        err = _update_baseline(
+        err, _ = _update_baseline(
             container, [".secrets.baseline"], "/tmp/repo",
         )
         assert err is None, f"Expected success, got error: {err}"
@@ -861,7 +865,7 @@ class TestUpdateBaseline:
             # write baseline
             (0, "", ""),
         ])
-        err = _update_baseline(
+        err, _ = _update_baseline(
             container, ["real.py", ".secrets.baseline"], "/tmp/repo",
         )
         assert err is None
@@ -894,6 +898,7 @@ class TestSecretScanOverride:
     @pytest.fixture(autouse=True)
     def _clear_overrides(self) -> None:
         _OVERRIDE_MAP.clear()
+        _OVERRIDE_REGISTRY.clear()
 
     def test_container_not_found(self) -> None:
         """Unknown container_id → error message."""
@@ -1320,3 +1325,376 @@ class TestBaselineHashesParameter:
             f"got {result['secret_scan']}"
         )
         assert len(result["findings"]) == 1
+
+
+# ============================================================================
+# Override registry (issue #722)
+# ============================================================================
+
+
+class TestOverrideRegistry:
+    """Host-side in-memory override registry (hashed-secret-level)."""
+
+    def test_registry_add_and_retrieve(self) -> None:
+        """Hashes added to the registry are retrievable."""
+        _OVERRIDE_REGISTRY.clear()
+        hashes = {"abc123", "def456"}
+        _add_to_override_registry("testcid123456", hashes)
+        result = get_override_registry_hashes("testcid123456")
+        assert result == hashes
+
+    def test_registry_accumulates(self) -> None:
+        """Multiple adds accumulate hashes for the same container."""
+        _OVERRIDE_REGISTRY.clear()
+        _add_to_override_registry("testcid123456", {"hash1"})
+        _add_to_override_registry("testcid123456", {"hash2"})
+        result = get_override_registry_hashes("testcid123456")
+        assert result == {"hash1", "hash2"}
+
+    def test_registry_isolation(self) -> None:
+        """Different containers have independent registries."""
+        _OVERRIDE_REGISTRY.clear()
+        _add_to_override_registry("containerA", {"hashA"})
+        _add_to_override_registry("containerB", {"hashB"})
+        assert get_override_registry_hashes("containerA") == {"hashA"}
+        assert get_override_registry_hashes("containerB") == {"hashB"}
+        # container C sees nothing
+        assert get_override_registry_hashes("containerC") == set()
+
+    def test_registry_returns_copy(self) -> None:
+        """get_override_registry_hashes returns a mutable copy."""
+        _OVERRIDE_REGISTRY.clear()
+        _add_to_override_registry("testcid123456", {"hashX"})
+        result = get_override_registry_hashes("testcid123456")
+        result.add("hacker")  # mutate the copy
+        # Original registry unchanged
+        original = get_override_registry_hashes("testcid123456")
+        assert "hacker" not in original
+        assert original == {"hashX"}
+
+
+# ============================================================================
+# Registry + run_secret_scan integration (issue #722)
+# ============================================================================
+
+
+class TestRegistryScanIntegration:
+    """Registry hashes suppress findings in run_secret_scan."""
+
+    def test_registry_suppresses_findings(self) -> None:
+        """A finding whose hash is in the registry is suppressed."""
+        _OVERRIDE_REGISTRY.clear()
+        finding_json = _make_finding_json("secret.py", 3, "Private Key")
+        # Parse to get the hashed_secret
+        finding_data = json.loads(finding_json)
+        finding_hash = finding_data["results"]["secret.py"][0][
+            "hashed_secret"
+        ]
+
+        _add_to_override_registry("testcid123456", {finding_hash})
+
+        container = _make_container([
+            (0, _dummy_version_output(), ""),     # --version check
+            (0, finding_json, ""),                 # scan output
+        ])
+        # Simulate publish: baseline_hashes empty set + registry populated
+        # via the union that publish does.
+        registry_hashes = get_override_registry_hashes("testcid123456")
+        baseline_hashes: set[str] = set() | registry_hashes
+
+        result = run_secret_scan(
+            container, ["secret.py"], "/tmp/repo",
+            baseline_hashes=baseline_hashes,
+        )
+        assert result["secret_scan"] == "clean", (
+            f"Finding should be suppressed by registry hash; "
+            f"got {result.get('secret_scan')}: {result.get('scan_summary')}"
+        )
+
+    def test_registry_unknown_hash_not_suppressed(self) -> None:
+        """A finding whose hash is NOT in the registry is reported."""
+        _OVERRIDE_REGISTRY.clear()
+        finding_json = _make_finding_json("secret.py", 3, "Private Key")
+
+        # Register a DIFFERENT hash
+        _add_to_override_registry("testcid123456", {"unrelated-hash"})
+
+        container = _make_container([
+            (0, _dummy_version_output(), ""),
+            (0, finding_json, ""),
+        ])
+        registry_hashes = get_override_registry_hashes("testcid123456")
+        baseline_hashes: set[str] = set() | registry_hashes
+
+        result = run_secret_scan(
+            container, ["secret.py"], "/tmp/repo",
+            baseline_hashes=baseline_hashes,
+        )
+        assert result["secret_scan"] == "findings", (
+            f"Unregistered finding should NOT be suppressed; "
+            f"got {result.get('secret_scan')}"
+        )
+
+    def test_registry_different_container_not_suppressed(self) -> None:
+        """Registry for container A does not affect scan with container B's
+        published baseline_hashes."""
+        _OVERRIDE_REGISTRY.clear()
+        finding_json = _make_finding_json("secret.py", 3, "Private Key")
+        finding_data = json.loads(finding_json)
+        finding_hash = finding_data["results"]["secret.py"][0][
+            "hashed_secret"
+        ]
+
+        # Register for container A
+        _add_to_override_registry("containerA", {finding_hash})
+
+        container = _make_container([
+            (0, _dummy_version_output(), ""),
+            (0, finding_json, ""),
+        ])
+        # Publish from container B — gets container B's registry
+        registry_hashes = get_override_registry_hashes("containerB")
+        baseline_hashes: set[str] = set() | registry_hashes
+
+        result = run_secret_scan(
+            container, ["secret.py"], "/tmp/repo",
+            baseline_hashes=baseline_hashes,
+        )
+        # containerB's registry is empty, so finding is NOT suppressed
+        assert result["secret_scan"] == "findings", (
+            f"Container B should not inherit container A's override; "
+            f"got {result.get('secret_scan')}"
+        )
+
+    def test_registry_with_remote_baseline_both_suppress(self) -> None:
+        """Registry + remote baseline both suppress their respective hashes."""
+        _OVERRIDE_REGISTRY.clear()
+        finding1_json = _make_finding_json("file1.py", 1, "Private Key")
+        finding2_json = _make_finding_json("file2.py", 2, "AWS Secret Key")
+
+        finding1_data = json.loads(finding1_json)
+        hash1 = finding1_data["results"]["file1.py"][0]["hashed_secret"]
+        finding2_data = json.loads(finding2_json)
+        hash2 = finding2_data["results"]["file2.py"][0]["hashed_secret"]
+
+        # hash1 from remote baseline, hash2 from registry
+        remote_hashes = {hash1}
+        _add_to_override_registry("testcid123456", {hash2})
+
+        # Build combined scan output with both findings
+        combined = finding1_data.copy()
+        combined["results"] = {
+            **finding1_data["results"],
+            **finding2_data["results"],
+        }
+        combined_json = json.dumps(combined)
+
+        container = _make_container([
+            (0, _dummy_version_output(), ""),
+            (0, combined_json, ""),
+        ])
+
+        registry_hashes = get_override_registry_hashes("testcid123456")
+        baseline_hashes = remote_hashes | registry_hashes
+
+        result = run_secret_scan(
+            container, ["file1.py", "file2.py"], "/tmp/repo",
+            baseline_hashes=baseline_hashes,
+        )
+        # Both should be suppressed → clean
+        assert result["secret_scan"] == "clean", (
+            f"Both hashes should be suppressed (remote + registry); "
+            f"got {result.get('secret_scan')}: {result.get('scan_summary')}"
+        )
+
+
+# ============================================================================
+# Override message content (issue #722)
+# ============================================================================
+
+
+class TestOverrideMessage:
+    """secret_scan_override result message describes both mechanisms."""
+
+    def test_baseline_on_message_describes_both_mechanisms(self) -> None:
+        """Baseline ON → message mentions immediate (registry) AND durable
+        (baseline) mechanisms."""
+        container = _make_container([
+            # detect-secrets --version
+            (0, "detect_secrets-1.5.0\n", ""),
+            # cat .secrets.baseline → not found
+            (1, "", "No such file"),
+            # detect-secrets scan
+            (0, _make_finding_json("secret.py", 3, "Private Key"), ""),
+            # write baseline
+            (0, "", ""),
+        ])
+
+        client = MagicMock()
+        client.containers.get.return_value = container
+
+        with (
+            patch("sunaba.tools.secret_scan._docker", return_value=client),
+            patch(
+                "sunaba.tools.secret_scan._baseline_enabled",
+                return_value=True,
+            ),
+            patch("sunaba.tools.secret_scan.record_boundary_crossing"),
+            patch("sunaba.tools.secret_scan.record_tool_use"),
+        ):
+            result = secret_scan_override(
+                "testcid123456", working_dir="/workspace",
+                files=["secret.py"],
+            )
+            payload = json.loads(result)
+            assert payload["status"] == "ok"
+            assert payload["action"] == "baseline_updated"
+
+            detail = payload["detail"]
+            # Must mention BOTH mechanisms
+            assert "Override registered" in detail, (
+                f"Expected 'Override registered' in message; got: {detail}"
+            )
+            assert "this container" in detail.lower(), (
+                f"Expected mention of THIS container; got: {detail}"
+            )
+            assert "immediate" in detail.lower(), (
+                f"Expected 'immediate' mechanism description; got: {detail}"
+            )
+            assert "durable" in detail.lower(), (
+                f"Expected 'durable' mechanism description; got: {detail}"
+            )
+            assert ".secrets.baseline" in detail, (
+                f"Expected mention of .secrets.baseline; got: {detail}"
+            )
+            assert "merge" in detail.lower(), (
+                f"Expected mention of merging to base branch; got: {detail}"
+            )
+
+            # Registry should be populated
+            registry = get_override_registry_hashes("testcid123456")
+            assert len(registry) > 0, (
+                "Registry should have hashes after override; got empty"
+            )
+
+    def test_baseline_off_message_unchanged(self) -> None:
+        """Baseline OFF → message keeps the in-memory override wording."""
+        container = _make_container([
+            (0, "detect_secrets-1.5.0\n", ""),
+        ])
+
+        client = MagicMock()
+        client.containers.get.return_value = container
+
+        with (
+            patch("sunaba.tools.secret_scan._docker", return_value=client),
+            patch(
+                "sunaba.tools.secret_scan._baseline_enabled",
+                return_value=False,
+            ),
+            patch("sunaba.tools.secret_scan.record_boundary_crossing"),
+            patch("sunaba.tools.secret_scan.record_tool_use"),
+        ):
+            result = secret_scan_override(
+                "testcid123456", working_dir="/workspace",
+                files=["secret.py"],
+            )
+            payload = json.loads(result)
+            assert payload["status"] == "ok"
+            assert payload["action"] == "override_set"
+            assert "in-memory" in payload["detail"]
+
+
+# ---------------------------------------------------------------------------
+# should_consume_override — stale one-time flag must not survive a
+# registry/baseline-suppressed publish (#722 review, [high])
+# ---------------------------------------------------------------------------
+
+
+class TestShouldConsumeOverride:
+    """Truth table for the flag-consumption decision after a successful push."""
+
+    def test_findings_state_consumes(self) -> None:
+        from sunaba.tools.secret_scan import should_consume_override
+        assert should_consume_override("findings", 0) is True
+
+    def test_error_state_consumes(self) -> None:
+        from sunaba.tools.secret_scan import should_consume_override
+        assert should_consume_override("error", 0) is True
+
+    def test_genuinely_clean_keeps_flag(self) -> None:
+        from sunaba.tools.secret_scan import should_consume_override
+        assert should_consume_override("clean", 0) is False
+
+    def test_skipped_keeps_flag(self) -> None:
+        from sunaba.tools.secret_scan import should_consume_override
+        assert should_consume_override("skipped", 0) is False
+
+    def test_suppressed_clean_consumes(self) -> None:
+        """A clean that exists only because suppressions fired = override use."""
+        from sunaba.tools.secret_scan import should_consume_override
+        assert should_consume_override("clean", 2) is True
+
+
+class TestSuppressedCountReporting:
+    """run_secret_scan reports how many findings suppression removed."""
+
+    def _scan_json_with_hash(self, known_hash: str) -> str:
+        return json.dumps({
+            "generated_at": "2026-07-20T00:00:00Z",
+            "plugins_used": [],
+            "results": {
+                "safe.py": [
+                    {
+                        "type": "Secret Keyword",
+                        "filename": "safe.py",
+                        "line_number": 10,
+                        "hashed_secret": known_hash,
+                        "is_verified": False,
+                    }
+                ]
+            },
+        })
+
+    def test_suppressed_count_when_hash_known(self) -> None:
+        import hashlib
+        fake_secret = "".join(
+            chr(ord(c) + 1) for c in "known-secret-for-count"
+        )
+        known_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+        container = _make_container([
+            (0, _dummy_version_output(), ""),
+            (0, self._scan_json_with_hash(known_hash), ""),
+        ])
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = run_secret_scan(
+                container, ["safe.py"], "/tmp/repo",
+                baseline_hashes={known_hash},
+            )
+        assert result["secret_scan_state"] == "clean"
+        assert result["suppressed_count"] == 1
+        assert "suppressed" in result["scan_summary"]
+
+    def test_suppressed_count_zero_when_nothing_known(self) -> None:
+        import hashlib
+        fake_secret = "".join(
+            chr(ord(c) + 1) for c in "unknown-secret-for-count"
+        )
+        unknown_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+        container = _make_container([
+            (0, _dummy_version_output(), ""),
+            (0, self._scan_json_with_hash(unknown_hash), ""),
+        ])
+        with patch(
+            "sunaba.tools.secret_scan._baseline_enabled",
+            return_value=True,
+        ):
+            result = run_secret_scan(
+                container, ["safe.py"], "/tmp/repo",
+                baseline_hashes=set(),
+            )
+        assert result["secret_scan_state"] == "findings"
+        assert result["suppressed_count"] == 0

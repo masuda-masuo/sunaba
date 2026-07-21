@@ -55,6 +55,7 @@ from .tools.journal import (
 from .tools.package import (
     package_install,
 )
+from .tools.run_python import run_python
 from .tools.secret_scan import (
     secret_scan_override,
 )
@@ -147,6 +148,7 @@ diff_in_container = mcp.tool()(diff_in_container)
 
 # Verify tool registrations
 transform_file = mcp.tool()(transform_file)
+run_python = mcp.tool()(run_python)
 search_in_container = mcp.tool()(search_in_container)
 lint_in_container = mcp.tool()(lint_in_container)
 type_check_in_container = mcp.tool()(type_check_in_container)

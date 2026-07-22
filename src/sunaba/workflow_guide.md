@@ -66,6 +66,11 @@ type check in one call.
   When the filtered subset passes, the full suite runs automatically.
 - The lint and type gates run as preconditions. A failure there is a real error;
   `skip_type_gate` is not a routine flag.
+- **A green `gate_passed` alongside a set `lint_type_incomplete` means "not measured", not
+  "passed".** A missing toolchain is not treated as a failure, so a container whose image
+  does not match the repository skips lint and type entirely and still reports a green
+  gate. Read both fields. This is the concrete cost of reusing a container across
+  repositories -- it once let two pyright errors through to a pushed branch.
 - `diff_summary` is structured JSON (`{unstaged, staged, untracked}`), not `git diff --stat`.
 
 ### diff_in_container takes `worktree`

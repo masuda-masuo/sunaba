@@ -9,8 +9,10 @@ same budget.
 from __future__ import annotations
 
 import asyncio
+import re
 
 from sunaba import server
+from sunaba.workflow_guide import _load_guide, _parse_phases
 
 DESCRIPTION_BYTE_LIMIT = 2048
 
@@ -118,4 +120,40 @@ class TestAggregateBudget:
             f"schema parameter descriptions total {total} bytes "
             f"(limit {TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT}); worst offenders: "
             f"{sorted(sizes.items(), key=lambda kv: -kv[1])[:5]}"
+        )
+
+
+class TestUnderscoreParams:
+    """No internal-use-only parameters leak into the MCP schema."""
+
+    def test_no_underscore_params(self) -> None:
+        hidden: list[str] = []
+        for t in _tools(server):
+            props = (t.parameters or {}).get("properties") or {}
+            for pname in props:
+                if pname.startswith("_"):
+                    hidden.append(f"{t.name}.{pname}")
+        assert not hidden, f"internal parameters exposed in schema: {hidden}"
+
+
+class TestWorkflowGuidePhases:
+    """Phase names in get_workflow_guide's visible description match the shipped guide."""
+
+    def test_phases_listed_in_description(self) -> None:
+        guide_text = _load_guide()
+        actual_phases = set(_parse_phases(guide_text).keys())
+
+        tools = {t.name: t for t in _tools(server)}
+        desc: str = tools["get_workflow_guide"].description or ""
+        m = re.search(r"Valid phases:\s*(.+)", desc)
+        assert m is not None, (
+            "could not find 'Valid phases:' in get_workflow_guide description"
+        )
+        # The sentence ends in a period, which would otherwise ride along on
+        # the last phase name.
+        desc_phases = {p.strip().rstrip(".") for p in m.group(1).split(",")}
+
+        assert desc_phases == actual_phases, (
+            f"phase mismatch: description has {sorted(desc_phases)}, "
+            f"guide has {sorted(actual_phases)}"
         )

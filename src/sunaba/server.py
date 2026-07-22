@@ -119,9 +119,9 @@ sandbox_pr_review_write = mcp.tool()(sandbox_pr_review_write)
 checkpoint = mcp.tool()(checkpoint)
 checkpoint_list = mcp.tool()(checkpoint_list)
 checkpoint_restore = mcp.tool()(checkpoint_restore)
-merge_base = mcp.tool()(merge_base)
-merge_complete = mcp.tool()(merge_complete)
-merge_abort = mcp.tool()(merge_abort)
+merge_base = mcp.tool(exclude_args=["_container"])(merge_base)
+merge_complete = mcp.tool(exclude_args=["_container"])(merge_complete)
+merge_abort = mcp.tool(exclude_args=["_container"])(merge_abort)
 secret_scan_override = mcp.tool()(secret_scan_override)
 
 # Container naming / discovery tools (Issue #478)
@@ -166,6 +166,8 @@ verify_in_container = mcp.tool()(verify_in_container)
 # Workflow guide (Issue #728)
 def get_workflow_guide(phase: str | None = None) -> str:
     """Return the version-locked sunaba workflow guide, or a filtered phase section.
+
+    Valid phases: init, explore, edit, verify, publish, issue, cleanup.
 
     Args:
         phase: Optional phase filter.

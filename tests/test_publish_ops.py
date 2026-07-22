@@ -716,12 +716,60 @@ class TestGitPrepareCommitAutoInclude:
 
 
 def _run_in(repo_dir, cmd, env=None):
-    """Run a shell command inside *repo_dir* and return (ec, stdout, stderr)."""
+    """Run a shell command inside *repo_dir* and return (ec, stdout, stderr).
+
+    This is the callback handed to ``git_prepare_commit``, so it must report
+    failures as a return code rather than raising -- that is the contract the
+    production code is written against.  For fixture setup use ``_setup_in``.
+    """
     result = subprocess.run(
         cmd, shell=True, capture_output=True, text=True,
         cwd=str(repo_dir), env=env,
     )
     return result.returncode, result.stdout, result.stderr
+
+
+def _setup_in(repo_dir, cmd):
+    """``_run_in`` for fixture setup: a non-zero exit is a broken test.
+
+    Setup steps must fail loudly and immediately.  Swallowing them makes the
+    first failed command surface many steps later as an unrelated assertion --
+    a failed initial ``git commit`` leaves HEAD unborn, so the branch checkout,
+    both pushes and the remote-base lookup all fail downstream of a cause that
+    is nowhere in the traceback.
+    """
+    ec, out, err = _run_in(repo_dir, cmd)
+    assert ec == 0, (
+        f"fixture setup failed: {cmd!r}\nstdout: {out}\nstderr: {err}"
+    )
+    return ec, out, err
+
+
+def _init_origin_and_clone(origin, clone):
+    """Create a bare origin and a clone configured for committing.
+
+    The git identity must be set explicitly: CI runners have no ambient
+    identity and no way to derive one, so without this the first commit in
+    every one of these fixtures fails.  Locally, git guesses an identity from
+    the host, which is exactly why this passes in a container and fails in CI.
+    """
+    subprocess.run(
+        ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
+        check=True, capture_output=True,
+    )
+    for key, value in (
+        ("user.name", "sunaba tests"),
+        ("user.email", "sunaba-tests@example.invalid"),
+        ("commit.gpgsign", "false"),
+    ):
+        subprocess.run(
+            ["git", "config", key, value],
+            check=True, capture_output=True, cwd=str(clone),
+        )
 
 
 class TestRealGitDeclaredPathNotOverwritten:
@@ -741,35 +789,24 @@ class TestRealGitDeclaredPathNotOverwritten:
             tmp = Path(tmp)
             origin = tmp / "origin.git"
             clone = tmp / "clone"
-
-            # --- 1. Create a bare "origin" ---
-            subprocess.run(
-                ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
-                check=True, capture_output=True,
-            )
-
-            # --- 2. Clone it ---
-            subprocess.run(
-                ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
-                check=True, capture_output=True,
-            )
+            _init_origin_and_clone(origin, clone)
 
             # --- 3. Initial commit on main ---
             (clone / "target.txt").write_text("initial on main\n")
-            _run_in(clone, "git add target.txt")
-            _run_in(clone, "git commit -m 'initial'")
-            _run_in(clone, "git push origin main")
+            _setup_in(clone, "git add target.txt")
+            _setup_in(clone, "git commit -m 'initial'")
+            _setup_in(clone, "git push origin main")
 
             # --- 4. Create a feature branch with different content ---
-            _run_in(clone, "git checkout -b feat")
+            _setup_in(clone, "git checkout -b feat")
             (clone / "target.txt").write_text("content on feat branch\n")
-            _run_in(clone, "git add target.txt")
-            _run_in(clone, "git commit -m 'feat commit'")
-            _run_in(clone, "git push origin feat")
+            _setup_in(clone, "git add target.txt")
+            _setup_in(clone, "git commit -m 'feat commit'")
+            _setup_in(clone, "git push origin feat")
 
             # --- Delete local feat so checkout -b works ---
-            _run_in(clone, "git checkout main")
-            _run_in(clone, "git branch -D feat")
+            _setup_in(clone, "git checkout main")
+            _setup_in(clone, "git branch -D feat")
             assert (clone / "target.txt").read_text() == "initial on main\n"
 
             # --- 6. Simulate the container edit: modify target.txt ---
@@ -820,34 +857,26 @@ class TestRealGitDeclaredPathNotOverwritten:
             tmp = Path(tmp)
             origin = tmp / "origin.git"
             clone = tmp / "clone"
-
-            subprocess.run(
-                ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
-                check=True, capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
-                check=True, capture_output=True,
-            )
+            _init_origin_and_clone(origin, clone)
 
             # Initial commit with two files
             (clone / "declared.txt").write_text("declared initial\n")
             (clone / "auto.txt").write_text("auto initial\n")
-            _run_in(clone, "git add declared.txt auto.txt")
-            _run_in(clone, "git commit -m 'initial'")
-            _run_in(clone, "git push origin main")
+            _setup_in(clone, "git add declared.txt auto.txt")
+            _setup_in(clone, "git commit -m 'initial'")
+            _setup_in(clone, "git push origin main")
 
             # Feature branch
-            _run_in(clone, "git checkout -b feat")
+            _setup_in(clone, "git checkout -b feat")
             (clone / "declared.txt").write_text("declared on feat\n")
             (clone / "auto.txt").write_text("auto on feat\n")
-            _run_in(clone, "git add declared.txt auto.txt")
-            _run_in(clone, "git commit -m 'feat'")
-            _run_in(clone, "git push origin feat")
+            _setup_in(clone, "git add declared.txt auto.txt")
+            _setup_in(clone, "git commit -m 'feat'")
+            _setup_in(clone, "git push origin feat")
 
             # Delete local feat
-            _run_in(clone, "git checkout main")
-            _run_in(clone, "git branch -D feat")
+            _setup_in(clone, "git checkout main")
+            _setup_in(clone, "git branch -D feat")
 
             # Back to main, edit only declared.txt
             edited_declared = "declared edited in container\n"
@@ -892,28 +921,20 @@ class TestRealGitDeclaredPathNotOverwritten:
             tmp = Path(tmp)
             origin = tmp / "origin.git"
             clone = tmp / "clone"
-
-            subprocess.run(
-                ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
-                check=True, capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
-                check=True, capture_output=True,
-            )
+            _init_origin_and_clone(origin, clone)
 
             (clone / "same.txt").write_text("unchanged content\n")
-            _run_in(clone, "git add same.txt")
-            _run_in(clone, "git commit -m 'initial'")
-            _run_in(clone, "git push origin main")
+            _setup_in(clone, "git add same.txt")
+            _setup_in(clone, "git commit -m 'initial'")
+            _setup_in(clone, "git push origin main")
 
             # Branch with the SAME content for this file
-            _run_in(clone, "git checkout -b feat")
+            _setup_in(clone, "git checkout -b feat")
             # Push without changing content — feat has same same.txt
-            _run_in(clone, "git push origin feat")
+            _setup_in(clone, "git push origin feat")
 
             # Back to main
-            _run_in(clone, "git checkout main")
+            _setup_in(clone, "git checkout main")
 
             # Working tree has the SAME content as origin/feat
             result = git_prepare_commit(
@@ -937,31 +958,23 @@ class TestRealGitDeclaredPathNotOverwritten:
             tmp = Path(tmp)
             origin = tmp / "origin.git"
             clone = tmp / "clone"
-
-            subprocess.run(
-                ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
-                check=True, capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
-                check=True, capture_output=True,
-            )
+            _init_origin_and_clone(origin, clone)
 
             # Initial commit
             (clone / "conflict.txt").write_text("v1\n")
-            _run_in(clone, "git add conflict.txt")
-            _run_in(clone, "git commit -m 'initial'")
-            _run_in(clone, "git push origin main")
+            _setup_in(clone, "git add conflict.txt")
+            _setup_in(clone, "git commit -m 'initial'")
+            _setup_in(clone, "git push origin main")
 
             # Branch with different content -> push
-            _run_in(clone, "git checkout -b feat")
+            _setup_in(clone, "git checkout -b feat")
             (clone / "conflict.txt").write_text("v2\n")
-            _run_in(clone, "git add conflict.txt")
-            _run_in(clone, "git commit -m 'branch'")
-            _run_in(clone, "git push origin feat")
+            _setup_in(clone, "git add conflict.txt")
+            _setup_in(clone, "git commit -m 'branch'")
+            _setup_in(clone, "git push origin feat")
 
             # Back to main, make a conflicting working-tree change
-            _run_in(clone, "git checkout main")
+            _setup_in(clone, "git checkout main")
             (clone / "conflict.txt").write_text("v3 uncommitted\n")
 
             # git checkout feat should fail because conflict.txt has
@@ -990,35 +1003,27 @@ class TestRealGitDeclaredPathNotOverwritten:
             tmp = Path(tmp)
             origin = tmp / "origin.git"
             clone = tmp / "clone"
-
-            subprocess.run(
-                ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
-                check=True, capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
-                check=True, capture_output=True,
-            )
+            _init_origin_and_clone(origin, clone)
 
             (clone / "changed.txt").write_text("v1\n")
             # unchanged.txt is identical on main and on feat: it is the
             # auto-included, non-declared path that must not affect the
             # empty-result decision.
             (clone / "unchanged.txt").write_text("same everywhere\n")
-            _run_in(clone, "git add changed.txt unchanged.txt")
-            _run_in(clone, "git commit -m 'initial'")
-            _run_in(clone, "git push origin main")
+            _setup_in(clone, "git add changed.txt unchanged.txt")
+            _setup_in(clone, "git commit -m 'initial'")
+            _setup_in(clone, "git push origin main")
 
             # Branch with different content for changed.txt
-            _run_in(clone, "git checkout -b feat")
+            _setup_in(clone, "git checkout -b feat")
             (clone / "changed.txt").write_text("v2\n")
-            _run_in(clone, "git add changed.txt")
-            _run_in(clone, "git commit -m 'branch'")
-            _run_in(clone, "git push origin feat")
+            _setup_in(clone, "git add changed.txt")
+            _setup_in(clone, "git commit -m 'branch'")
+            _setup_in(clone, "git push origin feat")
 
             # Delete local feat
-            _run_in(clone, "git checkout main")
-            _run_in(clone, "git branch -D feat")
+            _setup_in(clone, "git checkout main")
+            _setup_in(clone, "git branch -D feat")
 
             # Back to main, edit changed.txt to something new
             edited = "v3 container edit\n"

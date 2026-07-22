@@ -7,6 +7,9 @@ scripted (exit_code, stdout, stderr) tuples.
 
 from __future__ import annotations
 
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from sunaba.tools.publish_ops import (
@@ -531,6 +534,7 @@ class TestGitPrepareCommitAutoInclude:
             (0, "", ""),                     # git add added.txt
             # declared file staging
             (0, "", ""),                     # git add declared.txt
+            (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat/a abc1234] Msg\n", ""),  # commit
         ])
         result = git_prepare_commit(
@@ -561,6 +565,7 @@ class TestGitPrepareCommitAutoInclude:
             (0, "", ""),                     # git reset --mixed origin/HEAD
             # no auto-include writes (None -> skipped)
             (0, "", ""),                     # git add declared.txt
+            (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat/x abc1234] Msg\n", ""),  # commit
         ])
         result = git_prepare_commit(
@@ -605,6 +610,7 @@ class TestGitPrepareCommitAutoInclude:
             (0, "", ""),                     # git rm todelete.txt
             # declared file staging
             (0, "", ""),                     # git add declared.txt
+            (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat/d abc1234] Msg\n", ""),  # commit
         ])
         result = git_prepare_commit(
@@ -632,6 +638,7 @@ class TestGitPrepareCommitAutoInclude:
             (1, "", "fatal: ..."),           # git ls-files --error-unmatch → not tracked
             # declared file staging
             (0, "", ""),                     # git add declared.txt
+            (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat/e abc1234] Msg\n", ""),  # commit
         ])
         result = git_prepare_commit(
@@ -681,6 +688,7 @@ class TestGitPrepareCommitAutoInclude:
             (0, "", ""),                     # echo+base64 for binary.bin
             (0, "", ""),                     # git add binary.bin
             (0, "", ""),                     # git add declared.txt
+            (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat/g abc1234] Msg\n", ""),  # commit
         ])
         result = git_prepare_commit(
@@ -695,3 +703,342 @@ class TestGitPrepareCommitAutoInclude:
         assert any("binary.bin" in c and "base64" in c for c in cmd_strs), (
             "binary content should be written via base64"
         )
+
+# ============================================================================
+# Real-git regression tests (issue #727)
+# ============================================================================
+#
+# These tests exercise git_prepare_commit against **real** git in a
+# temporary bare-origin + clone setup.  No RecordingRun, no canned output.
+# They reproduce the bug where auto-include overwrites container edits
+# when the container HEAD is a merge commit and base_auto_include contains
+# a declared path.
+
+
+def _run_in(repo_dir, cmd, env=None):
+    """Run a shell command inside *repo_dir* and return (ec, stdout, stderr)."""
+    result = subprocess.run(
+        cmd, shell=True, capture_output=True, text=True,
+        cwd=str(repo_dir), env=env,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+class TestRealGitDeclaredPathNotOverwritten:
+    """Real-git tests: declared file content is what gets committed, not
+    auto-include content."""
+
+    def test_declared_path_survives_auto_include(self):
+        """When a declared path is also in base_auto_include, the
+        working-tree edit must be committed, not the auto-included content.
+
+        Reproduces the issue #727 incident: HEAD is a merge commit, so
+        base_auto_include is populated.  The auto-include loop writes
+        host-fetched content over the declared path — the bug — and the
+        subsequent ``git add`` stages stale content.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            origin = tmp / "origin.git"
+            clone = tmp / "clone"
+
+            # --- 1. Create a bare "origin" ---
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
+                check=True, capture_output=True,
+            )
+
+            # --- 2. Clone it ---
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
+                check=True, capture_output=True,
+            )
+
+            # --- 3. Initial commit on main ---
+            (clone / "target.txt").write_text("initial on main\n")
+            _run_in(clone, "git add target.txt")
+            _run_in(clone, "git commit -m 'initial'")
+            _run_in(clone, "git push origin main")
+
+            # --- 4. Create a feature branch with different content ---
+            _run_in(clone, "git checkout -b feat")
+            (clone / "target.txt").write_text("content on feat branch\n")
+            _run_in(clone, "git add target.txt")
+            _run_in(clone, "git commit -m 'feat commit'")
+            _run_in(clone, "git push origin feat")
+
+            # --- Delete local feat so checkout -b works ---
+            _run_in(clone, "git checkout main")
+            _run_in(clone, "git branch -D feat")
+            assert (clone / "target.txt").read_text() == "initial on main\n"
+
+            # --- 6. Simulate the container edit: modify target.txt ---
+            edited = "this is the container edit — must be kept\n"
+            (clone / "target.txt").write_text(edited)
+
+            # --- 7. base_auto_include carries the file from the remote base ---
+            # In real publish, this is fetched host-side from GitHub.
+            # Here we supply it directly.  Before the fix, the auto-include
+            # write overwrites the working-tree edit, and git add stages
+            # the stale auto-included content.
+            auto_content = "content from auto-include — must NOT win\n"
+
+            result = git_prepare_commit(
+                lambda cmd, env=None: _run_in(clone, cmd, env),
+                branch="feat",
+                message="publish edit",
+                files=["target.txt"],
+                base_auto_include={"target.txt": auto_content},
+            )
+
+            # --- 8. The call must succeed ---
+            assert result is None, (
+                f"git_prepare_commit returned error: {result}"
+            )
+
+            # --- 9. Committed content is the container edit, not auto-include ---
+            committed = subprocess.run(
+                ["git", "show", "HEAD:target.txt"],
+                capture_output=True, text=True, cwd=str(clone),
+            ).stdout
+            assert committed == edited, (
+                f"Expected committed content = edited content, "
+                f"but committed: {committed!r}"
+            )
+
+            # --- 10. Working tree still holds the edit after publish ---
+            wt = (clone / "target.txt").read_text()
+            assert wt == edited, (
+                f"Working tree content was rolled back. "
+                f"Expected: {edited!r}, got: {wt!r}"
+            )
+
+    def test_non_declared_auto_include_still_applies(self):
+        """Auto-include paths that are NOT in the declared files list
+        must still be written and staged.  Only declared paths override."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            origin = tmp / "origin.git"
+            clone = tmp / "clone"
+
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
+                check=True, capture_output=True,
+            )
+
+            # Initial commit with two files
+            (clone / "declared.txt").write_text("declared initial\n")
+            (clone / "auto.txt").write_text("auto initial\n")
+            _run_in(clone, "git add declared.txt auto.txt")
+            _run_in(clone, "git commit -m 'initial'")
+            _run_in(clone, "git push origin main")
+
+            # Feature branch
+            _run_in(clone, "git checkout -b feat")
+            (clone / "declared.txt").write_text("declared on feat\n")
+            (clone / "auto.txt").write_text("auto on feat\n")
+            _run_in(clone, "git add declared.txt auto.txt")
+            _run_in(clone, "git commit -m 'feat'")
+            _run_in(clone, "git push origin feat")
+
+            # Delete local feat
+            _run_in(clone, "git checkout main")
+            _run_in(clone, "git branch -D feat")
+
+            # Back to main, edit only declared.txt
+            edited_declared = "declared edited in container\n"
+            (clone / "declared.txt").write_text(edited_declared)
+
+            # Auto-include supplies both files (simulating a base-advance)
+            result = git_prepare_commit(
+                lambda cmd, env=None: _run_in(clone, cmd, env),
+                branch="feat",
+                message="publish",
+                files=["declared.txt"],
+                base_auto_include={
+                    "declared.txt": "should be overridden\n",
+                    "auto.txt": "auto-include content wins\n",
+                },
+            )
+            assert result is None, f"Unexpected error: {result}"
+
+            # Declared path has the edit
+            committed_declared = subprocess.run(
+                ["git", "show", "HEAD:declared.txt"],
+                capture_output=True, text=True, cwd=str(clone),
+            ).stdout
+            assert committed_declared == edited_declared, (
+                f"Declared path should have edit: {committed_declared!r}"
+            )
+
+            # Non-declared auto-include path has auto-include content
+            committed_auto = subprocess.run(
+                ["git", "show", "HEAD:auto.txt"],
+                capture_output=True, text=True, cwd=str(clone),
+            ).stdout
+            assert committed_auto == "auto-include content wins\n", (
+                f"Non-declared path should have auto-include: {committed_auto!r}"
+            )
+
+    def test_empty_result_rejected(self):
+        """When every declared path is byte-identical to what the remote
+        base already contains, publish must return ``status: \"error\"``
+        with ``step: \"empty_result\"`` and name the declared paths."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            origin = tmp / "origin.git"
+            clone = tmp / "clone"
+
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
+                check=True, capture_output=True,
+            )
+
+            (clone / "same.txt").write_text("unchanged content\n")
+            _run_in(clone, "git add same.txt")
+            _run_in(clone, "git commit -m 'initial'")
+            _run_in(clone, "git push origin main")
+
+            # Branch with the SAME content for this file
+            _run_in(clone, "git checkout -b feat")
+            # Push without changing content — feat has same same.txt
+            _run_in(clone, "git push origin feat")
+
+            # Back to main
+            _run_in(clone, "git checkout main")
+
+            # Working tree has the SAME content as origin/feat
+            result = git_prepare_commit(
+                lambda cmd, env=None: _run_in(clone, cmd, env),
+                branch="feat",
+                message="no change",
+                files=["same.txt"],
+            )
+
+            assert result is not None, "Should reject empty result"
+            assert result["status"] == "error"
+            assert result["step"] == "empty_result"
+            assert "same.txt" in str(result["declared_paths"])
+            assert "byte-identical" in result["error"]
+
+    def test_checkout_failure_is_reported(self):
+        """When git checkout fails (e.g. working-tree conflicts), the error
+        is surfaced with ``step: \"git_checkout\"`` instead of being silently
+        ignored."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            origin = tmp / "origin.git"
+            clone = tmp / "clone"
+
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
+                check=True, capture_output=True,
+            )
+
+            # Initial commit
+            (clone / "conflict.txt").write_text("v1\n")
+            _run_in(clone, "git add conflict.txt")
+            _run_in(clone, "git commit -m 'initial'")
+            _run_in(clone, "git push origin main")
+
+            # Branch with different content -> push
+            _run_in(clone, "git checkout -b feat")
+            (clone / "conflict.txt").write_text("v2\n")
+            _run_in(clone, "git add conflict.txt")
+            _run_in(clone, "git commit -m 'branch'")
+            _run_in(clone, "git push origin feat")
+
+            # Back to main, make a conflicting working-tree change
+            _run_in(clone, "git checkout main")
+            (clone / "conflict.txt").write_text("v3 uncommitted\n")
+
+            # git checkout feat should fail because conflict.txt has
+            # uncommitted changes and the branch has different content
+            result = git_prepare_commit(
+                lambda cmd, env=None: _run_in(clone, cmd, env),
+                branch="feat",
+                message="should fail",
+                files=["conflict.txt"],
+            )
+
+            assert result is not None, "Should fail on checkout conflict"
+            assert result["status"] == "error"
+            assert result["step"] == "git_checkout", (
+                f"Expected step=git_checkout, got {result.get('step')}"
+            )
+            assert "checkout" in result.get("error", "").lower() or (
+                "switch" in result.get("error", "").lower()
+            )
+
+    def test_non_declared_auto_include_lone_dont_block(self):
+        """When the declared paths differ from the base but the ONLY
+        auto-included non-declared path is unchanged, the commit is still
+        made — only the declared paths are checked for empty-result."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            origin = tmp / "origin.git"
+            clone = tmp / "clone"
+
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "init", "--bare", str(origin)],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "clone", str(origin), str(clone)],
+                check=True, capture_output=True,
+            )
+
+            (clone / "changed.txt").write_text("v1\n")
+            # unchanged.txt is identical on main and on feat: it is the
+            # auto-included, non-declared path that must not affect the
+            # empty-result decision.
+            (clone / "unchanged.txt").write_text("same everywhere\n")
+            _run_in(clone, "git add changed.txt unchanged.txt")
+            _run_in(clone, "git commit -m 'initial'")
+            _run_in(clone, "git push origin main")
+
+            # Branch with different content for changed.txt
+            _run_in(clone, "git checkout -b feat")
+            (clone / "changed.txt").write_text("v2\n")
+            _run_in(clone, "git add changed.txt")
+            _run_in(clone, "git commit -m 'branch'")
+            _run_in(clone, "git push origin feat")
+
+            # Delete local feat
+            _run_in(clone, "git checkout main")
+            _run_in(clone, "git branch -D feat")
+
+            # Back to main, edit changed.txt to something new
+            edited = "v3 container edit\n"
+            (clone / "changed.txt").write_text(edited)
+
+            result = git_prepare_commit(
+                lambda cmd, env=None: _run_in(clone, cmd, env),
+                branch="feat",
+                message="publish",
+                files=["changed.txt"],
+                # The only auto-included path is non-declared AND unchanged
+                # relative to the push target.
+                base_auto_include={"unchanged.txt": "same everywhere\n"},
+            )
+            assert result is None, (
+                f"Should succeed with changed declared path, got: {result}"
+            )
+
+            committed = subprocess.run(
+                ["git", "show", "HEAD:changed.txt"],
+                capture_output=True, text=True, cwd=str(clone),
+            ).stdout
+            assert committed == edited

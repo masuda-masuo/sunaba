@@ -706,6 +706,7 @@ class TestPublishManifest:
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
@@ -764,6 +765,7 @@ class TestPublishManifest:
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- ':(literal)declared.txt'
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
             (0, porcelain, b""),  # git status --porcelain -z (leftovers)
             (0, b"pushed", b""),  # push
@@ -811,6 +813,7 @@ class TestPublishManifest:
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'newfile.py'
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
@@ -852,6 +855,7 @@ class TestPublishManifest:
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Msg", b""),  # commit
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
@@ -1063,6 +1067,7 @@ class TestPublishManifest:
             (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD (found)
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'deleted.txt' (stages deletion)
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[feat/del abc1234] Delete", b""),  # commit
             (0, b"", b""),  # git status --porcelain (clean)
             (0, b"pushed", b""),  # push
@@ -1161,6 +1166,7 @@ class TestPublishManifest:
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'  <-- only declarerd
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
@@ -1223,6 +1229,7 @@ class TestPublishManifest:
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/fix/x
             (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
@@ -1284,6 +1291,7 @@ class TestPublishManifest:
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/main
             (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
@@ -1330,6 +1338,7 @@ class TestPublishManifest:
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/master
             (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
@@ -1618,6 +1627,7 @@ class TestPublishSecretScanIntegration:
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
             (0, b"", b""),  # git status --porcelain -z
             (0, b"pushed", b""),  # push
@@ -1666,6 +1676,7 @@ class TestPublishSecretScanIntegration:
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/HEAD
             (0, b"", b""),  # git add --
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
             (0, b"", b""),  # git status --porcelain -z
             (0, b"pushed", b""),  # push
@@ -1740,6 +1751,7 @@ class TestPublishBaseAutoInclude:
             (0, b"", b""),                # git add -- :(literal)moved.txt
             # declared file staging
             (0, b"", b""),                # git add -- :(literal)declared.txt
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
             (0, b"", b""),                # git status --porcelain -z
             (0, b"pushed", b""),          # push
@@ -1813,6 +1825,7 @@ class TestPublishBaseAutoInclude:
             (0, b"abc1234", b""),         # rev-parse --verify origin/HEAD
             (0, b"", b""),                # git reset --mixed origin/HEAD
             (0, b"", b""),                # git add -- :(literal)declared.txt
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
             (0, b"", b""),                # git status --porcelain -z
             (0, b"pushed", b""),          # push
@@ -1875,6 +1888,7 @@ class TestPublishBaseAutoInclude:
             (0, b"", b""),                # git add -- :(literal)base_advance.txt
             # declared file staging
             (0, b"", b""),                # git add -- :(literal)declared.txt
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
             (0, b"", b""),                # git status --porcelain -z
             (0, b"pushed", b""),          # push
@@ -1941,6 +1955,7 @@ class TestPublishBaseAutoInclude:
             (0, b"", b""),                # git add -- :(literal)good.txt
             # declared file staging
             (0, b"", b""),                # git add -- :(literal)declared.txt
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
             (0, b"", b""),                # git status --porcelain -z
             (0, b"pushed", b""),          # push
@@ -2009,6 +2024,7 @@ class TestPublishBaseAutoInclude:
             (0, b"", b""),                # git add -- :(literal)base.txt
             # declared file staging
             (0, b"", b""),                # git add -- :(literal)declared.txt
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
             (0, b"", b""),                # git status --porcelain -z
             (1, b"", b"remote rejected"), # git push FAILS → API fallback

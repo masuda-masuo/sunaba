@@ -131,7 +131,7 @@ class TestSandboxInitializeResources:
 
         result = sandbox_initialize(image=_IMG, mem_limit="2g", cpus=2.0)
 
-        assert result == "abc123def456 [network: off]"
+        assert result == "abc123def456 [network: off] [advisory: if you intend to edit or publish, call get_workflow_guide first]"
         kwargs = client.containers.run.call_args.kwargs
         assert kwargs["mem_limit"] == "2g"
         assert kwargs["memswap_limit"] == "2g"
@@ -232,7 +232,7 @@ class TestSandboxInitializeResources:
 
         result = sandbox_initialize(image=_IMG, mem_limit="512m")
 
-        assert result == "abc123def456 [network: off]"
+        assert result == "abc123def456 [network: off] [advisory: if you intend to edit or publish, call get_workflow_guide first]"
         kwargs = client.containers.run.call_args.kwargs
         assert kwargs["mem_limit"] == "512m"
 
@@ -255,7 +255,7 @@ class TestSandboxInitializeResources:
 
         result = sandbox_initialize(image=_IMG, mem_limit="2g")
 
-        assert result == "abc123def456 [network: off]"
+        assert result == "abc123def456 [network: off] [advisory: if you intend to edit or publish, call get_workflow_guide first]"
         kwargs = client.containers.run.call_args.kwargs
         assert kwargs["mem_limit"] == "2g"
 

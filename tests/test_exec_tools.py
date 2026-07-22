@@ -50,7 +50,7 @@ class TestSandboxInitialize:
                 allow_network=True,
             )
 
-        assert result == "abc123def456 [network: on]"
+        assert result == "abc123def456 [network: on] [advisory: if you intend to edit or publish, call get_workflow_guide first]"
         env = mock_client.containers.run.call_args[1]["environment"]
         assert "GITHUB_TOKEN" not in env
         assert "GH_TOKEN" not in env
@@ -153,7 +153,7 @@ class TestSandboxInitialize:
                 image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
             )
 
-        assert result == "abc123def456 [network: off]"
+        assert result == "abc123def456 [network: off] [advisory: if you intend to edit or publish, call get_workflow_guide first]"
         call_kwargs = mock_client.containers.run.call_args[1]
         assert "GITHUB_TOKEN" not in call_kwargs["environment"]
 

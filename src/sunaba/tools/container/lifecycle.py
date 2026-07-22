@@ -313,6 +313,13 @@ def sandbox_attach(name_or_id: str, session_label: str | None = None) -> str:
     except Exception:
         result["journal_activity"] = 0
 
+    # --- Advisory (Issue #728) ---
+    # Conditioned on intent so a caller who only attached to read (e.g. for
+    # git orientation) can skip it by its own judgment.
+    result["advisory"] = (
+        "If you intend to edit or publish, call get_workflow_guide first."
+    )
+
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -702,7 +709,15 @@ def sandbox_initialize(
     net_state = "on" if allow_network else "off"
     net_msg = f" [network: {net_state}]"
     name_msg = f" [name: {name}]" if name else ""
-    return cid + clone_msg + pr_msg + net_msg + name_msg
+    return (
+        cid
+        + clone_msg
+        + pr_msg
+        + net_msg
+        + name_msg
+        + " [advisory: if you intend to edit or publish, "
+        + "call get_workflow_guide first]"
+    )
 
 
 # Async wrapper around sandbox_initialize: the sync work runs in a thread

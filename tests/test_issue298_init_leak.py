@@ -72,7 +72,7 @@ class TestManagementLabel:
 
         result = sandbox_initialize(image=_IMAGE)
 
-        assert result == "abc123def456 [network: off]"
+        assert result == "abc123def456 [network: off] [advisory: if you intend to edit or publish, call get_workflow_guide first]"
         labels = mock_client.containers.run.call_args[1]["labels"]
         assert labels[MANAGED_LABEL] == "true"
         assert CREATED_AT_LABEL in labels

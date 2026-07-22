@@ -98,7 +98,7 @@ class TestSandboxInitializeCloneRepo:
             image="python@sha256:0000000000000000000000000000000000000000000000000000000000000000",
         )
 
-        assert result == "abc123def456 [network: off]"
+        assert result == "abc123def456 [network: off] [advisory: if you intend to edit or publish, call get_workflow_guide first]"
         mock_clone.assert_not_called()
 
     @patch("sunaba.tools.container.clone._clone_repo_via_network")

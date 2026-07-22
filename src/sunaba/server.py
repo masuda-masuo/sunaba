@@ -77,6 +77,7 @@ from .tools.verify import (
     type_check_in_container,
     verify_in_container,
 )
+from .workflow_guide import get_guide as _get_guide
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -153,6 +154,19 @@ search_in_container = mcp.tool()(search_in_container)
 lint_in_container = mcp.tool()(lint_in_container)
 type_check_in_container = mcp.tool()(type_check_in_container)
 verify_in_container = mcp.tool()(verify_in_container)
+
+
+# Workflow guide (Issue #728)
+def get_workflow_guide(phase: str | None = None) -> str:
+    """Return the version-locked sunaba workflow guide, or a filtered phase section.
+
+    Args:
+        phase: Optional phase filter.
+    """
+    return _get_guide(phase)
+
+
+get_workflow_guide = mcp.tool()(get_workflow_guide)
 
 # Journal / trace read tools are opt-in (#460): telemetry *writes* are
 # unconditional infrastructure, but the LLM-facing read surface stays off

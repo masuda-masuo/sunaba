@@ -36,7 +36,7 @@ include = ["sunaba*"]
 # the source tree until CI publishes the first proxy image; the glob simply
 # matches nothing then, and load_proxy_pin() treats absence as "use the local
 # tag" rather than an error.
-sunaba = ["image_pins.json", "proxy_pin.json"]
+sunaba = ["image_pins.json", "proxy_pin.json", "workflow_guide.md"]
 
 [project.optional-dependencies]
 # detect-secrets is a *test* dependency here, not a runtime one: the server

@@ -61,6 +61,7 @@ Used by AI models to search, lint, type check, and run tests.
 | `type_check_in_container` | `container_id`, `file_path` | Runs static type checkers (`pyright` for Python, `tsc` for TypeScript). |
 | `verify_in_container` | `container_id`, `path`, `test_filter` (opt), `pytest_args` (opt), `language` (opt), `working_dir` (opt) | **Pre-publish gate.** Runs the lint and type gates as a precondition, then the project's tests (`pytest`/`jest`/`go test`). Returns structured test results plus a diff summary. |
 | `diff_in_container` | `container_id`, `base` (opt), `path` (opt), `raw` (opt) | Returns a structured JSON summary of changes against `base` (per-file counts), or hunk objects when `path` names a single file. |
+| `get_workflow_guide` | `phase` (opt) | Returns the version-locked workflow guide shipped inside the sunaba wheel; the guide's tool contracts win over client-side documents. Pass a phase name (`init`/`explore`/`edit`/`verify`/`publish`/`issue`/`cleanup`) to filter to that section. |
 
 ---
 

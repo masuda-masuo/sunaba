@@ -159,6 +159,8 @@ class TestDriftDetection:
         "additions",              # diff_in_container per-file summary field
         "deletions",              # diff_in_container per-file summary field
         "diff_summary",           # verify_in_container return JSON key
+        "gate_passed",            # verify_in_container return JSON field
+        "lint_type_incomplete",   # verify_in_container return JSON field
         "merge_discarded_sha",    # publish return JSON field
         "merge_discarded_undeclared",  # publish return JSON field
         "mergeable",              # gh pr view JSON field

@@ -228,6 +228,7 @@ class TestPublishSecretScanReal:
                 # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
@@ -512,6 +513,7 @@ class TestPublishSecretScanReal:
                 # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
@@ -585,6 +587,7 @@ class TestPublishSecretScanReal:
                 # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'secret.txt'
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
@@ -642,6 +645,7 @@ class TestPublishSecretScanReal:
                 # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
@@ -814,6 +818,7 @@ class TestPublishSecretScanReal:
                 # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- '.secrets.baseline'
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
@@ -943,6 +948,7 @@ class TestPublishSecretScanReal:
                 # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- '.secrets.baseline'
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
@@ -1161,6 +1167,7 @@ class TestPublishHostSideBaseline:
                 # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
@@ -1266,6 +1273,7 @@ class TestPublishHostSideBaseline:
                 # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
@@ -1447,6 +1455,7 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
@@ -1537,6 +1546,7 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
                 (0, b"", b""),  # git reset --mixed origin/HEAD
                 (0, b"", b""),  # git add -- 'declared.txt'
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push

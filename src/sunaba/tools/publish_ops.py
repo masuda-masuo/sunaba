@@ -65,8 +65,9 @@ def git_prepare_commit(
 ) -> dict | None:
     """Checkout branch, stage, squash unpushed checkpoints, then commit.
 
-    Step names (for error reporting): ``git_add``, ``squash_reset``,
-    ``squash_readd``, ``git_commit``.
+    Step names (for error reporting): ``git_checkout``, ``git_add``,
+    ``squash_reset``, ``squash_readd``, ``git_commit``, ``empty_result``,
+    ``auto_include_write``, ``auto_include_add``, ``auto_include_delete``.
 
     Args:
         run: Injected exec callback.
@@ -97,10 +98,16 @@ def git_prepare_commit(
         return merge_err
 
     # --- Git branch check/create ---
-    run(
+    checkout_ec, checkout_out, checkout_err = run(
         f"git checkout -b {shlex.quote(branch)} 2>/dev/null"
         f" || git checkout {shlex.quote(branch)}"
     )
+    if checkout_ec != 0:
+        return {
+            "status": "error",
+            "step": "git_checkout",
+            "error": checkout_err or checkout_out,
+        }
 
     if files is not None:
         # --- Manifest mode: build the commit against the remote base ---
@@ -170,7 +177,13 @@ def git_prepare_commit(
         # after this block) override any auto-included path with the same
         # name.
         if base_auto_include:
+            declared_set = set(files)
             for path, content in base_auto_include.items():
+                if path in declared_set:
+                    # Declared paths override auto-include: the working-tree
+                    # edit is the authority, and auto-include must not
+                    # overwrite it with host-fetched content.
+                    continue
                 if content is None:
                     # Auto-include deletion: git rm the path if tracked
                     # (issue #715).  If the path was never tracked (edge
@@ -232,6 +245,35 @@ def git_prepare_commit(
                     "status": "error",
                     "step": "git_add",
                     "error": add_err or add_out,
+                }
+
+        # --- Reject an empty declared result ---
+        # When every declared path is byte-identical to what the push
+        # target already contains, the commit would be empty for those
+        # paths: nothing to publish.  Use ``git diff --cached --exit-code``
+        # (0 = no differences, 1 = differences, >1 = error) against the
+        # base ref the index was reset to.  Auto-included non-declared
+        # paths are excluded from this check.
+        if base_ref:
+            diff_cmd = (
+                "git diff --cached --exit-code "
+                + base_ref
+                + " -- "
+                + " ".join(
+                    shlex.quote(f":(literal){f}") for f in files
+                )
+            )
+            diff_ec, diff_out, diff_err = run(diff_cmd)
+            if diff_ec == 0:
+                return {
+                    "status": "error",
+                    "step": "empty_result",
+                    "error": (
+                        "Every declared path is byte-identical to what "
+                        + base_ref
+                        + " already contains. No change to publish."
+                    ),
+                    "declared_paths": files,
                 }
     else:
         # --- Legacy mode: git add -A with upstream-aware squash ---

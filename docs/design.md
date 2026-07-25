@@ -185,6 +185,21 @@ are always returned, and when its output cannot be parsed the result says so exp
 rather than presenting as a plain success. Deciding what to do about a dropped count
 belongs to the caller; `verify_in_container` reports and does not gate on it (issue #738).
 
+The same silence-equals-success problem affects the lint and type-check gates:
+a linter that cannot start (e.g. eslint exit 2 because no config file exists)
+previously produced an envelope with zero findings and status ``ok``, so the
+gate reported ``incomplete=False`` and a caller could not tell the result apart
+from a clean lint.  The fix (issue #740) aligned eslint's exit-code handling
+with pyright's: a non-zero exit whose stdout contains nothing parseable is
+returned as status ``error``, which makes the gate set ``incomplete=True``.
+``verify_in_container`` translates this to ``lint_type_incomplete: true`` in
+its JSON output.  A green gate with ``lint_type_incomplete: true`` means "the
+linter or type checker could not run (missing config, missing tool, etc.)" and
+a caller should treat it as **not measured** rather than as **clean**.  The
+gate still passes — a missing config or missing tool is an environment fact,
+not a code defect (consistent with the handling of ``not_available`` and
+``error`` since issue #293).
+
 ---
 
 ## 5. Edit/Verify Subsystem

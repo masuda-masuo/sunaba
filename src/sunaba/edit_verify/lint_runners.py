@@ -163,16 +163,17 @@ def _run_eslint_verify(
         return _annotate_resolution(
             _envelope_not_available("eslint", "eslint not installed in container"), source, cmd
         )
-    if ec not in (0, 1, 2):
-        # eslint exit 2 = runtime error
-        return _annotate_resolution(
-            _envelope_error("eslint", stderr_text.strip() or f"exit code {ec}", ec), source, cmd
-        )
 
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     findings = _parse_eslint_output(stdout_text, _path_display(path))
     for r in findings:
         r["severity"] = _determine_lint_severity(r.get("rule", ""))
+
+    if ec not in (0, 1) and not findings:
+        return _annotate_resolution(
+            _envelope_error("eslint", stderr_text.strip() or f"exit code {ec}", ec), source, cmd
+        )
+
     return _annotate_resolution(_envelope_ok("eslint", findings, ec), source, cmd)
 
 

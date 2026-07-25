@@ -133,6 +133,23 @@ def _run_js_linter(
     if result.status not in ("not_available", "error"):
         return result.findings
 
+    if result.status == "error":
+        # eslint is installed but the run itself failed -- most often a
+        # missing or broken eslint.config.*  Telling the caller to install
+        # eslint would send them the wrong way, so report the reason
+        # (Issue #740).
+        return [
+            {
+                "file": file_path,
+                "line": 0,
+                "rule": "error",
+                "message": (
+                    "eslint could not run: "
+                    + (result.detail.strip() or "unknown error")
+                ),
+            }
+        ]
+
     return [
         {
             "file": file_path,

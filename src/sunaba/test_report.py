@@ -82,26 +82,47 @@ class TestFailure:
 
 @dataclass
 class TestReport:
-    """Structured test result."""
+    """Structured test result.
+
+    Framework-specific runners may set additional fields (*total*,
+    *skipped*, *todo*) that are not part of the common schema;
+    :meth:`to_dict` includes them only when they carry meaningful
+    values (e.g. ``total`` when not None, ``skipped``/``todo`` when
+    > 0).
+    """
 
     status: str  # "ok" | "failed"
     duration: float  # seconds
     passed: int
     failed: int = 0
     failures: list[TestFailure] | None = None
+    # Extra fields used by the TAP adapter (node --test)
+    total: int | None = None  # total test count (None = not reported)
+    skipped: int = 0
+    todo: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the common JSON schema.
 
-        Success case returns minimal dict (status, passed, duration).
+        Base fields (status, duration, passed) are always present.
+        ``failed`` and ``failures`` are included only for failures.
+        ``total``, ``skipped``, ``todo`` are included only when they
+        carry meaningful values.
         """
         base: dict[str, Any] = {
             "status": self.status,
             "duration": self.duration,
             "passed": self.passed,
         }
-        if self.status == "failed" and self.failures:
+        if self.total is not None:
+            base["total"] = self.total
+        if self.skipped:
+            base["skipped"] = self.skipped
+        if self.todo:
+            base["todo"] = self.todo
+        if self.failed:
             base["failed"] = self.failed
+        if self.failures:
             base["failures"] = [asdict(f) for f in self.failures]
         return base
 
@@ -458,6 +479,123 @@ class GoTestAdapter:
             if line:
                 events.append(json.loads(line))
         return cls.parse(events)
+
+
+# ---------------------------------------------------------------------------
+# TAP (node --test) adapter
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TapAdapter:
+    """Adapt **TAP v13** output produced by ``node --test``.
+
+    ``node --test`` outputs TAP version 13 with per-test diagnostic
+    YAML blocks and a trailing summary block that looks like::
+
+        1..N
+        # tests N
+        # suites N
+        # pass N
+        # fail N
+        # cancelled N
+        # skipped N
+        # todo N
+        # duration_ms NNN.NNN
+
+    This adapter extracts the summary block and maps it to a
+    :class:`TestReport`.  Per-test detail (YAML blocks, individual
+    TAP lines) is **not** parsed — the summary block alone provides
+    the counts needed by :func:`~sunaba.edit_verify.test_runners._run_npm_test_verify`.
+
+    Raises :class:`ValueError` when no parseable summary block is
+    found, allowing callers to distinguish ``not_available`` output
+    from genuinely unparseable content.
+    """
+
+    _SUMMARY_RE = re.compile(
+        r"^#\s+(tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)\s+([\d.]+)",
+    )
+
+    @staticmethod
+    def parse(raw: str) -> TestReport:
+        """Parse TAP v13 output into a TestReport.
+
+        Parameters
+        ----------
+        raw:
+            The full stdout/stderr from ``node --test`` (TAP v13).
+
+        Returns
+        -------
+        TestReport
+            With ``total`` (test count), ``passed``, ``failed``,
+            ``skipped``, ``todo`` and ``duration`` (converted from
+            milliseconds to seconds) populated.
+
+        Raises
+        ------
+        ValueError
+            When the TAP plan line (``1..N``) or the trailing summary
+            block cannot be found.
+        """
+        lines = raw.strip().splitlines()
+
+        # -- Find the last ``1..N`` plan line ---------------------------
+        plan_idx = -1
+        for i in range(len(lines) - 1, -1, -1):
+            stripped = lines[i].strip()
+            if stripped.startswith("1.."):
+                plan_idx = i
+                break
+
+        if plan_idx == -1:
+            raise ValueError("TAP plan line (1..N) not found in output")
+
+        plan_match = re.match(r"^1\.\.(\d+)", lines[plan_idx].strip())
+        plan_total = int(plan_match.group(1)) if plan_match else 0
+
+        # -- Parse summary lines following the plan line -----------------
+        # The summary block immediately follows the final plan line.
+        summary: dict[str, str] = {}
+        for j in range(plan_idx + 1, min(plan_idx + 15, len(lines))):
+            cline = lines[j].strip()
+            m = TapAdapter._SUMMARY_RE.match(cline)
+            if m:
+                summary[m.group(1)] = m.group(2)
+            elif cline:
+                # Non-empty, non-# line signals end of summary.
+                break
+
+        if not summary:
+            raise ValueError("TAP summary block not found after plan line")
+
+        total = int(summary.get("tests", plan_total))
+        passed = int(summary.get("pass", 0))
+        failed = int(summary.get("fail", 0))
+        skipped = int(summary.get("skipped", 0))
+        todo = int(summary.get("todo", 0))
+        duration_ms = float(summary.get("duration_ms", 0))
+        duration_s = duration_ms / 1000.0
+
+        return TestReport(
+            status="failed" if failed > 0 else "ok",
+            duration=duration_s,
+            passed=passed,
+            failed=failed,
+            total=total,
+            skipped=skipped,
+            todo=todo,
+        )
+
+    @classmethod
+    def parse_json(cls, raw: str) -> TestReport:
+        """Parse raw TAP v13 string into a TestReport.
+
+        TAP is not JSON; ``parse_json`` exists for interface
+        consistency with the other adapter classes.
+        """
+        return cls.parse(raw)
 
 
 # ---------------------------------------------------------------------------

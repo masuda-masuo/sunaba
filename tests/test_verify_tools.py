@@ -1533,12 +1533,16 @@ class TestVerifyDispatch:
 class TestRunNpmTestVerify:
     """Tests for _run_npm_test_verify: package.json scripts.test dispatch.
 
-    Covers the five acceptance scenarios:
-      (a) scripts.test present + npm test ec=0    -> ok
-      (b) scripts.test present + npm test ec=1 + output -> findings
-      (c) scripts.test present + runner missing    -> not_available
-      (d) scripts.test absent  -> falls back to _run_jest_verify
-      (e) no package.json      -> falls back to _run_jest_verify
+    Covers acceptance scenarios including TAP v13 output parsing
+    (issue #738):
+      (a) scripts.test + ec=0 + TAP output                -> ok + counts
+      (b) scripts.test + ec=0 + non-TAP output             -> ok + no counts
+      (c) scripts.test + ec=0 + TAP zero-tests             -> ok + total=0
+      (d) scripts.test + ec=1 + TAP output                 -> findings + counts
+      (e) scripts.test + ec=1 + non-TAP output             -> findings + raw
+      (f) scripts.test + runner missing                    -> not_available
+      (g) scripts.test absent                              -> jest fallback
+      (h) no package.json                                  -> jest fallback
     """
 
     PKG_WITH_TEST = json.dumps({
@@ -1550,41 +1554,141 @@ class TestRunNpmTestVerify:
         "scripts": {"lint": "eslint ."},
     })
 
+    # Real captured TAP output from node --test (trimmed to essential lines)
+    _TAP_OK = (
+        "TAP version 13\n"
+        "1..3\n"
+        "# tests 3\n"
+        "# suites 1\n"
+        "# pass 3\n"
+        "# fail 0\n"
+        "# cancelled 0\n"
+        "# skipped 0\n"
+        "# todo 0\n"
+        "# duration_ms 50.0\n"
+    )
+    _TAP_ZERO = (
+        "TAP version 13\n"
+        "1..0\n"
+        "# tests 0\n"
+        "# suites 0\n"
+        "# pass 0\n"
+        "# fail 0\n"
+        "# cancelled 0\n"
+        "# skipped 0\n"
+        "# todo 0\n"
+        "# duration_ms 2.0\n"
+    )
+    _TAP_FAIL = (
+        "TAP version 13\n"
+        "not ok 1 - failing test\n"
+        "  ---\n"
+        "  error: |-\n"
+        "    Expected values to be strictly equal:\n"
+        "    1 !== 2\n"
+        "  ...\n"
+        "1..1\n"
+        "# tests 1\n"
+        "# suites 0\n"
+        "# pass 0\n"
+        "# fail 1\n"
+        "# cancelled 0\n"
+        "# skipped 0\n"
+        "# todo 0\n"
+        "# duration_ms 20.0\n"
+    )
+
     def _make_container(self, side_effects: list) -> MagicMock:
         container = MagicMock()
         container.exec_run.side_effect = side_effects
         return container
 
-    # --- (a) success -------------------------------------------------------
+    # --- (a) success with TAP counts ---------------------------------------
 
-    def test_npm_test_ok(self) -> None:
+    def test_npm_test_ok_with_tap_counts(self) -> None:
+        """TAP output is parsed and counts are returned in detail."""
         from sunaba.edit_verify import _run_npm_test_verify
 
         container = self._make_container([
             (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
-            (0, (b"PASS\\n", b"")),                     # npm test
+            (0, (self._TAP_OK.encode(), b"")),          # npm test (TAP)
         ])
         result = _run_npm_test_verify(container, "tests/", workdir="/repo")
         assert result.status == "ok"
         assert result.tool == "npm test"
         assert result.exit_code == 0
+        detail = json.loads(result.detail)
+        assert detail["passed"] == 3
+        assert detail["total"] == 3
+        assert detail["status"] == "ok"
 
-    # --- (b) test failure --------------------------------------------------
+    # --- (b) success with non-TAP output -----------------------------------
 
-    def test_npm_test_failure(self) -> None:
+    def test_npm_test_ok_non_tap_output(self) -> None:
+        """Non-TAP output still succeeds but detail notes missing counts."""
         from sunaba.edit_verify import _run_npm_test_verify
 
         container = self._make_container([
             (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
-            (1, (b"FAIL\\nsome test failed\\n", b"")),  # npm test
+            (0, (b"PASS\n", b"")),                      # npm test
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "ok"
+        assert result.tool == "npm test"
+        assert result.exit_code == 0
+        detail = json.loads(result.detail)
+        assert "note" in detail  # caller can see counts are missing
+
+    # --- (c) zero-test run (distinguishable from no-counts) ----------------
+
+    def test_npm_test_zero_tests(self) -> None:
+        """A run that executes 0 tests is reported with total=0."""
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (0, (self._TAP_ZERO.encode(), b"")),        # npm test (0 tests)
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "ok"
+        assert result.tool == "npm test"
+        detail = json.loads(result.detail)
+        assert detail["total"] == 0
+        assert detail["passed"] == 0
+
+    # --- (d) test failure with TAP counts ----------------------------------
+
+    def test_npm_test_failure_with_tap(self) -> None:
+        """A failing run still reports TAP counts alongside diagnostic info."""
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (self._TAP_FAIL.encode(), b"")),        # npm test (TAP, fail)
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "findings"
+        assert result.tool == "npm test"
+        assert result.exit_code == 1
+        detail = json.loads(result.detail)
+        assert detail["failed"] == 1
+        assert detail["total"] == 1
+
+    # --- (e) test failure with non-TAP output ------------------------------
+
+    def test_npm_test_failure_non_tap(self) -> None:
+        """Non-TAP failure still returns raw diagnostic output."""
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (b"FAIL\nsome test failed\n", b"")),    # npm test
         ])
         result = _run_npm_test_verify(container, "tests/", workdir="/repo")
         assert result.status == "findings"
         assert result.tool == "npm test"
         assert result.exit_code == 1
         assert "FAIL" in result.detail
-
-    # --- (c) runner not available ------------------------------------------
 
     def test_npm_test_not_available_command_not_found(self) -> None:
         from sunaba.edit_verify import _run_npm_test_verify

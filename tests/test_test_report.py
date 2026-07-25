@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,7 @@ from src.sunaba.test_report import (
     GoTestAdapter,
     JestAdapter,
     PytestAdapter,
+    TapAdapter,
     TestFailure,
     TestReport,
     export_test_report,
@@ -556,3 +558,130 @@ class TestGoTestAdapter:
         ]
         report = GoTestAdapter.parse(events)
         assert report.duration == pytest.approx(1.234, rel=1e-3)
+
+
+# ===================================================================
+# TAP (node --test) adapter tests  —  real captured output as fixtures
+# ===================================================================
+
+
+class TestTapAdapter:
+
+    _FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "tap"
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _load(self, name: str) -> str:
+        return (self._FIXTURE_DIR / name).read_text("utf-8")
+
+    # ------------------------------------------------------------------
+    # Healthy run — 3 tests, all pass, no skips/todos
+    # ------------------------------------------------------------------
+
+    def test_healthy_run_multi_test(self) -> None:
+        """A run with 3 passing tests reports correct counts."""
+        raw = self._load("tap_ok.txt")
+        report = TapAdapter.parse_json(raw)
+        d = report.to_dict()
+
+        assert d["status"] == "ok"
+        assert d["passed"] == 3
+        assert d["total"] == 3
+        assert d["duration"] > 0
+        # Skipped and todo are 0 — they are not included in to_dict()
+        # when their value is 0, keeping the output minimal.
+        assert "skipped" not in d
+        assert "todo" not in d
+        assert "failed" not in d
+
+    # ------------------------------------------------------------------
+    # Zero-test run — possible when discovery finds no files
+    # ------------------------------------------------------------------
+
+    def test_zero_test_run(self) -> None:
+        """A run that executed 0 tests (exits 0) is distinguishable.
+
+        The caller can distinguish a zero-test run from a passing run
+        with tests by checking ``total``: ``total: 0`` means no tests
+        were discovered.  A run with unparseable output would lack
+        the ``total`` key entirely.
+        """
+        raw = self._load("tap_zero.txt")
+        report = TapAdapter.parse_json(raw)
+        d = report.to_dict()
+
+        assert d["status"] == "ok"
+        assert d["passed"] == 0
+        assert d["total"] == 0
+        assert d["duration"] >= 0
+        assert "skipped" not in d
+        assert "todo" not in d
+
+    # ------------------------------------------------------------------
+    # Run with pass, fail, skipped and todo
+    # ------------------------------------------------------------------
+
+    def test_fail_skip_todo(self) -> None:
+        """A run with mixed outcomes reports skipped and todo counts."""
+        raw = self._load("tap_fail_skip_todo.txt")
+        report = TapAdapter.parse_json(raw)
+        d = report.to_dict()
+
+        assert d["status"] == "failed"
+        assert d["passed"] == 1
+        assert d["total"] == 4
+        assert d["skipped"] == 1
+        assert d["todo"] == 1
+        assert d["duration"] > 0
+        # ``failed`` key is present because failures exist in to_dict()
+        assert d["failed"] == 1
+
+    # ------------------------------------------------------------------
+    # Non-TAP output raises ValueError
+    # ------------------------------------------------------------------
+
+    def test_nontap_output_raises_valueerror(self) -> None:
+        """Output that is not TAP at all raises ValueError."""
+        raw = self._load("nontap_output.txt")
+        with pytest.raises(ValueError, match="TAP plan line"):
+            TapAdapter.parse_json(raw)
+
+    def test_empty_string_raises_valueerror(self) -> None:
+        with pytest.raises(ValueError):
+            TapAdapter.parse_json("")
+
+    def test_only_plan_line_raises_valueerror(self) -> None:
+        """A plan line without a following summary block raises."""
+        with pytest.raises(ValueError, match="TAP summary block"):
+            TapAdapter.parse_json("1..0\n")
+
+    # ------------------------------------------------------------------
+    # Round-trip: parse → to_dict → JSON → parse → match
+    # ------------------------------------------------------------------
+
+    def test_to_dict_stable(self) -> None:
+        """to_dict() produces the same result when called twice."""
+        raw = self._load("tap_ok.txt")
+        report = TapAdapter.parse_json(raw)
+        d1 = report.to_dict()
+        d2 = report.to_dict()
+        assert d1 == d2
+
+    def test_reparse_identical(self) -> None:
+        """Parsing the same raw TAP twice yields identical dicts."""
+        raw = self._load("tap_ok.txt")
+        r1 = TapAdapter.parse_json(raw)
+        r2 = TapAdapter.parse_json(raw)
+        assert r1.to_dict() == r2.to_dict()
+
+    # ------------------------------------------------------------------
+    # Duration conversion: milliseconds → seconds
+    # ------------------------------------------------------------------
+
+    def test_duration_converted_to_seconds(self) -> None:
+        raw = self._load("tap_ok.txt")
+        report = TapAdapter.parse_json(raw)
+        # The fixture has duration_ms around 47.8 → ~0.048 seconds.
+        assert 0.01 < report.duration < 0.5

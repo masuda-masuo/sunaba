@@ -702,7 +702,8 @@ def publish(
                 auto_include_skipped = auto_result.skipped
                 auto_include_included = auto_result.included
 
-        commit_err = git_prepare_commit(_run, branch=branch, message=message,
+        commit_err, committed_paths = git_prepare_commit(
+            _run, branch=branch, message=message,
             files=files, author_name=author_name, author_email=author_email,
             base_auto_include=base_auto_include)
         if commit_err:
@@ -772,7 +773,8 @@ def publish(
                 ),
             }, verified)
 
-        commit_err = git_prepare_commit(_run, branch=branch, message=message,
+        commit_err, committed_paths = git_prepare_commit(
+            _run, branch=branch, message=message,
             author_name=author_name, author_email=author_email)
         if commit_err:
             return finish_json(commit_err, verified)
@@ -903,8 +905,8 @@ def publish(
         # "unknown" state above, which blocks rather than waving through).
         "scan_summary": scan_result.get("scan_summary"),
     }
+    result["staged_files"] = committed_paths
     if manifest:
-        result["staged_files"] = files
         result["worktree_leftover"] = worktree_leftover
     if merge_discarded_sha:
         # Merge report fields (issue #711): present only when a merge

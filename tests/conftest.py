@@ -159,7 +159,11 @@ def _make_publish_container(
             return (1, (b"", b""))
 
         # --- exec_in_container: git diff-tree ---
-        if "git diff-tree" in cmd_str:
+        # Only intercept exec_in_container calls (cmd passed as keyword,
+        # no positional args).  _run calls (positional first arg) are for
+        # git_prepare_commit's own committed-path derivation and must
+        # consume from the positional list.
+        if "git diff-tree" in cmd_str and not args:
             return (0, (_diff_out, b""))
 
         # --- Regular publish _run calls: consume from positional list ---
@@ -239,9 +243,12 @@ def _make_publish_container_for_scan_test(
         # --- Secret scan: cat .secrets.baseline ---
         if ".secrets.baseline" in cmd_str:
             return (1, (b"", b""))
-
         # --- exec_in_container: git diff-tree ---
-        if "git diff-tree" in cmd_str:
+        # Only intercept exec_in_container calls (cmd passed as keyword,
+        # no positional args).  _run calls (positional first arg) are for
+        # git_prepare_commit's own committed-path derivation and must
+        # consume from the positional list.
+        if "git diff-tree" in cmd_str and not args:
             return (0, (_diff_out, b""))
 
         # --- Regular publish _run calls: consume from positional list ---

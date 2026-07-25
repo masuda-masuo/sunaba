@@ -164,6 +164,7 @@ class TestPublishSecretScanReal:
                 (0, b"", b""),  # git add -A
                 (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
+                (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             ],
             detect_secrets_scan_output=finding_bytes,
             git_diff_tree_output=b"secret.txt\n",
@@ -230,6 +231,7 @@ class TestPublishSecretScanReal:
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -515,6 +517,7 @@ class TestPublishSecretScanReal:
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -589,6 +592,7 @@ class TestPublishSecretScanReal:
                 (0, b"", b""),  # git add -- 'secret.txt'
                 (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"secret.txt\n", b""),  # git diff-tree HEAD^ HEAD
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -647,6 +651,7 @@ class TestPublishSecretScanReal:
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -807,19 +812,20 @@ class TestPublishSecretScanReal:
         """
         clean_bytes = _make_clean_scan_json().encode("utf-8")
 
+        # Commands mentioning '.secrets.baseline' (test -f, git ls-files,
+        # git add, git diff --cached) are answered by the interceptors in
+        # _make_baseline_container / _make_publish_container and never
+        # consume from this list -- do not add entries for them.
         container = self._make_baseline_container(
-            [(0, b"", b""),  # test -f '.secrets.baseline'
-
-                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            [
+                (0, b"", b""),  # rev-parse --verify HEAD^2 (empty -> not a merge)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
-                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"", b""),  # rev-parse --verify origin/fix/x (absent)
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-                # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
-                (0, b"", b""),  # git add -- '.secrets.baseline'
-                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b".secrets.baseline\n", b""),  # git diff-tree HEAD^ HEAD
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -937,19 +943,20 @@ class TestPublishSecretScanReal:
         """
         # Even if detect-secrets scan would crash, it is never called
         # because baseline is excluded.
+        # Commands mentioning '.secrets.baseline' (test -f, git ls-files,
+        # git add, git diff --cached) are answered by the interceptors in
+        # _make_baseline_container / _make_publish_container and never
+        # consume from this list -- do not add entries for them.
         container = self._make_baseline_container(
-            [(0, b"", b""),  # test -f '.secrets.baseline'
-
-                (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            [
+                (0, b"", b""),  # rev-parse --verify HEAD^2 (empty -> not a merge)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
-                (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
+                (0, b"", b""),  # rev-parse --verify origin/fix/x (absent)
                 (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-                # [REMOVED] old HEAD^2 check moved before git_prepare_commit
                 (0, b"", b""),  # git reset --mixed origin/HEAD
-                (0, b"", b""),  # git add -- '.secrets.baseline'
-                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b".secrets.baseline\n", b""),  # git diff-tree HEAD^ HEAD
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1169,6 +1176,7 @@ class TestPublishHostSideBaseline:
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1275,6 +1283,7 @@ class TestPublishHostSideBaseline:
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1457,6 +1466,7 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1548,6 +1558,7 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
                 (0, b"", b""),  # git add -- 'declared.txt'
                 (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # commit
+                (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
                 (0, b"", b""),  # git status --porcelain -z (no leftovers)
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD

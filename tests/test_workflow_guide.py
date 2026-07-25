@@ -166,6 +166,7 @@ class TestDriftDetection:
         "mergeable",              # gh pr view JSON field
         "parents",                # gh pr view JSON field
         "staged",                 # diff_summary JSON key
+        "declared_unchanged",     # publish return JSON field (step name)
         "staged_files",           # publish return JSON field
         "status",                 # common JSON return field (many tools)
         "unstaged",               # diff_summary JSON key

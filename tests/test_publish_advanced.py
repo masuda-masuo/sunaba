@@ -35,6 +35,7 @@ class TestPublishSquashCheckpoints:
             (0, b"", b""),  # reset --soft
             (0, b"", b""),  # readd
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ])
@@ -70,6 +71,7 @@ class TestPublishSquashCheckpoints:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"pushed", b""),
             (0, b"abc1234def5678", b""),
         ])
@@ -107,6 +109,7 @@ class TestPublishAllowForcePush:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"pushed", b""),
             (0, b"abc1234def5678", b""),
         ])
@@ -152,6 +155,7 @@ class TestPublishApiPushFallback:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (1, b"", b"remote rejected: permission denied"),
             (0, b"abc1234def5678", b""),
             (0, b"", b""),
@@ -185,6 +189,7 @@ class TestPublishApiPushFallback:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
             (0, b"[fix/x abc1234] Fix", b""),
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (1, b"", b"remote rejected"),
             (0, b"abc1234def5678", b""),
             (0, b"", b""),
@@ -217,16 +222,18 @@ class TestPublishLazyTokenInjection:
 
     @staticmethod
     def _simple_push_returns() -> list[tuple[int, bytes, bytes]]:
-        # checkout, ls-files, git add, no-upstream (skip squash), commit, push, HEAD
+        # checkout, ls-files, git add, no-upstream (skip squash), commit,
+        # diff-tree, push, HEAD
         return [
             (0, b"", b""),  # git ls-files --others --exclude-standard
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),
-            (0, b"[fix/x abc1234] Fix", b""),
-            (0, b"", b""),
-            (0, b"abc1234def5678", b""),
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
+            (0, b"", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ]
 
     @staticmethod
@@ -325,6 +332,7 @@ class TestPublishLazyTokenInjection:
             (0, b"", b""),              # git add
             (1, b"", b"no upstream"),  # skip squash
             (0, b"[fix/x abc] Fix", b""),  # commit
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (1, b"", b"permission denied"),  # git push fails
             (0, b"abc1234def5678", b""),     # rev-parse HEAD
             (0, b"", b""),              # api-push: write script

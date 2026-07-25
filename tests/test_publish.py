@@ -25,6 +25,7 @@ _PUSH_SEQUENCE = [
     (0, b"", b""),  # git add -A
     (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
     (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
+    (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
     (0, b"pushed", b""),  # git push
     (0, b"abc1234def5678", b""),  # git rev-parse HEAD
 ]
@@ -52,6 +53,7 @@ class TestPublish:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
             (0, b"abc1234def5678", b""),  # git rev-parse HEAD
         ])
@@ -112,6 +114,7 @@ class TestPublish:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix issue\n1 file changed", b""),  # git commit
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"To github.com:owner/repo.git\n * [new branch] fix/x -> fix/x", b""),  # git push
             (0, b"abc1234def5678", b""),  # git rev-parse HEAD
         ])
@@ -322,6 +325,7 @@ class TestPublish:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"pushed", b""),  # git push
             (0, b"abc1234def5678", b""),  # git rev-parse HEAD
             (0, b"https://github.com/owner/repo/pull/99", b""),  # gh pr create
@@ -403,6 +407,7 @@ class TestPublish:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"nothing to commit, working tree clean", b""),  # git commit
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"Everything up-to-date", b""),  # git push
             (0, b"abc1234def5678", b""),  # git rev-parse HEAD
         ])
@@ -434,6 +439,7 @@ class TestPublish:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),  # git commit
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (1, b"", b"remote rejected: permission denied"),  # git push
             (0, b"abc1234def5678", b""),  # git rev-parse HEAD
             (0, b"", b""),  # write API push script
@@ -480,6 +486,7 @@ class TestPublish:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
             (0, b"[fix/x abc1234] Fix", b""),  # git commit
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (1, b"", proxy_error.encode()),  # git push BLOCKED by proxy
             (0, b"abc1234def5678", b""),  # git rev-parse HEAD
         ])
@@ -499,12 +506,12 @@ class TestPublish:
         assert "BLOCKED by egress proxy" in result["error"]
         assert "hint" in result
         assert "SUNABA_ALLOWED_REPOS" in result["hint"]
-        # Exactly 9 exec calls:
-        #   8 positional (ls-files + MERGE_HEAD + checkout + add + rev-parse @{u}
-        #                 + commit + failed push + rev-parse HEAD)
+        # Exactly 10 exec calls:
+        #   9 positional (ls-files + MERGE_HEAD + checkout + add + rev-parse @{u}
+        #                + commit + diff-tree + failed push + rev-parse HEAD)
         # + 1 dispatched for the secret-scan diff-tree (run_secret_scan sees no files → no-op)
         # No _try_api_push was triggered.
-        assert container.exec_run.call_count == 9
+        assert container.exec_run.call_count == 10
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -658,6 +665,7 @@ class TestPublish:
             (0, b"", b""),  # git add
             (1, b"", b"no upstream"),  # rev-parse @{u}
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
         ])
@@ -708,6 +716,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git add -- 'declared.txt'
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -767,6 +776,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git add -- ':(literal)declared.txt'
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, porcelain, b""),  # git status --porcelain -z (leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -815,6 +825,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git add -- 'newfile.py'
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"newfile.py\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -857,6 +868,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git add -- 'declared.txt'
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Msg", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1069,6 +1081,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git add -- 'deleted.txt' (stages deletion)
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[feat/del abc1234] Delete", b""),  # commit
+            (0, b"deleted.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),  # git status --porcelain (clean)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1136,7 +1149,7 @@ class TestPublishManifest:
 
         assert result["status"] == "pushed"
         assert result["swept_untracked"] == []
-        assert "staged_files" not in result
+        assert result["staged_files"] == ["file1.py"]
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -1168,6 +1181,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git add -- 'declared.txt'  <-- only declarerd
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1231,6 +1245,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git add -- 'declared.txt'
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1293,6 +1308,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git add -- 'declared.txt'
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1340,6 +1356,7 @@ class TestPublishManifest:
             (0, b"", b""),  # git add -- 'declared.txt'
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),  # git status --porcelain -z (no leftovers)
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1629,6 +1646,7 @@ class TestPublishSecretScanIntegration:
             (0, b"", b""),  # git add -- 'declared.txt'
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),  # git status --porcelain -z
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1678,6 +1696,7 @@ class TestPublishSecretScanIntegration:
             (0, b"", b""),  # git add --
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),  # git status --porcelain -z
             (0, b"pushed", b""),  # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1697,6 +1716,99 @@ class TestPublishSecretScanIntegration:
         assert result["files_scanned"] == ["declared.txt"]
         # No override was involved, so none may be spent.
         mock_consume.assert_not_called()
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_declared_unchanged_error(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When one of two declared paths is byte-identical to the base,
+        publish must fail with ``step: \"declared_unchanged\"`` before push.
+
+        The git diff-tree returns only the changed file; the unchanged
+        one is detected absent from the commit.  The error is returned
+        before any push or PR creation attempt.
+        """
+        container = _make_publish_container([
+            (0, b"", b""),   # test -f 'changed.txt'
+            (0, b"", b""),   # test -f 'unchanged.txt'
+            (1, b"", b""),   # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),   # checkout -b
+            (1, b"", b""),   # rev-parse --verify origin/fix/x (not on remote)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),   # git reset --mixed origin/HEAD
+            (0, b"", b""),   # git add -- 'changed.txt'
+            (0, b"", b""),   # git add -- 'unchanged.txt'
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (has diffs)
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"changed.txt\n", b""),  # git diff-tree HEAD^ HEAD (unchanged absent)
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["changed.txt", "unchanged.txt"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "declared_unchanged"
+        assert result["declared_unchanged"] == ["unchanged.txt"]
+        # Must name the offending paths and the base ref
+        assert "unchanged.txt" in result["error"]
+        assert "origin/HEAD" in result["error"]
+        # No push — early return before any push attempt
+        assert "sha" not in result
+        assert "pr_url" not in result
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_declared_unchanged_not_all_unchanged(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Declaring a single file that changed is fine — the case where
+        all declared paths are unchanged is ``empty_result``, and where
+        some (but not all) are unchanged is ``declared_unchanged``.
+        A single changed path must still succeed with correct staged_files.
+        """
+        container = _make_publish_container([
+            (0, b"", b""),   # test -f 'declared.txt'
+            (1, b"", b""),   # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),   # checkout -b
+            (1, b"", b""),   # rev-parse --verify origin/fix/x (not on remote)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),   # git reset --mixed origin/HEAD
+            (0, b"", b""),   # git add -- 'declared.txt'
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
+            (0, b"", b""),   # git status --porcelain -z
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["staged_files"] == ["declared.txt"]
+        assert "declared_unchanged" not in result
 
 
 # ============================================================================
@@ -1753,6 +1865,7 @@ class TestPublishBaseAutoInclude:
             (0, b"", b""),                # git add -- :(literal)declared.txt
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),                # git status --porcelain -z
             (0, b"pushed", b""),          # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1827,6 +1940,7 @@ class TestPublishBaseAutoInclude:
             (0, b"", b""),                # git add -- :(literal)declared.txt
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),                # git status --porcelain -z
             (0, b"pushed", b""),          # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1890,6 +2004,9 @@ class TestPublishBaseAutoInclude:
             (0, b"", b""),                # git add -- :(literal)declared.txt
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+            # The commit holds the auto-included path as well as the
+            # declared one, so staged_files must report both.
+            (0, b"base_advance.txt\ndeclared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),                # git status --porcelain -z
             (0, b"pushed", b""),          # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -1920,6 +2037,11 @@ class TestPublishBaseAutoInclude:
         assert result["merge_discarded_undeclared"] == ["checkpoint.txt"]
         # AC 2: base_advance.txt was auto-included
         assert "base_advance.txt" in result["auto_include_applied"]
+        # staged_files describes the commit, not the manifest: an
+        # auto-included path that entered the commit appears there too.
+        assert set(result["staged_files"]) == {
+            "base_advance.txt", "declared.txt",
+        }
         # AC 5: non-empty set is reported as a non-empty list
         assert len(result["merge_discarded_undeclared"]) == 1
         assert result["push_transport"] == "native"
@@ -1957,6 +2079,7 @@ class TestPublishBaseAutoInclude:
             (0, b"", b""),                # git add -- :(literal)declared.txt
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),                # git status --porcelain -z
             (0, b"pushed", b""),          # push
             (0, b"abc1234def5678", b""),  # rev-parse HEAD
@@ -2026,6 +2149,7 @@ class TestPublishBaseAutoInclude:
             (0, b"", b""),                # git add -- :(literal)declared.txt
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),                # git status --porcelain -z
             (1, b"", b"remote rejected"), # git push FAILS → API fallback
             (0, b"apisha1234567", b""),   # rev-parse HEAD (used for sha on failure)

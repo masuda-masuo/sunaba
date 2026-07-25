@@ -107,7 +107,9 @@ resolved host-side and never enters the container.
 
 publish rebuilds the commit, so anything undeclared is dropped there silently.
 
-- `staged_files` -- what was actually staged. Reconcile against your manifest.
+- `staged_files` -- the paths that actually entered the commit, derived from `HEAD`, not
+  from the manifest. A declared path absent from this list triggers a `declared_unchanged`
+  error before push.
 - `worktree_leftover` -- undeclared changes left behind.
 - `merge_discarded_sha` / `merge_discarded_undeclared` -- a merge commit is always discarded
   and rebuilt onto the first parent; files lost in that rebuild are listed here.

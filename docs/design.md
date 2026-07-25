@@ -168,10 +168,22 @@ To optimize AI reasoning, test results are parsed into structured JSON format in
 }
 ```
 
-Support is provided for three testing frameworks:
+Support is provided for four testing frameworks:
 *   **Pytest**: Parsed via `pytest-json-report` (`--json-report`).
 *   **Jest**: Parsed via `jest --json`.
 *   **Go Test**: Parsed via `go test -json`.
+*   **TAP version 13**: Parsed from the runner's own output by `TapAdapter`. This is the
+    path taken when `package.json` declares a `scripts.test` that emits TAP, such as
+    Node's built-in `node --test`.
+
+A runner that discovers its test files implicitly (`node --test` being the common case)
+**exits 0 when it finds nothing to run**. A green exit therefore does not attest that any
+test executed, so the counts are the only thing that distinguishes a healthy run from a
+suite that silently stopped being discovered — after a rename, a move, or a file split.
+For that reason the reported counts are not decoration: when the runner emits them they
+are always returned, and when its output cannot be parsed the result says so explicitly
+rather than presenting as a plain success. Deciding what to do about a dropped count
+belongs to the caller; `verify_in_container` reports and does not gate on it (issue #738).
 
 ---
 

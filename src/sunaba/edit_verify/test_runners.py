@@ -17,7 +17,6 @@ from .results import (
     VerifyResult,
     _envelope_error,
     _envelope_not_available,
-    _envelope_ok,
     _envelope_skipped,
 )
 from .shell import _GO_ENV, _SANDBOX_ENV, _quote_path
@@ -212,14 +211,56 @@ def _run_npm_test_verify(
     stdout_part, _stderr_part = output if isinstance(output, tuple) else (output, b"")
     combined = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
 
-    if ec == 0:
-        return _envelope_ok("npm test", [], ec)
+    # 4. Try to parse TAP v13 counts (node --test and similar runners)
+    tap_report = None
+    try:
+        from sunaba.test_report import TapAdapter
 
-    # 4. Non-zero: discriminate not_available vs findings
+        tap_report = TapAdapter.parse_json(combined)
+    except Exception:
+        tap_report = None
+
+    output_tail = (
+        "\n".join(combined.strip().split("\n")[-20:]) if combined.strip() else ""
+    )
+
+    if tap_report is not None:
+        # TAP output parsed successfully — embed counts in detail.
+        d = tap_report.to_dict()
+        status = d.get("status", "ok")
+        if ec != 0 and output_tail:
+            d["raw_tail"] = output_tail
+        return VerifyResult(
+            tool="npm test",
+            status="ok" if status == "ok" else "findings",
+            detail=json.dumps(d),
+            exit_code=ec,
+        )
+
+    # 5. Cannot parse TAP output.
+    if ec == 0:
+        # Exit code 0 but output is not parseable TAP.  The caller can
+        # distinguish this from a run-with-tests by the absence of
+        # ``total`` in *detail* (see issue #738).
+        return VerifyResult(
+            tool="npm test",
+            status="ok",
+            detail=json.dumps(
+                {
+                    "status": "ok",
+                    "note": (
+                        "npm test exited 0 but its output is not TAP; "
+                        "test counts are unavailable, so this result "
+                        "does not attest that any test ran."
+                    ),
+                }
+            ),
+            exit_code=ec,
+        )
+
+    # 6. Non-zero, unparseable: discriminate not_available vs findings
     #    Conservative matching: only known "runner missing" strings
     #    produce not_available; everything else is a test failure.
-    output_tail = "\n".join(combined.strip().split("\n")[-20:]) if combined.strip() else ""
-
     npm_error_no_lifecycle = (
         "npm error" in combined and "ELIFECYCLE" not in combined
     )

@@ -46,6 +46,7 @@ _PUSH_SEQUENCE = [
     (0, b"", b""),  # git add
     (1, b"", b"no upstream"),  # git rev-parse --abbrev-ref @{u}
     (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
+    (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
     (0, b"pushed", b""),  # git push
     (0, b"abc1234def5678", b""),  # git rev-parse HEAD
 ]

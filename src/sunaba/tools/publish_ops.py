@@ -62,12 +62,18 @@ def git_prepare_commit(
     author_name: str | None = None,
     author_email: str | None = None,
     base_auto_include: dict[str, str | bytes | None] | None = None,
-) -> dict | None:
+) -> tuple[dict | None, list[str] | None]:
     """Checkout branch, stage, squash unpushed checkpoints, then commit.
 
     Step names (for error reporting): ``git_checkout``, ``git_add``,
     ``squash_reset``, ``squash_readd``, ``git_commit``, ``empty_result``,
-    ``auto_include_write``, ``auto_include_add``, ``auto_include_delete``.
+    ``committed_paths``, ``declared_unchanged``, ``auto_include_write``,
+    ``auto_include_add``, ``auto_include_delete``.
+
+    Returns ``(error_dict, None)`` on failure or
+    ``(None, committed_paths)`` on success.  ``committed_paths`` is the
+    list of paths that actually entered the commit, derived from
+    ``git diff-tree HEAD^ HEAD`` (not from the *files* manifest).
 
     Args:
         run: Injected exec callback.
@@ -86,16 +92,17 @@ def git_prepare_commit(
             the container.  Applied before declared files (declared files
             override).
 
-    Returns an error dict on failure, or ``None`` on success (including
-    "nothing to commit" which is treated as success).
+    Returns ``(error_dict, None)`` on failure or
+    ``(None, committed_paths)`` on success.
     """
+    base_ref = ""  # resolved in manifest mode; used by declared_unchanged
     # --- Reject publish during an unresolved merge ---
     # When a merge stopped on conflicts, the merge is not yet committed:
     # HEAD still has a single parent and .git/MERGE_HEAD exists.  A reset
     # would destroy the merge state along with any resolutions.
     merge_err = _check_merge_in_progress(run)
     if merge_err is not None:
-        return merge_err
+        return merge_err, None
 
     # --- Git branch check/create ---
     checkout_ec, checkout_out, checkout_err = run(
@@ -107,7 +114,7 @@ def git_prepare_commit(
             "status": "error",
             "step": "git_checkout",
             "error": checkout_err or checkout_out,
-        }
+        }, None
 
     if files is not None:
         # --- Manifest mode: build the commit against the remote base ---
@@ -156,7 +163,7 @@ def git_prepare_commit(
                     "status": "error",
                     "step": "squash_reset",
                     "error": reset_err or reset_out,
-                }
+                }, None
         else:
             # No remote ref could be resolved — fail instead of silently
             # skipping the reset, which would re-create the manifest leak.
@@ -168,7 +175,7 @@ def git_prepare_commit(
                     "Ensure the repository has been cloned from a remote "
                     "(origin) and that the remote has a default branch."
                 ),
-            }
+            }, None
 
         # --- Host-side auto-include (issue #712 Candidate C) ---
         # These are files that the base branch advanced since the feature
@@ -202,7 +209,7 @@ def git_prepare_commit(
                                 "status": "error",
                                 "step": "auto_include_delete",
                                 "error": rm_err or rm_out,
-                            }
+                            }, None
                     continue
                 # Write content via base64 to safely pass through the shell
                 if isinstance(content, bytes):
@@ -220,7 +227,7 @@ def git_prepare_commit(
                         "status": "error",
                         "step": "auto_include_write",
                         "error": write_err or write_out,
-                    }
+                    }, None
                 # Stage the auto-included file
                 add_ec, add_out, add_err = run(
                     "git add -- "
@@ -231,7 +238,7 @@ def git_prepare_commit(
                         "status": "error",
                         "step": "auto_include_add",
                         "error": add_err or add_out,
-                    }
+                    }, None
 
         # Stage only the declared manifest paths.  :(literal) disables
         # pathspec glob interpretation so each declared path stages
@@ -245,7 +252,7 @@ def git_prepare_commit(
                     "status": "error",
                     "step": "git_add",
                     "error": add_err or add_out,
-                }
+                }, None
 
         # --- Reject an empty declared result ---
         # When every declared path is byte-identical to what the push
@@ -274,7 +281,7 @@ def git_prepare_commit(
                         + " already contains. No change to publish."
                     ),
                     "declared_paths": files,
-                }
+                }, None
     else:
         # --- Legacy mode: git add -A with upstream-aware squash ---
         add_ec, add_out, add_err = run("git add -A")
@@ -283,7 +290,7 @@ def git_prepare_commit(
                 "status": "error",
                 "step": "git_add",
                 "error": add_err or add_out,
-            }
+            }, None
 
         # Squash unpushed checkpoints into a single commit (upstream only).
         track_ec, track_out, _ = run(
@@ -302,14 +309,14 @@ def git_prepare_commit(
                         "status": "error",
                         "step": "squash_reset",
                         "error": reset_err or reset_out,
-                    }
+                    }, None
                 readd_ec, readd_out, readd_err = run("git add -A")
                 if readd_ec != 0:
                     return {
                         "status": "error",
                         "step": "squash_readd",
                         "error": readd_err or readd_out,
-                    }
+                    }, None
 
     # --- Git identity: set before commit ---
     name_to_use = (
@@ -337,9 +344,59 @@ def git_prepare_commit(
                 "status": "error",
                 "step": "git_commit",
                 "error": commit_err or commit_out,
-            }
+            }, None
 
-    return None
+    # --- Derive the actual committed paths from the commit ---
+    # These are the paths that really entered the commit, not the caller's
+    # manifest.  HEAD^ is the parent commit (the base after reset); fall
+    # back to the empty-tree hash for root commits (though unlikely after a
+    # clone + reset).
+    diff_ec, diff_out, diff_err = run(
+        "git diff-tree --no-commit-id -r --name-only HEAD^ HEAD 2>/dev/null"
+        " || git diff-tree --no-commit-id -r --name-only"
+        " 4b825dc642cb6eb9a060e54bf898b433f71bada6 HEAD"
+    )
+    if diff_ec != 0:
+        # Fail rather than reporting an empty staged_files.  The whole point
+        # of deriving these paths is that the caller can trust the field; a
+        # silent empty list would re-create the defect this replaced (#736),
+        # and would additionally suppress the declared_unchanged check below.
+        # This runs before the push, so nothing has reached the remote.
+        return {
+            "status": "error",
+            "step": "committed_paths",
+            "error": (
+                "The commit was created but its file list could not be read "
+                "(git diff-tree exited "
+                f"{diff_ec}): {diff_err or diff_out}"
+            ),
+        }, None
+    committed_paths: list[str] = [
+        p for p in diff_out.split("\n") if p.strip()
+    ]
+
+    # --- Check for partially-unchanged declared paths (manifest mode) ---
+    # The "all unchanged" case is caught earlier by empty_result.  Here we
+    # catch the case where SOME declared paths are byte-identical to the
+    # base and therefore absent from the commit.
+    if files is not None:
+        declared_set = set(files)
+        committed_set = set(committed_paths)
+        unchanged = sorted(declared_set - committed_set)
+        if unchanged and len(unchanged) < len(files):
+            ref_name = base_ref if base_ref else "the remote base"
+            return {
+                "status": "error",
+                "step": "declared_unchanged",
+                "declared_unchanged": unchanged,
+                "error": (
+                    f"These declared paths are identical to {ref_name} "
+                    f"and contributed nothing to the commit: "
+                    f"{', '.join(unchanged)}"
+                ),
+            }, None
+
+    return None, committed_paths
 
 
 def git_push_with_fallback(

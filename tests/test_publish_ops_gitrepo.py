@@ -115,7 +115,7 @@ class TestManifestCheckpointLeakPrevention:
         _git(clone, "commit", "-m", "checkpoint with undeclared file")
 
         # Now publish with manifest mode — only declared.txt is declared
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="fix/x", message="Manifest push",
             files=["declared.txt"],
         )
@@ -161,7 +161,7 @@ class TestManifestFollowUp:
         second.write_text("second\n")
 
         # ---- Second publish (manifest mode) ----
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/feature-x", message="Second commit",
             files=["second.txt"],
         )
@@ -215,7 +215,7 @@ class TestManifestUndeclaredEditExcluded:
         new_txt.write_text("new\n")
 
         # Manifest publish: only new.txt is declared, not README.md
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/feature-y", message="Manifest push",
             files=["new.txt"],
         )
@@ -264,7 +264,7 @@ class TestManifestDeclaredDeletion:
         to_delete.unlink()
 
         # Manifest publish with the deleted file declared
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/feature-z", message="Delete todelete.txt",
             files=["todelete.txt"],
         )
@@ -300,7 +300,7 @@ class TestManifestUntrackedPathRejection:
         run = _make_run(clone)
 
         _git(clone, "checkout", "-b", "feat/rejection")
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/rejection", message="Should fail",
             files=["nosuchfile.txt"],
         )
@@ -324,7 +324,7 @@ class TestManifestUntrackedPathRejection:
         run = _make_run(clone)
 
         _git(clone, "checkout", "-b", "feat/glob")
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/glob", message="Should fail",
             files=["*.md"],
         )
@@ -448,7 +448,7 @@ class TestManifestPreservesBaseMerge:
 
         # Now an ordinary manifest publish of an unrelated declared file.
         (Path(clone) / "declared.txt").write_text("declared\n")
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/x", message="Manifest push after merge",
             files=["declared.txt"],
             base_auto_include=auto_include,
@@ -493,7 +493,7 @@ class TestManifestPreservesBaseMerge:
         _git(clone, "merge", "origin/main", "--no-edit")
 
         (Path(clone) / "declared.txt").write_text("declared\n")
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/y", message="Manifest push",
             files=["declared.txt"],
         )
@@ -559,7 +559,7 @@ class TestForgeRemoteRefCannotLeak:
 
         # Manifest publish of only legit.txt.
         (Path(clone) / "declared.txt").write_text("declared\n")
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/secret",
             message="Manifest push after forged merge",
             files=["declared.txt"],
@@ -628,7 +628,7 @@ class TestAutoIncludeBaseAdvance:
 
         # Manifest publish with only declared.txt.
         (Path(clone) / "declared.txt").write_text("declared\n")
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/adv",
             message="Manifest push after merge",
             files=["declared.txt"],
@@ -731,7 +731,7 @@ class TestAutoIncludeBaseDeletion:
 
         # Manifest publish with only declared.txt.
         (Path(clone) / "declared.txt").write_text("declared\n")
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/del",
             message="Manifest push after base deletion merge",
             files=["declared.txt"],
@@ -833,7 +833,7 @@ class TestAutoIncludeBaseDeletion:
         # Manifest publish — the deletion of README.md must not error
         # even though the file is already gone from the feature branch.
         (Path(clone) / "declared.txt").write_text("declared\n")
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/also_del",
             message="Manifest push after independent-deletion merge",
             files=["declared.txt"],
@@ -905,7 +905,7 @@ class TestAutoIncludeBaseBinary:
 
         # Manifest publish with only declared.txt.
         (Path(clone) / "declared.txt").write_text("declared\n")
-        err = git_prepare_commit(
+        err, _committed = git_prepare_commit(
             run, branch="feat/bin",
             message="Manifest push after binary merge",
             files=["declared.txt"],

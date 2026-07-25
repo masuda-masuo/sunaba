@@ -83,7 +83,7 @@ class TestGitPrepareCommit:
         run = RecordingRun([
             (0, "in-progress\n", ""),  # MERGE_HEAD check
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="topic", message="Msg",
         )
         assert result is not None
@@ -99,11 +99,13 @@ class TestGitPrepareCommit:
             (0, "", ""),                # git add -A
             (1, "", "no upstream"),     # rev-parse @{u} -> no tracking
             (0, "[topic abc1234] Msg\n1 file changed", ""),  # commit
+            (0, "file1.py\n", ""),      # git diff-tree HEAD^ HEAD
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="topic", message="Msg",
         )
         assert result is None
+        assert _committed == ["file1.py"]
 
     def test_git_add_failure(self) -> None:
         """git add -A error returns error dict."""
@@ -112,7 +114,7 @@ class TestGitPrepareCommit:
             (0, "", ""),                    # checkout
             (1, "", "fatal: not a git repo"),  # git add fails
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="topic", message="Msg",
         )
         assert result is not None
@@ -131,16 +133,42 @@ class TestGitPrepareCommit:
             (0, "", ""),                # reset --soft @{u}
             (0, "", ""),                # git add -A (readd)
             (0, "[topic abc1234] Msg\n", ""),  # commit
+            (0, "file1.py\n", ""),      # git diff-tree HEAD^ HEAD
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="topic", message="Msg",
         )
         assert result is None
+        assert _committed == ["file1.py"]
 
         # Verify the squash steps were called
         cmd_strs = [c[0] for c in run.calls]
         assert any("reset --soft" in c for c in cmd_strs)
         assert any("git add -A" in c for c in cmd_strs)
+
+    def test_diff_tree_failure_is_an_error(self) -> None:
+        """A commit whose file list cannot be read fails, never pushes.
+
+        Reporting an empty ``staged_files`` here would re-create the very
+        defect this derivation replaced (#736), and would also make the
+        declared_unchanged check below vacuously pass.
+        """
+        run = RecordingRun([
+            (0, "none\n", ""),  # MERGE_HEAD check
+            (0, "", ""),                # checkout
+            (0, "", ""),                # git add -A
+            (1, "", "no upstream"),     # rev-parse @{u} -> skip squash
+            (0, "[topic abc1234] Msg\n", ""),  # commit
+            (128, "", "fatal: bad object"),   # git diff-tree fails
+        ])
+        result, committed = git_prepare_commit(
+            run, branch="topic", message="Msg",
+        )
+        assert result is not None
+        assert result["status"] == "error"
+        assert result["step"] == "committed_paths"
+        assert "bad object" in result["error"]
+        assert committed is None
 
     def test_squash_reset_fails(self) -> None:
         """squash reset failure returns step=squash_reset."""
@@ -152,7 +180,7 @@ class TestGitPrepareCommit:
             (0, "abc1234 First\n", ""),  # log oneline
             (1, "", "reset failed"),    # reset --soft fails
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="topic", message="Msg",
         )
         assert result is not None
@@ -170,7 +198,7 @@ class TestGitPrepareCommit:
             (0, "", ""),                # reset --soft ok
             (1, "", "readd failed"),    # readd fails
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="topic", message="Msg",
         )
         assert result is not None
@@ -186,7 +214,7 @@ class TestGitPrepareCommit:
             (1, "", "no upstream"),         # rev-parse @{u}
             (0, "nothing to commit, working tree clean", ""),  # commit
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="topic", message="Msg",
         )
         assert result is None
@@ -200,7 +228,7 @@ class TestGitPrepareCommit:
             (1, "", "no upstream"),         # rev-parse @{u}
             (1, "", "author unknown"),      # commit fails
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="topic", message="Msg",
         )
         assert result is not None
@@ -218,7 +246,7 @@ class TestGitPrepareCommit:
             (1, "", "no upstream"),
             (0, "[topic abc1234] Msg\n", ""),
         ])
-        git_prepare_commit(
+        _committed = git_prepare_commit(
             run, branch="topic", message="Msg",
             author_name="Custom User", author_email="user@ex.com",
         )
@@ -235,7 +263,7 @@ class TestGitPrepareCommit:
             (1, "", "no upstream"),
             (0, "[topic abc1234] Msg\n", ""),
         ])
-        git_prepare_commit(
+        _committed = git_prepare_commit(
             run, branch="topic", message="Msg",
         )
         commit_cmd = run.calls[4][0]
@@ -537,7 +565,7 @@ class TestGitPrepareCommitAutoInclude:
             (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat/a abc1234] Msg\n", ""),  # commit
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="feat/a", message="Msg",
             files=["declared.txt"],
             base_auto_include={
@@ -568,7 +596,7 @@ class TestGitPrepareCommitAutoInclude:
             (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat/x abc1234] Msg\n", ""),  # commit
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="feat/x", message="Msg",
             files=["declared.txt"],
             base_auto_include=None,
@@ -588,7 +616,7 @@ class TestGitPrepareCommitAutoInclude:
             (0, "", ""),                     # git reset --mixed origin/HEAD
             (1, "", "write error"),          # echo+base64 fails
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="feat/z", message="Msg",
             files=["declared.txt"],
             base_auto_include={"bad.txt": "content"},
@@ -613,7 +641,7 @@ class TestGitPrepareCommitAutoInclude:
             (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat/d abc1234] Msg\n", ""),  # commit
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="feat/d", message="Msg",
             files=["declared.txt"],
             base_auto_include={"todelete.txt": None},
@@ -641,7 +669,7 @@ class TestGitPrepareCommitAutoInclude:
             (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat/e abc1234] Msg\n", ""),  # commit
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="feat/e", message="Msg",
             files=["declared.txt"],
             base_auto_include={"notexist.txt": None},
@@ -666,7 +694,7 @@ class TestGitPrepareCommitAutoInclude:
             (0, "gone.txt\n", ""),           # git ls-files --error-unmatch → tracked
             (1, "", "git rm failed"),        # git rm fails
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="feat/f", message="Msg",
             files=["declared.txt"],
             base_auto_include={"gone.txt": None},
@@ -691,7 +719,7 @@ class TestGitPrepareCommitAutoInclude:
             (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat/g abc1234] Msg\n", ""),  # commit
         ])
-        result = git_prepare_commit(
+        result, _committed = git_prepare_commit(
             run, branch="feat/g", message="Msg",
             files=["declared.txt"],
             base_auto_include={"binary.bin": raw_bytes},
@@ -820,7 +848,7 @@ class TestRealGitDeclaredPathNotOverwritten:
             # the stale auto-included content.
             auto_content = "content from auto-include — must NOT win\n"
 
-            result = git_prepare_commit(
+            result, _committed = git_prepare_commit(
                 lambda cmd, env=None: _run_in(clone, cmd, env),
                 branch="feat",
                 message="publish edit",
@@ -883,7 +911,7 @@ class TestRealGitDeclaredPathNotOverwritten:
             (clone / "declared.txt").write_text(edited_declared)
 
             # Auto-include supplies both files (simulating a base-advance)
-            result = git_prepare_commit(
+            result, _committed = git_prepare_commit(
                 lambda cmd, env=None: _run_in(clone, cmd, env),
                 branch="feat",
                 message="publish",
@@ -937,7 +965,7 @@ class TestRealGitDeclaredPathNotOverwritten:
             _setup_in(clone, "git checkout main")
 
             # Working tree has the SAME content as origin/feat
-            result = git_prepare_commit(
+            result, _committed = git_prepare_commit(
                 lambda cmd, env=None: _run_in(clone, cmd, env),
                 branch="feat",
                 message="no change",
@@ -979,7 +1007,7 @@ class TestRealGitDeclaredPathNotOverwritten:
 
             # git checkout feat should fail because conflict.txt has
             # uncommitted changes and the branch has different content
-            result = git_prepare_commit(
+            result, _committed = git_prepare_commit(
                 lambda cmd, env=None: _run_in(clone, cmd, env),
                 branch="feat",
                 message="should fail",
@@ -1029,7 +1057,7 @@ class TestRealGitDeclaredPathNotOverwritten:
             edited = "v3 container edit\n"
             (clone / "changed.txt").write_text(edited)
 
-            result = git_prepare_commit(
+            result, _committed = git_prepare_commit(
                 lambda cmd, env=None: _run_in(clone, cmd, env),
                 branch="feat",
                 message="publish",

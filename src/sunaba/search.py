@@ -74,6 +74,17 @@ def search_files(
     except Exception as e:
         return {"status": "error", "error": f"Container {container_id[:12]} not found: {e}"}
 
+    _DENIED_SEARCH_PATHS = frozenset(["/", "/proc", "/sys", "/dev"])
+    if path in _DENIED_SEARCH_PATHS:
+        return {
+            "status": "error",
+            "error": (
+                f"path \"{path}\" would search the entire container "
+                "filesystem and is denied. To check whether a tool exists, "
+                "use `list_files` or `sandbox_exec` instead."
+            ),
+        }
+
     if mode == "structural":
         return _search_structural(container, pattern, path, max_results)
     return _search_lexical(

@@ -135,6 +135,18 @@ def search_in_container(
     if resolved_path is None:
         resolved_path = resolve_git_root(container)
 
+    # Reject paths that would trigger full-filesystem scan (Issue #744)
+    _DENIED_SEARCH_PATHS = frozenset(["/", "/proc", "/sys", "/dev"])
+    if resolved_path in _DENIED_SEARCH_PATHS:
+        return json.dumps({
+            "status": "error",
+            "error": (
+                f"path \"{resolved_path}\" would search the entire container "
+                "filesystem and is denied. To check whether a tool exists, "
+                "use `list_files` or `sandbox_exec` instead."
+            ),
+        })
+
     record_tool_use(
         container_id[:12],
         "search_in_container",

@@ -8,6 +8,7 @@ from src.sunaba.search import (
     _parse_grep_output,
     _parse_rg_json,
     _parse_sg_json,
+    is_path_denied,
 )
 
 # ===================================================================
@@ -207,3 +208,15 @@ class TestParseSgJson:
 # _determine_lint_severity tests (Issue #54)
 # ===================================================================
 
+# ===================================================================
+# is_path_denied tests (Issue #744)
+# ===================================================================
+
+class TestIsPathDenied:
+    """Tests for is_path_denied guard against full-filesystem scans."""
+
+    def test_denies_root(self) -> None:
+        assert is_path_denied("/") is True
+
+    def test_denies_root_trailing(self) -> None:
+        assert is_path_denied("//") is True

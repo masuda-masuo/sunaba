@@ -229,6 +229,63 @@ class TestSearchInContainer:
         assert result == {"status": "error", "error": "connection refused"}
 
     @patch("sunaba.tools.verify._docker")
+    def test_denies_root_path(self, mock_docker: MagicMock) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = json.loads(
+            search_in_container(container_id="abc123", pattern="foo", path="/")
+        )
+        assert result["status"] == "error"
+        assert "denied" in result["error"].lower()
+
+    @patch("sunaba.tools.verify._docker")
+    def test_denies_proc_path(self, mock_docker: MagicMock) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = json.loads(
+            search_in_container(container_id="abc123", pattern="foo", path="/proc")
+        )
+        assert result["status"] == "error"
+        assert "denied" in result["error"].lower()
+
+    @patch("sunaba.tools.verify._docker")
+    def test_denies_proc_trailing_slash(self, mock_docker: MagicMock) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = json.loads(
+            search_in_container(container_id="abc123", pattern="foo", path="/proc/")
+        )
+        assert result["status"] == "error"
+        assert "denied" in result["error"].lower()
+
+    @patch("sunaba.tools.verify._docker")
+    def test_allows_valid_path(self, mock_docker: MagicMock) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        mock_resolve = "sunaba.tools.verify.resolve_git_root"
+        with patch(mock_resolve) as mock_resolve_fn:
+            mock_resolve_fn.return_value = "/repo"
+            with patch("sunaba.tools.verify.search_files") as mock_impl:
+                mock_impl.return_value = {"matches": [], "shown": 0, "total": 0, "truncated": False}
+                result = json.loads(
+                    search_in_container(container_id="abc123", pattern="foo")
+                )
+                assert "error" not in result
+                assert "matches" in result
+
+    @patch("sunaba.tools.verify._docker")
     @patch("sunaba.tools.verify.search_files")
     @patch("sunaba.tools.verify.resolve_git_root")
     def test_delegates_with_defaults(

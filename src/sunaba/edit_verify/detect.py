@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .paths import _get_extension
+from .shell import _exec_run
 
 
 @dataclass
@@ -120,25 +121,17 @@ def detect_languages(
         for p in search_paths
     )
 
-    ec, output = container.exec_run(
-        ["/bin/sh", "-c", find_cmd],
-        stdout=True,
-        stderr=True,
-        workdir=working_dir,
-    )
-    if ec == 0:
-        stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-        out = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-        for line_out in out.strip().split("\n"):
-            line_out = line_out.strip()
-            if not line_out:
-                continue
-            basename = posixpath.basename(line_out)
-            marker_dir = posixpath.dirname(line_out)
-            for pattern, marker_lang in _DETECTION_MARKERS:
-                if fnmatch.fnmatch(basename, pattern):
-                    lang_scope[marker_lang] = marker_dir
-                    break
+    ec, out, _ = _exec_run(container, ["/bin/sh", "-c", find_cmd], workdir=working_dir)
+    for line_out in out.strip().split("\n"):
+        line_out = line_out.strip()
+        if not line_out:
+            continue
+        basename = posixpath.basename(line_out)
+        marker_dir = posixpath.dirname(line_out)
+        for pattern, marker_lang in _DETECTION_MARKERS:
+            if fnmatch.fnmatch(basename, pattern):
+                lang_scope[marker_lang] = marker_dir
+                break
 
     if not lang_scope:
         return DetectionResult(
@@ -161,14 +154,12 @@ def _find_tsconfig_upward(container: Any, file_path: str, working_dir: str | Non
     """
     current = posixpath.dirname(posixpath.abspath(file_path))
     while True:
-        ec, output = container.exec_run(
+        ec, out, _ = _exec_run(
+            container,
             ["/bin/sh", "-c", f'test -f {shlex.quote(posixpath.join(current, "tsconfig.json"))} && echo found || echo notfound'],
-            stdout=True,
-            stderr=True,
             workdir=working_dir,
         )
-        stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-        out = stdout_part.decode("utf-8", errors="replace").strip() if stdout_part else ""
+        out = out.strip()
         if "found" in out:
             return current
         parent = posixpath.dirname(current)

@@ -176,16 +176,17 @@ class TestNeedsPCRE2:
 class TestRunPyrightVerify:
     """Tests for _run_pyright_verify with mocked container."""
 
-    def _make_result(self, ec: int, stdout: str = "", stderr: str = ""):
-        """Create a tuple matching container.exec_run return format."""
-        return (ec, (stdout.encode("utf-8"), stderr.encode("utf-8")))
+    def _make_container(self, ec: int, stdout: str = "", stderr: str = ""):
+        """Create a mock container with docker-py compliant exec_run."""
+        from tests.conftest import _make_docker_compliant_container
+
+        return _make_docker_compliant_container([
+            (ec, stdout.encode("utf-8"), stderr.encode("utf-8")),
+        ])
 
     def test_exit_code_1_returns_findings(self) -> None:
-        from unittest.mock import MagicMock
+        from sunaba.edit_verify import _run_pyright_verify
 
-        from src.sunaba.edit_verify import _run_pyright_verify
-
-        container = MagicMock()
         pyright_output = json.dumps({
             "generalDiagnostics": [
                 {
@@ -197,7 +198,7 @@ class TestRunPyrightVerify:
                 }
             ]
         })
-        container.exec_run.return_value = self._make_result(1, pyright_output)
+        container = self._make_container(1, pyright_output)
 
         result = _run_pyright_verify(container, "/app/test.py")
         assert result.status == "findings"
@@ -205,35 +206,26 @@ class TestRunPyrightVerify:
         assert result.findings[0]["line"] == 6
 
     def test_exit_code_0_returns_ok(self) -> None:
-        from unittest.mock import MagicMock
+        from sunaba.edit_verify import _run_pyright_verify
 
-        from src.sunaba.edit_verify import _run_pyright_verify
-
-        container = MagicMock()
         pyright_output = json.dumps({"generalDiagnostics": []})
-        container.exec_run.return_value = self._make_result(0, pyright_output)
+        container = self._make_container(0, pyright_output)
 
         result = _run_pyright_verify(container, "/app/test.py")
         assert result.status == "ok"
         assert result.findings == []
 
     def test_exit_code_127_returns_not_available(self) -> None:
-        from unittest.mock import MagicMock
+        from sunaba.edit_verify import _run_pyright_verify
 
-        from src.sunaba.edit_verify import _run_pyright_verify
-
-        container = MagicMock()
-        container.exec_run.return_value = self._make_result(127)
+        container = self._make_container(127)
 
         result = _run_pyright_verify(container, "/app/test.py")
         assert result.status == "not_available"
 
     def test_exit_code_250_with_findings_returns_ok(self) -> None:
-        from unittest.mock import MagicMock
+        from sunaba.edit_verify import _run_pyright_verify
 
-        from src.sunaba.edit_verify import _run_pyright_verify
-
-        container = MagicMock()
         pyright_output = json.dumps({
             "generalDiagnostics": [
                 {
@@ -245,30 +237,24 @@ class TestRunPyrightVerify:
                 }
             ]
         })
-        container.exec_run.return_value = self._make_result(250, pyright_output)
+        container = self._make_container(250, pyright_output)
 
         result = _run_pyright_verify(container, "/app/test.py")
         assert result.status == "findings"
         assert len(result.findings) == 1
 
     def test_exit_code_250_without_findings_returns_error(self) -> None:
-        from unittest.mock import MagicMock
+        from sunaba.edit_verify import _run_pyright_verify
 
-        from src.sunaba.edit_verify import _run_pyright_verify
-
-        container = MagicMock()
-        container.exec_run.return_value = self._make_result(250, "", "FATAL ERROR: OOM")
+        container = self._make_container(250, "", "FATAL ERROR: OOM")
 
         result = _run_pyright_verify(container, "/app/test.py")
         assert result.status == "error"
 
     def test_exit_code_2_with_empty_output_returns_error(self) -> None:
-        from unittest.mock import MagicMock
+        from sunaba.edit_verify import _run_pyright_verify
 
-        from src.sunaba.edit_verify import _run_pyright_verify
-
-        container = MagicMock()
-        container.exec_run.return_value = self._make_result(2)
+        container = self._make_container(2)
 
         result = _run_pyright_verify(container, "/app/test.py")
         assert result.status == "error"

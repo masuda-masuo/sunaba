@@ -22,7 +22,7 @@ from .results import (
     _envelope_not_available,
     _envelope_ok,
 )
-from .shell import _GO_ENV, _SANDBOX_ENV, _path_display, _quote_path
+from .shell import _GO_ENV, _SANDBOX_ENV, _exec_run, _path_display, _quote_path
 
 # ---------------------------------------------------------------------------
 # Linter / Type checker / Test / Scan runners
@@ -102,7 +102,8 @@ def _run_ruff_verify(
         else ""
     )
     fix_arg = "--fix " if fix else ""
-    ec, output = container.exec_run(
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
         [
             "/bin/sh",
             "-c",
@@ -111,19 +112,14 @@ def _run_ruff_verify(
             f"{security_args}"
             f"{_quote_path(path)}",
         ],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec == 127:
         return _envelope_not_available("ruff", "ruff not installed in container")
     if ec not in (0, 1):
         return _envelope_error("ruff", stderr_text.strip() or f"exit code {ec}", ec)
 
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     findings = _parse_ruff_output(stdout_text, _path_display(path))
     for r in findings:
         r["severity"] = _determine_lint_severity(r.get("rule", ""))
@@ -146,25 +142,21 @@ def _run_eslint_verify(
     """
     fix_arg = "--fix " if fix else ""
     cmd, source = _resolve_js_tool(container, "eslint", workdir=workdir)
-    ec, output = container.exec_run(
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
         [
             "/bin/sh",
             "-c",
             f"{_SANDBOX_ENV}{cmd} {fix_arg}--format json {_quote_path(path)}",
         ],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec == 127:
         return _annotate_resolution(
             _envelope_not_available("eslint", "eslint not installed in container"), source, cmd
         )
 
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     findings = _parse_eslint_output(stdout_text, _path_display(path))
     for r in findings:
         r["severity"] = _determine_lint_severity(r.get("rule", ""))
@@ -179,26 +171,21 @@ def _run_eslint_verify(
 
 def _run_golangci_lint_verify(container: Any, path: str | Sequence[str]) -> VerifyResult:
     """Run golangci-lint on *path*.  Falls back to go vet."""
-    ec, output = container.exec_run(
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
         [
             "/bin/sh",
             "-c",
             f"{_SANDBOX_ENV}{_GO_ENV}golangci-lint run --out-format json {_quote_path(path)}",
         ],
-        stdout=True,
-        stderr=True,
     )
     if ec == 127:
         return _run_go_vet_verify(container, path)
-
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec not in (0, 1):
         # golangci-lint uses exit 2 for execution errors (config issues, etc.)
         return _envelope_error("golangci-lint", stderr_text.strip() or f"exit code {ec}", ec)
 
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     findings = _parse_golangci_lint_output(stdout_text, _path_display(path))
     for r in findings:
         r["severity"] = "error"
@@ -207,24 +194,20 @@ def _run_golangci_lint_verify(container: Any, path: str | Sequence[str]) -> Veri
 
 def _run_go_vet_verify(container: Any, path: str | Sequence[str]) -> VerifyResult:
     """Run go vet on *path*."""
-    ec, output = container.exec_run(
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
         [
             "/bin/sh",
             "-c",
             f"{_SANDBOX_ENV}{_GO_ENV}go vet {_quote_path(path)}",
         ],
-        stdout=True,
-        stderr=True,
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec == 127:
         return _envelope_not_available("go vet", "go not installed in container")
     if ec not in (0, 1):
         return _envelope_error("go vet", stderr_text.strip() or f"exit code {ec}", ec)
 
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     findings = _parse_go_vet_output(stdout_text + "\n" + stderr_text, _path_display(path))
     for r in findings:
         r["severity"] = "error"
@@ -235,23 +218,19 @@ def _run_pyright_verify(
     container: Any, path: str, workdir: str | None = None
 ) -> VerifyResult:
     """Run pyright on *path*.  Returns VerifyResult envelope."""
-    ec, output = container.exec_run(
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
         [
             "/bin/sh",
             "-c",
             f"{_SANDBOX_ENV}pyright --outputjson {_quote_path(path)}",
         ],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec == 127:
         return _envelope_not_available("pyright", "pyright not installed in container")
 
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     findings = _parse_pyright_output(stdout_text, path)
     for r in findings:
         r["severity"] = "error"
@@ -272,22 +251,16 @@ def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> Ve
     than relying on npx's own (differently-behaved) fallback search.
     """
     cmd, source = _resolve_js_tool(container, "tsc", workdir=workdir)
-    ec, output = container.exec_run(
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
         [
             "/bin/sh",
             "-c",
             f"{_SANDBOX_ENV}{cmd} --noEmit {_quote_path(path)} 2>&1",
         ],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    combined = ""
-    if stdout_part:
-        combined += stdout_part.decode("utf-8", errors="replace")
-    if stderr_part:
-        combined += stderr_part.decode("utf-8", errors="replace")
+    combined = stdout_text + stderr_text
 
     if ec == 127:
         return _annotate_resolution(

@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -69,6 +70,138 @@ def _make_container_mock(exec_returns: list[tuple[int, bytes, bytes]]):
     container.exec_run.side_effect = [
         (ec, (stdout, stderr)) for ec, stdout, stderr in exec_returns
     ]
+    return container
+
+
+# -------------------------------------------------------------------
+# Docker-py compliant exec_run fake (Issue #742)
+# -------------------------------------------------------------------
+
+
+def _make_exec_run_results(
+    results: list[tuple[int, bytes, bytes]],
+) -> list[tuple[int, bytes | tuple[bytes, bytes]]]:
+    """Convert ``(ec, stdout, stderr)`` triples into docker-py-compliant
+    ``exec_run`` return values.
+
+    docker-py returns ``(ec, (stdout, stderr))`` **only** when the call was
+    made with ``demux=True``.  Without ``demux`` it returns
+    ``(ec, multiplexed_bytes)`` — the two streams are not separable.
+
+    This helper only builds the demuxed form.  The ``demux``/no-``demux``
+    dispatch itself lives in :class:`_DockerCompliantExec`, which
+    re-multiplexes the pair back into a single ``bytes`` when the caller
+    omitted ``demux`` -- so a caller that forgets it gets the same
+    unusable single stream docker-py would have handed back.
+    """
+    return [
+        (ec, (stdout, stderr)) for ec, stdout, stderr in results
+    ]
+
+
+class _DockerCompliantExec:
+    """Replacement for ``MagicMock.exec_run`` that checks for ``demux``.
+
+    docker-py returns ``(ec, (stdout, stderr))`` **only** when called with
+    ``demux=True``; without ``demux`` it returns multiplexed bytes.  This
+    class wraps a private ``MagicMock`` to enforce that contract while
+    forwarding ``.return_value``, ``.side_effect``, ``.call_args``,
+    ``.call_args_list`` and ``.call_count`` transparently, so existing
+    patterns like ``mock.exec_run.return_value = (0, (b"...", b""))``
+    continue to work.
+    """
+
+    def __init__(self) -> None:
+        self._mock = MagicMock()
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        result = self._mock(*args, **kwargs)
+        ec, output = result
+        if kwargs.get("demux"):
+            if isinstance(output, tuple):
+                # docker-py yields ``None``, not ``b""``, for a stream that
+                # produced nothing.
+                stdout_part, stderr_part = output
+                return ec, (stdout_part or None, stderr_part or None)
+            return ec, output
+        if isinstance(output, tuple):
+            return ec, (output[0] or b"") + (output[1] or b"")
+        return ec, output
+
+    @property
+    def return_value(self) -> Any:
+        return self._mock.return_value
+
+    @return_value.setter
+    def return_value(self, val: Any) -> None:
+        self._mock.return_value = val
+
+    @property
+    def side_effect(self) -> Any:
+        return self._mock.side_effect
+
+    @side_effect.setter
+    def side_effect(self, val: Any) -> None:
+        self._mock.side_effect = val
+
+    @property
+    def call_args(self) -> Any:
+        return self._mock.call_args
+
+    @property
+    def call_args_list(self) -> Any:
+        return self._mock.call_args_list
+
+    @property
+    def call_count(self) -> int:
+        return self._mock.call_count
+
+
+def _docker_compliant_mock(mock: MagicMock | None = None) -> MagicMock:
+    """Wrap a MagicMock so its ``exec_run`` follows docker-py's contract.
+
+    Use this in any test that mocks ``exec_run`` so a missing ``demux=True``
+    is caught by the test, not by production.
+
+    Example::
+
+        mock = _docker_compliant_mock(MagicMock())
+        mock.exec_run.return_value = (0, (b"stdout", b"stderr"))
+        # Without demux: mock.exec_run(cmd) returns (0, b"stdoutstderr")
+        # With demux:    mock.exec_run(cmd, demux=True) returns (0, (b"stdout", b"stderr"))
+    """
+    if mock is None:
+        mock = MagicMock()
+    mock.exec_run = _DockerCompliantExec()
+    return mock
+
+
+def _make_docker_compliant_container(
+    results: list[tuple[int, bytes, bytes]],
+) -> MagicMock:
+    """Build a mock container whose ``exec_run`` follows docker-py's real
+    contract: returns ``(ec, (stdout, stderr))`` **only** when ``demux=True``
+    was passed, and raw bytes otherwise.
+
+    Use this in tests that exercise ``exec_run`` calls so that a missing
+    ``demux=True`` is caught by the test, not by production.
+    """
+    container = MagicMock()
+    compliant_results = _make_exec_run_results(results)
+
+    def _side_effect(*args: Any, **kwargs: Any) -> Any:
+        idx = _side_effect.call_count  # type: ignore[attr-defined]
+        _side_effect.call_count += 1  # type: ignore[attr-defined]
+        ec, out = compliant_results[idx]
+        if kwargs.get("demux"):
+            return ec, out
+        # Without demux: return multiplexed bytes (simplified: stdout+stderr)
+        stdout_part, stderr_part = out
+        combined = stdout_part + stderr_part
+        return ec, combined
+
+    _side_effect.call_count = 0  # type: ignore[attr-defined]
+    container.exec_run.side_effect = _side_effect
     return container
 
 
@@ -316,7 +449,13 @@ class _FakeContainer:
                 pass
         finally:
             sys.stdout = old
-        return 0, (buf.getvalue().encode("utf-8"), b"")
+        # Follow docker-py's contract (Issue #742): the split pair is only
+        # returned when the caller asked for demux; otherwise the streams
+        # arrive multiplexed as a single bytes object.
+        out = buf.getvalue().encode("utf-8")
+        if kwargs.get("demux"):
+            return 0, (out or None, None)
+        return 0, out
 
 
 class _FakeClient:

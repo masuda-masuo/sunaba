@@ -16,7 +16,7 @@ from .lint_runners import (
     _run_tsc_verify,
 )
 from .results import VerifyResult, _envelope_not_available, _envelope_skipped
-from .shell import _SANDBOX_ENV
+from .shell import _SANDBOX_ENV, _exec_run
 from .test_runners import _DISPATCH
 
 # ---------------------------------------------------------------------------
@@ -102,23 +102,21 @@ def _run_patch_targets_verify(
     without it are not blocked).  Findings mirror the script's stderr
     output format ``path:lineno: patch target ...``.
     """
-    ec, output = container.exec_run(
+    ec, stdout_text, _ = _exec_run(
+        container,
         ["/bin/sh", "-c",
          f"{_SANDBOX_ENV}test -f scripts/check_patch_targets.py && echo EXISTS || echo NOT_FOUND"],
-        stdout=True, stderr=True, workdir=working_dir,
+        workdir=working_dir,
     )
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     if stdout_text.strip() != "EXISTS":
         return _envelope_skipped("check-patch-targets", "scripts/check_patch_targets.py not found")
 
-    ec, output = container.exec_run(
+    ec, stdout_text, _ = _exec_run(
+        container,
         ["/bin/sh", "-c",
          f"{_SANDBOX_ENV}python scripts/check_patch_targets.py 2>&1"],
-        stdout=True, stderr=True, workdir=working_dir,
+        workdir=working_dir,
     )
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
 
     if ec == 127:
         return _envelope_not_available("check-patch-targets", "python not found")

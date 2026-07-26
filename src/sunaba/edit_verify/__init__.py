@@ -86,7 +86,7 @@ from .results import (  # noqa: F401
     _envelope_ok,
     _envelope_skipped,
 )
-from .shell import _GO_ENV, _SANDBOX_ENV, _path_display, _quote_path  # noqa: F401
+from .shell import _GO_ENV, _SANDBOX_ENV, _exec_run, _path_display, _quote_path  # noqa: F401
 from .single_file import (  # noqa: F401
     _run_js_linter,
     _run_pylint,
@@ -172,6 +172,7 @@ __all__ = [
     # shell
     "_GO_ENV",
     "_SANDBOX_ENV",
+    "_exec_run",
     "_path_display",
     "_quote_path",
     # single_file

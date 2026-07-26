@@ -16,7 +16,7 @@ from typing import Any
 from sunaba.journal import record_file_write
 
 from .paths import _is_test_file
-from .shell import _quote_path
+from .shell import _exec_run, _quote_path
 
 # ---------------------------------------------------------------------------
 # Container file operations
@@ -32,14 +32,10 @@ def read_file(container: Any, file_path: str) -> str:
     Raises:
         ValueError: Container not found or file read error.
     """
-    exit_code, output = container.exec_run(
+    exit_code, stdout_text, stderr_text = _exec_run(
+        container,
         ["/bin/sh", "-c", f"cat {_quote_path(file_path)}"],
-        stdout=True,
-        stderr=True,
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if exit_code != 0:
         raise ValueError(
@@ -97,14 +93,11 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
     parent_dir = posixpath.dirname(file_path) or "/"
 
     # Ensure the parent directory exists (no file content in argv here).
-    mk_code, mk_out = container.exec_run(
+    mk_code, _, mk_text = _exec_run(
+        container,
         ["/bin/sh", "-c", f"mkdir -p {_quote_path(parent_dir)}"],
-        stdout=True,
-        stderr=True,
     )
     if mk_code != 0:
-        _, mk_err = mk_out if isinstance(mk_out, tuple) else (None, mk_out)
-        mk_text = mk_err.decode("utf-8", errors="replace") if mk_err else ""
         raise ValueError(
             f"Failed to create parent dir for {file_path}: "
             f"exit code {mk_code}\n{mk_text}"
@@ -157,15 +150,13 @@ def _owner_for_write(
     ``999, 999, 0o644`` when ``stat`` is unavailable.
     """
     def _stat(path: str, fmt: str) -> list[str] | None:
-        code, out = container.exec_run(
+        code, stdout_text, _ = _exec_run(
+            container,
             ["/bin/sh", "-c", f"stat -c {shlex.quote(fmt)} {_quote_path(path)}"],
-            stdout=True,
-            stderr=True,
         )
-        stdout_part = out[0] if isinstance(out, tuple) else out
-        if code != 0 or not stdout_part:
+        if code != 0 or not stdout_text:
             return None
-        return stdout_part.decode("utf-8", errors="replace").split()
+        return stdout_text.split()
 
     existing = _stat(file_path, "%u %g %a")
     if existing and len(existing) == 3:
@@ -179,14 +170,13 @@ def _owner_for_write(
     # with ``id``, not ``stat /proc/self``: ``/proc/self`` is a root-owned
     # symlink and ``stat`` does not dereference by default, so it reported
     # 0:0 (root) and left new files unwritable by the sandbox user (Issue #642).
-    code, out = container.exec_run(
-        ["/bin/sh", "-c", "id -u; id -g"], stdout=True, stderr=True
+    code, stdout_text, _ = _exec_run(
+        container, ["/bin/sh", "-c", "id -u; id -g"]
     )
-    stdout_part = out[0] if isinstance(out, tuple) else out
-    if code == 0 and stdout_part:
+    if code == 0 and stdout_text:
         # ``id -u; id -g`` prints two newline-separated tokens ("999\n999\n");
         # split() on whitespace yields exactly [uid, gid] on success.
-        ids = stdout_part.decode("utf-8", errors="replace").split()
+        ids = stdout_text.split()
         if len(ids) == 2:
             try:
                 return int(ids[0]), int(ids[1]), 0o644

@@ -14,7 +14,7 @@ from sunaba.edit_verify import (
     type_check_file,
 )
 from sunaba.journal import record_tool_use
-from sunaba.search import search_files
+from sunaba.search import is_path_denied, search_files
 from sunaba.tools.common import _docker, container_not_found_error
 from sunaba.tools.vcs import resolve_git_root
 from sunaba.verify_state import record_verify_success
@@ -136,13 +136,12 @@ def search_in_container(
         resolved_path = resolve_git_root(container)
 
     # Reject paths that would trigger full-filesystem scan (Issue #744)
-    _DENIED_SEARCH_PATHS = frozenset(["/", "/proc", "/sys", "/dev"])
-    if resolved_path in _DENIED_SEARCH_PATHS:
+    if is_path_denied(resolved_path):
         return json.dumps({
             "status": "error",
             "error": (
-                f"path \"{resolved_path}\" would search the entire container "
-                "filesystem and is denied. To check whether a tool exists, "
+                f"path \"{resolved_path}\" is denied. Full-filesystem scans are "
+                "prohibited. To check whether a tool exists, "
                 "use `list_files` or `sandbox_exec` instead."
             ),
         })

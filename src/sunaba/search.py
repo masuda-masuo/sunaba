@@ -13,6 +13,21 @@ from typing import Any
 #: Regex for standard grep output: ``file:line:text``
 _GREP_OUTPUT_RE = re.compile(r"^([^:]+):(\d+):(.*)$")
 
+#: Paths denied in search to prevent full-filesystem scans (Issue #744).
+#: Exact matches and all subpaths are rejected.
+DENIED_SEARCH_PATHS = frozenset(["/", "/proc", "/sys", "/dev"])
+
+
+def is_path_denied(path: str) -> bool:
+    """Check if *path* is denied to prevent full-filesystem scans."""
+    normalized = path.rstrip("/") or "/"
+    if normalized in DENIED_SEARCH_PATHS:
+        return True
+    for entry in DENIED_SEARCH_PATHS:
+        if entry != "/" and path.startswith(entry + "/"):
+            return True
+    return False
+
 
 def _build_search_result(
     matches: list[dict[str, Any]],
@@ -74,13 +89,12 @@ def search_files(
     except Exception as e:
         return {"status": "error", "error": f"Container {container_id[:12]} not found: {e}"}
 
-    _DENIED_SEARCH_PATHS = frozenset(["/", "/proc", "/sys", "/dev"])
-    if path in _DENIED_SEARCH_PATHS:
+    if is_path_denied(path):
         return {
             "status": "error",
             "error": (
-                f"path \"{path}\" would search the entire container "
-                "filesystem and is denied. To check whether a tool exists, "
+                f"path \"{path}\" is denied. Full-filesystem scans are "
+                "prohibited. To check whether a tool exists, "
                 "use `list_files` or `sandbox_exec` instead."
             ),
         }

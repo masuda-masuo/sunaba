@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from .results import VerifyResult
+from .shell import _exec_run
 
 # ---------------------------------------------------------------------------
 # JS/TS tool resolution: repo node_modules/.bin wins over the baked global
@@ -32,10 +33,9 @@ def _resolve_js_tool(container: Any, tool: str, workdir: str | None = None) -> t
     is ``"local"`` when the repo-pinned binary exists, or ``"global"`` when
     falling back to the image-baked one on ``PATH``.
     """
-    ec, _ = container.exec_run(
+    ec, _, _ = _exec_run(
+        container,
         ["/bin/sh", "-c", f"test -x node_modules/.bin/{tool}"],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
     if ec == 0:
@@ -89,14 +89,11 @@ def _detect_js_test_runner(container: Any, workdir: str | None = None) -> str:
     TODO(#588 follow-up): no VitestAdapter exists yet -- add one and
     dispatch to it here once vitest support is in scope.
     """
-    ec, output = container.exec_run(
+    ec, raw, _ = _exec_run(
+        container,
         ["/bin/sh", "-c", "cat package.json 2>/dev/null || true"],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    raw = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     if not raw.strip():
         return "jest"
     try:

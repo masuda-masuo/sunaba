@@ -20,6 +20,7 @@ from sunaba.edit_verify import (
     lint_file,
     run_lint_type_gate,
 )
+from tests.conftest import _make_docker_compliant_container
 
 # ---------------------------------------------------------------------------
 # ESLint real output shapes
@@ -66,13 +67,19 @@ def _make_container(
     stdout: str = "",
     stderr: str = "",
 ) -> MagicMock:
-    """Create a mock container whose exec_run returns the given exit code/IO."""
-    container = MagicMock()
-    container.exec_run.return_value = (
-        exit_code,
-        (stdout.encode("utf-8"), stderr.encode("utf-8")),
-    )
-    return container
+    """Create a mock container whose exec_run follows docker-py's contract:
+    tuple **only** when ``demux=True`` is passed.
+
+    Two results so the mock survives the ``_resolve_js_tool`` call
+    (which runs ``test -x node_modules/.bin/eslint``) before the
+    actual eslint run.  The first result (exit 1) means "no local
+    eslint" → fallback to global, which is the less surprising default
+    for a test fixture.
+    """
+    return _make_docker_compliant_container([
+        (1, b"", b""),  # _resolve_js_tool: no local binary
+        (exit_code, stdout.encode("utf-8"), stderr.encode("utf-8")),  # eslint run
+    ])
 
 
 # ===================================================================
@@ -164,12 +171,10 @@ class TestRunEslintVerifyExit2Resolution:
 
     def test_exit_2_local_resolution_annotated(self) -> None:
         """Local eslint that exits 2 still reports which binary ran."""
-        container = MagicMock()
-        # Two exec_run calls: (1) `test -x` for resolution, (2) eslint run
-        container.exec_run.side_effect = [
-            (0, (b"", b"")),          # local binary found
-            (2, (b"", _STDERR_NO_CONFIG.encode("utf-8"))),  # eslint exit 2
-        ]
+        container = _make_docker_compliant_container([
+            (0, b"", b""),                             # local binary found
+            (2, b"", _STDERR_NO_CONFIG.encode("utf-8")),  # eslint exit 2
+        ])
 
         result = _run_eslint_verify(container, "file.js", workdir="/repo")
 
@@ -180,18 +185,16 @@ class TestRunEslintVerifyExit2Resolution:
 
     def test_exit_2_global_resolution_annotated(self) -> None:
         """Global eslint that exits 2 still reports which binary ran."""
-        container = MagicMock()
-        container.exec_run.side_effect = [
-            (1, (b"", b"")),          # no local binary
-            (2, (b"", _STDERR_NO_CONFIG.encode("utf-8"))),  # eslint exit 2
-        ]
+        container = _make_docker_compliant_container([
+            (1, b"", b""),                             # no local binary
+            (2, b"", _STDERR_NO_CONFIG.encode("utf-8")),  # eslint exit 2
+        ])
 
         result = _run_eslint_verify(container, "file.js", workdir="/repo")
 
         assert result.status == "error"
         assert "resolved via global" in result.detail
         assert "ESLint couldn't find" in result.detail
-
 
 # ===================================================================
 # Gate-level consequence
@@ -324,11 +327,10 @@ class TestLintFileEslintRunFailure:
         return client
 
     def test_config_failure_reports_the_reason(self) -> None:
-        container = MagicMock()
-        container.exec_run.side_effect = [
-            (1, (b"", b"")),  # no local binary -> global eslint
-            (2, (b"", _STDERR_NO_CONFIG.encode("utf-8"))),
-        ]
+        container = _make_docker_compliant_container([
+            (1, b"", b""),  # no local binary -> global eslint
+            (2, b"", _STDERR_NO_CONFIG.encode("utf-8")),
+        ])
 
         findings = lint_file(self._client_for(container), "cid", "file.js")
 
@@ -347,14 +349,82 @@ class TestLintFileEslintRunFailure:
         assert "Install eslint" in findings[0]["message"]
 
     def test_findings_path_is_untouched(self) -> None:
-        container = MagicMock()
-        container.exec_run.side_effect = [
-            (1, (b"", b"")),  # no local binary -> global eslint
-            (1, (_JSON_FINDING.encode("utf-8"), b"")),
-        ]
+        container = _make_docker_compliant_container([
+            (1, b"", b""),  # no local binary -> global eslint
+            (1, _JSON_FINDING.encode("utf-8"), b""),
+        ])
 
         findings = lint_file(self._client_for(container), "cid", "file.js")
 
         assert len(findings) == 1
         assert findings[0]["rule"] == "no-unused-vars"
         assert findings[0]["line"] == 5
+
+
+# ===================================================================
+# _exec_run helper contract
+# ===================================================================
+
+
+class TestExecRunHelper:
+    """The _exec_run wrapper must correctly separate stdout/stderr even when
+    the underlying docker-py ``exec_run`` would return multiplexed bytes
+    without ``demux=True`` (the bug this fix addresses — Issue #742)."""
+
+    def test_demux_true_separates_streams(self) -> None:
+        """With demux=True, _exec_run returns cleanly separated text."""
+        from sunaba.edit_verify.shell import _exec_run
+
+        container = _make_docker_compliant_container([
+            (0, b"stdout text", b"stderr text"),
+        ])
+        ec, out, err = _exec_run(container, ["/bin/sh", "-c", "echo test"])
+        assert ec == 0
+        assert out == "stdout text"
+        assert err == "stderr text"
+
+    def test_multiplexed_bytes_without_demux(self) -> None:
+        """_exec_run always passes demux=True, so the compliant mock returns
+        a tuple.  This test verifies that if someone called exec_run WITHOUT
+        demux, the mock returns raw bytes — proving the mock catches the
+        bug just like docker-py would."""
+        container = _make_docker_compliant_container([
+            (2, b"", _STDERR_NO_CONFIG.encode("utf-8")),
+        ])
+        # Call exec_run directly WITHOUT demux
+        ec, output = container.exec_run(
+            ["/bin/sh", "-c", "eslint --format json file.js"],
+            stdout=True,
+            stderr=True,
+        )
+        assert ec == 2
+        # Without demux, output is raw bytes (not a tuple)
+        assert isinstance(output, bytes), (
+            f"Expected bytes when demux is absent, got {type(output).__name__}"
+        )
+
+    def test_eslint_stderr_survives_through_helper(self) -> None:
+        """Eslint's 'no config file' stderr message reaches the error detail
+        when exec_run goes through _exec_run (which passes demux=True).
+
+        This is the acceptance test for Issue #742: the real-world symptom
+        was that ``result.detail`` said 'exit code 2' instead of the actual
+        ESLint error.
+        """
+        container = _make_docker_compliant_container([
+            (1, b"", b""),                             # no local binary
+            (2, b"", _STDERR_NO_CONFIG.encode("utf-8")),  # eslint exit 2
+        ])
+
+        result = _run_eslint_verify(container, "file.js", workdir="/repo")
+
+        assert result.status == "error"
+        assert result.exit_code == 2
+        # The stderr text must appear in detail (not "exit code 2")
+        assert "ESLint couldn't find" in result.detail, (
+            f"Expected ESLint config error in detail, got: {result.detail!r}"
+        )
+        assert "exit code 2" not in result.detail, (
+            "Should not fall back to 'exit code 2' when real stderr is available"
+        )
+

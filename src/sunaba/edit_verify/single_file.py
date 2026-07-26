@@ -12,7 +12,7 @@ from .lint_runners import (
 )
 from .parsers import _parse_pylint_output
 from .paths import ScopeWorkdir, _get_extension
-from .shell import _SANDBOX_ENV, _quote_path
+from .shell import _SANDBOX_ENV, _exec_run, _quote_path
 
 
 def lint_file(
@@ -265,17 +265,14 @@ def _run_ts_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
 
 def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
     """Run ``pylint --output-format json``. Returns None if pylint is not installed."""
-    exit_code, output = container.exec_run(
+    exit_code, stdout_text, _ = _exec_run(
+        container,
         [
             "/bin/sh",
             "-c",
             f"{_SANDBOX_ENV}pylint --output-format json {_quote_path(file_path)} 2>/dev/null || true",
         ],
-        stdout=True,
-        stderr=True,
     )
     if exit_code == 127:
         return None
-    stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     return _parse_pylint_output(stdout_text, file_path)

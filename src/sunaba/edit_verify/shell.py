@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Sequence
+from typing import Any
 
 
 def _quote_path(path: str | Sequence[str]) -> str:
@@ -29,6 +30,37 @@ _SANDBOX_ENV: str = (
     "RUFF_CACHE_DIR=/tmp/.ruff_cache "
     "mkdir -p /tmp/.ruff_cache 2>/dev/null; "
 )
+
+
+def _exec_run(
+    container: Any,
+    cmd: list[str],
+    workdir: str | None = None,
+) -> tuple[int, str, str]:
+    """Run ``container.exec_run`` with ``demux=True``.
+
+    docker-py *only* returns a ``(stdout, stderr)`` tuple when
+    ``demux=True`` is passed; without it the output is multiplexed
+    bytes with no way to separate the streams.  This wrapper
+    centralises the call so every caller gets clean decoded text
+    without repeating the idiom.
+
+    Returns:
+        ``(exit_code, stdout_text, stderr_text)``.
+    """
+    exit_code, (stdout_part, stderr_part) = container.exec_run(
+        cmd,
+        stdout=True,
+        stderr=True,
+        demux=True,
+        workdir=workdir,
+    )
+    # docker-py hands back ``None`` -- not ``b""`` -- for a stream that
+    # produced nothing, so both parts are guarded before decoding.
+    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+    return exit_code, stdout_text, stderr_text
+
 
 #: Environment prefix for *go* invocations only (Issue #584).
 #:

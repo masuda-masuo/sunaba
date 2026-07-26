@@ -490,9 +490,9 @@ class TestRunLintTypeGate:
     def test_patch_targets_skipped_when_script_absent(self, monkeypatch):
         """_run_patch_targets_verify returns skipped when script absent."""
         from src.sunaba.edit_verify import _run_patch_targets_verify
+        from tests.conftest import _make_docker_compliant_container
 
-        mock_container = type("MockContainer", (), {})()
-        mock_container.exec_run = lambda *a, **k: (0, (b"NOT_FOUND\n", b""))
+        mock_container = _make_docker_compliant_container([(0, b"NOT_FOUND\n", b"")])
         result = _run_patch_targets_verify(mock_container, working_dir=None)
         assert result.status == "skipped"
 

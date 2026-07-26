@@ -19,7 +19,7 @@ from .results import (
     _envelope_not_available,
     _envelope_skipped,
 )
-from .shell import _GO_ENV, _SANDBOX_ENV, _quote_path
+from .shell import _GO_ENV, _SANDBOX_ENV, _exec_run, _quote_path
 
 
 def _run_pytest_verify(
@@ -38,19 +38,15 @@ def _run_pytest_verify(
     _json_file = "/tmp/_pytest_report.json"
     _raw_file = "/tmp/_pytest_raw.txt"
     cmd = build_pytest_cmd(_json_file, _raw_file, "", _quote_path(path), _SANDBOX_ENV)
-    ec, output = container.exec_run(
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
         ["/bin/sh", "-c", cmd],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec == 127:
         return _envelope_not_available("pytest", "python3 not found in container")
     if ec == 2:
-        stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
         _, raw_tail = split_pytest_output(stdout_text)
         detail = "test collection failed"
         if raw_tail:
@@ -60,8 +56,6 @@ def _run_pytest_verify(
         return _envelope_skipped("pytest", "no tests found")
     if ec not in (0, 1):
         return _envelope_error("pytest", stderr_text.strip() or f"exit code {ec}", ec)
-
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
 
     json_part, raw_tail = split_pytest_output(stdout_text)
 
@@ -112,18 +106,15 @@ def _run_jest_verify(
         )
 
     cmd, source = _resolve_js_tool(container, "jest", workdir=workdir)
-    ec, output = container.exec_run(
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
         [
             "/bin/sh",
             "-c",
             f"{_SANDBOX_ENV}{cmd} --json --passWithNoTests {_quote_path(path)}",
         ],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec == 127:
         return _annotate_resolution(
@@ -133,8 +124,6 @@ def _run_jest_verify(
         return _annotate_resolution(
             _envelope_error("jest", stderr_text.strip() or f"exit code {ec}", ec), source, cmd
         )
-
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
 
     if not stdout_text.strip():
         return _annotate_resolution(
@@ -179,14 +168,11 @@ def _run_npm_test_verify(
         - ``status="not_available"`` when the runner/script is missing.
     """
     # 1. Read repo-root package.json
-    ec, output = container.exec_run(
+    ec, stdout_text, _ = _exec_run(
+        container,
         ["/bin/sh", "-c", f"{_SANDBOX_ENV}cat package.json 2>/dev/null"],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
-    stdout_part, _stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
 
     # 2. Parse & check for scripts.test
     scripts_test: str | None = None
@@ -202,14 +188,11 @@ def _run_npm_test_verify(
         return _run_jest_verify(container, path, workdir=workdir)
 
     # 3. Run npm test
-    ec, output = container.exec_run(
+    ec, combined, _ = _exec_run(
+        container,
         ["/bin/sh", "-c", f"{_SANDBOX_ENV}npm test --silent 2>&1"],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
-    stdout_part, _stderr_part = output if isinstance(output, tuple) else (output, b"")
-    combined = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
 
     # 4. Try to parse TAP v13 counts (node --test and similar runners)
     tap_report = None
@@ -285,25 +268,20 @@ def _run_go_test_verify(
     container: Any, path: str, workdir: str | None = None
 ) -> VerifyResult:
     """Run go test -json on *path*.  Returns VerifyResult envelope."""
-    ec, output = container.exec_run(
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
         [
             "/bin/sh",
             "-c",
             f"{_SANDBOX_ENV}{_GO_ENV}go test -json {_quote_path(path)}",
         ],
-        stdout=True,
-        stderr=True,
         workdir=workdir,
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     if ec == 127:
         return _envelope_not_available("go test", "go not installed in container")
     if ec not in (0, 1):
         return _envelope_error("go test", stderr_text.strip() or f"exit code {ec}", ec)
-
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
 
     if not stdout_text.strip():
         return _envelope_skipped("go test", "no test output produced")

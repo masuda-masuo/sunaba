@@ -17,6 +17,7 @@ from sunaba.journal import record_file_write
 
 from .drivers import _EDIT_SYMBOL_DRIVER, _GIT_APPLY_TRANSFORM, _TRANSFORM_RUNNER
 from .paths import _is_test_file
+from .shell import _exec_run
 
 # ---------------------------------------------------------------------------
 # Public API: called by @mcp.tool() handlers in server.py
@@ -143,15 +144,9 @@ def transform_file_in_container(
         f"; exit $rc"
     )
 
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", cmd],
-        stdout=True,
-        stderr=True,
-        demux=True,
+    exit_code, stdout_text, stderr_text = _exec_run(
+        container, ["/bin/sh", "-c", cmd],
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     start = stdout_text.find(mark_a)
     end = stdout_text.find(mark_b)
@@ -235,15 +230,9 @@ def edit_symbol_in_container(
         f"; exit $rc"
     )
 
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", cmd],
-        stdout=True,
-        stderr=True,
-        demux=True,
+    exit_code, stdout_text, stderr_text = _exec_run(
+        container, ["/bin/sh", "-c", cmd],
     )
-    stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
     start = stdout_text.find(mark_a)
     end = stdout_text.find(mark_b)

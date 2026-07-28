@@ -262,6 +262,7 @@ jobs:
           BASE_DIGEST: ${{ steps.base.outputs.digest }}
           PYTHON_DIGEST: ${{ steps.python.outputs.digest }}
           GO_DIGEST: ${{ steps.go.outputs.digest }}
+          RUST_DIGEST: ${{ steps.rust.outputs.digest }}
           FULL_DIGEST: ${{ steps.full.outputs.digest }}
           JS_DIGEST: ${{ steps.js.outputs.digest }}
         run: |
@@ -278,6 +279,7 @@ jobs:
             --neutral "${BASE_DIGEST}" \
             --python "${PYTHON_DIGEST}" \
             --go "${GO_DIGEST}" \
+            --rust "${RUST_DIGEST}" \
             --full "${FULL_DIGEST}" \
             --js "${JS_DIGEST}"
 
@@ -297,6 +299,7 @@ jobs:
           base:   ghcr.io/${REPO}/sandbox@${BASE_DIGEST}
           python: ghcr.io/${REPO}/sandbox@${PYTHON_DIGEST}
           go:     ghcr.io/${REPO}/sandbox@${GO_DIGEST}
+          rust:   ghcr.io/${REPO}/sandbox@${RUST_DIGEST}
           full:   ghcr.io/${REPO}/sandbox@${FULL_DIGEST}
           js:     ghcr.io/${REPO}/sandbox@${JS_DIGEST}
 
@@ -318,6 +321,7 @@ jobs:
           | base   | \`${BASE_DIGEST}\` |
           | python | \`${PYTHON_DIGEST}\` |
           | go     | \`${GO_DIGEST}\` |
+          | rust   | \`${RUST_DIGEST}\` |
           | full   | \`${FULL_DIGEST}\` |
           | js     | \`${JS_DIGEST}\` |
 

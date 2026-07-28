@@ -520,7 +520,7 @@ def sandbox_initialize(
         env.update(proxy_lifecycle.sandbox_proxy_env(proxy_runtime))
 
     try:
-        # Resolve variant aliases ("full", "neutral", "python", "go", "js") to pinned digests (Issue #545)
+        # Resolve variant aliases ("full", "neutral", "python", "go", "rust", "js") to pinned digests (Issue #545)
         resolved = _image_pins.get(resolved, resolved)
         resolved = _resolve_image_ref(resolved)
         validate_image_ref(resolved)
@@ -756,7 +756,7 @@ async def sandbox_initialize_tool(
     for the real result.
 
     Args:
-        image: Docker image, or alias 'full'/'neutral'/'python'/'go'/'js' (pinned digests).
+        image: Docker image, or alias full/neutral/python/go/rust/js (pinned digests).
                Default: the all-in-one image (every toolchain verify can run).
         allow_network: Enable network access. Required for pip install,
             network clones, and publish.
@@ -914,7 +914,7 @@ def run_container_and_exec(
     masked) and consecutive repeated lines are compressed.
 
     Args:
-        image: Docker image, or alias 'full'/'neutral'/'python'/'go'/'js' (pinned digests).
+        image: Docker image, or alias full/neutral/python/go/rust/js (pinned digests).
                Default: the all-in-one image (every toolchain verify can run).
         commands: Shell commands run sequentially; must be non-empty.
         verbose: 'error_only', 'summary' (default), or 'full'.
@@ -1027,7 +1027,7 @@ def run_container_and_exec(
 
     # --- Start container ---
     try:
-        # Resolve variant aliases ("full", "neutral", "python", "go", "js") to pinned digests (Issue #545)
+        # Resolve variant aliases ("full", "neutral", "python", "go", "rust", "js") to pinned digests (Issue #545)
         resolved = _image_pins.get(resolved, resolved)
         resolved = _resolve_image_ref(resolved)
         validate_image_ref(resolved)

@@ -35,7 +35,7 @@ _image_pins: dict[str, str] = image_pins.load_image_pins()
 _FULL_IMAGE: str = _image_pins["full"]
 
 #: Lean images, reachable only through an explicit ``image=`` (which also
-#: accepts the aliases "neutral" / "python" / "go" / "js" / "full"; alias
+#: accepts the aliases "neutral" / "python" / "go" / "rust" / "js" / "full"; alias
 #: resolution reads :data:`_image_pins` directly).  ``neutral`` is also the
 #: ``FROM`` parent the variants are built on.
 _NEUTRAL_IMAGE: str = _image_pins["neutral"]

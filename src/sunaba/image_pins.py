@@ -26,9 +26,10 @@ from importlib import resources
 #:
 #: ``full`` is the all-in-one image (base + every language toolchain) that
 #: ``sandbox_initialize`` starts by default (#584).  ``neutral`` remains the
-#: ``FROM`` parent of the variants; ``python`` / ``go`` / ``js`` are the lean
-#: images an explicit ``image=`` can still ask for (``js`` added in #588).
-PIN_KEYS: tuple[str, ...] = ("neutral", "python", "go", "full", "js")
+#: ``FROM`` parent of the variants; ``python`` / ``go`` / ``rust`` / ``js``
+#: are the lean images an explicit ``image=`` can still ask for (``js`` added
+#: in #588, ``rust`` in #751).
+PIN_KEYS: tuple[str, ...] = ("neutral", "python", "go", "rust", "full", "js")
 
 #: A pin must be a fully digest-pinned GHCR reference -- never a mutable tag.
 #: ``<registry>/.../sandbox@sha256:<64 hex>`` (``docs/design-multilang-support.md`` §6).

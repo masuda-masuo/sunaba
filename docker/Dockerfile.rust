@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+# docker/Dockerfile.rust
+#
+# Code Sandbox MCP — Rust backend イメージ（base + Rust ツールチェーン）
+# 公開タグ: ghcr.io/<owner>/sunaba/sandbox:rust
+# 設計: docs/design_multilang_support.md §6
+# ビルド:
+#   docker build -f docker/Dockerfile.rust \
+#     --build-arg BASE_IMAGE=sunaba/sandbox:base \
+#     -t sunaba/sandbox:rust .
+#
+# 位置づけ: これは *明示 image= 用の lean イメージ*。既定で使われるのは
+# 全部入りの sandbox:full。ツールチェーンの定義は install-rust.sh に一本化し、
+# Dockerfile.full と共有する。
+
+ARG BASE_IMAGE=sunaba/sandbox:base
+FROM ${BASE_IMAGE}
+
+# ── Rust ツールチェーン ─────────────────────────────────────────────
+# root: apt の C コンパイラ/リンカ (rusqlite bundled 等ネイティブ拡張に必要)
+# と rustup の両方を install-rust.sh 一本が担当する。詳細はそのコメント参照。
+USER root
+ARG RUST_VERSION=1.97.1
+COPY docker/install-rust.sh /tmp/install-rust.sh
+RUN sh /tmp/install-rust.sh "${RUST_VERSION}" && rm /tmp/install-rust.sh
+
+# CARGO_HOME/bin に rustup が置く cargo/rustc/rustfmt/clippy 等のプロキシが
+# 並ぶので PATH に足す。RUSTUP_HOME/CARGO_HOME は install-rust.sh の最後で
+# sandbox 所有に chown 済みなので、`rustup target add <triple>` が非 root で
+# 実行時に成立する（これがこのイメージを足す具体的な理由 -- Windows ターゲット
+# へのクロスコンパイル）。
+ENV RUSTUP_HOME=/home/sandbox/.rustup \
+    CARGO_HOME=/home/sandbox/.cargo \
+    PATH="/home/sandbox/.cargo/bin:${PATH}"
+
+USER sandbox
+WORKDIR /workspace
+
+# ── ヘルスチェック (base 継承 + rust 固有ツール) ──────────────────────
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD rg --version && sg --version && node --version && npm --version \
+   && cc --version \
+   && rustc --version && cargo --version && cargo clippy --version && cargo fmt --version || exit 1
+
+CMD ["bash"]

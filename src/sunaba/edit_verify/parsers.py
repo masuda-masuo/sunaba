@@ -36,6 +36,63 @@ def _parse_golangci_lint_output(raw: str, file_path: str) -> list[dict[str, Any]
     return results
 
 
+def _parse_clippy_output(raw: str, file_path: str) -> list[dict[str, Any]]:
+    """Parse ``cargo clippy --message-format=json`` NDJSON output.
+
+    Each line is a cargo message envelope (``reason`` values include
+    ``"compiler-artifact"``, ``"build-script-executed"``,
+    ``"build-finished"``); only ``"compiler-message"`` entries carry a
+    rustc/clippy diagnostic in their nested ``message`` object.  Within
+    that, only ``"warning"`` and ``"error"`` level messages become
+    findings here -- clippy attaches a ``"note"``/``"help"`` child (and
+    sometimes a top-level ``"help"`` message, e.g. "for further
+    information visit ...") to nearly every real diagnostic, and
+    counting those as separate findings would double- or triple-count
+    a single lint.  A message with an empty ``"spans"`` list is skipped
+    too: cargo also emits a trailing summary compiler-message (e.g.
+    ``"1 warning emitted"`` / ``"aborting due to 2 previous errors"``)
+    with no location at all, which is a run-level total, not a finding.
+
+    The finding dict includes a ``"severity"`` key set directly from
+    the message's own ``"level"`` field (``"warning"`` or ``"error"``)
+    -- unlike the other parsers here, whose callers assign a uniform
+    severity after the fact, clippy's JSON already distinguishes the
+    two per-message, so preserving that distinction is the parser's
+    job, not the caller's (see ``_run_clippy_verify`` in
+    ``lint_runners.py``, which deliberately does not overwrite it).
+    """
+    results: list[dict[str, Any]] = []
+    for line in raw.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("reason") != "compiler-message":
+            continue
+        message = data.get("message") or {}
+        level = message.get("level", "")
+        if level not in ("error", "warning"):
+            continue
+        spans = message.get("spans") or []
+        if not spans:
+            continue
+        primary = next((s for s in spans if s.get("is_primary")), spans[0])
+        file_name = primary.get("file_name", file_path)
+        line_no = int(primary.get("line_start", 0))
+        code = (message.get("code") or {}).get("code") or "clippy"
+        results.append({
+            "file": file_name,
+            "line": line_no,
+            "rule": code,
+            "message": message.get("message", ""),
+            "severity": level,
+        })
+    return results
+
+
 def _parse_go_vet_output(raw: str, file_path: str) -> list[dict[str, Any]]:
     """Parse go vet text output (file:line:col: message)."""
     results: list[dict[str, Any]] = []

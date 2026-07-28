@@ -194,6 +194,10 @@ class TestDecideHost:
         assert guard.decide_host("registry.npmjs.org").allow is True
         assert guard.decide_host("proxy.golang.org").allow is True
         assert guard.decide_host("sum.golang.org").allow is True
+        assert guard.decide_host("crates.io").allow is True
+        assert guard.decide_host("static.crates.io").allow is True
+        assert guard.decide_host("index.crates.io").allow is True
+        assert guard.decide_host("static.rust-lang.org").allow is True
 
     def test_unknown_host_denied_by_default(self) -> None:
         guard = EgressGuard()
@@ -266,6 +270,14 @@ class TestAllowedEgressHostsFromEnv:
         assert guard.decide_host("proxy.golang.org").allow is True
         assert "sum.golang.org" in DEFAULT_EGRESS_HOSTS
         assert guard.decide_host("sum.golang.org").allow is True
+        assert "crates.io" in DEFAULT_EGRESS_HOSTS
+        assert guard.decide_host("crates.io").allow is True
+        assert "static.crates.io" in DEFAULT_EGRESS_HOSTS
+        assert guard.decide_host("static.crates.io").allow is True
+        assert "index.crates.io" in DEFAULT_EGRESS_HOSTS
+        assert guard.decide_host("index.crates.io").allow is True
+        assert "static.rust-lang.org" in DEFAULT_EGRESS_HOSTS
+        assert guard.decide_host("static.rust-lang.org").allow is True
         # And the block hint names the right env var.
         assert "SUNABA_ALLOWED_EGRESS_HOSTS" in EGRESS_HOST_BLOCK_HINT
 

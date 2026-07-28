@@ -10,7 +10,7 @@ form the core of the minimal edit loop:
 By sending only diffs and reading only the needed lines, each iteration
 consumes only hundreds of tokens instead of thousands.
 
-Supports multi-language verification (Python / JS / TS / Go) with
+Supports multi-language verification (Python / JS / TS / Go / Rust) with
 language-aware dispatch, status envelopes, and proper gate logic.
 """
 
@@ -58,17 +58,20 @@ from .jstools import (  # noqa: F401
 from .lint_runners import (  # noqa: F401
     _RUFF_SECURITY_IGNORE,
     _RUFF_SECURITY_SELECT,
+    _run_clippy_verify,
     _run_eslint_verify,
     _run_go_vet_verify,
     _run_golangci_lint_verify,
     _run_pyright_verify,
     _run_ruff_verify,
+    _run_rust_type_verify,
     _run_tsc_verify,
 )
 from .parsers import (  # noqa: F401
     _RUFF_SEVERITY_MAP,
     _TSC_TEXT_RE,
     _determine_lint_severity,
+    _parse_clippy_output,
     _parse_eslint_output,
     _parse_go_vet_output,
     _parse_golangci_lint_output,
@@ -86,7 +89,7 @@ from .results import (  # noqa: F401
     _envelope_ok,
     _envelope_skipped,
 )
-from .shell import _GO_ENV, _SANDBOX_ENV, _exec_run, _path_display, _quote_path  # noqa: F401
+from .shell import _GO_ENV, _RUST_ENV, _SANDBOX_ENV, _exec_run, _path_display, _quote_path  # noqa: F401
 from .single_file import (  # noqa: F401
     _run_js_linter,
     _run_pylint,
@@ -98,6 +101,7 @@ from .single_file import (  # noqa: F401
 )
 from .test_runners import (  # noqa: F401
     _DISPATCH,
+    _run_cargo_test_verify,
     _run_go_test_verify,
     _run_jest_verify,
     _run_npm_test_verify,
@@ -140,16 +144,19 @@ __all__ = [
     # lint_runners
     "_RUFF_SECURITY_IGNORE",
     "_RUFF_SECURITY_SELECT",
+    "_run_clippy_verify",
     "_run_eslint_verify",
     "_run_go_vet_verify",
     "_run_golangci_lint_verify",
     "_run_pyright_verify",
     "_run_ruff_verify",
+    "_run_rust_type_verify",
     "_run_tsc_verify",
     # parsers
     "_RUFF_SEVERITY_MAP",
     "_TSC_TEXT_RE",
     "_determine_lint_severity",
+    "_parse_clippy_output",
     "_parse_eslint_output",
     "_parse_go_vet_output",
     "_parse_golangci_lint_output",
@@ -171,6 +178,7 @@ __all__ = [
     "_envelope_skipped",
     # shell
     "_GO_ENV",
+    "_RUST_ENV",
     "_SANDBOX_ENV",
     "_exec_run",
     "_path_display",
@@ -185,6 +193,7 @@ __all__ = [
     "_run_pylint",
     # test_runners
     "_DISPATCH",
+    "_run_cargo_test_verify",
     "_run_go_test_verify",
     "_run_jest_verify",
     "_run_npm_test_verify",

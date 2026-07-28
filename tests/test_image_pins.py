@@ -81,7 +81,7 @@ def test_loader_rejects_unknown_keys(tmp_path, monkeypatch) -> None:
     # Simulate drift: a pin file with a stray/renamed key must fail loudly
     # rather than load a partial mapping.
     bad = {k: f"ghcr.io/x/sandbox@sha256:{'0' * 64}" for k in PIN_KEYS}
-    bad["rust"] = f"ghcr.io/x/sandbox@sha256:{'0' * 64}"
+    bad["swift"] = f"ghcr.io/x/sandbox@sha256:{'0' * 64}"
     _patch_resource(monkeypatch, tmp_path, json.dumps(bad))
     with pytest.raises(ImagePinError, match="keys mismatch"):
         load_image_pins()

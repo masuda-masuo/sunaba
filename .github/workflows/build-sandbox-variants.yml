@@ -20,10 +20,12 @@ on:
       - "docker/Dockerfile.base"
       - "docker/Dockerfile.python"
       - "docker/Dockerfile.go"
+      - "docker/Dockerfile.rust"
       - "docker/Dockerfile.full"
       - "docker/Dockerfile.js"
       - "docker/install-python-tools.sh"
       - "docker/install-go.sh"
+      - "docker/install-rust.sh"
       - "docker/install-js-tools.sh"
   workflow_dispatch:
 
@@ -158,6 +160,26 @@ jobs:
           wait_healthy "$CID" "go" 30 || { docker kill "$CID" >/dev/null 2>&1; exit 1; }
           docker kill "$CID" >/dev/null 2>&1
 
+      - name: Build and push rust
+        id: rust
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.rust
+          push: true
+          build-args: |
+            BASE_IMAGE=ghcr.io/${{ github.repository }}/sandbox@${{ steps.base.outputs.digest }}
+          tags: ghcr.io/${{ github.repository }}/sandbox:rust
+
+      # 6.2) rust の HEALTHCHECK を確認
+      - name: Verify rust HEALTHCHECK
+        run: |
+          source /tmp/healthcheck.sh
+          IMG="ghcr.io/${{ github.repository }}/sandbox@${{ steps.rust.outputs.digest }}"
+          CID=$(docker run -d "$IMG" sleep 90)
+          wait_healthy "$CID" "rust" 30 || { docker kill "$CID" >/dev/null 2>&1; exit 1; }
+          docker kill "$CID" >/dev/null 2>&1
+
       # 6.5) full（全部入り・既定イメージ, #584）
       #      python / go と同じ install スクリプトを叩くので、ツール定義は
       #      ドリフトしない。HEALTHCHECK が dispatch マトリクスの和を表明する。
@@ -216,6 +238,7 @@ jobs:
             echo "| base   | \`${{ steps.base.outputs.digest }}\` | ✅ verified | ✅ unhealthy detected |"
             echo "| python | \`${{ steps.python.outputs.digest }}\` | ✅ verified | — |"
             echo "| go     | \`${{ steps.go.outputs.digest }}\` | ✅ verified | — |"
+            echo "| rust   | \`${{ steps.rust.outputs.digest }}\` | ✅ verified | — |"
             echo "| full   | \`${{ steps.full.outputs.digest }}\` | ✅ verified | — |"
             echo "| js     | \`${{ steps.js.outputs.digest }}\` | ✅ verified | — |"
             echo ""
@@ -277,7 +300,7 @@ jobs:
           full:   ghcr.io/${REPO}/sandbox@${FULL_DIGEST}
           js:     ghcr.io/${REPO}/sandbox@${JS_DIGEST}
 
-          Automated update triggered by docker/Dockerfile.{base,python,go,full,js} build."
+          Automated update triggered by docker/Dockerfile.{base,python,go,rust,full,js} build."
           git push origin "${BRANCH}"
 
           gh pr create \
@@ -286,7 +309,7 @@ jobs:
             --title "chore(#313): 既定 variant イメージの digest pin を更新" \
             --body "## 自動生成 PR（#313: 検出ベース既定イメージの pin 更新）
 
-          CI で \`docker/Dockerfile.{base,python,go,full,js}\` のビルドが完了したため、
+          CI で \`docker/Dockerfile.{base,python,go,rust,full,js}\` のビルドが完了したため、
           \`image_pins.json\` の \`neutral\` / \`python\` / \`go\` / \`full\` / \`js\` pin を
           新しい digest へ更新します。
 

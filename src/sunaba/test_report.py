@@ -482,6 +482,137 @@ class GoTestAdapter:
 
 
 # ---------------------------------------------------------------------------
+# Rust (cargo test) adapter
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RustTestAdapter:
+    """Adapt **cargo test** plain-text output.
+
+    Unlike ``go test -json``, stable cargo has no structured test-report
+    format -- ``cargo test``'s own ``--format json`` is gated behind
+    ``-Z unstable-options`` (nightly only), so this parses the same
+    human-readable text a developer would see.  ``cargo test`` runs one
+    test binary per target (lib unit tests, each integration test file,
+    doctests, ...) in a single invocation, printing one independent
+    block per binary::
+
+        running 3 tests
+        test tests::it_adds_two ... ok
+        test tests::it_fails ... FAILED
+        test tests::it_is_ignored ... ignored
+
+        failures:
+
+        ---- tests::it_fails stdout ----
+        thread 'tests::it_fails' panicked at src/lib.rs:15:5:
+        assertion `left == right` failed
+          left: 4
+         right: 5
+        note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        failures:
+            tests::it_fails
+
+        test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    This adapter sums the ``test result: ...`` summary line's counts
+    across every block found in *raw*, and pulls failure detail (file
+    and line) out of the ``thread '<name>' panicked at <file>:<line>:<col>:``
+    line inside each failing test's ``---- <name> stdout ----`` section
+    -- the same "grep the location out of the panic/output text" idea
+    :class:`GoTestAdapter` uses for ``file_test.go:42:``.
+
+    Raises :class:`ValueError` when no ``test result: ...`` summary line
+    is found, so callers can distinguish "genuinely unparseable output"
+    from a clean parse (mirrors :class:`TapAdapter`).
+    """
+
+    #: ``test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s``
+    _RESULT_RE = re.compile(
+        r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; "
+        r"(\d+) measured; (\d+) filtered out(?:; finished in ([\d.]+)s)?",
+        re.MULTILINE,
+    )
+    #: ``test tests::it_fails ... FAILED`` -- the name may contain spaces
+    #: (doctest names look like ``src/lib.rs - foo (line 3)``), so the
+    #: name is captured non-greedily up to the literal `` ... ``.
+    _TEST_LINE_RE = re.compile(r"^test (.+?) \.\.\. (ok|FAILED|ignored)$", re.MULTILINE)
+    #: ``---- tests::it_fails stdout ----`` section header.
+    _STDOUT_HEADER_RE = re.compile(r"^---- (.+?) stdout ----$", re.MULTILINE)
+    #: ``thread 'tests::it_fails' panicked at src/lib.rs:15:5:``
+    _PANIC_LOC_RE = re.compile(r"panicked at ([^\s:][^:]*):(\d+):(\d+)")
+
+    @classmethod
+    def parse(cls, raw: str) -> TestReport:
+        """Parse cargo test's plain-text output into a TestReport."""
+        results = cls._RESULT_RE.findall(raw)
+        if not results:
+            raise ValueError("cargo test 'test result: ...' summary line not found in output")
+
+        passed = failed = ignored = 0
+        duration = 0.0
+        for _status, p, f, i, _measured, _filtered, dur in results:
+            passed += int(p)
+            failed += int(f)
+            ignored += int(i)
+            if dur:
+                duration += float(dur)
+
+        # Failing test names, in the order cargo printed them, deduped
+        # (a name could in principle repeat across binaries).
+        failed_names: list[str] = []
+        seen: set[str] = set()
+        for name, status in cls._TEST_LINE_RE.findall(raw):
+            if status == "FAILED" and name not in seen:
+                seen.add(name)
+                failed_names.append(name)
+
+        # Per-test stdout sections: name -> body text, so each failure's
+        # panic location/message can be pulled out individually.
+        headers = list(cls._STDOUT_HEADER_RE.finditer(raw))
+        sections: dict[str, str] = {}
+        for idx, m in enumerate(headers):
+            start = m.end()
+            end = headers[idx + 1].start() if idx + 1 < len(headers) else len(raw)
+            sections[m.group(1)] = raw[start:end]
+
+        failures_list: list[TestFailure] = []
+        for name in failed_names:
+            body = sections.get(name, "")
+            file = ""
+            line = 0
+            loc_m = cls._PANIC_LOC_RE.search(body)
+            if loc_m:
+                file = loc_m.group(1)
+                line = int(loc_m.group(2))
+            pruned = prune_library_frames(body) if body else "unknown"
+            failures_list.append(
+                TestFailure(test=name, error=pruned, file=file, line=line)
+            )
+
+        status = "failed" if failed > 0 else "ok"
+        return TestReport(
+            status=status,
+            duration=duration,
+            passed=passed,
+            failed=failed,
+            failures=failures_list if failures_list else None,
+        )
+
+    @classmethod
+    def parse_json(cls, raw: str) -> TestReport:
+        """Parse raw cargo test text output into a TestReport.
+
+        cargo test's stable output is not JSON; ``parse_json`` exists for
+        interface consistency with the other adapter classes (mirrors
+        :meth:`TapAdapter.parse_json`).
+        """
+        return cls.parse(raw)
+
+
+# ---------------------------------------------------------------------------
 # TAP (node --test) adapter
 # ---------------------------------------------------------------------------
 

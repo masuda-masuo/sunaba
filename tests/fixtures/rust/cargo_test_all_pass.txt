@@ -1,0 +1,13 @@
+running 3 tests
+test tests::it_is_ignored ... ignored
+test tests::it_adds_two ... ok
+test tests::it_multiplies ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test src/lib.rs - add (line 3) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+

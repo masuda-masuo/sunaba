@@ -73,3 +73,16 @@ def _exec_run(
 #: that leak reaches every container, so the guard moves to where it belongs:
 #: the go command itself.
 _GO_ENV: str = "GOMAXPROCS=1 "
+
+#: Environment prefix for *cargo* invocations only, mirroring ``_GO_ENV``.
+#:
+#: ``CARGO_BUILD_JOBS=1`` serialises rustc's codegen-unit / crate-graph
+#: fan-out for the same reason ``GOMAXPROCS=1`` exists above: an unbounded
+#: ``cargo build``/``clippy``/``test`` can spawn enough parallel rustc
+#: processes to blow past the container's ``pids_limit`` (#233's failure
+#: mode is toolchain-agnostic, not Go-specific).  ``CARGO_TERM_COLOR=never``
+#: keeps cargo's human-readable stderr free of ANSI escapes, which would
+#: otherwise land inside the panic messages that
+#: :class:`~sunaba.test_report.RustTestAdapter` regex-matches out of
+#: ``cargo test`` output.
+_RUST_ENV: str = "CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never "

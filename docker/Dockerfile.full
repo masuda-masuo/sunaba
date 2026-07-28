@@ -46,6 +46,18 @@ ENV GOPATH=/home/sandbox/go \
     GOCACHE=/tmp/.gocache \
     GOFLAGS="-buildvcs=false -p=1"
 
+# ── Rust ツールチェーン (root: apt の cc + rustup を install-rust.sh が担当) ──
+# 詳細は install-rust.sh のコメント参照。RUSTUP_HOME/CARGO_HOME はそこで
+# sandbox 所有に chown 済みなので、`rustup target add` が実行時に非 root で
+# 通る（Windows ターゲットへのクロスコンパイルがこのイメージを足す理由）。
+ARG RUST_VERSION=1.97.1
+COPY docker/install-rust.sh /tmp/install-rust.sh
+RUN sh /tmp/install-rust.sh "${RUST_VERSION}" && rm /tmp/install-rust.sh
+
+ENV RUSTUP_HOME=/home/sandbox/.rustup \
+    CARGO_HOME=/home/sandbox/.cargo \
+    PATH="/home/sandbox/.cargo/bin:${PATH}"
+
 # ── Python 開発ツール (sandbox ユーザ、base の永続 venv へ) ───────
 USER sandbox
 WORKDIR /workspace
@@ -66,6 +78,8 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
    && python3 -c "import pytest_jsonreport" \
    && python3 -c "import xdist" \
    && go version \
-   && eslint --version && tsc --version && jest --version || exit 1
+   && eslint --version && tsc --version && jest --version \
+   && cc --version \
+   && rustc --version && cargo --version && cargo clippy --version && cargo fmt --version || exit 1
 
 CMD ["bash"]

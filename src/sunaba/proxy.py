@@ -138,8 +138,9 @@ EGRESS_HOST_WILDCARD = "*"
 #: Destination hosts always reachable under the egress proxy, independent of
 #: user configuration: GitHub (git smart-HTTP, REST API, archive downloads,
 #: and the ``*.githubusercontent.com`` hosts serving raw files / release
-#: assets) plus the Python, Node, and Go package registries, so ``pip`` /
-#: ``npm`` / ``go install`` keep working under default-deny (#506).
+#: assets) plus the Python, Node, Go, and Rust package registries, so
+#: ``pip`` / ``npm`` / ``go install`` / ``cargo`` / ``rustup`` keep working
+#: under default-deny (#506).
 #: Operators extend this set via :data:`ALLOWED_EGRESS_HOSTS_ENV`; they
 #: cannot shrink it (the built-ins are what make the proxy usable as a dev
 #: sandbox out of the box).
@@ -153,6 +154,10 @@ DEFAULT_EGRESS_HOSTS: frozenset[str] = frozenset({
     "registry.npmjs.org",
     "proxy.golang.org",
     "sum.golang.org",
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+    "static.rust-lang.org",
 })
 
 #: Static fallback push token injected into authorized pushes.  The primary

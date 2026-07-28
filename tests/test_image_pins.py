@@ -168,6 +168,9 @@ class TestFullImageHealthcheckCoversDispatchMatrix:
         "ruff", "pyright", "pytest",  # python
         "go version",  # go
         "eslint", "tsc", "jest",  # js/ts (#588)
+        # rust: cc は素の "cc" だと他の単語への部分一致で素通りするので
+        # "cc --version" で照合する
+        "rustc", "cargo", "cargo clippy", "cargo fmt", "cc --version",
     )
 
     def test_healthcheck_names_every_dispatch_tool(self) -> None:
@@ -179,6 +182,16 @@ class TestFullImageHealthcheckCoversDispatchMatrix:
             f"not_available deep inside a user's first verify instead of "
             f"failing CI's docker-run healthcheck (#584/#588)."
         )
+
+
+class TestRustImageHealthcheckCoversRustDispatchTools:
+    """sandbox:rust (explicit image=rust) must assert its own rust tools."""
+
+    def test_healthcheck_names_rust_tools(self) -> None:
+        healthcheck = _dockerfile_healthcheck_text("rust")
+        required = ("rustc", "cargo", "cargo clippy", "cargo fmt", "cc --version")
+        missing = [t for t in required if t not in healthcheck]
+        assert not missing, f"docker/Dockerfile.rust HEALTHCHECK is missing {missing}"
 
 
 class TestJsImageHealthcheckCoversJsDispatchTools:

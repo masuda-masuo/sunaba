@@ -45,11 +45,13 @@ _LANGUAGE_EXT_MAP: dict[str, str] = {
     ".ts": "ts",
     ".tsx": "ts",
     ".go": "go",
+    ".rs": "rust",
 }
 
 # (pattern, language) — pattern supports fnmatch glob (e.g. requirements*.txt)
 _DETECTION_MARKERS: list[tuple[str, str]] = [
     ("go.mod", "go"),
+    ("Cargo.toml", "rust"),
     ("pyproject.toml", "python"),
     ("setup.py", "python"),
     ("requirements*.txt", "python"),
@@ -134,6 +136,9 @@ def detect_languages(
                 break
 
     if not lang_scope:
+        lang_scope = _deep_marker_scan(container, working_dir=working_dir)
+
+    if not lang_scope:
         return DetectionResult(
             languages=set(),
             scope={},
@@ -145,6 +150,55 @@ def detect_languages(
 
     languages = set(lang_scope.keys())
     return DetectionResult(languages=languages, scope=lang_scope)
+
+
+def _deep_marker_scan(
+    container: Any, working_dir: str | None = None
+) -> dict[str, str]:
+    """Second-chance marker scan, 2-3 levels deep, when depth 1 found nothing.
+
+    The primary scan looks at ``maxdepth 1`` of the target path and the
+    working root.  A repository whose project manifest lives in a
+    subdirectory -- e.g. a Rust repo carrying its Cargo workspace in
+    ``prototypes/`` -- then detects *nothing*, and an empty detection makes
+    the pre-publish gate pass with "no languages detected" and the test
+    layer report ``no_tests``: an end-to-end false green measured on a real
+    repository (the js dispatch shipped with exactly this class of gap,
+    #738).  Deepening only the nothing-found case keeps every currently
+    detected layout byte-identical while converting that silent pass into a
+    real run.
+
+    Returns the same ``{language: root_dir}`` shape as the primary scan,
+    choosing the shallowest match per language so a workspace root wins
+    over its member crates.
+    """
+    prune = " -o ".join(
+        f'-name "{d}"' for d in (*_EXCLUDE_DIRS, "target", ".git")
+    )
+    names = " -o ".join(f'-name "{pattern}"' for pattern, _ in _DETECTION_MARKERS)
+    find_cmd = (
+        f"find . -mindepth 2 -maxdepth 3 \\( {prune} \\) -prune"
+        f" -o \\( {names} \\) -print 2>/dev/null"
+    )
+    ec, out, _ = _exec_run(container, ["/bin/sh", "-c", find_cmd], workdir=working_dir)
+
+    hits: list[tuple[int, str, str]] = []  # (depth, marker_dir, language)
+    for line_out in out.strip().split("\n"):
+        line_out = line_out.strip()
+        if not line_out:
+            continue
+        basename = posixpath.basename(line_out)
+        for pattern, marker_lang in _DETECTION_MARKERS:
+            if fnmatch.fnmatch(basename, pattern):
+                hits.append(
+                    (line_out.count("/"), posixpath.dirname(line_out), marker_lang)
+                )
+                break
+
+    lang_scope: dict[str, str] = {}
+    for _depth, marker_dir, marker_lang in sorted(hits):
+        lang_scope.setdefault(marker_lang, marker_dir)
+    return lang_scope
 
 
 def _find_tsconfig_upward(container: Any, file_path: str, working_dir: str | None = None) -> str | None:

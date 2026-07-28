@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Sequence
 from typing import Any
 
 from .jstools import _annotate_resolution, _resolve_js_tool
 from .parsers import (
     _determine_lint_severity,
+    _parse_clippy_output,
     _parse_eslint_output,
     _parse_go_vet_output,
     _parse_golangci_lint_output,
@@ -21,8 +23,9 @@ from .results import (
     _envelope_error,
     _envelope_not_available,
     _envelope_ok,
+    _envelope_skipped,
 )
-from .shell import _GO_ENV, _SANDBOX_ENV, _exec_run, _path_display, _quote_path
+from .shell import _GO_ENV, _RUST_ENV, _SANDBOX_ENV, _exec_run, _path_display, _quote_path
 
 # ---------------------------------------------------------------------------
 # Linter / Type checker / Test / Scan runners
@@ -212,6 +215,163 @@ def _run_go_vet_verify(container: Any, path: str | Sequence[str]) -> VerifyResul
     for r in findings:
         r["severity"] = "error"
     return _envelope_ok("go vet", findings, ec)
+
+
+def _resolve_cargo_manifest(
+    container: Any, path: str | Sequence[str], workdir: str | None = None
+) -> str | None:
+    """Locate the Cargo.toml the cargo runners should build against.
+
+    cargo has no "lint/test this subdirectory" positional argument, so the
+    manifest has to be named explicitly via ``--manifest-path`` -- otherwise
+    cargo resolves the manifest from the *process cwd*, which the dispatch
+    call sites pin to the git root.  A repository whose workspace manifest
+    lives in a subdirectory (the shape of the first real Rust consumer:
+    ``prototypes/Cargo.toml``) would then fail with "could not find
+    Cargo.toml" -- and, before this helper existed, that failure exited 101
+    with an empty JSON stream and was reported as a *green* lint run.
+
+    Resolution order, all relative to *workdir*:
+
+    1. ``<path>/Cargo.toml`` for each candidate in *path* -- the caller's
+       verify path doubles as a hint (detection found the marker there).
+    2. ``./Cargo.toml`` -- the ordinary manifest-at-root layout.
+    3. The shallowest ``Cargo.toml`` within 3 levels (skipping ``target/``),
+       depth-first so a workspace root wins over its member crates.
+
+    Returns the manifest path relative to *workdir*, or ``None`` when the
+    tree has no manifest at all -- callers must report that as an error,
+    never run cargo anyway.
+    """
+    candidates = [path] if isinstance(path, str) else list(path)
+    probes = [f"{c.rstrip('/')}/Cargo.toml" for c in candidates if c not in (".", "")]
+    probes.append("Cargo.toml")
+    probe_cmd = "; ".join(
+        f'test -f {shlex.quote(p)} && echo {shlex.quote(p)} && exit 0' for p in probes
+    )
+    ec, out, _ = _exec_run(
+        container, ["/bin/sh", "-c", f"({probe_cmd}; exit 1)"], workdir=workdir
+    )
+    if ec == 0 and out.strip():
+        return out.strip().split("\n")[0]
+
+    ec, out, _ = _exec_run(
+        container,
+        [
+            "/bin/sh",
+            "-c",
+            "for d in 1 2 3; do"
+            "  find . -mindepth $d -maxdepth $d -name Cargo.toml"
+            "    -not -path '*/target/*' 2>/dev/null | sort | head -1 | grep . && exit 0;"
+            "done; exit 1",
+        ],
+        workdir=workdir,
+    )
+    if ec == 0 and out.strip():
+        return out.strip().split("\n")[0]
+    return None
+
+
+def _run_clippy_verify(
+    container: Any, path: str | Sequence[str], workdir: str | None = None
+) -> VerifyResult:
+    """Run cargo clippy on *path*.  Returns VerifyResult envelope.
+
+    *path* is accepted for interface parity with the other lint runners
+    (every branch of ``_gate_lint_runner`` / dispatch-table entry has the
+    same call shape) but is not passed to cargo: unlike ``ruff``/
+    ``eslint``, which take a file/dir argument, ``cargo clippy`` always
+    lints the crate(s) rooted at the manifest found in *workdir* (or the
+    container's default working directory) -- there is no cargo flag
+    that means "lint just this subdirectory".  ``--workspace`` is passed
+    explicitly so a workspace manifest that declares only ``[workspace]``
+    and no root ``[package]`` still gets every member crate linted; this
+    is the shape of the first real Rust consumer of this gate.
+
+    Findings keep clippy's own per-message ``"severity"``
+    (``_parse_clippy_output`` sets it from the JSON ``level`` field), so
+    a clean-but-for-warnings run and a run with real compile errors both
+    return ``status="findings"`` -- like every other lint runner here --
+    but are distinguishable by finding severity rather than collapsed
+    into one undifferentiated bucket.  ``cargo clippy`` (like every other
+    cargo subcommand) exits 101 on any error-level diagnostic or a
+    genuine compile failure, and 0 when there is nothing above a
+    warning; both are treated as a normal (non-execution-error) run.
+    """
+    manifest = _resolve_cargo_manifest(container, path, workdir=workdir)
+    if manifest is None:
+        # Probe cargo availability first so a rust-less container still
+        # reports not_available (the flag the gate's incompleteness check
+        # keys on) rather than a confusing "no manifest" error.
+        probe_ec, _, _ = _exec_run(
+            container, ["/bin/sh", "-c", "command -v cargo"], workdir=workdir
+        )
+        if probe_ec != 0:
+            return _envelope_not_available("clippy", "cargo/clippy not installed in container")
+        return _envelope_error(
+            "clippy", f"no Cargo.toml found under {workdir or 'the working directory'}", 1
+        )
+
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}{_RUST_ENV}cargo clippy --workspace "
+            f"--manifest-path {shlex.quote(manifest)} --message-format=json",
+        ],
+        workdir=workdir,
+    )
+
+    if ec == 127:
+        return _envelope_not_available("clippy", "cargo/clippy not installed in container")
+    if ec not in (0, 101):
+        return _envelope_error("clippy", stderr_text.strip() or f"exit code {ec}", ec)
+
+    findings = _parse_clippy_output(stdout_text, _path_display(path))
+    if ec == 101 and not findings:
+        # 101 with zero diagnostics is an infrastructure failure (broken
+        # lockfile, missing member, ...), not a clean run.  Reporting it
+        # green is the eslint-exit-2 bug (#740) all over again.
+        return _envelope_error(
+            "clippy",
+            "cargo clippy exited 101 without emitting any diagnostic:\n"
+            + (stderr_text.strip()[-2000:] or "no stderr"),
+            ec,
+        )
+    return _envelope_ok("clippy", findings, ec)
+
+
+def _run_rust_type_verify(
+    container: Any, path: str, workdir: str | None = None
+) -> VerifyResult:
+    """Rust's "type" layer: deliberately folded into the lint layer.
+
+    Rust has no standalone type checker the way Python has pyright or
+    TypeScript has tsc.  Clippy runs the full rustc frontend (type
+    checking and borrow checking included) before its own lints run, so
+    any type error already surfaces as an ``"error"``-severity finding
+    from :func:`_run_clippy_verify`.
+
+    This returns ``status="skipped"`` with a specific reason rather than
+    ``status="not_available"`` (which would mark the pre-publish gate's
+    ``lint_type_incomplete`` flag -- correctly reserved for "a tool that
+    should have run did not", not "this language folds type-checking
+    into another layer on purpose") and rather than simply omitting a
+    rust "type" entry from the dispatch table (which would fall through
+    to the generic "language 'rust' has no type layer" message and be
+    indistinguishable, at the call site, from a language nobody has
+    gotten around to wiring up yet).  A dedicated function -- reused by
+    both ``_DISPATCH["rust"]["type"]`` and ``_gate_type_runner`` -- keeps
+    that reasoning in one place instead of two independent fallbacks
+    silently agreeing by accident.
+    """
+    return _envelope_skipped(
+        "rust-type",
+        "Rust has no standalone type checker; type and borrow-check "
+        "errors are reported by the clippy lint layer's rustc compile "
+        "pass instead of a separate type layer.",
+    )
 
 
 def _run_pyright_verify(

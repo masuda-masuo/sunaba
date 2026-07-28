@@ -9,10 +9,12 @@ from typing import Any
 
 from .detect import detect_languages
 from .lint_runners import (
+    _run_clippy_verify,
     _run_eslint_verify,
     _run_golangci_lint_verify,
     _run_pyright_verify,
     _run_ruff_verify,
+    _run_rust_type_verify,
     _run_tsc_verify,
 )
 from .results import VerifyResult, _envelope_not_available, _envelope_skipped
@@ -78,6 +80,8 @@ def _gate_lint_runner(
         return _run_eslint_verify(container, path, workdir=workdir)
     if lang == "go":
         return _run_golangci_lint_verify(container, path)
+    if lang == "rust":
+        return _run_clippy_verify(container, path, workdir=workdir)
     return _envelope_skipped(f"{lang}-lint", f"language '{lang}' has no lint layer")
 
 
@@ -89,6 +93,12 @@ def _gate_type_runner(
         return _run_pyright_verify(container, path, workdir=workdir)
     if lang == "ts":
         return _run_tsc_verify(container, path, workdir=workdir)
+    if lang == "rust":
+        # Dedicated function, not the generic fallback below: see
+        # _run_rust_type_verify's docstring for why "no type layer" and
+        # "type-checking is deliberately folded into lint" need to stay
+        # visibly different dispositions.
+        return _run_rust_type_verify(container, path, workdir=workdir)
     return _envelope_skipped(f"{lang}-type", f"language '{lang}' has no type layer")
 
 

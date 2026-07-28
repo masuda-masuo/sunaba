@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import shlex
 from typing import Any
 
 from .jstools import _annotate_resolution, _detect_js_test_runner, _resolve_js_tool
 from .lint_runners import (
+    _resolve_cargo_manifest,
+    _run_clippy_verify,
     _run_eslint_verify,
     _run_golangci_lint_verify,
     _run_pyright_verify,
     _run_ruff_verify,
+    _run_rust_type_verify,
     _run_tsc_verify,
 )
 from .results import (
@@ -19,7 +23,7 @@ from .results import (
     _envelope_not_available,
     _envelope_skipped,
 )
-from .shell import _GO_ENV, _SANDBOX_ENV, _exec_run, _quote_path
+from .shell import _GO_ENV, _RUST_ENV, _SANDBOX_ENV, _exec_run, _quote_path
 
 
 def _run_pytest_verify(
@@ -307,6 +311,89 @@ def _run_go_test_verify(
         return _envelope_error("go test", detail, ec)
 
 
+def _run_cargo_test_verify(
+    container: Any, path: str, workdir: str | None = None
+) -> VerifyResult:
+    """Run cargo test on *path*.  Returns VerifyResult envelope.
+
+    Stable cargo has no structured (JSON) test-report format -- unlike
+    ``go test -json``, ``cargo test``'s own ``--format json`` sits behind
+    ``-Z unstable-options`` (nightly only) -- so this parses cargo's
+    plain per-binary text summary via
+    :class:`~sunaba.test_report.RustTestAdapter` instead.
+
+    *path* is accepted for interface parity with the other test runners
+    (the dispatch table calls every entry the same way:
+    ``runner(container, test_path, workdir=working_dir)``) but is not
+    passed to cargo, for the same reason it is unused in
+    :func:`~sunaba.edit_verify.lint_runners._run_clippy_verify`: cargo
+    test has no path/package positional argument that scopes the run to
+    a subdirectory the way ``go test``'s package pattern does.
+    ``--workspace`` runs every member crate's tests (including for a
+    workspace-only root manifest with no ``[package]``), and
+    ``--no-fail-fast`` keeps a single early failure from hiding every
+    other test's result -- the same reason golangci-lint/pytest/jest
+    runners here report the full result set rather than stopping at the
+    first problem.
+
+    Output is merged with ``2>&1`` (mirroring ``_run_npm_test_verify``'s
+    handling of another non-JSON, human-text test runner) since cargo's
+    build/compile progress goes to stderr while the ``test result: ...``
+    summary lines are not reliably confined to stdout across wrapper
+    invocations; the adapter regexes only care about matching text, not
+    which stream it arrived on.
+    """
+    manifest = _resolve_cargo_manifest(container, path, workdir=workdir)
+    if manifest is None:
+        probe_ec, _, _ = _exec_run(
+            container, ["/bin/sh", "-c", "command -v cargo"], workdir=workdir
+        )
+        if probe_ec != 0:
+            return _envelope_not_available("cargo test", "cargo not installed in container")
+        return _envelope_error(
+            "cargo test", f"no Cargo.toml found under {workdir or 'the working directory'}", 1
+        )
+
+    ec, stdout_text, stderr_text = _exec_run(
+        container,
+        [
+            "/bin/sh",
+            "-c",
+            f"{_SANDBOX_ENV}{_RUST_ENV}cargo test --workspace "
+            f"--manifest-path {shlex.quote(manifest)} --no-fail-fast 2>&1",
+        ],
+        workdir=workdir,
+    )
+
+    if ec == 127:
+        return _envelope_not_available("cargo test", "cargo not installed in container")
+    if ec not in (0, 101):
+        return _envelope_error("cargo test", stderr_text.strip() or f"exit code {ec}", ec)
+
+    if not stdout_text.strip():
+        return _envelope_skipped("cargo test", "no test output produced")
+
+    try:
+        from sunaba.test_report import RustTestAdapter
+
+        report = RustTestAdapter.parse_json(stdout_text)
+        d = report.to_dict()
+        status = d.get("status", "ok")
+        return VerifyResult(
+            tool="cargo test",
+            status="findings" if status == "failed" else "ok",
+            findings=[],
+            detail=json.dumps(d),
+            exit_code=ec,
+        )
+    except Exception:
+        detail = "failed to parse cargo test output"
+        if stdout_text.strip():
+            tail = "\n".join(stdout_text.strip().split("\n")[-20:])
+            detail += f"\n--- raw output tail ---\n{tail}"
+        return _envelope_error("cargo test", detail, ec)
+
+
 # ---------------------------------------------------------------------------
 # Unified dispatch table
 # ---------------------------------------------------------------------------
@@ -336,6 +423,15 @@ _DISPATCH: dict[str, dict[str, Any]] = {
         "lint": _run_golangci_lint_verify,
         "type": None,  # skipped: build/vet covers typing
         "test": _run_go_test_verify,
+    },
+    "rust": {
+        "lint": _run_clippy_verify,
+        # Unlike go's bare `None` (generic "no type layer" fallback),
+        # rust points at a dedicated function so the disposition is a
+        # specific, visible reason rather than a one-size-fits-all
+        # message -- see _run_rust_type_verify's docstring.
+        "type": _run_rust_type_verify,
+        "test": _run_cargo_test_verify,
     },
     "unknown": {
         "lint": None,

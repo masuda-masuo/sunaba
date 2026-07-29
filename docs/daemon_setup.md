@@ -101,3 +101,53 @@ Clients connect to the background daemon using `mcp-remote` over HTTP:
     ```bash
     secret-tool search --all service mcp-launcher
     ```
+
+---
+
+## 5. Docker Daemon Mode: Rootless vs Rootful
+
+Sunaba's systemd service (`install-systemd.sh`) is designed for a **rootless Docker** setup — the
+installer checks that user lingering is enabled (pointing you at `sudo loginctl enable-linger` when
+it is not) and installs a per-user unit. Rootless is the primary/assumed configuration.
+
+### Rootless (primary)
+
+In a rootless Docker setup the daemon socket lives at:
+
+```
+/run/user/<uid>/docker.sock
+```
+
+The `DOCKER_HOST` environment variable **must** point at this socket for the service user. The
+shipped unit template does not set it, so add it to the unit:
+
+```
+Environment=DOCKER_HOST=unix:///run/user/%U/docker.sock
+```
+
+(where `%U` is the numeric UID of the user running the service).
+
+### Rootful (alternative)
+
+Docker can alternatively run with a rootful daemon (e.g. the classic `dockerd` started by
+`systemctl start docker` or Docker Desktop). In that mode the socket is the default
+`/var/run/docker.sock`, and access is controlled via the `docker` Unix group.
+
+**⚠️ `docker` group membership is root-equivalent.** The Docker API grants unrestricted access to
+the daemon — a container escape (`docker run --privileged -v /:/host`) lands as root on the host.
+Rootless Docker specifically mitigates this: a container escape in a rootless context lands as the
+unprivileged user, not root. Adding a user to the `docker` group silently removes that mitigation.
+
+### Troubleshooting `permission denied` on `docker.sock`
+
+Before touching group membership, check the `DOCKER_HOST` variable:
+
+```bash
+# Is DOCKER_HOST set to the rootless socket?
+echo "${DOCKER_HOST:-unset}"
+# Expected for rootless: unix:///run/user/$(id -u)/docker.sock
+```
+
+If `DOCKER_HOST` is unset or wrong, set it to the correct rootless socket path. Only fall back to
+adding the user to the `docker` group if you are intentionally using a rootful daemon and
+acknowledge the root-equivalence risk.

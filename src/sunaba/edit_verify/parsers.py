@@ -187,7 +187,15 @@ def _parse_eslint_output(raw: str, file_path: str) -> list[dict[str, Any]]:
 
 
 def _parse_pyright_output(raw: str, file_path: str) -> list[dict[str, Any]]:
-    """Parse pyright JSON output into the common result format."""
+    """Parse pyright JSON output into the common result format.
+
+    Preserves pyright's own ``severity`` field (``"error"``,
+    ``"warning"``, ``"information"``) rather than hard-coding to
+    ``"error"``, so the caller can make gate decisions based on the
+    repository's configured severity policy (Issue #747).  Findings
+    without a severity in the input default to ``"error"`` for
+    backward-compatible safety.
+    """
     raw = raw.strip()
     if not raw:
         return []
@@ -204,6 +212,7 @@ def _parse_pyright_output(raw: str, file_path: str) -> list[dict[str, Any]]:
                 "line": int(diag.get("range", {}).get("start", {}).get("line", 0)) + 1,
                 "rule": diag.get("rule", "unknown"),
                 "message": diag.get("message", ""),
+                "severity": diag.get("severity", "error"),
             }
         )
     return results

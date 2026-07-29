@@ -377,13 +377,41 @@ def _run_rust_type_verify(
 def _run_pyright_verify(
     container: Any, path: str, workdir: str | None = None
 ) -> VerifyResult:
-    """Run pyright on *path*.  Returns VerifyResult envelope."""
+    """Run pyright on *path*.  Returns VerifyResult envelope.
+
+    pyright searches for ``[tool.pyright]`` in ``pyproject.toml`` /
+    ``pyrightconfig.json`` by walking up from the *process cwd*, not from
+    the target file's path.  To make config resolution cwd-independent:
+
+    * The ``--project`` flag is set to *workdir* (the repository root)
+      when available.
+    * When *workdir* is not passed (the ``_run_python_typecheck`` path in
+      ``single_file.py``), the project root is derived from the target
+      path's ``/src/`` marker as a fallback.
+
+    Severity is carried through from pyright's JSON output rather than
+    overwritten, so a warning-level finding (e.g. configured via
+    ``[tool.pyright] reportMissingImports = "warning"``) survives as a
+    warning and does not fail the type gate (Issue #747).
+    """
+    # cwd-independent config resolution: --project takes a directory
+    # containing pyproject.toml or pyrightconfig.json.
+    project_root = workdir
+    if project_root is None and isinstance(path, str):
+        # Fallback: derive repo root from the path (e.g.
+        # /workspace/src/foo.py -> /workspace).
+        normalized = path.replace("\\", "/")
+        idx = normalized.find("/src/")
+        if idx != -1:
+            project_root = normalized[:idx]
+    project_arg = f"--project {shlex.quote(project_root)} " if project_root else ""
+
     ec, stdout_text, stderr_text = _exec_run(
         container,
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}pyright --outputjson {_quote_path(path)}",
+            f"{_SANDBOX_ENV}pyright --outputjson {project_arg}{_quote_path(path)}",
         ],
         workdir=workdir,
     )
@@ -392,8 +420,9 @@ def _run_pyright_verify(
         return _envelope_not_available("pyright", "pyright not installed in container")
 
     findings = _parse_pyright_output(stdout_text, path)
-    for r in findings:
-        r["severity"] = "error"
+    # Severity is carried through from pyright's JSON (Issue #747).
+    # No longer overwritten to "error" -- the parser preserves pyright's
+    # own severity (or defaults to "error" for safety).
 
     if ec not in (0, 1) and not findings:
         return _envelope_error("pyright", stderr_text.strip() or f"exit code {ec}", ec)

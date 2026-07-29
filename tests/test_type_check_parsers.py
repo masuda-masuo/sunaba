@@ -44,6 +44,68 @@ class TestParsePyrightOutput:
     def test_invalid_json(self) -> None:
         assert _parse_pyright_output("{bad", "file.py") == []
 
+    def test_preserves_severity_warning(self) -> None:
+        """Pyright's severity 'warning' must be preserved (Issue #747)."""
+        raw = json.dumps(
+            {
+                "generalDiagnostics": [
+                    {
+                        "file": "test.py",
+                        "range": {"start": {"line": 3}},
+                        "rule": "reportMissingImports",
+                        "message": "Cannot resolve import",
+                        "severity": "warning",
+                    },
+                ],
+            }
+        )
+        result = _parse_pyright_output(raw, "file.py")
+        assert len(result) == 1
+        assert result[0]["severity"] == "warning"
+
+    def test_preserves_severity_error(self) -> None:
+        """Pyright's severity 'error' must be preserved."""
+        raw = json.dumps(
+            {
+                "generalDiagnostics": [
+                    {
+                        "file": "test.py",
+                        "range": {"start": {"line": 5}},
+                        "rule": "reportGeneralTypeIssues",
+                        "message": "Type mismatch",
+                        "severity": "error",
+                    },
+                ],
+            }
+        )
+        result = _parse_pyright_output(raw, "file.py")
+        assert len(result) == 1
+        assert result[0]["severity"] == "error"
+
+    def test_defaults_to_error_when_severity_missing(self) -> None:
+        """A pyright diagnostic without severity should default to 'error'
+        for backward compatibility (Issue #747)."""
+        raw = json.dumps(
+            {
+                "generalDiagnostics": [
+                    {
+                        "file": "test.py",
+                        "range": {"start": {"line": 7}},
+                        "rule": "reportUnknownRule",
+                        "message": "Something",
+                    },
+                ],
+            }
+        )
+        result = _parse_pyright_output(raw, "file.py")
+        assert len(result) == 1
+        assert result[0]["severity"] == "error"
+
+
+# ===================================================================
+# _parse_tsc_text tests
+# ===================================================================
+
 
 # ===================================================================
 # _parse_tsc_text tests
@@ -258,6 +320,56 @@ class TestRunPyrightVerify:
 
         result = _run_pyright_verify(container, "/app/test.py")
         assert result.status == "error"
+
+    def test_warning_severity_preserved_by_runner(self) -> None:
+        """_run_pyright_verify must not overwrite pyright's own severity
+        (Issue #747).  A 'warning' finding should stay 'warning'."""
+        from sunaba.edit_verify import _run_pyright_verify
+
+        pyright_output = json.dumps({
+            "generalDiagnostics": [
+                {
+                    "file": "test.py",
+                    "severity": "warning",
+                    "message": "Cannot resolve import",
+                    "range": {"start": {"line": 3}},
+                    "rule": "reportMissingImports",
+                }
+            ]
+        })
+        container = self._make_container(1, pyright_output)
+
+        result = _run_pyright_verify(container, "/workspace/test.py")
+        assert result.status == "findings"
+        assert len(result.findings) == 1
+        assert result.findings[0]["severity"] == "warning"
+
+    def test_error_severity_preserved_by_runner(self) -> None:
+        """An 'error' finding from pyright must stay 'error' (Issue #747)."""
+        from sunaba.edit_verify import _run_pyright_verify
+
+        pyright_output = json.dumps({
+            "generalDiagnostics": [
+                {
+                    "file": "test.py",
+                    "severity": "error",
+                    "message": "Type mismatch",
+                    "range": {"start": {"line": 10}},
+                    "rule": "reportGeneralTypeIssues",
+                }
+            ]
+        })
+        container = self._make_container(1, pyright_output)
+
+        result = _run_pyright_verify(container, "/workspace/test.py")
+        assert result.status == "findings"
+        assert len(result.findings) == 1
+        assert result.findings[0]["severity"] == "error"
+
+
+# ===================================================================
+# detect_languages tests  (Issue #109)
+# ===================================================================
 
 
 # ===================================================================

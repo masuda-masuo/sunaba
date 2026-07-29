@@ -292,6 +292,79 @@ class TestRunLintTypeGate:
         assert r["gate_passed"] is False
         assert any("type_check" in reason for reason in r["gate_fail_reasons"])
 
+    def test_type_warning_does_not_fail_gate(self, monkeypatch):
+        """A warning-severity type finding must not fail the gate
+        (Issue #747)."""
+        from src.sunaba.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        monkeypatch.setattr(
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
+            lambda *a, **k: self._vr("ok"),
+        )
+        type_warn = self._vr("findings", [{
+            "file": "src/x.py", "line": 2, "rule": "reportMissingImports",
+            "severity": "warning", "message": "Cannot resolve import",
+        }], tool="pyright")
+        monkeypatch.setattr(
+            "src.sunaba.edit_verify.gate._gate_type_runner",
+            lambda *a, **k: type_warn,
+        )
+        r = run_lint_type_gate(object(), "src")
+        assert r["gate_passed"] is True
+
+    def test_type_finding_without_severity_still_fails_gate(self, monkeypatch):
+        """A type finding carrying no severity key must fail the gate.
+
+        The severity filter added for #747 must default to "error" rather
+        than reading a missing key as "not an error" -- otherwise a type
+        layer that forgets to label its findings silently passes
+        everything.
+        """
+        from src.sunaba.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        monkeypatch.setattr(
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
+            lambda *a, **k: self._vr("ok"),
+        )
+        unlabelled = self._vr("findings", [{
+            "file": "src/x.py", "line": 3, "rule": "reportGeneralTypeIssues",
+            "message": "Type mismatch",
+        }], tool="pyright")
+        monkeypatch.setattr(
+            "src.sunaba.edit_verify.gate._gate_type_runner",
+            lambda *a, **k: unlabelled,
+        )
+        r = run_lint_type_gate(object(), "src")
+        assert r["gate_passed"] is False
+        assert any("type_check" in reason for reason in r["gate_fail_reasons"])
+
+    def test_type_warning_and_error_only_error_fails_gate(self, monkeypatch):
+        """When pyright reports both warnings and errors, only the
+        error-severity findings should fail the gate (Issue #747)."""
+        from src.sunaba.edit_verify import run_lint_type_gate
+        self._patch_detect(monkeypatch)
+        monkeypatch.setattr(
+            "src.sunaba.edit_verify.gate._gate_lint_runner",
+            lambda *a, **k: self._vr("ok"),
+        )
+        mixed = self._vr("findings", [
+            {
+                "file": "src/x.py", "line": 1, "rule": "reportMissingImports",
+                "severity": "warning", "message": "Cannot resolve import",
+            },
+            {
+                "file": "src/x.py", "line": 5, "rule": "reportGeneralTypeIssues",
+                "severity": "error", "message": "Type mismatch",
+            },
+        ], tool="pyright")
+        monkeypatch.setattr(
+            "src.sunaba.edit_verify.gate._gate_type_runner",
+            lambda *a, **k: mixed,
+        )
+        r = run_lint_type_gate(object(), "src")
+        assert r["gate_passed"] is False
+        assert any("type_check" in reason for reason in r["gate_fail_reasons"])
+
     def test_tool_absence_is_incomplete_but_does_not_block(self, monkeypatch):
         from src.sunaba.edit_verify import run_lint_type_gate
         self._patch_detect(monkeypatch)
@@ -524,4 +597,3 @@ class TestPathDisplay:
     def test_list_joined_with_space(self):
         from src.sunaba.edit_verify import _path_display
         assert _path_display(["src", "tests"]) == "src tests"
-

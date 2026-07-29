@@ -192,7 +192,8 @@ def type_check_file(
     ext = _get_extension(file_path)
 
     if ext in (".py",):
-        findings = _run_python_typecheck(container, file_path)
+        workdir = scope_workdir.workdir if scope_workdir else None
+        findings = _run_python_typecheck(container, file_path, workdir=workdir)
         if not findings and scope_workdir:
             scope_path, workdir = scope_workdir
             scope_r = _run_pyright_verify(container, scope_path, workdir=workdir)
@@ -218,9 +219,17 @@ def type_check_file(
         ]
 
 
-def _run_python_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
-    """Try pyright for Python type checking."""
-    pyright_result = _run_pyright_verify(container, file_path)
+def _run_python_typecheck(
+    container: Any, file_path: str, workdir: str | None = None
+) -> list[dict[str, Any]]:
+    """Try pyright for Python type checking.
+
+    *workdir* is passed through to :func:`_run_pyright_verify` so
+    pyright can discover the repository's ``[tool.pyright]`` config
+    (Issue #747).  When *workdir* is ``None`` the runner falls back
+    to deriving the project root from the file path.
+    """
+    pyright_result = _run_pyright_verify(container, file_path, workdir=workdir)
     if pyright_result.status not in ("not_available", "error"):
         return pyright_result.findings
 

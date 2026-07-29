@@ -249,6 +249,11 @@ def run_lint_type_gate(
                 type_errors = [
                     r for r in vr.findings
                     if r.get("rule") not in _GATE_SENTINEL_RULES
+                    # Default to "error" when a runner omits severity: an
+                    # unlabelled finding must still fail the gate.  Reading it
+                    # as "not an error" would let a future type layer that
+                    # forgets to set severity silently pass everything.
+                    and r.get("severity", "error") == "error"
                 ]
                 if type_errors:
                     gate_fail_reasons.append(

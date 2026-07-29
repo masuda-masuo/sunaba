@@ -1,0 +1,7 @@
+# BROKER_TAG=mcp-token/v1.3.4
+6521cbdc1b81fd99e6beddfa49664caa8dc4fcf6ac4c4a7486e128ce3d1a1f27  mcp-token-darwin-amd64
+cc247baca04337166c0608cadd5d95074e8d5fd5a195937dcab4c1a8978899a3  mcp-token-darwin-arm64
+c22e0a457a9a9c8c2035c941b4938c340ab209b0acfaf63acb1b628d93b374a8  mcp-token-linux-amd64
+55aa1d00b799c05a80633a7c3a39197abb80821757f181ded5a11e2788ad7216  mcp-token-linux-arm64
+b5f6bff2d6d5abde5d4c38f5c10718dc7ef0f11f39633759710b573918cd15c1  mcp-token-mint-socket-v1.3.4.tar.gz
+a9e0baa200ae5e7259f97fccb465b63eca2c11c1f4b128bca7e9515c0bcacc15  mcp-token-windows-amd64.exe

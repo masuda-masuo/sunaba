@@ -56,10 +56,12 @@ import hashlib
 import logging
 import os
 import platform
+import re
 import shlex
 import stat
 import subprocess
 import tempfile
+from importlib import resources
 from pathlib import Path
 from urllib.parse import quote
 
@@ -69,20 +71,122 @@ import platformdirs
 logger = logging.getLogger(__name__)
 
 # Pinned mcp-launcher "mcp-token" broker release (issue #232 / mcp-launcher#25).
+# BROKER_TAG is the single version fact; per-platform SHA-256 checksums are
+# derived from the shipped broker_checksums.txt data file (issue #757).
 BROKER_REPO = "masuda-masuo/mcp-launcher"
-BROKER_TAG = "mcp-token/v1.3.2"
+BROKER_TAG = "mcp-token/v1.3.4"
 
-# (os, arch) -> (asset_name, sha256). Verified against the GitHub release.
-# Bump BROKER_TAG and all five hashes together; the release workflow embeds the
-# version string into each binary (-X main.version=), so the hashes change on
-# every release even when the Go source is unchanged.
-_BROKER_ASSETS: dict[tuple[str, str], tuple[str, str]] = {
-    ("linux", "amd64"): ("mcp-token-linux-amd64", "c6d345bd3a61333d0614c29f72550727a4250115b948e19d43514e7fc5d74b0e"),
-    ("linux", "arm64"): ("mcp-token-linux-arm64", "43b21e24d3e4b34dbb0a4de8e98d4f2f00c9b49ba870d062651fb7e26984958b"),
-    ("darwin", "amd64"): ("mcp-token-darwin-amd64", "a45ceb46842a334694833c55a3e2cc8ba81b67a5388e11719c777fdaa8b528a5"),
-    ("darwin", "arm64"): ("mcp-token-darwin-arm64", "c96d9842cf1df06c2a0d3066a3ff19571852fd1724d12b5e72dfc9771f98b26d"),
-    ("windows", "amd64"): ("mcp-token-windows-amd64.exe", "9a7457641e14e344fbefa6da8e16447b1631633f4250aeb31ded516c49e8dc3f"),
+#: Resource name of the shipped checksums file (vendored from the release's
+#: checksums.txt, with a ``# BROKER_TAG=...`` header line added for drift
+#: detection).  Listed in ``[tool.setuptools.package-data]`` so it ships in
+#: the wheel.
+_CHECKSUMS_RESOURCE: str = "broker_checksums.txt"
+
+#: A checksum entry must be exactly 64 lowercase hex characters -- the shape
+#: sha256sum emits.  Anything else means the data file was hand-edited wrong.
+_SHA256_PATTERN: re.Pattern[str] = re.compile(r"[0-9a-f]{64}")
+
+# (os, arch) -> asset filename (the hash is derived from checksums data).
+_ASSET_NAMES: dict[tuple[str, str], str] = {
+    ("linux", "amd64"): "mcp-token-linux-amd64",
+    ("linux", "arm64"): "mcp-token-linux-arm64",
+    ("darwin", "amd64"): "mcp-token-darwin-amd64",
+    ("darwin", "arm64"): "mcp-token-darwin-arm64",
+    ("windows", "amd64"): "mcp-token-windows-amd64.exe",
 }
+
+
+class BrokerPinError(RuntimeError):
+    """Raised when the broker checksums data is missing, malformed, or tag-drifted.
+
+    Deliberately fatal: a mismatch between ``BROKER_TAG`` and the shipped
+    checksums file means the tags-and-hashes were not bumped together, and
+    a downloaded binary would not go through the checksum the code expects.
+    """
+
+
+def _load_broker_checksums() -> dict[str, str]:
+    """Read and parse the shipped ``broker_checksums.txt``.
+
+    Returns ``{asset_filename: sha256_hex}`` for every checksum line in the
+    file.  The first line must be ``# BROKER_TAG=<tag>`` and is validated
+    against :data:`BROKER_TAG` as a structural drift check.
+
+    Raises :class:`BrokerPinError` when the file is missing, malformed, or
+    the declared tag does not match ``BROKER_TAG`` -- the same class of
+    mismatch that shipped stale v1.3.2 hashes silently (#757).
+    """
+    try:
+        raw = (
+            resources.files("sunaba")
+            .joinpath(_CHECKSUMS_RESOURCE)
+            .read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError) as exc:
+        raise BrokerPinError(
+            f"broker checksums file {_CHECKSUMS_RESOURCE!r} not found in package "
+            "(packaging regression: check [tool.setuptools.package-data])"
+        ) from exc
+
+    lines = raw.splitlines()
+    if not lines or not lines[0].startswith("# BROKER_TAG="):
+        raise BrokerPinError(
+            f"{_CHECKSUMS_RESOURCE} must start with '# BROKER_TAG=<tag>'"
+        )
+
+    declared_tag = lines[0].removeprefix("# BROKER_TAG=").strip()
+    if declared_tag != BROKER_TAG:
+        raise BrokerPinError(
+            f"{_CHECKSUMS_RESOURCE} declares tag {declared_tag!r} "
+            f"but BROKER_TAG is {BROKER_TAG!r} "
+            "(update both together — see scripts/setup.sh too)"
+        )
+
+    checksums: dict[str, str] = {}
+    for line in lines[1:]:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue  # malformed line, skip
+        sha256_hex, filename = parts
+        # Validate the shape here rather than letting a truncated or garbled
+        # digest sit in the table until a fresh download trips _check_sha256.
+        # Mirrors image_pins.py's _PIN_PATTERN: the data file is the pin, so a
+        # malformed pin is a packaging error, not a runtime surprise.
+        if not _SHA256_PATTERN.fullmatch(sha256_hex):
+            raise BrokerPinError(
+                f"{_CHECKSUMS_RESOURCE}: entry for {filename!r} has a malformed "
+                f"SHA-256 {sha256_hex!r} (expected 64 lowercase hex characters)"
+            )
+        checksums[filename] = sha256_hex
+
+    return checksums
+
+
+def _build_broker_assets() -> dict[tuple[str, str], tuple[str, str]]:
+    """Build the ``(os, arch) -> (asset_name, sha256)`` mapping from checksums.
+
+    Every key in :data:`_ASSET_NAMES` must appear in the checksums file; extra
+    lines (such as the ``mint-socket`` tarball) are ignored.
+    """
+    checksums = _load_broker_checksums()
+    result: dict[tuple[str, str], tuple[str, str]] = {}
+    for key, asset_name in _ASSET_NAMES.items():
+        sha256_hex = checksums.get(asset_name)
+        if sha256_hex is None:
+            raise BrokerPinError(
+                f"checksum for asset {asset_name!r} not found in {_CHECKSUMS_RESOURCE}"
+            )
+        result[key] = (asset_name, sha256_hex)
+    return result
+
+
+# Build at import time from the shipped data file.  A missing or tag-drifted
+# checksums file fails loud at import (and in CI) rather than shipping a stale
+# pin silently (#757).
+_BROKER_ASSETS: dict[tuple[str, str], tuple[str, str]] = _build_broker_assets()
 
 # Normalise platform.machine() spellings to our short arch tokens.
 _MACHINE_ALIASES = {
@@ -91,6 +195,37 @@ _MACHINE_ALIASES = {
     "aarch64": "arm64",
     "arm64": "arm64",
 }
+
+#: Guard flag so the version subprocess (``mcp-token version``) runs at most
+#: once per process lifetime, even when ``resolve_broker_binary`` is called
+#: repeatedly on the hot path.
+_logged_version: bool = False
+
+
+def _log_binary_version(path: Path) -> None:
+    """Emit the resolved binary's version string through the module logger.
+
+    Runs the ``version`` subcommand once per process lifetime.  Failures
+    (missing binary, non-zero exit, timeout) are swallowed and logged at
+    DEBUG level so they never break token minting.
+    """
+    global _logged_version
+    if _logged_version:
+        return
+    _logged_version = True
+    try:
+        proc = subprocess.run(
+            [str(path), "version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0:
+            ver = proc.stdout.strip()
+            if ver:
+                logger.info("token broker: resolved binary version %s", ver)
+    except (OSError, subprocess.SubprocessError):
+        logger.debug("token broker: could not determine binary version", exc_info=True)
 
 
 def _platform_key() -> tuple[str, str] | None:
@@ -167,11 +302,17 @@ def resolve_broker_binary(*, allow_download: bool = True) -> Path | None:
 
     Returns ``None`` (never raises) when the platform is unsupported, the
     cached copy is corrupt with downloads disabled, or the fetch fails.
+
+    On the first successful resolution the binary's version string is logged
+    (via ``mcp-token version``) so operators can see which release is active.
     """
     override = os.environ.get("GITHUB_TOKEN_BROKER_BIN")
     if override:
         path = Path(override)
-        return path if path.exists() else None
+        if path.exists():
+            _log_binary_version(path)
+            return path
+        return None
     key = _platform_key()
     if key is None:
         logger.warning(
@@ -181,6 +322,7 @@ def resolve_broker_binary(*, allow_download: bool = True) -> Path | None:
     asset_name, sha256 = _BROKER_ASSETS[key]
     dest = _dest_path(key)
     if dest.exists() and _sha256_file(dest) == sha256:
+        _log_binary_version(dest)
         return dest
     if not allow_download or os.environ.get("SUNABA_TOKEN_BROKER_NO_DOWNLOAD"):
         return None
@@ -189,6 +331,7 @@ def resolve_broker_binary(*, allow_download: bool = True) -> Path | None:
     except Exception as exc:  # noqa: BLE001 - best-effort; fall back to static token
         logger.warning("token broker: failed to fetch %s: %s", asset_name, exc)
         return None
+    _log_binary_version(dest)
     return dest
 
 

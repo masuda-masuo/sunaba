@@ -8,6 +8,43 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-29
+
+### Added
+
+- **Rust support** (#749, #753, closes #747/#751): new `sandbox:rust` image variant, crates.io/static.crates.io egress allowance, verify's Rust dispatch (cargo test), rust pin wired into PIN_KEYS and image_pins.json.
+- **run_python tool** (#724, closes #692): execute arbitrary Python inside the container in one call.
+- **Version-locked workflow guide** (#729, closes #728; #733, closes #731): new `get_workflow_guide` tool ships the workflow manual inside the wheel so guide and server version always match; SERVER_INSTRUCTIONS trimmed to a map that points at it. Also: a green gate with `lint_type_incomplete` is now documented as "unmeasured, not passed" (#730).
+- **Secret scan on publish** (#693, closes #676; hardened by #702/#706/#707/#709 and #723 closes #722; #726 closes #725; design doc #710 closes #705): publish now runs a secret scan before push, fail-closed (blocks unless the scan affirmatively passed), with a permission-gated `secret_scan_override`; success envelope reports `scan_summary`/`suppressed_count`.
+- **Publish manifest contract** (#679 closes #677; #685, #690 closes #683/#684/#688; #735 closes #727; #737 closes #736): `publish(files=[...])` stages only declared paths (deletions declarable; undeclared files stay in the worktree and are reported as `worktree_leftover`); declared paths win over auto-include; `staged_files` is derived from the actual commit and partially-unchanged manifests are rejected.
+- **Merge auto-include subsystem** (#713 closes #712; #717 closes #715; #718 closes #716; #719 closes #711; design doc #720): host-verified base_auto_include that also handles files deleted on the base branch and binary/non-UTF-8 content; publish reports discarded merge info, auto-include coverage, and push transport.
+- **sandbox_initialize(branch=...)** (#697) and in-sandbox resolution of a moved base branch (#695, closes #675).
+- **Untracked files listed in diff_summary** (#689, closes #687).
+- **npm test path reports test counts** (#739, closes #738).
+
+### Changed
+
+- **Default diff base is the merge target, not HEAD~1** (#762); when the named diff base is missing from the clone, fetch once and retry (#766). The branch/base lifecycle from clone to push now has its own design doc, `docs/design_branch_lifecycle.md` (#761).
+- **Remote default branch resolved via ls-remote** instead of guessing main/master (#758, closes #756).
+- **The type gate honours the target repo's `[tool.pyright]` config** (#760).
+- **copy_project is tracked-only by default and ownership normalization actually works** (#691, closes #678).
+- **mcp-token pin bumped to v1.3.4**, hash table derived from shipped checksums (#759).
+- **Image pins updated**: default variant images (#694, #313) and egress proxy sidecar (#750, #432).
+- **Tool description budget/audit**: parameter-description budget earned back (#764), two defects from the 6-element tool-description audit fixed (#734, closes #732).
+
+### Fixed
+
+- **An eslint run that could not start no longer reports as lint-clean** (#741, fixes #740).
+- **edit_verify actually reads stderr** — exec_run now passes demux=True (#743, fixes #742).
+- **search_in_container rejects path=/, /proc, /sys, /dev** (#745, fixes #744).
+- **Journal no longer writes secrets in plaintext; origin host is actually verified** (#754).
+- **Secret scan exec helper uses Container.exec_run** (#698, fixes #696).
+
+### Docs / CI
+
+- **README troubleshooting is rootless-first** (#746): the docker.sock permission-denied row now leads with `DOCKER_HOST`, and docs/daemon_setup.md documents rootless vs rootful (docker-group membership is root-equivalent).
+- **ci-tests.yml declares `permissions: contents: read`** (#755).
+
 ## [0.10.2] - 2026-07-18
 
 ### Changed

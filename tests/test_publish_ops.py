@@ -732,6 +732,147 @@ class TestGitPrepareCommitAutoInclude:
             "binary content should be written via base64"
         )
 
+
+# ============================================================================
+# git_prepare_commit manifest-mode base_ref resolution (issue #756)
+# ============================================================================
+
+
+class TestGitPrepareCommitManifestBaseRef:
+    """Base-ref resolution in manifest mode: origin/HEAD, ls-remote, guess."""
+
+    def test_ls_remote_dev_branch(self) -> None:
+        """origin/HEAD unset, ls-remote yields 'dev' — fetches and uses it.
+
+        This exercises the ls-remote resolution path: when the remote's
+        default branch is 'dev' (neither main nor master), the function
+        fetches it and uses origin/dev as the reset target.
+        """
+        run = RecordingRun([
+            (0, "none\n", ""),                # MERGE_HEAD check
+            (0, "", ""),                      # checkout feat
+            (0, "\n", "origin/HEAD\n"),        # rev-parse origin/feat (empty)
+            (0, "", ""),                      # rev-parse origin/HEAD (empty)
+            # ls-remote succeeds with "dev"
+            (0, "ref: refs/heads/dev\tHEAD\nabc1234\tHEAD\n", ""),
+            # verify locally — fails, so fetch
+            (0, "", ""),
+            # git fetch origin dev
+            (0, "", ""),
+            # verify again — succeeds now
+            (0, "deadbeef\n", ""),
+            # reset to origin/dev
+            (0, "", ""),
+            # nothing to auto-include, stage declared file
+            (0, "", ""),                      # git add declared.txt
+            (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
+            (0, "[feat abc1234] Msg\n", ""),  # commit
+        ])
+        result, _committed = git_prepare_commit(
+            run, branch="feat", message="Msg",
+            files=["declared.txt"],
+        )
+        assert result is None
+
+        # Verify the base_ref was resolved from ls-remote
+        cmd_strs = [c[0] for c in run.calls]
+        assert any("ls-remote" in c for c in cmd_strs), (
+            "ls-remote should be called when origin/HEAD is unset"
+        )
+        assert any("fetch origin dev" in c for c in cmd_strs), (
+            "should fetch the resolved branch 'dev'"
+        )
+        assert any("reset --mixed origin/dev" in c for c in cmd_strs), (
+            "reset should target origin/dev"
+        )
+
+    def test_ls_remote_fails_guess_succeeds(self) -> None:
+        """origin/HEAD and ls-remote both fail, guess 'main' works."""
+        run = RecordingRun([
+            (0, "none\n", ""),                # MERGE_HEAD check
+            (0, "", ""),                      # checkout feat
+            (0, "\n", "origin/HEAD\n"),        # rev-parse origin/feat (empty)
+            (0, "", ""),                      # rev-parse origin/HEAD (empty)
+            # ls-remote fails (empty output)
+            (0, "", ""),
+            # guess: origin/main exists
+            (0, "deadbeef\n", ""),
+            # reset to origin/main
+            (0, "", ""),
+            # stage declared file
+            (0, "", ""),                      # git add declared.txt
+            (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
+            (0, "[feat abc1234] Msg\n", ""),  # commit
+        ])
+        result, _committed = git_prepare_commit(
+            run, branch="feat", message="Msg",
+            files=["declared.txt"],
+        )
+        assert result is None
+
+        cmd_strs = [c[0] for c in run.calls]
+        assert any("reset --mixed origin/main" in c for c in cmd_strs), (
+            "reset should target origin/main from the guess fallback"
+        )
+
+    def test_no_remote_ref_fails_with_diagnostic_message(self) -> None:
+        """Everything fails — error message names non-main/master case."""
+        run = RecordingRun([
+            (0, "none\n", ""),                # MERGE_HEAD check
+            (0, "", ""),                      # checkout feat
+            (0, "\n", "origin/HEAD\n"),        # rev-parse origin/feat (empty)
+            (0, "", ""),                      # rev-parse origin/HEAD (empty)
+            # ls-remote fails
+            (0, "", ""),
+            # guess: main fails
+            (1, "", ""),
+            # guess: master fails
+            (1, "", ""),
+        ])
+        result, _committed = git_prepare_commit(
+            run, branch="feat", message="Msg",
+            files=["declared.txt"],
+        )
+        assert result is not None
+        assert result["status"] == "error"
+        assert result["step"] == "squash_reset"
+        assert "something other than 'main' or 'master'" in result["error"], (
+            f"Error should mention non-main/master default, got: {result['error']}"
+        )
+
+    def test_ls_remote_verify_succeeds_no_fetch_needed(self) -> None:
+        """ls-remote yields 'dev' and origin/dev already exists locally."""
+        run = RecordingRun([
+            (0, "none\n", ""),                # MERGE_HEAD check
+            (0, "", ""),                      # checkout feat
+            (0, "\n", "origin/HEAD\n"),        # rev-parse origin/feat (empty)
+            (0, "", ""),                      # rev-parse origin/HEAD (empty)
+            # ls-remote succeeds with "dev"
+            (0, "ref: refs/heads/dev\tHEAD\nabc1234\tHEAD\n", ""),
+            # verify locally — succeeds immediately
+            (0, "deadbeef\n", ""),
+            # reset to origin/dev
+            (0, "", ""),
+            # stage declared file
+            (0, "", ""),                      # git add declared.txt
+            (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
+            (0, "[feat abc1234] Msg\n", ""),  # commit
+        ])
+        result, _committed = git_prepare_commit(
+            run, branch="feat", message="Msg",
+            files=["declared.txt"],
+        )
+        assert result is None
+
+        cmd_strs = [c[0] for c in run.calls]
+        assert any("reset --mixed origin/dev" in c for c in cmd_strs), (
+            "reset should target origin/dev"
+        )
+        # No fetch needed
+        fetch_calls = [c for c in cmd_strs if "fetch" in c]
+        assert len(fetch_calls) == 0, "no fetch should be needed when origin/dev exists"
+
+
 # ============================================================================
 # Real-git regression tests (issue #727)
 # ============================================================================

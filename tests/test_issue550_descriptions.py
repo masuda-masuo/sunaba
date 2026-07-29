@@ -85,8 +85,16 @@ class TestServerInstructions:
 #   parameters of the three merge tools above (measured 10390 B).  An earlier
 #   attempt set 11264, leaving ~1.1 KB of unearned headroom -- exactly the quiet
 #   regrowth this cap exists to prevent.
+# - param descriptions 10496 -> 10410: #763 earned room back.  The surface had
+#   grown to 5 B under the cap, so no argument could be added anywhere without
+#   first cutting.  Restated types, defaults already carried by the JSON schema,
+#   and duplication were trimmed from sandbox_initialize, edit_file,
+#   sandbox_exec and run_container_and_exec (measured 10350 B).  The +60 B
+#   margin is one parameter at roughly the median per-param cost -- deliberate,
+#   not leftover.  What was NOT cut: any statement of when a parameter applies
+#   (e.g. edit_file's "AST mode only"), which is the element #731 protects.
 TOTAL_DESCRIPTION_BYTE_LIMIT = 11264
-TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10496
+TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10410
 
 
 def _param_desc_bytes(tool) -> int:

@@ -162,12 +162,11 @@ def edit_file(
             contract above).  For small replacements only -- large
             blocks: use ``def foo():`` (.py, AST) or
             ``start_line``/``end_line`` (any file).
-        preserve: For old_str AST resolution on .py files, parts of
-            the old definition to keep: ``"decorators+docstring"``
-            (default), ``"decorators"``, ``"docstring"``, or
-            ``"none"``.
-        line: For old_str AST resolution on .py files, disambiguates
-            same-name definitions (any line inside the target).
+        preserve: AST mode only.  Parts of the old definition to keep:
+            ``"decorators+docstring"`` (default), ``"decorators"``,
+            ``"docstring"``, or ``"none"``.
+        line: AST mode only.  Disambiguates same-name definitions (any
+            line inside the target).
         ast: Overrides the implicit old_str AST trigger on .py files.
             ``True`` forces AST resolution (error, no fallback).
             ``False`` forces a plain string replace even for a

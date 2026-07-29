@@ -22,6 +22,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from sunaba.output_control import mask_tokens
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -126,13 +128,43 @@ def _rotate_if_needed_unlocked() -> None:
         _JOURNAL_PATH.replace(_JOURNAL_BACKUP_PATH)
 
 
+def _mask_entry(value: Any) -> Any:
+    """Mask credential values anywhere inside a journal entry.
+
+    ``record_exec`` stores the shell commands verbatim, so a command that
+    carries a token (``export GITHUB_TOKEN=...``) used to land in
+    ``journal.log`` in clear text -- measured, not theorised: a probe token
+    written through ``sandbox_exec`` was recoverable from the file
+    afterwards.  ``mask_tokens`` already existed for this and its docstring
+    even claims it protects "journal records", but nothing on the journal
+    path called it.
+
+    Masking here rather than at the four ``record_exec`` call sites is
+    deliberate: a per-call-site fix is the shape that already failed once,
+    and it would leave every future field unprotected.  ``_append_json`` is
+    the single door every entry goes through.
+
+    Masking runs on the values *before* serialisation, never on the JSON
+    text: the token pattern ends with an optional quote, so applying it to
+    a serialised line can eat the quote that terminates a JSON string and
+    corrupt the record.
+    """
+    if isinstance(value, str):
+        return mask_tokens(value)
+    if isinstance(value, dict):
+        return {k: _mask_entry(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_entry(v) for v in value]
+    return value
+
+
 def _append_json(entry: dict[str, Any]) -> None:
     """Append a single JSON-lines record to the journal."""
     _ensure_dir()
     with _lock:
         _rotate_if_needed_unlocked()
         with open(_JOURNAL_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.write(json.dumps(_mask_entry(entry), ensure_ascii=False) + "\n")
 
 
 # ---------------------------------------------------------------------------

@@ -111,7 +111,9 @@ class TestResolveRepoFromContainer:
                 (0, "https://gitlab.com/owner/repo.git\n", ""),
             ],
         })
-        with pytest.raises(RuntimeError, match="Unsupported remote URL"):
+        # The message is now the specific one: a well-formed URL on the wrong
+        # host is rejected for the host, not for its "format".
+        with pytest.raises(RuntimeError, match="not a github.com URL"):
             _resolve_repo_from_container(container, "/workspace")
 
     def test_https_url_with_trailing_slash(self) -> None:
@@ -525,3 +527,72 @@ def test_merge_abort_failure():
         "cd /workspace && [ -f .git/MERGE_HEAD ]": (0, b"in-progress\n", b""),
         "git merge --abort": (1, b"merge: no merge to abort\n", b""),
     }
+
+
+# ---------------------------------------------------------------------------
+# _parse_github_remote — the remote is chosen inside the sandbox, so it decides
+# which repository the host talks to.  A substring test is not a host check.
+# ---------------------------------------------------------------------------
+
+
+class TestParseGithubRemote:
+    """Only remotes that really point at github.com may resolve."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/owner/name",
+            "http://github.com/owner/name",
+            "https://user@github.com/owner/name",
+            "https://github.com:443/owner/name",
+            "https://GitHub.com/owner/name",
+            "ssh://git@github.com/owner/name",
+            "git@github.com:owner/name",
+            "github.com:owner/name",
+            "https://github.com/owner/name.with.dots",
+        ],
+    )
+    def test_accepts_real_github_remotes(self, url: str) -> None:
+        from sunaba.tools.vcs.merge_base import _parse_github_remote
+
+        assert _parse_github_remote(url) == (
+            "owner/name.with.dots" if url.endswith(".with.dots") else "owner/name"
+        )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # The exact bypass the old substring test allowed: the attacker's
+            # host serves the path, and "github.com/" appears inside it.
+            "https://evil.test/github.com/owner/name",
+            "https://evil.test/x/github.com:owner/name",
+            # Lookalike hosts.
+            "https://github.com.evil.test/owner/name",
+            "https://notgithub.com/owner/name",
+            "git@github.com.evil.test:owner/name",
+            # Right host, wrong shape.
+            "https://github.com/owner",
+            "https://github.com/owner/name/extra",
+            "https://github.com/",
+            # Not a URL at all.
+            "owner/name",
+            "",
+        ],
+    )
+    def test_rejects_everything_else(self, url: str) -> None:
+        from sunaba.tools.vcs.merge_base import _parse_github_remote
+
+        with pytest.raises(RuntimeError):
+            _parse_github_remote(url)
+
+    def test_resolve_from_container_rejects_planted_remote(self) -> None:
+        """End to end through the container path, not just the helper."""
+        from sunaba.tools.vcs.merge_base import _resolve_repo_from_container
+
+        container = RecordingContainer({
+            "/bin/sh -c cd /workspace && git remote get-url origin": [
+                (0, "https://evil.test/github.com/victim/repo\n", ""),
+            ],
+        })
+        with pytest.raises(RuntimeError):
+            _resolve_repo_from_container(container, "/workspace")

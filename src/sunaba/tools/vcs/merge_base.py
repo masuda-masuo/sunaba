@@ -19,8 +19,10 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 import shlex
 from typing import Any
+from urllib.parse import urlsplit
 
 from docker.errors import NotFound
 
@@ -74,6 +76,62 @@ def _read_container_meta(container) -> dict:
     return {}
 
 
+#: ``owner/name`` where each side is a plausible GitHub identifier.  Anchored,
+#: so nothing may precede the owner or follow the name.
+_OWNER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+#: scp-style remote: ``git@github.com:owner/name``.  The user part is optional
+#: because ``github.com:owner/name`` is also accepted by git.
+_SCP_REMOTE_RE = re.compile(r"^(?:[A-Za-z0-9._-]+@)?github\.com:(?P<path>.+)$")
+
+
+def _parse_github_remote(url: str) -> str:
+    """Return ``owner/name`` for a remote that really points at github.com.
+
+    This used to be a substring test (``if "github.com/" in url``), which is
+    not a host check: ``https://evil.com/github.com/owner/name`` contains that
+    substring and parsed cleanly to ``owner/name``.  The remote is read with
+    ``git remote get-url origin`` **inside the sandbox**, so its value is
+    chosen by whatever is running in the container -- it decides which
+    repository the host then talks to.  A container-supplied string must not be
+    able to redirect that by embedding a hostname in a path.
+
+    Accepts the forms git itself accepts for GitHub and rejects everything
+    else:
+
+    - ``https://github.com/owner/name`` (and ``http://``), userinfo allowed
+    - ``ssh://git@github.com/owner/name``
+    - ``git@github.com:owner/name`` (scp-style)
+
+    Raises:
+        RuntimeError: If the remote is not a github.com URL, or the path is
+            not exactly ``owner/name``.
+    """
+    path: str | None = None
+
+    scp = _SCP_REMOTE_RE.match(url)
+    if scp is not None:
+        path = scp.group("path")
+    elif "://" in url:
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("https", "http", "ssh", "git"):
+            raise RuntimeError(f"Unsupported remote URL scheme: {url}")
+        # hostname lowercases and drops userinfo and port; comparing it (rather
+        # than netloc) is what makes "user@GitHub.com:443" and
+        # "github.com.evil.test" resolve correctly.
+        if parsed.hostname != "github.com":
+            raise RuntimeError(f"Remote is not a github.com URL: {url}")
+        path = parsed.path.lstrip("/")
+
+    if path is None:
+        raise RuntimeError(f"Unsupported remote URL format: {url}")
+
+    path = path.strip("/")
+    if not _OWNER_NAME_RE.match(path):
+        raise RuntimeError(f"Cannot parse owner/name from remote URL: {url}")
+    return path
+
+
 def _resolve_repo_from_container(container, working_dir: str) -> str:
     """Extract the ``owner/name`` from the container's ``origin`` remote.
 
@@ -99,23 +157,11 @@ def _resolve_repo_from_container(container, working_dir: str) -> str:
             f"Cannot resolve origin remote URL: {stderr_text or stdout_text}"
         )
 
-    # Parse https://github.com/owner/name.git -> owner/name
     # removesuffix() strips the literal ".git" suffix (unlike rstrip which
     # treats its argument as a character set, corrupting names that end in
     # those characters).  Trailing newlines and slashes are stripped first.
     url = stdout_text.strip().rstrip("/").removesuffix(".git")
-    # Handle both https://github.com/owner/name and git@github.com:owner/name
-    if "github.com/" in url:
-        parts = url.split("github.com/", 1)[1]
-    elif "github.com:" in url:
-        parts = url.split("github.com:", 1)[1]
-    else:
-        raise RuntimeError(f"Unsupported remote URL format: {url}")
-
-    # Validate owner/name
-    if "/" in parts and len(parts.split("/")) == 2:
-        return parts
-    raise RuntimeError(f"Cannot parse owner/name from remote URL: {url}")
+    return _parse_github_remote(url)
 
 
 def _resolve_base_branch(

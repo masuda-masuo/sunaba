@@ -757,3 +757,92 @@ class TestGetLastActivity:
             assert "cid-a" in result
             assert "cid-b" in result
             assert result["cid-a"] >= result["cid-b"]
+
+
+# ---------------------------------------------------------------------------
+# Credential masking on the journal path.
+#
+# record_exec stores the shell commands verbatim.  Before this was wired up, a
+# token passed through sandbox_exec was recoverable from journal.log afterwards
+# (measured against the real file, not inferred).  mask_tokens already existed
+# and its docstring claimed it covered "journal records" -- nothing called it.
+# ---------------------------------------------------------------------------
+
+
+class TestJournalMasking:
+    @contextmanager
+    def _journal_at(self, tmp_path: Path) -> Iterator[Path]:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_BACKUP_PATH", journal_dir / "journal.log.1"), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir), \
+             patch("sunaba.journal._state_synced", False):
+            yield log_path
+
+    def test_record_exec_masks_token_assignment(self, tmp_path: Path) -> None:
+        with self._journal_at(tmp_path) as log_path:
+            record_exec(
+                "c0ffee000000",
+                ["export GITHUB_TOKEN=ghp_realsecretvalue0000000000", "make"],
+                0,
+            )
+            text = log_path.read_text(encoding="utf-8")
+        assert "ghp_realsecretvalue0000000000" not in text
+        assert "GITHUB_TOKEN=***" in text
+
+    def test_record_exec_masks_bare_token_without_assignment(
+        self, tmp_path: Path
+    ) -> None:
+        """A credential does not need a KEY= prefix to reach a log line."""
+        with self._journal_at(tmp_path) as log_path:
+            record_exec(
+                "c0ffee000000",
+                ["curl -H 'Authorization: token ghs_barevalue00000000000000'"],
+                0,
+            )
+            text = log_path.read_text(encoding="utf-8")
+        assert "ghs_barevalue00000000000000" not in text
+
+    def test_record_exec_masks_pem_block(self, tmp_path: Path) -> None:
+        """The shape that actually leaked in the field on 2026-07-29."""
+        pem = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEpAIBAAKCAQEAsecretbodyline1\n"
+            "secretbodyline2\n"
+            "-----END RSA PRIVATE KEY-----"
+        )
+        with self._journal_at(tmp_path) as log_path:
+            record_exec("c0ffee000000", [f"register PRIVATE_KEY '{pem}'"], 0)
+            text = log_path.read_text(encoding="utf-8")
+        assert "secretbodyline1" not in text
+        assert "secretbodyline2" not in text
+
+    def test_masking_keeps_the_record_parseable(self, tmp_path: Path) -> None:
+        """Masking must run on values, not on the serialised line.
+
+        Applied to JSON text, the token pattern's trailing optional quote can
+        eat the quote that terminates a JSON string.
+        """
+        with self._journal_at(tmp_path) as log_path:
+            record_exec(
+                "c0ffee000000",
+                ['export GITHUB_TOKEN="ghp_quotedsecret0000000000"'],
+                0,
+            )
+            lines = [
+                line
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        entry = json.loads(lines[-1])
+        assert entry["operation"] == "exec"
+        assert "ghp_quotedsecret0000000000" not in json.dumps(entry)
+
+    def test_non_secret_commands_are_untouched(self, tmp_path: Path) -> None:
+        with self._journal_at(tmp_path) as log_path:
+            record_exec("c0ffee000000", ["pytest -q", "ruff check ."], 0)
+            text = log_path.read_text(encoding="utf-8")
+        assert "pytest -q" in text
+        assert "ruff check ." in text

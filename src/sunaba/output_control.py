@@ -154,6 +154,27 @@ _TOKEN_MASK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(GITHUB_TOKEN_SOURCE=)['\"]?[^\s'\"]+['\"]?"),
 ]
 
+#: Secrets that carry no ``KEY=`` prefix and so are invisible to the patterns
+#: above.  A credential does not have to be assigned to a variable to end up in
+#: a log line -- it can be a bare argument, a heredoc, or a pasted value.
+#:
+#: The GitHub token prefixes are the documented ones (``ghp_`` personal,
+#: ``ghs_`` installation/server, ``gho_`` OAuth, ``ghu_`` user-to-server,
+#: ``ghr_`` refresh, ``github_pat_`` fine-grained).  The PEM block is here
+#: because that is the shape that actually leaked in the field: on 2026-07-29 a
+#: GitHub App private key reached a system journal because it was passed as a
+#: command-line argument, and ``grep "BEGIN RSA PRIVATE KEY"`` found nothing
+#: while the key body sat there across twenty lines.  Matching the whole block
+#: (DOTALL) rather than the header is what makes that case detectable.
+_BARE_SECRET_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"gh[psour]_[A-Za-z0-9]{16,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        re.DOTALL,
+    ),
+]
+
 
 def mask_tokens(text: str) -> str:
     """Mask VCS authentication token values in command output.
@@ -171,6 +192,8 @@ def mask_tokens(text: str) -> str:
     result = text
     for pattern in _TOKEN_MASK_PATTERNS:
         result = pattern.sub(r"\1***", result)
+    for pattern in _BARE_SECRET_PATTERNS:
+        result = pattern.sub("***", result)
     return result
 
 

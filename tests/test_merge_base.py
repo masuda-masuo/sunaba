@@ -213,7 +213,10 @@ class TestResolveBaseBranch:
         assert "remote default branch" in description
 
     def test_guessed_branch(self) -> None:
-        """Fallback to well-known branch names when origin/HEAD unavailable."""
+        """Fallback to well-known branch names when origin/HEAD unavailable.
+
+        ls-remote also fails (no network), so the offline guess resolves.
+        """
         container = MockMetaContainer(
             exec_responses={
                 "git symbolic-ref refs/remotes/origin/HEAD": (
@@ -228,11 +231,56 @@ class TestResolveBaseBranch:
         assert result == "main"
         assert "guessed" in description
 
-    def test_no_fallback_raises(self) -> None:
-        """No branch can be resolved — raises RuntimeError."""
+    def test_ls_remote_dev_branch(self) -> None:
+        """Remote default branch resolved via ls-remote --symref yields 'dev'.
+
+        When origin/HEAD is unset and the default is neither main nor master,
+        ls-remote resolves it without enumerating candidates.
+        """
         container = MockMetaContainer(
             exec_responses={
                 "git symbolic-ref refs/remotes/origin/HEAD": (
+                    1, (b"", b""),
+                ),
+                "git ls-remote --symref origin HEAD": (
+                    0, (b"ref: refs/heads/dev\tHEAD\nabc1234\tHEAD\n", b""),
+                ),
+            },
+        )
+        result, description = _resolve_base_branch(container, "/workspace")
+        assert result == "dev"
+        assert "ls-remote" in description
+
+    def test_ls_remote_fails_guess_succeeds(self) -> None:
+        """When ls-remote fails, the offline guess still resolves main."""
+        container = MockMetaContainer(
+            exec_responses={
+                "git symbolic-ref refs/remotes/origin/HEAD": (
+                    1, (b"", b""),
+                ),
+                "git ls-remote --symref origin HEAD": (
+                    1, (b"", b""),
+                ),
+                "git rev-parse --verify origin/main": (
+                    0, (b"abc123\n", b""),
+                ),
+            },
+        )
+        result, description = _resolve_base_branch(container, "/workspace")
+        assert result == "main"
+        assert "guessed" in description
+
+    def test_no_fallback_raises(self) -> None:
+        """No branch can be resolved — raises RuntimeError.
+
+        The error message names the possibility of a non-main/master default.
+        """
+        container = MockMetaContainer(
+            exec_responses={
+                "git symbolic-ref refs/remotes/origin/HEAD": (
+                    1, (b"", b""),
+                ),
+                "git ls-remote --symref origin HEAD": (
                     1, (b"", b""),
                 ),
                 "git rev-parse --verify origin/main": (
@@ -243,7 +291,7 @@ class TestResolveBaseBranch:
                 ),
             },
         )
-        with pytest.raises(RuntimeError, match="Cannot determine the base branch"):
+        with pytest.raises(RuntimeError, match="something other than 'main' or 'master'"):
             _resolve_base_branch(container, "/workspace")
 
 

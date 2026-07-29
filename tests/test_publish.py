@@ -1302,6 +1302,7 @@ class TestPublishManifest:
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
+            (0, b"", b""),  # ls-remote --symref origin HEAD (empty/fails)
             (0, b"abc1234", b""),  # rev-parse --verify origin/main (found)
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/main
@@ -1349,6 +1350,7 @@ class TestPublishManifest:
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
+            (0, b"", b""),  # ls-remote --symref origin HEAD (empty/fails)
             (1, b"", b""),  # rev-parse --verify origin/main (not found)
             (0, b"abc1234", b""),  # rev-parse --verify origin/master (found)
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
@@ -1398,6 +1400,7 @@ class TestPublishManifest:
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
             (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
+            (0, b"", b""),  # ls-remote --symref origin HEAD (empty/fails)
             (1, b"", b""),  # rev-parse --verify origin/main (not found)
             (1, b"", b""),  # rev-parse --verify origin/master (not found)
         ])

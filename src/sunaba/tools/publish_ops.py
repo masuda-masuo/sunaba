@@ -138,15 +138,49 @@ def git_prepare_commit(
             if head_out.strip():
                 base_ref = "origin/HEAD"
             else:
-                # Last-resort fallback: try well-known default names.
-                base_ref = ""
-                for default in ("main", "master"):
-                    _, default_out, _ = run(
-                        f"git rev-parse --verify origin/{default} 2>/dev/null"
-                    )
-                    if default_out.strip():
-                        base_ref = f"origin/{default}"
-                        break
+                # Try to resolve via ls-remote --symref (network).
+                # This resolves main, master, dev, or anything else the
+                # remote has configured as its HEAD without enumerating names.
+                _, ls_out, _ = run(
+                    "timeout 15 git ls-remote --symref origin HEAD 2>/dev/null || true"
+                )
+                for ls_line in ls_out.splitlines():
+                    if ls_line.startswith("ref: refs/heads/") and "\tHEAD" in ls_line:
+                        # Format: "ref: refs/heads/<name>\tHEAD"
+                        ls_default = ls_line.removeprefix(
+                            "ref: refs/heads/"
+                        ).split("\t")[0]
+                        if ls_default:
+                            ls_quoted = shlex.quote(ls_default)
+                            # Check if the branch already exists locally
+                            _, verify_out, _ = run(
+                                f"git rev-parse --verify origin/{ls_quoted} 2>/dev/null"
+                            )
+                            if verify_out.strip():
+                                base_ref = f"origin/{ls_quoted}"
+                                break
+                            # Fetch the branch from the remote
+                            fetch_ec, _, _ = run(
+                                f"git fetch origin {ls_quoted} 2>/dev/null"
+                            )
+                            if fetch_ec == 0:
+                                _, verify2_out, _ = run(
+                                    "git rev-parse --verify"
+                                    f" origin/{ls_quoted} 2>/dev/null"
+                                )
+                                if verify2_out.strip():
+                                    base_ref = f"origin/{ls_quoted}"
+                                    break
+
+                if not base_ref:
+                    # Last-resort fallback: try well-known default names.
+                    for default in ("main", "master"):
+                        _, default_out, _ = run(
+                            f"git rev-parse --verify origin/{default} 2>/dev/null"
+                        )
+                        if default_out.strip():
+                            base_ref = f"origin/{default}"
+                            break
 
         if base_ref:
             # Always reset to the remote base (issue #712 Candidate C).
@@ -172,8 +206,10 @@ def git_prepare_commit(
                 "step": "squash_reset",
                 "error": (
                     "Cannot resolve a remote base for manifest mode. "
-                    "Ensure the repository has been cloned from a remote "
-                    "(origin) and that the remote has a default branch."
+                    "The repository's default branch may be named something "
+                    "other than 'main' or 'master'. "
+                    "Ensure the remote (origin) is reachable and has a "
+                    "default branch."
                 ),
             }, None
 

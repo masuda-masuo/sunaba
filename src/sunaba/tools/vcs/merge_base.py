@@ -205,7 +205,30 @@ def _resolve_base_branch(
         default = stdout_text[len("refs/remotes/origin/"):]
         return default, f"remote default branch (origin/HEAD): {default}"
 
-    # Last-resort: try well-known branch names
+    # Try to resolve via ls-remote --symref (network).
+    # This resolves main, master, dev, or anything else the remote has
+    # configured as its HEAD, without enumerating candidate names.
+    ec_ls, out_ls = container.exec_run(
+        ["/bin/sh", "-c",
+         f"cd {safe_wd} && timeout 15 git ls-remote --symref origin HEAD 2>/dev/null"
+         " || echo ''"],
+        stdout=True,
+        stderr=True,
+    )
+    stdout_ls, _ = (out_ls if isinstance(out_ls, tuple) else (out_ls, b""))
+    stdout_ls_text = stdout_ls.decode("utf-8", errors="replace").strip() if stdout_ls else ""
+
+    if stdout_ls_text:
+        for ls_line in stdout_ls_text.splitlines():
+            if ls_line.startswith("ref: refs/heads/") and "\tHEAD" in ls_line:
+                # Format: "ref: refs/heads/<name>\tHEAD"
+                default = ls_line.removeprefix("ref: refs/heads/").split("\t")[0]
+                if default:
+                    return default, f"remote default branch (ls-remote --symref): {default}"
+
+    # Last-resort fallback: try well-known branch names.
+    # This is an offline-safe path: when the network is unavailable and
+    # origin/HEAD is unset, a main/master repo still resolves correctly.
     for guess in ("main", "master"):
         ec2, out2 = container.exec_run(
             ["/bin/sh", "-c",
@@ -219,6 +242,8 @@ def _resolve_base_branch(
 
     raise RuntimeError(
         "Cannot determine the base branch. "
+        "The repository's default branch may be named something other "
+        "than 'main' or 'master'. "
         "Pass base_branch explicitly, ensure the container has metadata from "
         "a PR checkout, or make sure origin has a default branch."
     )

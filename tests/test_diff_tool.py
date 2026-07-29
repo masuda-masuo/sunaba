@@ -1596,3 +1596,169 @@ class TestDiffInContainer:
 
         assert result["status"] == "error"
         assert result["step"] == "resolve_base"
+
+
+    # --- Fetch-once retry (Issue #765) ---
+
+    def test_fetch_on_missing_base(self):
+        """When merge base fails first time, fetch happens, then succeeds.
+
+        Response includes fetch_happened=True.
+        The fetch command is ``git fetch origin`` (never pull, never single-branch).
+        """
+        container = MagicMock()
+        call_count = [0]  # mutable counter for the closure
+        seen_fetch_cmds = []
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "merge-base" in cmd_str:
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    # First attempt: unknown ref
+                    return (128, (b"", b"fatal: Not a valid object name"))
+                # Second attempt: success after fetch
+                return (0, (f"{_MERGE_BASE_SHA}\n".encode(), b""))
+            if "fetch" in cmd_str:
+                seen_fetch_cmds.append(cmd_str)
+                return (0, (b"", b""))
+            if "--numstat" in cmd_str:
+                return (0, (b"1\t0\tfixed.py\n", b""))
+            if "--name-status" in cmd_str:
+                return (0, (b"A\tfixed.py\n", b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(
+                diff_in_container("abc123def456", base="origin/v2")
+            )
+
+        assert result["total_files"] == 1
+        assert result["files"][0]["path"] == "fixed.py"
+        assert result["base"] == "origin/v2"
+        assert result["fetch_happened"] is True
+
+        # Verify the fetch command is `git fetch origin` (never pull)
+        assert len(seen_fetch_cmds) == 1, (
+            f"Expected exactly one fetch, got {len(seen_fetch_cmds)}"
+        )
+        fetch_cmd = seen_fetch_cmds[0]
+        assert "git fetch origin" in fetch_cmd, (
+            f"Fetch command should be 'git fetch origin': {fetch_cmd}"
+        )
+        assert "pull" not in fetch_cmd, (
+            f"Must not be a pull: {fetch_cmd}"
+        )
+        assert "refs/heads/" not in fetch_cmd and "heads/" not in fetch_cmd, (
+            f"Must fetch all refs, not a single branch: {fetch_cmd}"
+        )
+
+    def test_no_fetch_when_base_resolved(self):
+        """When base resolves immediately, no fetch occurs.
+
+        Response does NOT include fetch_happened.
+        """
+        container = MagicMock()
+
+        seen_fetch = []
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "fetch" in cmd_str and "origin" in cmd_str:
+                seen_fetch.append(cmd_str)
+            if "merge-base" in cmd_str:
+                return (0, (f"{_MERGE_BASE_SHA}\n".encode(), b""))
+            if "--numstat" in cmd_str:
+                return (0, (b"2\t1\texisting.py\n", b""))
+            if "--name-status" in cmd_str:
+                return (0, (b"M\texisting.py\n", b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(
+                diff_in_container("abc123def456", base="main")
+            )
+
+        assert result["total_files"] == 1
+        assert result["base"] == "main"
+        assert "fetch_happened" not in result
+        assert len(seen_fetch) == 0, f"Unexpected fetch command: {seen_fetch}"
+
+    def test_fetch_still_fails(self):
+        """When base does not resolve even after fetch, error is returned."""
+        container = MagicMock()
+
+        seen_fetch = []
+
+        def exec_side_effect(cmd, **kwargs):
+            cmd_str = (
+                cmd[-1].decode() if isinstance(cmd[-1], bytes) else str(cmd[-1])
+            )
+            if "fetch" in cmd_str and "origin" in cmd_str:
+                seen_fetch.append(cmd_str)
+                return (0, (b"", b""))  # fetch succeeds but ref still missing
+            if "merge-base" in cmd_str:
+                return (128, (b"", b"fatal: Not a valid object name"))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = exec_side_effect
+
+        with patch(
+            "sunaba.tools.diff._docker",
+            return_value=MagicMock(
+                containers=MagicMock(get=MagicMock(return_value=container))
+            ),
+        ), patch(
+            "sunaba.tools.diff.resolve_git_root",
+            return_value="/repo",
+        ), patch(
+            "sunaba.tools.diff.record_tool_use",
+        ):
+            result = json.loads(
+                diff_in_container("abc123def456", base="no-such-branch")
+            )
+
+        assert result["status"] == "error"
+        assert result["step"] == "merge_base"
+        assert "no-such-branch" in result["error"]
+        assert len(seen_fetch) == 1, "Fetch should have been attempted once"
+        # The caller must be told the fetch already ran, or they will go and
+        # do it by hand expecting a different answer.
+        assert "already attempted" in result["error"], result["error"]
+
+
+class TestFetchHelperImport:
+    """Verify the shared fetch helper is importable."""
+
+    def test_git_fetch_origin_importable(self):
+        from sunaba.tools.vcs.fetch import git_fetch_origin
+
+        assert callable(git_fetch_origin)

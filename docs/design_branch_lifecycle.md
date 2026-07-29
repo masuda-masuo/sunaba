@@ -66,9 +66,10 @@ Two consequences that are easy to assume wrongly:
 
 1. **A base branch that existed at clone time needs no fetch.** `base="origin/v2"` works
    without any network round trip.
-2. **A branch created after the container started is invisible.** Nothing re-fetches during
-   a container's life, so a merge target that appears later is not reachable. This is a
-   known gap, deliberately out of scope, not an oversight.
+2. **A branch created after the container started is not fetched automatically.**
+   `diff_in_container` fetches once when a named base does not resolve locally: only
+   remote-tracking refs move, HEAD and the working tree are unchanged. After that single
+   fetch the branch is reachable.
 
 `origin/HEAD` is normally present, but it is not guaranteed — some initialization paths can
 leave it unset, and that is precisely when the fallback ladder below stops being academic.
@@ -146,10 +147,12 @@ So the moment a `checkpoint` commits, the local `main` advances with HEAD, and
 `merge-base(main, HEAD)` collapses to HEAD itself. Every committed change disappears from
 the diff while the call still succeeds.
 
-`origin/main` does not move — nothing re-fetches during a container's life — so it remains
-the commit the work started from. An auto-resolved base (from the ladder or from container
-metadata) is therefore rewritten to `origin/<branch>` when that ref exists. A base the
-caller passed explicitly is used verbatim; the response reports whichever was used.
+`origin/main` normally does not move — the only thing that re-fetches during a container's
+life is the fetch-once retry below, and that fires only when a named base fails to resolve,
+which an auto-resolved base never does. So it remains the commit the work started from. An
+auto-resolved base (from the ladder or from container metadata) is therefore rewritten to
+`origin/<branch>` when that ref exists. A base the caller passed explicitly is used
+verbatim; the response reports whichever was used.
 
 This is invisible to a test that mocks `git merge-base`, because the mock answers the same
 regardless of which ref it was asked about. It was found by running the real tool against a
@@ -219,13 +222,20 @@ reset onto:
 
 ### Two traps, both with real damage behind them
 
-**The remote base is the one fetched at container initialization.** Nothing refreshes it.
-Publish one PR, merge it, then open a second from the same container, and the second is
-still built on the pre-merge base: the commit reads as a fresh file addition and the PR
-goes `CONFLICTING`. **After publishing one PR, start a new container** (#727).
+**The remote base is normally the one fetched at container initialization.** Publish one PR,
+merge it, then open a second from the same container, and the second is still built on the
+pre-merge base: the commit reads as a fresh file addition and the PR goes `CONFLICTING`.
+**After publishing one PR, start a new container** (#727).
 
 Measured: 80 containers published more than once, so this is reached in practice, not
 theoretical.
+
+One thing does refresh it as a side effect: the diff fetch-once retry updates every
+remote-tracking ref, so a `diff_in_container` call against an unresolvable base moves
+`origin/*` for `publish` too. That direction is harmless — publish then builds on a *newer*
+base rather than a staler one — but it means the base a container publishes against is not
+strictly fixed at initialization. Do not rely on the init snapshot as an invariant; rely on
+starting a fresh container.
 
 **Reusing an existing remote branch name can discard your worktree edits.** Working around
 the first trap by editing in a fresh container and force-pushing to the same branch name
@@ -255,8 +265,8 @@ old PR (#727).
 2. Diffs are computed from the divergence point, so an advancing target does not alter
    them.
 3. A review answer states the base it used.
-4. Nothing that reads state mutates it — no index changes, no fetches into the working
-   branch.
+4. Nothing that reads state mutates the working tree or HEAD. Remote-tracking refs may be
+   updated on demand when a named base does not resolve locally.
 5. A base that cannot be resolved is an error, never a silent fallback to "no base".
 6. Layer 5 of the ladder is a guess and is labelled as one wherever it surfaces.
 

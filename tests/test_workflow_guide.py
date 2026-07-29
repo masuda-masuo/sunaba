@@ -146,11 +146,12 @@ class TestDriftDetection:
         "git",          # git CLI (e.g. ``git diff --stat``)
 
         # git concepts and subcommands
-        "origin",       # git remote name (``origin/<branch>``)
-        "diff",         # git subcommand (``git diff --stat``)
-        "stat",         # git diff flag (``git diff --stat``)
         "check",        # git concept / general term
         "default",      # "default branch" concept
+        "diff",         # git subcommand (``git diff --stat``)
+        "main",         # git default branch name (``e.g. \`main\```)
+        "origin",       # git remote name (``origin/<branch>``)
+        "stat",         # git diff flag (``git diff --stat``)
 
         # External tools / frameworks
         "pytest",       # Python test framework, not a sunaba tool

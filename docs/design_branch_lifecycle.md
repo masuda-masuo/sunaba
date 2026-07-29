@@ -20,20 +20,16 @@ refs exist to choose from.
 
 ## Implementation status
 
-This document leads the code. One section is not implemented yet:
+Every section below is implemented.
 
 | Section | Status |
 |---|---|
 | What a clone actually gives you | implemented |
 | Container metadata | implemented |
 | The default-branch ladder | implemented (#758) |
-| **Choosing the diff base** | **not yet implemented — tracked by #748** |
+| Choosing the diff base | implemented (#748) |
 | Publish | implemented |
 | Checkpoints | implemented |
-
-Until #748 lands, `diff_in_container` still defaults to `HEAD~1` and does not report
-untracked files or the base it used. That is the drift this document defines as a bug in
-the code.
 
 ---
 
@@ -138,6 +134,26 @@ though you had deleted them. Git's answer is to compare from the commit where th
 branches diverged — the merge base. `main...HEAD` is that, spelled with three dots.
 
 The property that matters: **your diff does not change when the merge target moves.**
+
+### The base must be the remote-tracking ref, not the branch name
+
+A resolved base is a plain branch name such as `main`, and git reads that as the **local**
+branch. That is the wrong commit here, and the reason is specific to how sunaba works: a
+container checks out the cloned default branch and edits it directly, rather than creating
+a feature branch. `publish` is what eventually moves the work onto a branch.
+
+So the moment a `checkpoint` commits, the local `main` advances with HEAD, and
+`merge-base(main, HEAD)` collapses to HEAD itself. Every committed change disappears from
+the diff while the call still succeeds.
+
+`origin/main` does not move — nothing re-fetches during a container's life — so it remains
+the commit the work started from. An auto-resolved base (from the ladder or from container
+metadata) is therefore rewritten to `origin/<branch>` when that ref exists. A base the
+caller passed explicitly is used verbatim; the response reports whichever was used.
+
+This is invisible to a test that mocks `git merge-base`, because the mock answers the same
+regardless of which ref it was asked about. It was found by running the real tool against a
+real container with a real checkpoint in it.
 
 ### End at the working tree, not at HEAD
 

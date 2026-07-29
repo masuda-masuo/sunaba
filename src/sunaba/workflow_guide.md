@@ -73,13 +73,11 @@ type check in one call.
   repositories -- it once let two pyright errors through to a pushed branch.
 - `diff_summary` is structured JSON (`{unstaged, staged, untracked}`), not `git diff --stat`.
 
-### diff_in_container takes `worktree`
+### diff_in_container's default base is the merge target
 
-**To see uncommitted changes, pass `diff_in_container(container_id, worktree=True)`.**
-The default `base` is the PR base recorded at `pr=N` checkout, or `HEAD~1` otherwise, so
-uncommitted edits do not appear. This was once misdiagnosed as a bug that "misreports
-uncommitted changes", and agents were told to fall back to `sandbox_exec git diff`. It is
-an argument, not a bug. There is no reason to drop to raw git.
+The default `base` is the PR base branch recorded at `pr=N` checkout, or the repository's default branch (e.g. `main`) otherwise. The diff always ends at the **working tree**, so both committed and uncommitted work appears. Untracked files are listed in the `untracked` field.
+
+Pass `worktree=True` to see only uncommitted changes (`git diff HEAD`); the `base` argument is ignored in this mode.
 
 - no path: per-file summary (`path` / `status` / `additions` / `deletions`)
 - `path`: hunks for that file only, disclosed progressively (`offset` / `limit`)

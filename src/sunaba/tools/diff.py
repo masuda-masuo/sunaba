@@ -17,6 +17,7 @@ from sunaba.tools.common import (
     container_not_found_error,
 )
 from sunaba.tools.vcs import resolve_git_root
+from sunaba.tools.vcs.fetch import git_fetch_origin
 from sunaba.tools.vcs.merge_base import _resolve_base_branch
 
 #: Path inside the container for clone/PR metadata (also referenced by
@@ -122,6 +123,7 @@ def diff_in_container(
     # Resolve base ref.  An unresolvable base is an error, never a silent
     # fallback: degrading to "no base" is how a caller ends up reviewing a
     # plausible-looking diff of something other than their own work (#748).
+    fetch_happened = False
     if worktree:
         actual_base = "HEAD"
         mode = "worktree"
@@ -159,15 +161,36 @@ def diff_in_container(
         # exits 0 and reports only unstaged changes -- a wrong answer
         # indistinguishable from a correct one.
         merge_base_sha = _resolve_merge_base(container, safe_wd, actual_base)
+
+        # Fetch-once retry: when the base does not resolve locally it may be a
+        # branch that was created after the container started.  Run `git fetch
+        # origin` once to refresh remote-tracking refs and retry.  Only
+        # remote-tracking refs move; HEAD and the working tree are unchanged.
+        fetch_attempted = False
         if merge_base_sha is None:
+            fetch_attempted = git_fetch_origin(container, working_dir)
+            if fetch_attempted:
+                merge_base_sha = _resolve_merge_base(
+                    container, safe_wd, actual_base,
+                )
+                if merge_base_sha is not None:
+                    fetch_happened = True
+
+        if merge_base_sha is None:
+            # Say that the fetch already ran, so the caller does not go off
+            # and retry it by hand expecting a different answer.
+            tried = (
+                " A fetch was already attempted."
+                if fetch_attempted
+                else " The remote could not be reached to look for it."
+            )
             return json.dumps({
                 "status": "error",
                 "step": "merge_base",
                 "error": (
-                    f"No merge base between {actual_base!r} and HEAD. "
-                    "The ref may not exist in this clone (branches created "
-                    "after the container started are not fetched), or it "
-                    "shares no history with HEAD."
+                    f"No merge base between {actual_base!r} and HEAD.{tried} "
+                    "The ref may not exist on the remote, or it shares no "
+                    "history with HEAD."
                 ),
             })
         safe_base = shlex.quote(merge_base_sha)
@@ -182,6 +205,8 @@ def diff_in_container(
         if "status" not in result or result["status"] != "error":
             result["base"] = actual_base
             result["mode"] = mode
+            if fetch_happened:
+                result["fetch_happened"] = True
         return json.dumps(result)
 
     result = json.loads(
@@ -192,6 +217,8 @@ def diff_in_container(
     if "status" not in result or result["status"] != "error":
         result["base"] = actual_base
         result["mode"] = mode
+        if fetch_happened:
+            result["fetch_happened"] = True
     return json.dumps(result)
 
 

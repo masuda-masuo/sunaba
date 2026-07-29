@@ -122,7 +122,7 @@ For client configurations (such as connecting Claude Desktop via `mcp-remote`) a
 | Symptom | Likely Cause | Fix |
 |---|---|---|
 | `Cannot connect to the Docker daemon` | Docker isn't running | Start Docker Desktop or `dockerd`. |
-| `permission denied` on `docker.sock` | User isn't in `docker` group | `sudo usermod -aG docker $USER` and log back in. |
+| `permission denied` on `docker.sock` | `DOCKER_HOST` unset/wrong (rootless); user not in `docker` group (rootful) | Set `DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock` first; fallback `sudo usermod -aG docker $USER` (⚠️ root-equivalent — see [Daemon Setup](docs/daemon_setup.md)). |
 | `sandbox_initialize` times out | Pulling image from GHCR exceeds 60s client timeout | Switch to the systemd background daemon. |
 | `BLOCKED by egress proxy` | Host not allowlisted or `allow_network` is false | Pass `allow_network=True` or add the host to `SUNABA_ALLOWED_EGRESS_HOSTS`. |
 

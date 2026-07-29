@@ -7,6 +7,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege for GITHUB_TOKEN. The repository default is already
+# read-only, but declaring it here keeps the workflow correct if that default
+# ever changes, and is what CodeQL's actions/missing-workflow-permissions asks
+# for. This workflow only checks out and runs tests.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

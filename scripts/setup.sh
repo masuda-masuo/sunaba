@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE_DIR="${HOME}/.cache/sunaba/bin"
-RELEASE_TAG="mcp-token/v1.3.2"
+RELEASE_TAG="mcp-token/v1.3.4"
 REPO="masuda-masuo/mcp-launcher"
 
 # ---------------------------------------------------------------------------

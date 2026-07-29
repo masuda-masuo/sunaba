@@ -758,8 +758,7 @@ async def sandbox_initialize_tool(
     Args:
         image: Docker image, or alias full/neutral/python/go/rust/js (pinned digests).
                Default: the all-in-one image (every toolchain verify can run).
-        allow_network: Enable network access. Required for pip install,
-            network clones, and publish.
+        allow_network: Required for pip install, network clones, and publish.
         clone_repo: 'owner/name' cloned over the network (auto-enables
             allow_network; private repos authenticate host-side, no token
             in container).
@@ -917,11 +916,11 @@ def run_container_and_exec(
         image: Docker image, or alias full/neutral/python/go/rust/js (pinned digests).
                Default: the all-in-one image (every toolchain verify can run).
         commands: Shell commands run sequentially; must be non-empty.
-        verbose: 'error_only', 'summary' (default), or 'full'.
+        verbose: 'error_only', 'summary', or 'full'.
         max_lines: Max lines shown in summary/error_only mode.
         offset: 0-indexed line offset for paging output.
         limit: Max lines per page.
-        allow_network: Enable network access (needed for git/gh/PyPI).
+        allow_network: Needed for git/gh/PyPI.
         clone_repo: 'owner/name' cloned over the network (auto-enables
             allow_network; private repos authenticate host-side, no token
             in container).

@@ -59,7 +59,7 @@ def sandbox_exec(
         commands: Shell commands run sequentially. No raw newlines
             (see above).
         working_dir: cd here before running.
-        verbose: 'error_only', 'summary' (default), or 'full'.
+        verbose: 'error_only', 'summary', or 'full'.
         max_lines: Max lines shown in summary/error_only mode.
         offset: 0-indexed line offset for paging output.
         limit: Max lines per page.
@@ -67,9 +67,8 @@ def sandbox_exec(
             status='timeout', exit_code=124.
         max_output_tokens: Summarize output to this token budget (0 = off);
             full output stays retrievable via a resource://run/ handle.
-        argv: Argument vector run directly, no shell -- quoting and
-            embedded newlines pass through literally. Mutually
-            exclusive with commands.
+        argv: Direct exec, no shell -- quoting and embedded newlines
+            pass through literally.  Mutually exclusive with commands.
 
     Returns:
         JSON: status, output, paging metadata; exit_code and stderr on

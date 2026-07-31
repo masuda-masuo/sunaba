@@ -194,12 +194,12 @@ _ISSUE_WRITE_METHODS = ("create", "comment")
 # _github_api_request, the pattern of _create_pr_via_api / issue_view
 # (#409/#413); single-call, dry-run retired for V1.0 to match publish.
 def sandbox_issue_write(
-    container_id: str,
     repo: str,
     method: str,
     title: str = "",
     body: str = "",
     issue_number: int | None = None,
+    container_id: str | None = None,
 ) -> str:
     """Create a GitHub issue or comment on one -- host-side, no in-container gh.
 
@@ -207,8 +207,6 @@ def sandbox_issue_write(
     the container and container network access is not required.
 
     Args:
-        container_id: Container ID prefix (journal trail only; the
-            container's network state is irrelevant).
         repo: 'owner/repo'.
         method: 'create' (new issue) or 'comment' (on an existing
             issue or PR).
@@ -216,6 +214,8 @@ def sandbox_issue_write(
         body: Issue or comment body.
         issue_number: Issue/PR number to comment on; required for
             'comment', ignored for 'create'.
+        container_id: Container to attribute in the journal; omit for
+            container-less (host-scoped) calls.
 
     Returns:
         JSON: status, html_url, number (for 'create'); error on
@@ -230,15 +230,16 @@ def sandbox_issue_write(
     if method == "comment" and not issue_number:
         return json.dumps({"status": "error", "error": "issue_number is required when method='comment'"})
 
-    client = _docker()
-    try:
-        client.containers.get(container_id)
-    except NotFound:
-        return container_not_found_error(container_id)
-    except Exception as e:
-        return json.dumps({"status": "error", "error": str(e)})
-
-    cid = container_id[:12]
+    cid: str | None = None
+    if container_id is not None:
+        client = _docker()
+        try:
+            client.containers.get(container_id)
+        except NotFound:
+            return container_not_found_error(container_id)
+        except Exception as e:
+            return json.dumps({"status": "error", "error": str(e)})
+        cid = container_id[:12]
 
     if method == "create":
         details = f"repo={repo} issue_create title={title[:80]}"
@@ -292,12 +293,12 @@ _PR_REVIEW_EVENTS = ("APPROVE", "REQUEST_CHANGES", "COMMENT")
 
 # Host-side one-shot review submission, following sandbox_issue_write (#414).
 def sandbox_pr_review_write(
-    container_id: str,
     repo: str,
     pr: int,
     event: str,
     body: str = "",
     comments: list[dict[str, Any]] | None = None,
+    container_id: str | None = None,
 ) -> str:
     """Create and submit a PR review in one shot -- host-side, no in-container gh.
 
@@ -307,14 +308,14 @@ def sandbox_pr_review_write(
     *APPROVE*/*REQUEST_CHANGES* auto-downgrade to *COMMENT* on own PR (#613).
 
     Args:
-        container_id: Container ID prefix (journal trail only; the
-            container's network state is irrelevant).
         repo: 'owner/repo'.
         pr: PR number to review.
         event: 'APPROVE', 'REQUEST_CHANGES', or 'COMMENT'.
         body: Review body text.
         comments: Inline comment dicts: path, line, body, optional side
             ('LEFT'/'RIGHT', default 'RIGHT').
+        container_id: Container to attribute in the journal; omit for
+            container-less (host-scoped) calls.
 
     Returns:
         JSON: status, html_url, review_id; includes original_event and
@@ -348,15 +349,17 @@ def sandbox_pr_review_write(
                     "error": f"Comment at index {i} is missing required key 'body'",
                 })
 
-    client = _docker()
-    try:
-        client.containers.get(container_id)
-    except NotFound:
-        return container_not_found_error(container_id)
-    except Exception as e:
-        return json.dumps({"status": "error", "error": str(e)})
+    cid: str | None = None
+    if container_id is not None:
+        client = _docker()
+        try:
+            client.containers.get(container_id)
+        except NotFound:
+            return container_not_found_error(container_id)
+        except Exception as e:
+            return json.dumps({"status": "error", "error": str(e)})
+        cid = container_id[:12]
 
-    cid = container_id[:12]
     details = f"repo={repo} pr=#{pr} event={event}"
 
     push_token = _resolve_vcs_token()

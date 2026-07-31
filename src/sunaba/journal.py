@@ -106,6 +106,24 @@ def get_or_create_run_id(container_id: str) -> str:
         return _run_map[container_id]
 
 
+#: Process-lifetime run id for host-scoped (container-less) operations.
+_host_run_id: str | None = None
+
+
+def get_host_run_id() -> str:
+    """Return the run_id shared by all container-less operations (#778).
+
+    Host-scoped boundary crossings (e.g. ``sandbox_issue_write`` without a
+    container) are grouped under one run per server process, so the audit
+    trail stays attributable without a throwaway container.
+    """
+    global _host_run_id
+    with _run_map_lock:
+        if _host_run_id is None:
+            _host_run_id = "host-" + generate_run_id()
+        return _host_run_id
+
+
 def remove_run_id(container_id: str) -> None:
     """Remove the run_id mapping when a container is stopped."""
     with _run_map_lock:
@@ -425,7 +443,7 @@ def record_stop(container_id: str) -> None:
 
 
 def record_boundary_crossing(
-    container_id: str,
+    container_id: str | None,
     operation: str,
     details: str,
     approved: bool | None = None,
@@ -435,11 +453,29 @@ def record_boundary_crossing(
 
     *approved* is ``None`` when no approval was required (e.g. read-only
     VCS access that only needs journal recording).
+
+    *container_id* is ``None`` for host-scoped operations that involve no
+    container (#778); they share the process-lifetime host run_id and the
+    sidecar container state is untouched.
     """
+    if container_id is None:
+        entry: dict[str, Any] = {
+            "ts": _utcnow_iso(),
+            "run_id": get_host_run_id(),
+            "container_id": None,
+            "operation": "boundary_crossing",
+            "sub_operation": operation,
+            "details": details,
+            "approved": approved,
+        }
+        if session_label is not None:
+            entry["session_label"] = session_label
+        _append_json(entry)
+        return
     if session_label is not None:
         set_session_label(container_id, session_label)
     run_id = get_or_create_run_id(container_id)
-    entry: dict[str, Any] = {
+    entry = {
         "ts": _utcnow_iso(),
         "run_id": run_id,
         "container_id": container_id,

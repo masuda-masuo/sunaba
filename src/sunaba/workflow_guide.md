@@ -145,10 +145,13 @@ detect-secrets runs before publish. A false positive can be pushed through with
 
 ## phase: issue
 
-- `sandbox_issue_write(container_id, repo, issue_number=N, method="comment", body=...)` --
+- `sandbox_issue_write(repo, issue_number=N, method="comment", body=...)` --
   **omitting `body` on a confirm call creates an empty comment without erroring.** Confirm
   what actually landed.
 - `sandbox_pr_review_write(...)` -- formal reviews (approve / request changes / inline).
+- **`container_id` is optional on both write tools** (#778): pass it to attribute the write
+  to a container's run in the journal; omit it for container-less (host-scoped) calls --
+  do not start a throwaway container just to file an issue.
 - **You cannot approve or request changes on your own PR.** That is a GitHub restriction, not
   a tool limitation; reply with a comment instead.
 - Merging PRs and closing issues happen through host-side `gh`.

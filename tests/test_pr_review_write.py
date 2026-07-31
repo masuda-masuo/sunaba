@@ -435,3 +435,32 @@ class TestGithubApiRequest:
             else:
                 msg = "Expected RuntimeError"
                 raise AssertionError(msg)
+
+
+class TestSandboxPrReviewWriteContainerless:
+    """container_id omitted: no docker interaction, host-scoped journal (#778)."""
+
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
+    def test_review_without_container(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+    ) -> None:
+        def _api(path: str, token: str, method: str = "GET", payload=None):
+            if path == "/repos/owner/repo/pulls/7":
+                return {"head": {"sha": "abc123"}}
+            return {"id": 42, "html_url": "https://github.com/owner/repo/pull/7#pullrequestreview-42"}
+
+        with patch("sunaba.tools.vcs.issues._github_api_request", side_effect=_api):
+            result = _decode(sandbox_pr_review_write(
+                repo="owner/repo", pr=7, event="COMMENT", body="looks good",
+            ))
+
+        assert result["status"] == "ok"
+        assert result["review_id"] == 42
+        mock_docker.assert_not_called()
+        mock_record.assert_called_once()
+        assert mock_record.call_args[0][0] is None

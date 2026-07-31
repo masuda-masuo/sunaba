@@ -244,6 +244,37 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
 # gate stays src/-scoped (CI has no type step).  Language dispatch shares
 # detection with the gate via edit_verify._DISPATCH (#493).  The diff summary
 # lets the LLM review what will be pushed before publish.
+
+
+def _record_verify_outcome(container_id: str, result: dict) -> None:
+    """Record the verify outcome in the journal for the phase view (#774).
+
+    ``verify_in_container`` runs tests via Docker SDK directly rather than
+    through ``sandbox_exec``, so the journal would otherwise contain no
+    pytest pass/fail entries for the most common verification path.
+
+    This function writes a ``tool_use`` entry with tool name
+    ``"verify_in_container"`` carrying a ``result`` key in params so the
+    phase aggregator in ``src/sunaba/phase.py`` can populate the
+    ``verify_timeline`` with actual pass/fail data.
+    """
+    outcome: dict = {"gate_passed": result.get("gate_passed", False)}
+    tests = result.get("tests", {})
+    full = tests.get("full", {})
+    if isinstance(full, dict):
+        outcome["passes"] = full.get("passed", full.get("passes", 0))
+        outcome["fails"] = full.get("failed", full.get("fails", 0))
+        outcome["collected"] = full.get("collected", 0)
+        outcome["status"] = full.get("status", "unknown")
+    elif isinstance(full, list):
+        outcome["status"] = "multi_lang"
+    record_tool_use(
+        container_id[:12],
+        "verify_in_container",
+        {"result": outcome},
+    )
+
+
 def verify_in_container(
     container_id: str,
     path: str,
@@ -439,6 +470,7 @@ def verify_in_container(
                 "status": "skipped",
                 "message": "precondition gate failed; tests not run",
             }
+            _record_verify_outcome(container_id, result)
             return json.dumps(result)
 
     # --- Run tests (language-aware dispatch, Issue #493) ---
@@ -579,6 +611,7 @@ def verify_in_container(
                         f"{filtered_result.get('failed', 0)} failed"
                     )
                 result["gate_fail_reasons"] = [msg]
+                _record_verify_outcome(container_id, result)
                 return json.dumps(result)
 
             # Phase 2: full test suite for all languages
@@ -600,6 +633,7 @@ def verify_in_container(
         result["gate_pass_reason"] = "no languages detected \u2014 gate passes"
         result["gate_passed"] = True
         record_verify_success(container_id)
+        _record_verify_outcome(container_id, result)
         return json.dumps(result)
     elif len(detected.languages) == 1:
         lang = list(detected.languages)[0]
@@ -692,4 +726,11 @@ def verify_in_container(
     if result["gate_passed"]:
         record_verify_success(container_id)
         result["recommended_next_action"] = "publish"
+
+    # Record the verify outcome in the journal so the trace-page phase
+    # view can render pass/fail checkmarks without relying on pytest
+    # exec entries (which verify_in_container does not produce — it
+    # runs tests via Docker SDK directly, bypassing sandbox_exec).
+    # Issue #774.
+    _record_verify_outcome(container_id, result)
     return json.dumps(result)

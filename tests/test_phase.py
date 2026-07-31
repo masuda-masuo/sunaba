@@ -457,3 +457,61 @@ class TestAggregationDetails:
         assert "run-b" in state
         assert state["run-a"]["phases"][0]["phase"] == "init"
         assert state["run-b"]["phases"][0]["phase"] == "init"
+
+
+# ---------------------------------------------------------------------------
+# Health markers (Issue #775)
+# ---------------------------------------------------------------------------
+
+
+class TestHealthMarkers:
+    """The aggregation state carries the markers the health classifier needs:
+    ``published``, ``stopped`` and ``last_op``."""
+
+    def test_defaults(self):
+        state = aggregate_run_phases(None, [_entry("initialize", image="python:3.12")])
+        run = state["test-run"]
+        assert run["published"] is False
+        assert run["stopped"] is False
+        assert run["last_op"] == "initialize"
+
+    def test_published_set_by_publish_boundary(self):
+        entries = [
+            _entry("initialize", ts="2026-01-01T00:00:01Z"),
+            _boundary_entry("publish", ts="2026-01-01T00:00:02Z"),
+        ]
+        run = aggregate_run_phases(None, entries)["test-run"]
+        assert run["published"] is True
+        assert run["stopped"] is False
+
+    def test_stopped_set_by_stop_entry(self):
+        entries = [
+            _entry("initialize", ts="2026-01-01T00:00:01Z"),
+            _entry("stop", ts="2026-01-01T00:00:02Z"),
+        ]
+        run = aggregate_run_phases(None, entries)["test-run"]
+        assert run["stopped"] is True
+        assert run["published"] is False
+
+    def test_last_op_tracks_most_recent_entry(self):
+        entries = [
+            _entry("initialize", ts="2026-01-01T00:00:01Z"),
+            _tool_entry("read_file_range", ts="2026-01-01T00:00:02Z"),
+            _tool_entry("edit_file", ts="2026-01-01T00:00:03Z"),
+        ]
+        run = aggregate_run_phases(None, entries)["test-run"]
+        assert run["last_op"] == "tool:edit_file"
+
+    def test_markers_survive_incremental_chunking(self):
+        entries = [
+            _entry("initialize", ts="2026-01-01T00:00:01Z"),
+            _boundary_entry("publish", ts="2026-01-01T00:00:02Z"),
+            _entry("stop", ts="2026-01-01T00:00:03Z"),
+        ]
+        full = aggregate_run_phases(None, entries)["test-run"]
+        inc = aggregate_run_phases(
+            aggregate_run_phases(None, entries[:1]), entries[1:]
+        )["test-run"]
+        assert full["published"] is True and inc["published"] is True
+        assert full["stopped"] is True and inc["stopped"] is True
+        assert full["last_op"] == "stop" and inc["last_op"] == "stop"

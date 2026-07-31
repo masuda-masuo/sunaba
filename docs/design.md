@@ -250,18 +250,14 @@ Tool-specific fields (such as `gate_passed` in `verify_in_container`) may be inc
 
 ---
 
-## 7. Transport Options (Timeout Mitigation)
+## 7. Transport Options
 
-> Problem: Standard `stdio` transport is capped at a ~60-second timeout by many MCP clients. Operations like pulling base images, compiling test runs, or copying repositories can exceed this limit.
-
-We resolve this by using HTTP-based transport options (such as `streamable-http`) under a background systemd user service, which prevents client timeouts during slow operations.
+Sunaba uses HTTP-based transports under a background systemd user service, which prevents client timeouts during slow operations such as pulling base images or compiling test runs.
 
 | Transport | Recommended for | Characteristics |
 |---|---|---|
-| `streamable-http` (Recommended) | Production / WSL2 | Binds to localhost. Supports bidirectional streaming and prevents client timeouts natively. |
-| `sse` | Alternative daemon | Server-Sent Events over HTTP. |
+| `streamable-http` (default) | Production / WSL2 | Binds to localhost. Supports bidirectional streaming and prevents client timeouts natively. |
 | `http` | Alternative daemon | Stateless HTTP transport. |
-| `stdio` | Local Debugging only | Standard I/O. Subject to client-side timeouts during slow setup phases. |
 
 For detailed instructions on deploying the server on headless GCE instances or VM nodes, simulating DBus sessions, and forwarding remote loopback ports, see the dedicated [Headless VM & CI/CD Deployment Guide](headless_setup.md).
 

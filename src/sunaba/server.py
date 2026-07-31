@@ -230,12 +230,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--transport",
         type=str,
-        default="stdio",
-        choices=["stdio", "sse", "http", "streamable-http"],
+        default="streamable-http",
+        choices=["http", "streamable-http"],
         help=(
-            "MCP transport protocol (default: stdio). "
-            "Use 'sse' or 'http' to avoid the ~60s client timeout. "
-            "When using SSE/HTTP, specify --host and --port."
+            "MCP transport protocol (default: streamable-http). "
+            "streamable-http binds to localhost and is required for production. "
+            "Use --host and --port to control the bind address."
         ),
     )
     parser.add_argument(
@@ -413,17 +413,17 @@ def main() -> None:
     """Parse CLI arguments and run the MCP server.
 
     ``--default-image`` for overriding the default Docker image,
-    ``--transport`` to select the MCP transport protocol,
+    ``--transport`` to select the MCP transport protocol
+    (``streamable-http`` or ``http``; default ``streamable-http``),
     ``--dashboard-port`` for the observability dashboard (default: 8751),
     ``--dashboard-host`` to set the bind address (default: 127.0.0.1),
     ``--webhook-url`` for push notifications,
     and ``--log-level`` to control logging verbosity (default: INFO).
 
-    HTTP-based transports (``sse``, ``http``, ``streamable-http``)
-    are not subject to the ~60-second client timeout that affects
-    ``stdio``, making them suitable for long-running Docker
-    operations such as ``docker pull`` or ``copy_project`` on
-    large directories.
+    The server binds to localhost over HTTP, avoiding the ~60-second
+    client timeout that affects stdio-based MCP transports, making it
+    suitable for long-running Docker operations such as ``docker pull``
+    or ``copy_project`` on large directories.
     """
     parser = _build_arg_parser()
     args = parser.parse_args()
@@ -497,11 +497,7 @@ def main() -> None:
         )
 
     try:
-        transport = args.transport
-        if transport == "stdio":
-            mcp.run(transport=transport)
-        else:
-            mcp.run(transport=transport, host=args.host, port=args.port)
+        mcp.run(transport=args.transport, host=args.host, port=args.port)
     finally:
         # Stop the observability dashboard on shutdown so the background
         # HTTP server thread does not outlive the process (issue #345).

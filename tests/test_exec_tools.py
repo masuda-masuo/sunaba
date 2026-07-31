@@ -524,21 +524,32 @@ class TestSandboxExec:
 class TestServerArgs:
     """Tests for server argument parsing using the actual parser."""
 
-    def test_default_transport_is_stdio(self) -> None:
-        """Default transport should be stdio."""
+    def test_default_transport_is_streamable_http(self) -> None:
+        """Default transport should be streamable-http."""
         from sunaba.server import _build_arg_parser
         parser = _build_arg_parser()
         args = parser.parse_args([])
-        assert args.transport == "stdio"
+        assert args.transport == "streamable-http"
 
-    def test_sse_transport_parsed(self) -> None:
-        """--transport sse should be parsed correctly."""
+    def test_stdio_transport_rejected(self) -> None:
+        """--transport stdio should be rejected by argparse."""
+        import pytest
+
         from sunaba.server import _build_arg_parser
         parser = _build_arg_parser()
-        args = parser.parse_args(["--transport", "sse", "--host", "0.0.0.0", "--port", "9876"])
-        assert args.transport == "sse"
-        assert args.host == "0.0.0.0"
-        assert args.port == 9876
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["--transport", "stdio"])
+        assert exc_info.value.code == 2
+
+    def test_sse_transport_rejected(self) -> None:
+        """--transport sse should be rejected by argparse."""
+        import pytest
+
+        from sunaba.server import _build_arg_parser
+        parser = _build_arg_parser()
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["--transport", "sse"])
+        assert exc_info.value.code == 2
 
     def test_http_transport_parsed(self) -> None:
         """--transport http should be parsed correctly."""

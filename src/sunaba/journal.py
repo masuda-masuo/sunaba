@@ -655,6 +655,148 @@ def read_journal(
     return entries
 
 
+def read_journal_tail(
+    offset: int = 0,
+    generation: int | None = None,
+) -> tuple[list[dict[str, Any]], int, bool, int]:
+    """Read complete journal lines from a byte *offset* in the live file.
+
+    Tail-following reader for the dashboard's diff-polling endpoint (#776).
+    Unlike :func:`read_journal` it never touches ``journal.log.1``: the
+    caller keeps a byte offset into the live file and we hand back only the
+    lines that became visible after it, so a poll costs O(new bytes).
+
+    Args:
+        offset: Byte position in the live ``journal.log`` to read from.
+            0 (the default) means "from the beginning of the live file".
+        generation: The file-identity token the caller received with its
+            previous read (``None`` on the first poll).  Rotation replaces
+            the live file, so a size check alone misses the case where the
+            *new* file has already grown past the caller's offset; the
+            generation (the file's inode number) catches it regardless of
+            sizes.  On platforms whose ``st_ino`` is always 0 the check
+            degrades to the size-based detection.
+
+    Returns:
+        ``(entries, next_offset, rotated, generation)``:
+
+        * *entries*: parsed JSON-lines covering ``[offset, next_offset)``,
+          oldest first.
+        * *next_offset*: the byte position the caller should poll from next.
+        * *rotated*: ``True`` when the live file was replaced (its
+          generation changed) or is *smaller* than *offset*.  The caller
+          must reset to offset 0 and fully re-draw; the backup file is
+          deliberately never spliced into the delta.
+        * *generation*: the live file's current identity token; echo it back
+          on the next call.
+
+    A partial trailing line (a record still being written, so no newline
+    yet) is never returned: *next_offset* stays at the start of that line
+    and the next poll re-reads it once it is complete.
+    """
+    with _lock:
+        if not _JOURNAL_PATH.exists():
+            return [], 0, offset > 0, 0
+        st = _JOURNAL_PATH.stat()
+        size = st.st_size
+        current_gen = st.st_ino
+        if generation is not None and current_gen and generation != current_gen:
+            return [], 0, True, current_gen
+        if offset > size:
+            return [], size, True, current_gen
+        if offset < 0:
+            offset = 0
+        try:
+            with open(_JOURNAL_PATH, "rb") as f:
+                f.seek(offset)
+                data = f.read()
+        except (OSError, OverflowError, ValueError):
+            # File vanished/replaced between stat and open, or an offset the
+            # seek cannot represent: nothing deliverable this round.  The
+            # next poll re-checks (rotation detection or fresh data), so the
+            # connection is never left hanging on an exception.
+            return [], offset, False, current_gen
+
+    # Byte-based slicing: the offset must stay a byte position even though
+    # entries are UTF-8 (ensure_ascii=False), so each line is decoded on its
+    # own after splitting the raw bytes.
+    last_nl = data.rfind(b"\n")
+    if last_nl < 0:
+        # Nothing complete yet (or offset == size): poll again at the same
+        # position once the line is finished.
+        return [], offset, False, current_gen
+    complete = data[: last_nl + 1]
+    next_offset = offset + len(complete)
+
+    entries: list[dict[str, Any]] = []
+    for line in complete.split(b"\n"):
+        if not line.strip():
+            continue
+        try:
+            entries.append(json.loads(line.decode("utf-8")))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+    return entries, next_offset, False, current_gen
+
+
+def read_journal_snapshot(
+    run_id: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Read the whole journal once; return ``(entries, live_offset)``.
+
+    One atomic snapshot for live-update consumers (dashboard trace page,
+    #776): *entries* is the backup file's records followed by the live
+    file's complete lines (chronological order, optionally filtered by
+    *run_id*), and *live_offset* is the byte position just after the live
+    file's last complete line -- exactly where a diff poll should resume.
+
+    Rows rendered from *entries* and polls started at *live_offset*
+    partition the live file without gap or overlap: a record appended
+    between the render and the first poll is delivered by the poller, and
+    nothing already rendered is re-delivered.  A partial trailing line is
+    excluded (as in :func:`read_journal_tail`) and its start lies below
+    *live_offset*, so the next poll picks it up once the newline arrives.
+    """
+    with _lock:
+        entries: list[dict[str, Any]] = []
+
+        def _load(path: Path) -> int:
+            """Parse *path* into entries; return the byte offset after its
+            last complete line (a partial trailing line excluded)."""
+            if not path.exists():
+                return 0
+            with open(path, "rb") as f:
+                data = f.read()
+            last_nl = data.rfind(b"\n")
+            if last_nl < 0:
+                return 0
+            complete = data[: last_nl + 1]
+            for line in complete.split(b"\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line.decode("utf-8")))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+            return len(complete)
+
+        _load(_JOURNAL_BACKUP_PATH)
+        live_offset = _load(_JOURNAL_PATH)
+
+    if run_id is not None:
+        entries = [e for e in entries if e.get("run_id") == run_id]
+    return entries, live_offset
+
+
+def get_journal_live_size() -> int:
+    """Return the current byte size of the live ``journal.log`` (0 if absent)."""
+    with _lock:
+        if not _JOURNAL_PATH.exists():
+            return 0
+        return _JOURNAL_PATH.stat().st_size
+
+
 def get_journal_path() -> str:
     """Return the absolute path to the journal log file."""
     return str(_JOURNAL_PATH)

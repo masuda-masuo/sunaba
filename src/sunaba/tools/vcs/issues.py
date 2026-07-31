@@ -231,7 +231,7 @@ def sandbox_issue_write(
         return json.dumps({"status": "error", "error": "issue_number is required when method='comment'"})
 
     cid: str | None = None
-    if container_id is not None:
+    if container_id:  # "" counts as omitted, not as a lookup of container ""
         client = _docker()
         try:
             client.containers.get(container_id)
@@ -350,7 +350,7 @@ def sandbox_pr_review_write(
                 })
 
     cid: str | None = None
-    if container_id is not None:
+    if container_id:  # "" counts as omitted, not as a lookup of container ""
         client = _docker()
         try:
             client.containers.get(container_id)

@@ -8,6 +8,10 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [Unreleased]
 
+### Changed
+
+- **`container_id` is now optional on `sandbox_issue_write` / `sandbox_pr_review_write`** (#779, closes #778): omit it (or pass `""`) for container-less, host-scoped calls — no throwaway container needed to file an issue or review. Such writes are journaled under a process-lifetime `host-` run, shown with a distinct `host` status in the dashboard. Passing a container keeps the previous attribution behaviour. The two parameters moved to the end of the signature; keyword callers (including all MCP clients) are unaffected.
+
 ## [0.11.0] - 2026-07-29
 
 ### Added

@@ -12,6 +12,7 @@ Uses Python's built-in ``http.server`` — no external dependencies.
 """
 from __future__ import annotations
 
+import copy
 import html as _html
 import json
 import secrets
@@ -25,10 +26,8 @@ from sunaba.health import HEALTH_ORDER, classify_all_runs, classify_run_health
 from sunaba.insights import compute_all_insights
 from sunaba.journal import (
     _MAX_JOURNAL_SIZE,
-    get_active_environments,
     get_journal_live_size,
     get_journal_path,
-    get_run_id_per_container,
     get_runs,
     get_tool_usage,
     read_journal,
@@ -49,6 +48,177 @@ _CSRF_TOKEN: str = secrets.token_urlsafe(32)
 #: server as same-origin; pinning the Host header shuts that door, since the
 #: rebound request still carries the attacker's hostname.
 _ALLOWED_CONTROL_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "[::1]"})
+
+# ---------------------------------------------------------------------------
+# Incremental aggregation cache (Issue #789)
+# ---------------------------------------------------------------------------
+
+#: Server-side cache of everything the per-poll fragments render from the
+#: journal, maintained incrementally: every poll reads only the live-file
+#: tail via ``read_journal_tail`` and folds the delta through
+#: ``aggregate_run_phases`` (the #774 incremental contract
+#: ``(state, new_entries) -> state``), instead of re-parsing the whole
+#: journal on every 1-second poll.  The derived views the fragments render
+#: -- the run summaries (mirroring ``journal.get_runs``), the
+#: container->run_id mapping (``journal.get_run_id_per_container``), the
+#: active test environments (``journal.get_active_environments``) and the
+#: total entry count -- are maintained from the same deltas, so *no*
+#: fragment path full-parses.  Only the PARSING is incremental --
+#: classification (``classify_all_runs``) still runs per poll on the
+#: cached state, because health is time-dependent.
+#:
+#: Keyed by journal path so each test's isolated journal (and any real path
+#: change) gets an independent cache; per-process production use has a
+#: single path and a single entry.  The first call for a path primes the
+#: cache with one full read (backup file included), so no entries written
+#: before priming are skipped; a rotation rebuilds once from a full read
+#: and then continues incrementally.
+#:
+#: Thread safety: polls arrive concurrently on ThreadingHTTPServer threads,
+#: so all cache mutation happens under ``_journal_agg_lock``.  The stored
+#: offset advances only inside the lock, which makes delta application
+#: atomic -- the same entries are never applied twice (that would corrupt
+#: counters like ``op_calls``) and never torn.  Callers receive a deep
+#: snapshot taken under the lock: ``aggregate_run_phases`` folds later
+#: deltas into the same per-run dicts in place, and a render iterating a
+#: counter dict mid-update could raise on a resize -- a crash is not the
+#: acceptable "stale-but-consistent read".  Each caller therefore gets a
+#: point-in-time copy (the state is far smaller than the journal it
+#: summarises), and the next poll self-corrects freshness.
+_journal_agg_lock: threading.Lock = threading.Lock()
+_journal_agg_cache: dict[str, dict[str, Any]] = {}
+
+
+def _apply_delta(cached: dict[str, Any], entries: list[dict[str, Any]]) -> None:
+    """Fold a journal delta into every part of a cache entry, in place.
+
+    Caller must hold ``_journal_agg_lock``.  Updates the aggregation state
+    and the derived views (entry count, container->run_id mapping, active
+    test environments) from the same delta, so all of them stay consistent
+    at the same journal offset.
+    """
+    cached["entry_count"] += len(entries)
+    run_ids = cached["run_ids"]
+    active_envs = cached["active_envs"]
+    for entry in entries:
+        cid = entry.get("container_id")
+        if cid:
+            if entry.get("operation") == "stop":
+                run_ids.pop(cid, None)
+            else:
+                rid = entry.get("run_id")
+                if rid:
+                    run_ids[cid] = rid
+            if entry.get("operation") == "test_environment":
+                if entry.get("environment_status") == "stopped":
+                    active_envs.pop(cid, None)
+                else:
+                    active_envs[cid] = entry
+    cached["state"] = aggregate_run_phases(cached["state"], entries)
+
+
+def _cached_entry() -> dict[str, Any]:
+    """Return the cache entry for the live journal path, priming it with a
+    full read (backup + live) when this is the first call.
+
+    Caller must hold ``_journal_agg_lock``.  Priming captures the live
+    file's generation so later rotations are detected by identity, not just
+    by size; an entry appended between the snapshot and the capture is not
+    applied here -- the stored offset stays at the snapshot's value, so the
+    next poll re-reads it exactly once.
+    """
+    path = get_journal_path()
+    cached = _journal_agg_cache.get(path)
+    if cached is None:
+        entries, offset = read_journal_snapshot()
+        cached = {
+            "offset": offset,
+            "generation": None,
+            "state": None,
+            "entry_count": 0,
+            "run_ids": {},
+            "active_envs": {},
+        }
+        _journal_agg_cache[path] = cached
+        _apply_delta(cached, entries)
+        cached["generation"] = read_journal_tail(offset, None)[3]
+    return cached
+
+
+def _cached_agg_state() -> dict[str, dict[str, Any]]:
+    """Return a point-in-time snapshot of the aggregated run-phase state.
+
+    The first call per journal path performs one full read (``journal.log.1``
+    included) to prime the cache; every later call reads only the live-file
+    tail and folds the delta through :func:`sunaba.phase.aggregate_run_phases`.
+    After a rotation the cache rebuilds once from a full read, then
+    continues incrementally.
+
+    The returned state is a deep copy taken under the cache lock: callers
+    may iterate it freely (dict mutation during iteration is a crash risk on
+    the live state) and may not corrupt the cache by mutating it.
+    """
+    with _journal_agg_lock:
+        cached = _cached_entry()
+        entries, next_offset, rotated, gen = read_journal_tail(
+            cached["offset"], cached["generation"]
+        )
+        if rotated:
+            # The live file was replaced: our byte offset no longer
+            # identifies history and the backup now holds entries we have
+            # never seen.  Rebuild once from a full snapshot (backup
+            # included), then continue incrementally.
+            entries, offset = read_journal_snapshot()
+            cached["offset"] = offset
+            cached["entry_count"] = 0
+            cached["run_ids"] = {}
+            cached["active_envs"] = {}
+            cached["state"] = None
+            _apply_delta(cached, entries)
+            cached["generation"] = read_journal_tail(offset, None)[3]
+        else:
+            _apply_delta(cached, entries)
+            cached["offset"] = next_offset
+            cached["generation"] = gen
+        # ``_apply_delta`` always folds into a real state by this point.
+        state: dict[str, dict[str, Any]] | None = cached["state"]
+        assert state is not None
+        return copy.deepcopy(state)
+
+
+def _cached_run_ids() -> dict[str, str]:
+    """``container_id -> run_id`` at the cache's current journal offset.
+
+    Mirrors :func:`sunaba.journal.get_run_id_per_container` but is
+    maintained incrementally from the tail deltas (Issue #789).  Fragments
+    call :func:`_cached_agg_state` first so this reflects the same offset
+    as the aggregation state they render.
+    """
+    with _journal_agg_lock:
+        cached = _cached_entry()
+        return dict(cached["run_ids"])
+
+
+def _cached_active_envs() -> list[dict[str, Any]]:
+    """Active test environments at the cache's current journal offset.
+
+    Mirrors :func:`sunaba.journal.get_active_environments` (Issue #789).
+    """
+    with _journal_agg_lock:
+        cached = _cached_entry()
+        return list(cached["active_envs"].values())
+
+
+def _cached_journal_entry_count() -> int:
+    """Total journal entries at the cache's current journal offset.
+
+    The dashboard's journal-card stat; maintained incrementally instead of
+    scanning the whole file on every poll (Issue #789).
+    """
+    with _journal_agg_lock:
+        cached = _cached_entry()
+        return cached["entry_count"]
+
 
 # ---------------------------------------------------------------------------
 # HTML template pages
@@ -1087,16 +1257,22 @@ def _containers_fragments(now: str | None = None) -> dict[str, str]:
     ``error_html`` (the listing-error banner; empty string when all is well).
     """
     containers, error = list_managed_containers()
-    run_ids = get_run_id_per_container()
+
+    # Advance the incremental cache once so the derived views below (run
+    # ids, environments, health) all reflect the same journal offset; the
+    # cache is fed only from the tail, never a full parse (Issue #789).
+    agg_state = _cached_agg_state()
+    run_ids = _cached_run_ids()
     envs = {
         env.get("container_id", ""): env
-        for env in get_active_environments()
+        for env in _cached_active_envs()
     }
 
     # Per-run health badges (Issue #775): aggregated from the journal, keyed
     # by run_id, so each row can badge the run its container is attached to.
+    # Classification stays per-poll because health is time-dependent.
     health_map = classify_all_runs(
-        aggregate_run_phases(None, read_journal()),
+        agg_state,
         now if now is not None else _now_iso(),
     )
 
@@ -1180,7 +1356,12 @@ def _dashboard_fragments() -> dict[str, str]:
     Returns the ``stats_card`` and ``journal_card`` inner content plus the
     ``run_rows`` ``<tbody>`` content.
     """
-    runs = get_runs()
+    # The aggregation state and every derived stat below come from the
+    # incremental cache (Issue #789): only the journal tail is parsed per
+    # poll.  Run summaries are built from the state (mirroring get_runs)
+    # rather than by full-parsing the journal on every poll.
+    agg_state = _cached_agg_state()
+    runs = _run_summaries_from_state(agg_state)
     total_ops = 0
     boundary_count = 0
     vcs_ops = 0
@@ -1189,25 +1370,18 @@ def _dashboard_fragments() -> dict[str, str]:
         boundary_count += r.get("boundary_crossings", 0)
         vcs_ops += r.get("vcs_operations", 0)
 
-    journal_entries = 0
+    journal_entries = _cached_journal_entry_count()
     jp = get_journal_path()
-    try:
-        with open(jp) as f:
-            journal_entries = sum(1 for _ in f)
-    except Exception:
-        pass
 
-    active_envs = get_active_environments()
+    active_envs = _cached_active_envs()
     running_services = sum(
         len(env.get("services", [])) for env in active_envs
     )
 
     # Per-run health badges (Issue #775): one classification pass over
-    # the whole aggregation state, then a lookup per row.
-    health_map = classify_all_runs(
-        aggregate_run_phases(None, read_journal()),
-        _now_iso(),
-    )
+    # the whole aggregation state, then a lookup per row.  Classification
+    # stays per-poll because health is time-dependent.
+    health_map = classify_all_runs(agg_state, _now_iso())
 
     run_rows_parts: list[str] = []
     for r in runs[:20]:  # show last 20 runs
@@ -1255,18 +1429,52 @@ def _dashboard_fragments() -> dict[str, str]:
     }
 
 
+def _run_summaries_from_state(
+    state: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the dashboard's run summaries from the aggregation state.
+
+    Replaces ``journal.get_runs`` in the per-poll fragments (Issue #789):
+    the journal function full-parses on every poll, while the aggregation
+    state carries the same per-run counters incrementally.  The summary
+    shape mirrors ``get_runs`` (minus ``session_labels``, which the
+    dashboard rows do not render), including its sort order and its
+    ``running`` / ``stopped`` / ``host`` status semantics.
+    """
+    summaries: list[dict[str, Any]] = []
+    for rid, run in state.items():
+        if run.get("host"):
+            status = "host"
+        elif run.get("stopped"):
+            status = "stopped"
+        else:
+            status = "running"
+        summaries.append({
+            "run_id": rid,
+            "started": run.get("start_ts") or "",
+            "image": run.get("image", "unknown"),
+            "operations": run.get("entry_count", 0),
+            "boundary_crossings": run.get("boundary_crossings", 0),
+            "vcs_operations": run.get("vcs_operations", 0),
+            "status": status,
+        })
+    summaries.sort(key=lambda r: r.get("started", ""), reverse=True)
+    return summaries
+
+
 def _trace_fragments(run_id: str) -> dict[str, str]:
     """Server-rendered header fragments for the trace page (Issue #776).
 
-    Recomputed per poll from the same aggregation the page itself uses
-    (:func:`aggregate_run_phases` over the full journal), so the phase view
-    and health badge always reflect the complete history -- backup file
-    included after a rotation.
+    Recomputed per poll from the same aggregation the page itself uses (the
+    incremental cache, Issue #789), so the phase view and health badge always
+    reflect the complete history -- backup file included after a rotation.
+    Classification stays per-poll because health is time-dependent; only the
+    journal PARSING is incremental.
 
     Returns ``phase_view`` (escaped HTML), ``health`` (plain label) and
     ``health_cls``.
     """
-    agg_state = aggregate_run_phases(None, read_journal())
+    agg_state = _cached_agg_state()
     run_state = phase_state_for_run(agg_state, run_id)
     health = classify_run_health(agg_state, run_id, _now_iso())
     health_cls = f"health-{health}" if health in HEALTH_ORDER else "health-progressing"
@@ -1700,8 +1908,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             if period_raw and period_raw.isdigit():
                 period = int(period_raw)
 
-        entries = read_journal()
-        agg_state = aggregate_run_phases(None, entries)
+        agg_state = _cached_agg_state()
 
         # Compute time bounds for the period filter
         from_ts: str | None = None
@@ -1891,9 +2098,15 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 details = f'image={_escape(e.get("image", ""))} net={e.get("allow_network","")}'
             elif op == "exec":
                 cmds = " && ".join(e.get("commands", []))
-                ec = e.get("exit_code", 0)
-                ec_cls = "exit-ok" if ec == 0 else "exit-err"
-                details = f'<span class="cmds">{_escape(cmds)}</span> <span class="{ec_cls}">exit={ec}</span>'
+                if "exit_code" in e:
+                    ec = e.get("exit_code", 0)
+                    ec_cls = "exit-ok" if ec == 0 else "exit-err"
+                    exit_part = f' <span class="{ec_cls}">exit={ec}</span>'
+                else:
+                    # Exec start entry (Issue #789): recorded before running,
+                    # no outcome yet -- label it running, not exit=0.
+                    exit_part = ' <span class="exit-err">running</span>'
+                details = f'<span class="cmds">{_escape(cmds)}</span>{exit_part}'
             elif op == "boundary_crossing":
                 sub_op = e.get("sub_operation", "")
                 detail_text = e.get("details", "")
@@ -1942,7 +2155,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
         # Phase aggregation (per-run) and health classification (full-state:
         # the regression rule compares against other runs on the same repo).
-        agg_state = aggregate_run_phases(None, read_journal())
+        agg_state = _cached_agg_state()
         run_state = phase_state_for_run(agg_state, run_id)
         phase_view_html = _build_phase_view(run_state)
         health = classify_run_health(agg_state, run_id, _now_iso())

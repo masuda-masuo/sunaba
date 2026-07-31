@@ -157,7 +157,11 @@ def _file_path_from_entry(entry: dict[str, Any]) -> str | None:
 
 def _is_pytest_pass(entry: dict[str, Any]) -> bool | None:
     """Return ``True`` if *entry* is a pytest exec that passed,
-    ``False`` if it failed, or ``None`` if it is not a pytest exec."""
+    ``False`` if it failed, or ``None`` if it is not a pytest exec.
+
+    An exec START entry (no ``exit_code`` -- Issue #789) is never a pytest
+    outcome: its result is not known yet, so it returns ``None``.
+    """
     if entry.get("operation") != "exec":
         return None
     cmds = entry.get("commands", [])
@@ -167,19 +171,35 @@ def _is_pytest_pass(entry: dict[str, Any]) -> bool | None:
     # Heuristic: the first command starts with pytest
     if not (first.startswith("pytest") or first.startswith("python") and "pytest" in first):
         return None
-    ec = entry.get("exit_code", 0)
-    return ec == 0
+    if "exit_code" not in entry:
+        return None  # exec start entry: outcome not yet known
+    return entry["exit_code"] == 0
 
 
 def _is_outcome_entry(entry: dict[str, Any]) -> bool:
-    """Return True for ``tool_use`` entries that report a *result*.
+    """Return True for entries that report a *result* rather than a call.
 
-    ``verify_in_container`` writes two journal entries per invocation
-    (Issue #774): a call entry carrying the request params, and a separate
-    outcome entry whose params hold the ``result`` dict.  Outcome entries are
-    not calls -- they never increment ``op_calls`` -- but they are the ones
-    that carry pass/fail signals.
+    Two journaling patterns pair a call entry with a separate outcome
+    entry:
+
+    * ``verify_in_container`` (Issue #774): the call entry carries the
+      request params; the outcome entry's params hold the ``result`` dict.
+    * ``exec`` (Issue #789): the start entry is recorded before execution
+      and has no ``exit_code``; the completion entry carries ``exit_code``
+      and ``output_size``.
+
+    An exec entry with ``exit_code == -1`` is the background-exec dispatch
+    sentinel (Issue #359): ``-1`` means "launched, outcome not yet known",
+    so it is *not* an outcome -- it keeps counting as a call (and as a
+    failure via :func:`_entry_failed`), exactly as before the exec
+    double-entry.
+
+    Outcome entries are not calls -- they never increment ``op_calls`` --
+    but they are the ones that carry pass/fail signals.
     """
+    if entry.get("operation") == "exec":
+        ec = entry.get("exit_code")
+        return ec is not None and ec != -1
     if entry.get("operation") != "tool_use":
         return False
     params = entry.get("params")
@@ -191,14 +211,18 @@ def _entry_failed(entry: dict[str, Any]) -> bool:
 
     Failure is defined where the journal records an outcome:
 
-    * ``exec`` -- ``exit_code`` is not 0 (``None`` counts as 0).
+    * ``exec`` completion -- ``exit_code`` is not 0 (``None`` counts as 0).
+      An exec START entry (no ``exit_code`` -- Issue #789) has no outcome
+      yet and is never failed.
     * ``tool_use`` outcome entry -- ``result.gate_passed`` is ``False``.
 
     Every other operation type has no failure signal and is never failed.
     """
     op = entry.get("operation", "")
     if op == "exec":
-        ec = entry.get("exit_code", 0)
+        if "exit_code" not in entry:
+            return False  # exec start entry: outcome not yet known
+        ec = entry.get("exit_code")
         return ec not in (None, 0)
     if op == "tool_use":
         params = entry.get("params")
@@ -237,11 +261,29 @@ def _new_run_state(run_id: str) -> dict[str, Any]:
         "op_failures": {},
         "failure_recovery": {},
         "pending_failure_ops": [],
+        # Issue #789 (dashboard): per-run summary counters mirroring
+        # journal.get_runs, so the per-poll dashboard fragments render run
+        # rows from the incremental aggregation state instead of
+        # full-parsing the journal.  Monotonic and idempotent -- safe under
+        # the incremental contract.
+        "entry_count": 0,
+        "boundary_crossings": 0,
+        "vcs_operations": 0,
         # Issue #775 (health badges): monotonic markers for the rule-based
         # classifier in sunaba.health.
         "published": False,
         "stopped": False,
         "last_op": "",
+        # Issue #789: ``host`` is True for host-scoped runs -- the
+        # process-lifetime run_id for container-less operations, always
+        # prefixed ``host-`` (journal.get_host_run_id, #778).  The prefix is
+        # the detection source because it is the journal's own contract and
+        # cannot collide with container run_ids (uuid4 hex, ``get_runs``
+        # already keys host status off it).  ``exec_in_flight`` is True while
+        # the run's most recent exec entry is a START (no ``exit_code``),
+        # i.e. the exec is still running; the completion entry clears it.
+        "host": run_id.startswith("host-"),
+        "exec_in_flight": False,
     }
 
 
@@ -329,6 +371,21 @@ def _incorporate(run: dict[str, Any], entry: dict[str, Any]) -> None:
         run["published"] = True
     if op == "stop":
         run["stopped"] = True
+    if eff == "exec":
+        # Issue #789: an exec START entry (no ``exit_code``) means the exec
+        # is still running; the completion entry clears the flag.  The
+        # health classifier exempts a run ending on an in-flight exec from
+        # the stalled rule, bounded by the grace window.  Background-exec
+        # dispatch sentinels carry ``exit_code=-1`` and count as
+        # completions, so they never set the flag.
+        run["exec_in_flight"] = "exit_code" not in entry
+
+    # ── per-run summary counters (Issue #789, mirrors journal.get_runs) ──
+    run["entry_count"] += 1
+    if entry.get("boundary_crossing") or op == "boundary_crossing":
+        run["boundary_crossings"] += 1
+        if eff in ("boundary:issue_view", "boundary:publish"):
+            run["vcs_operations"] += 1
 
     # ── touched files ─────────────────────────────────────────
     fp = _file_path_from_entry(entry)
@@ -406,8 +463,9 @@ def _track_op_metrics(run: dict[str, Any], entry: dict[str, Any]) -> None:
     distribution in *run* (mutated).
 
     Called from :func:`_incorporate` on every journal entry.  Outcome entries
-    (``verify_in_container`` result records) are never counted as calls, but
-    they carry pass/fail signals used by :func:`_entry_failed`.
+    (``verify_in_container`` result records and ``exec`` completions --
+    Issue #789) are never counted as calls, but they carry pass/fail signals
+    used by :func:`_entry_failed`.
 
     Failure-recovery tracking keeps a FIFO (``pending_failure_ops``) of the
     operations that failed and have not yet seen a follow-up action.  The

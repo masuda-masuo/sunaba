@@ -20,10 +20,13 @@ looping          >= N consecutive edit -> verify-failure roundtrips
 stalled          >= M minutes with no journal activity since ``last_ts``;
                  a run whose most recent operation is a known long-running
                  one still in flight (e.g. a pending ``verify_in_container``
-                 call) is NOT flagged -- but that exemption lapses after a
-                 grace window (see below): no tool legitimately runs silent
-                 forever, and a session that dies right after such a call
-                 must still surface as stalled eventually
+                 call, or an exec START -- Issue #789) is NOT flagged -- but
+                 that exemption lapses after a grace window (see below): no
+                 tool legitimately runs silent forever, and a session that
+                 dies right after such a call must still surface as stalled
+                 eventually.  Host-scoped runs (``host-`` run_ids, #778)
+                 are never ``stalled``: they have no session-end lifecycle,
+                 so idle time is expected for them
 regression       the run's verify pass count decreased vs the most recent
                  prior run for the same ``repo`` (skipped when ``repo`` is
                  None or there is no prior run)
@@ -68,7 +71,15 @@ HEALTH_ORDER: tuple[str, ...] = (
 #: shows no new activity: the tools record their ``tool_use`` entry *before*
 #: executing.  A run whose most recent operation is one of these is treated
 #: as busy, not stalled (Issue #775).
+#:
+#: ``exec`` (Issue #789) journals twice per foreground call -- a START entry
+#: before running and the completion after -- so a run ending on an exec
+#: START may still be busy (the classifier checks the ``exec_in_flight``
+#: marker from the phase aggregation for that); a run ending on an exec
+#: completion stalls normally.  Background-exec dispatch sentinels carry
+#: ``exit_code=-1`` and are completion-shaped, so they get no exemption.
 _LONG_RUNNING_OPS: frozenset[str] = frozenset({
+    "exec",
     "tool:lint_in_container",
     "tool:type_check_in_container",
     "tool:verify_in_container",
@@ -159,7 +170,10 @@ def _last_op_in_flight(
     run ending on one is busy.  ``verify_in_container`` is written twice:
     a pending call before the run and an outcome-bearing entry after it --
     a run ending on a pending call is still verifying, while one ending on
-    the outcome has finished.
+    the outcome has finished.  ``exec`` (Issue #789) also journals twice: a
+    START entry before running and the completion after -- a run ending on
+    a START (``exec_in_flight``) is still executing, while one ending on a
+    completion has finished.
 
     The exemption is bounded: it holds only while ``now`` is within
     *grace_minutes* of ``last_ts``.  Beyond that, silence means the tool
@@ -173,6 +187,13 @@ def _last_op_in_flight(
     last_epoch = _parse_iso(run.get("last_ts"))
     if last_epoch is None or now_epoch - last_epoch >= grace_minutes * 60:
         return False
+    if last_op == "exec":
+        # exec journals a START entry before running and the completion
+        # after (Issue #789): only a run whose last entry is a START is
+        # still busy.  The ``exec_in_flight`` marker comes from the phase
+        # aggregation; background-exec dispatch sentinels (exit_code=-1)
+        # are completion-shaped and never set it.
+        return bool(run.get("exec_in_flight"))
     if last_op != "tool:verify_in_container":
         return True
     timeline = run.get("verify_timeline", [])
@@ -271,12 +292,17 @@ def classify_run_health(
         return "looping"
 
     # stalled -- >= M minutes idle, unless the most recent operation is a
-    # long-running one still in flight.
+    # long-running one still in flight.  Host-scoped runs (run_id prefixed
+    # ``host-``, #778) have no session-end lifecycle -- they never receive a
+    # stop entry -- so idle time is expected for them and never reads as a
+    # dead session (Issue #789).
     now_epoch = _parse_iso(now)
     if now_epoch is None:
         raise ValueError(f"now must be an ISO-8601 timestamp, got {now!r}")
-    if _is_stalled(run, now_epoch, stall_minutes) and not _last_op_in_flight(
-        run, now_epoch, inflight_grace_minutes
+    if (
+        not run.get("host")
+        and _is_stalled(run, now_epoch, stall_minutes)
+        and not _last_op_in_flight(run, now_epoch, inflight_grace_minutes)
     ):
         return "stalled"
 

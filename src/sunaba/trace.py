@@ -167,9 +167,15 @@ def generate_html_trace(run_id: str) -> str:
             details = f'image={_escape(e.get("image", ""))} net={e.get("allow_network","")}'
         elif op == "exec":
             cmds = " && ".join(e.get("commands", []))
-            ec = e.get("exit_code", 0)
-            ec_cls = "exit-ok" if ec == 0 else "exit-err"
-            details = f'<span class="cmds">{_escape(cmds)}</span> <span class="{ec_cls}">exit={ec}</span>'
+            if "exit_code" in e:
+                ec = e.get("exit_code", 0)
+                ec_cls = "exit-ok" if ec == 0 else "exit-err"
+                exit_part = f' <span class="{ec_cls}">exit={ec}</span>'
+            else:
+                # Exec start entry (Issue #789): recorded before running, no
+                # outcome yet -- label it running, not exit=0.
+                exit_part = ' <span class="exit-err">running</span>'
+            details = f'<span class="cmds">{_escape(cmds)}</span>{exit_part}'
         elif op == "boundary_crossing":
             details = (_escape(e.get("sub_operation", "")) + " "
                        + _escape(e.get("details", "")))

@@ -769,6 +769,96 @@ class TestCoerceListArg:
         assert result2 == "requests"
 
 
+class TestForegroundExecStartRecording:
+    """sandbox_exec journals an exec START before running and the
+    completion after (Issue #789): the start entry (no exit_code) is the
+    "call", so a long-running exec no longer reads as stalled mid-run.
+    """
+
+    @patch("sunaba.tools.exec.journal_record_exec")
+    @patch("sunaba.tools.exec.journal_record_exec_start")
+    @patch("sunaba.tools.exec._docker")
+    def test_start_recorded_before_completion(
+        self,
+        mock_docker: MagicMock,
+        mock_start: MagicMock,
+        mock_complete: MagicMock,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"ok\n", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        order: list[str] = []
+        mock_start.side_effect = lambda *a, **k: order.append("start")
+        mock_complete.side_effect = lambda *a, **k: order.append("complete")
+
+        result = json.loads(sandbox_exec(
+            container_id="abc123def456",
+            commands=["echo hello"],
+        ))
+        assert result["status"] == "ok"
+
+        assert order == ["start", "complete"]
+        start_args = mock_start.call_args[0]
+        assert start_args[0] == "abc123def456"
+        assert start_args[1] == ["echo hello"]
+        # The completion entry carries the real exit code; the start
+        # entry carries none (that is the discriminator).
+        complete_args = mock_complete.call_args[0]
+        assert complete_args[2] == 0
+
+    @patch("sunaba.tools.exec.journal_record_exec_start")
+    @patch("sunaba.tools.exec._docker")
+    def test_no_start_entry_when_container_missing(
+        self,
+        mock_docker: MagicMock,
+        mock_start: MagicMock,
+    ) -> None:
+        """A lookup failure means nothing executed: no START is recorded."""
+        from docker.errors import NotFound
+
+        mock_client = MagicMock()
+        mock_client.containers.get.side_effect = NotFound("not found")
+        mock_docker.return_value = mock_client
+
+        result = json.loads(sandbox_exec(container_id="abc123def456", commands=["true"]))
+        assert result["status"] == "error"
+        mock_start.assert_not_called()
+
+    @patch("sunaba.tools.exec.journal_record_exec")
+    @patch("sunaba.tools.exec.journal_record_exec_start")
+    @patch("sunaba.tools.exec._docker")
+    def test_start_entry_closed_when_execution_raises(
+        self,
+        mock_docker: MagicMock,
+        mock_start: MagicMock,
+        mock_complete: MagicMock,
+    ) -> None:
+        """An exception after START must still journal a completion (#789
+        review): otherwise the run reads as in-flight until the health
+        grace window expires and the call is a phantom in the op counters.
+        The synthetic exit code -2 marks "aborted before completion".
+        """
+        import pytest
+
+        mock_container = MagicMock()
+        mock_container.exec_run.side_effect = RuntimeError("docker died")
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with pytest.raises(RuntimeError, match="docker died"):
+            sandbox_exec(container_id="abc123def456", commands=["echo hi"])
+
+        assert mock_start.called
+        assert mock_complete.called
+        complete_args = mock_complete.call_args[0]
+        assert complete_args[0] == "abc123def456"
+        assert complete_args[2] == -2
+
+
 class TestBackgroundExecJournalRecording:
     """sandbox_exec_background must leave an audit trail (Issue #359).
 

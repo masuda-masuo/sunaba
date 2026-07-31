@@ -473,7 +473,12 @@ class TestFailureSignals:
     """Unit tests for _is_outcome_entry and _entry_failed."""
 
     def test_is_outcome_entry(self):
-        """Only tool_use entries whose params carry a ``result`` are outcomes."""
+        """Outcome entries: tool_use with a ``result``, and exec completions.
+
+        Issue #789: exec journals a START entry (no ``exit_code``) before
+        running and the completion (``exit_code`` present) after; only the
+        completion is an outcome.
+        """
         assert _is_outcome_entry(
             _tool_entry("verify_in_container",
                         params={"result": {"gate_passed": True}})
@@ -481,8 +486,17 @@ class TestFailureSignals:
         assert not _is_outcome_entry(
             _tool_entry("verify_in_container", params={"path": "tests/"})
         )
-        assert not _is_outcome_entry(
+        assert _is_outcome_entry(
             _entry("exec", commands=["pytest"], exit_code=0)
+        )
+        assert not _is_outcome_entry(
+            _entry("exec", commands=["pytest"])  # start entry, no outcome
+        )
+        # Background-exec dispatch sentinel: -1 means "launched, outcome
+        # not yet known" -- not an outcome (Issue #789 leaves its
+        # semantics unchanged).
+        assert not _is_outcome_entry(
+            _entry("exec", commands=["pytest"], exit_code=-1)
         )
         assert not _is_outcome_entry(
             _tool_entry("verify_in_container")  # no params at all
@@ -523,11 +537,16 @@ class TestOpMetrics:
     """Aggregation of op_calls / op_failures / failure_recovery."""
 
     def test_calls_and_failures_counted(self):
+        # Issue #789: each exec journals a start (no exit_code -- the call)
+        # followed by the completion (the outcome); calls must not
+        # double-count, so two execs are two calls, one failed.
         entries = [
             _entry("initialize", ts="2026-01-01T00:00:01Z", image="python:3.12"),
             _tool_entry("edit_file", ts="2026-01-01T00:00:02Z"),
-            _entry("exec", commands=["pytest"], exit_code=1, ts="2026-01-01T00:00:03Z"),
-            _entry("exec", commands=["pytest"], exit_code=0, ts="2026-01-01T00:00:04Z"),
+            _entry("exec", commands=["pytest"], ts="2026-01-01T00:00:03Z"),
+            _entry("exec", commands=["pytest"], exit_code=1, ts="2026-01-01T00:00:04Z"),
+            _entry("exec", commands=["pytest"], ts="2026-01-01T00:00:05Z"),
+            _entry("exec", commands=["pytest"], exit_code=0, ts="2026-01-01T00:00:06Z"),
         ]
         state = aggregate_run_phases(None, entries)
         run = state["test-run"]
@@ -566,10 +585,15 @@ class TestOpMetrics:
     def test_consecutive_failures_each_get_recovery(self):
         """exec → exec-fail → edit: the second exec is the first failure's
         immediately-following action, edit recovers the second."""
+        # Issue #789: each exec journals a start (the call) then the
+        # completion (the outcome); the second exec's start is the first
+        # failure's immediately-following action.
         entries = [
-            _entry("exec", commands=["a"], exit_code=1, ts="2026-01-01T00:00:01Z"),
-            _entry("exec", commands=["b"], exit_code=1, ts="2026-01-01T00:00:02Z"),
-            _tool_entry("edit_file", ts="2026-01-01T00:00:03Z",
+            _entry("exec", commands=["a"], ts="2026-01-01T00:00:01Z"),
+            _entry("exec", commands=["a"], exit_code=1, ts="2026-01-01T00:00:02Z"),
+            _entry("exec", commands=["b"], ts="2026-01-01T00:00:03Z"),
+            _entry("exec", commands=["b"], exit_code=1, ts="2026-01-01T00:00:04Z"),
+            _tool_entry("edit_file", ts="2026-01-01T00:00:05Z",
                         params={"file_path": "a.py"}),
         ]
         state = aggregate_run_phases(None, entries)
@@ -581,13 +605,32 @@ class TestOpMetrics:
         assert rec.get("tool:edit_file") == 1
         assert run["pending_failure_ops"] == []
 
+    def test_background_dispatch_counts_as_call_and_failure(self):
+        """The background-exec dispatch sentinel (exit_code=-1) keeps its
+        pre-#789 counting: one call, one failure (its -1 semantics are
+        relied upon elsewhere and are left unchanged)."""
+        entries = [
+            _entry("exec", commands=["long job"], exit_code=-1,
+                   verbose="background", ts="2026-01-01T00:00:01Z"),
+        ]
+        state = aggregate_run_phases(None, entries)
+        run = state["test-run"]
+        assert run["op_calls"]["exec"] == 1
+        assert run["op_failures"]["exec"] == 1
+        assert run["pending_failure_ops"] == ["exec"]
+
     def test_failure_then_passing_exec_then_edit(self):
         """A passing exec recovers the failure; the later edit is not
         double-counted as a recovery."""
+        # Issue #789: each exec journals a start (the call) then the
+        # completion (the outcome); the passing exec's start is the
+        # failure's immediately-following action.
         entries = [
-            _entry("exec", commands=["bad"], exit_code=1, ts="2026-01-01T00:00:01Z"),
-            _entry("exec", commands=["good"], exit_code=0, ts="2026-01-01T00:00:02Z"),
-            _tool_entry("edit_file", ts="2026-01-01T00:00:03Z",
+            _entry("exec", commands=["bad"], ts="2026-01-01T00:00:01Z"),
+            _entry("exec", commands=["bad"], exit_code=1, ts="2026-01-01T00:00:02Z"),
+            _entry("exec", commands=["good"], ts="2026-01-01T00:00:03Z"),
+            _entry("exec", commands=["good"], exit_code=0, ts="2026-01-01T00:00:04Z"),
+            _tool_entry("edit_file", ts="2026-01-01T00:00:05Z",
                         params={"file_path": "a.py"}),
         ]
         state = aggregate_run_phases(None, entries)

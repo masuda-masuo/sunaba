@@ -8,6 +8,8 @@ from pathlib import Path
 
 from sunaba.phase import (
     _PHASE_MAP,
+    _entry_failed,
+    _is_outcome_entry,
     aggregate_run_phases,
     phase_for_entry,
 )
@@ -230,6 +232,11 @@ class TestIncrementalContract:
         assert full_run["last_ts"] == inc_run["last_ts"]
         assert full_run["touched_files"] == inc_run["touched_files"]
         assert full_run["edit_verify_roundtrips"] == inc_run["edit_verify_roundtrips"]
+        # Issue #777 fields must also be chunk-invariant.
+        assert full_run["op_calls"] == inc_run["op_calls"]
+        assert full_run["op_failures"] == inc_run["op_failures"]
+        assert full_run["failure_recovery"] == inc_run["failure_recovery"]
+        assert full_run["pending_failure_ops"] == inc_run["pending_failure_ops"]
         assert len(full_run["phases"]) == len(inc_run["phases"])
 
         for i, (fs, is_) in enumerate(
@@ -457,3 +464,134 @@ class TestAggregationDetails:
         assert "run-b" in state
         assert state["run-a"]["phases"][0]["phase"] == "init"
         assert state["run-b"]["phases"][0]["phase"] == "init"
+
+
+# ── Failure / outcome signal helpers (Issue #777) ─────────────────
+
+
+class TestFailureSignals:
+    """Unit tests for _is_outcome_entry and _entry_failed."""
+
+    def test_is_outcome_entry(self):
+        """Only tool_use entries whose params carry a ``result`` are outcomes."""
+        assert _is_outcome_entry(
+            _tool_entry("verify_in_container",
+                        params={"result": {"gate_passed": True}})
+        )
+        assert not _is_outcome_entry(
+            _tool_entry("verify_in_container", params={"path": "tests/"})
+        )
+        assert not _is_outcome_entry(
+            _entry("exec", commands=["pytest"], exit_code=0)
+        )
+        assert not _is_outcome_entry(
+            _tool_entry("verify_in_container")  # no params at all
+        )
+
+    def test_entry_failed_exec(self):
+        """exec fails when exit_code is nonzero; None counts as 0."""
+        assert _entry_failed(_entry("exec", commands=["pytest"], exit_code=1)) is True
+        assert _entry_failed(_entry("exec", commands=["pytest"], exit_code=0)) is False
+        assert _entry_failed(_entry("exec", commands=["pytest"])) is False
+
+    def test_entry_failed_tool_outcome(self):
+        """tool_use outcome entries fail when gate_passed is False."""
+        assert _entry_failed(
+            _tool_entry("verify_in_container",
+                        params={"result": {"gate_passed": False}})
+        ) is True
+        assert _entry_failed(
+            _tool_entry("verify_in_container",
+                        params={"result": {"gate_passed": True}})
+        ) is False
+        # A plain call entry (no result) carries no failure signal.
+        assert _entry_failed(
+            _tool_entry("edit_file", params={"file_path": "a.py"})
+        ) is False
+
+    def test_entry_failed_other_ops(self):
+        """Operations without an outcome never count as failed."""
+        assert _entry_failed(_entry("initialize", image="python:3.12")) is False
+        assert _entry_failed(_boundary_entry("publish")) is False
+        assert _entry_failed(_entry("stop")) is False
+
+
+# ── Op metrics / failure-recovery state (Issue #777) ───────────────
+
+
+class TestOpMetrics:
+    """Aggregation of op_calls / op_failures / failure_recovery."""
+
+    def test_calls_and_failures_counted(self):
+        entries = [
+            _entry("initialize", ts="2026-01-01T00:00:01Z", image="python:3.12"),
+            _tool_entry("edit_file", ts="2026-01-01T00:00:02Z"),
+            _entry("exec", commands=["pytest"], exit_code=1, ts="2026-01-01T00:00:03Z"),
+            _entry("exec", commands=["pytest"], exit_code=0, ts="2026-01-01T00:00:04Z"),
+        ]
+        state = aggregate_run_phases(None, entries)
+        run = state["test-run"]
+        assert run["op_calls"]["tool:edit_file"] == 1
+        assert run["op_calls"]["exec"] == 2
+        assert run["op_failures"]["exec"] == 1
+        assert run["pending_failure_ops"] == []
+
+    def test_outcome_entry_not_counted_as_call_but_counts_as_failure(self):
+        """Verify outcome entries are not calls, but failures signal them."""
+        entries = [
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:01Z"),
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:02Z",
+                        params={"result": {"gate_passed": False}}),
+        ]
+        state = aggregate_run_phases(None, entries)
+        run = state["test-run"]
+        assert run["op_calls"]["tool:verify_in_container"] == 1
+        assert run["op_failures"]["tool:verify_in_container"] == 1
+
+    def test_verify_outcome_failure_recovery_recorded(self):
+        """A failed verify outcome is queued, so the next call is its recovery."""
+        entries = [
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:01Z"),
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:02Z",
+                        params={"result": {"gate_passed": False}}),
+            _tool_entry("edit_file", ts="2026-01-01T00:00:03Z",
+                        params={"file_path": "a.py"}),
+        ]
+        state = aggregate_run_phases(None, entries)
+        run = state["test-run"]
+        rec = run["failure_recovery"]
+        assert rec.get("tool:verify_in_container", {}).get("tool:edit_file") == 1
+        assert run["pending_failure_ops"] == []
+
+    def test_consecutive_failures_each_get_recovery(self):
+        """exec → exec-fail → edit: the second exec is the first failure's
+        immediately-following action, edit recovers the second."""
+        entries = [
+            _entry("exec", commands=["a"], exit_code=1, ts="2026-01-01T00:00:01Z"),
+            _entry("exec", commands=["b"], exit_code=1, ts="2026-01-01T00:00:02Z"),
+            _tool_entry("edit_file", ts="2026-01-01T00:00:03Z",
+                        params={"file_path": "a.py"}),
+        ]
+        state = aggregate_run_phases(None, entries)
+        run = state["test-run"]
+        assert run["op_calls"]["exec"] == 2
+        assert run["op_failures"]["exec"] == 2
+        rec = run["failure_recovery"]["exec"]
+        assert rec.get("exec") == 1
+        assert rec.get("tool:edit_file") == 1
+        assert run["pending_failure_ops"] == []
+
+    def test_failure_then_passing_exec_then_edit(self):
+        """A passing exec recovers the failure; the later edit is not
+        double-counted as a recovery."""
+        entries = [
+            _entry("exec", commands=["bad"], exit_code=1, ts="2026-01-01T00:00:01Z"),
+            _entry("exec", commands=["good"], exit_code=0, ts="2026-01-01T00:00:02Z"),
+            _tool_entry("edit_file", ts="2026-01-01T00:00:03Z",
+                        params={"file_path": "a.py"}),
+        ]
+        state = aggregate_run_phases(None, entries)
+        run = state["test-run"]
+        rec = run["failure_recovery"]["exec"]
+        assert rec.get("exec") == 1  # the passing exec call
+        assert rec.get("tool:edit_file", 0) == 0

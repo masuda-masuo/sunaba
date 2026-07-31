@@ -164,6 +164,42 @@ def _is_pytest_pass(entry: dict[str, Any]) -> bool | None:
     return ec == 0
 
 
+def _is_outcome_entry(entry: dict[str, Any]) -> bool:
+    """Return True for ``tool_use`` entries that report a *result*.
+
+    ``verify_in_container`` writes two journal entries per invocation
+    (Issue #774): a call entry carrying the request params, and a separate
+    outcome entry whose params hold the ``result`` dict.  Outcome entries are
+    not calls -- they never increment ``op_calls`` -- but they are the ones
+    that carry pass/fail signals.
+    """
+    if entry.get("operation") != "tool_use":
+        return False
+    params = entry.get("params")
+    return isinstance(params, dict) and "result" in params
+
+
+def _entry_failed(entry: dict[str, Any]) -> bool:
+    """Return True when *entry* carries a failure signal.
+
+    Failure is defined where the journal records an outcome:
+
+    * ``exec`` -- ``exit_code`` is not 0 (``None`` counts as 0).
+    * ``tool_use`` outcome entry -- ``result.gate_passed`` is ``False``.
+
+    Every other operation type has no failure signal and is never failed.
+    """
+    op = entry.get("operation", "")
+    if op == "exec":
+        ec = entry.get("exit_code", 0)
+        return ec not in (None, 0)
+    if op == "tool_use":
+        params = entry.get("params")
+        if isinstance(params, dict) and isinstance(params.get("result"), dict):
+            return params["result"].get("gate_passed") is False
+    return False
+
+
 def _phase_order(phase: str) -> int:
     """Return a sort key so phases appear in workflow order."""
     _order = {"init": 0, "explore": 1, "edit": 2, "verify": 3, "publish": 4, "other": 5}
@@ -186,6 +222,14 @@ def _new_run_state(run_id: str) -> dict[str, Any]:
         "touched_files": [],
         "verify_timeline": [],
         "edit_verify_roundtrips": 0,
+        # Issue #777 (insights page): per-operation call/failure counters and
+        # the distribution of the action that immediately follows a failure.
+        # ``pending_failure_ops`` is the FIFO of failures that have not yet
+        # seen a follow-up action; drained by :func:`_track_op_metrics`.
+        "op_calls": {},
+        "op_failures": {},
+        "failure_recovery": {},
+        "pending_failure_ops": [],
     }
 
 
@@ -329,6 +373,58 @@ def _incorporate(run: dict[str, Any], entry: dict[str, Any]) -> None:
 
     # ── edit → verify-fail → edit roundtrips ──────────────────
     _update_roundtrips(run)
+
+    # ── per-operation call / failure / recovery tracking (#777) ──
+    _track_op_metrics(run, entry)
+
+
+def _track_op_metrics(run: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Update per-operation call counts, failure counts, and failure-recovery
+    distribution in *run* (mutated).
+
+    Called from :func:`_incorporate` on every journal entry.  Outcome entries
+    (``verify_in_container`` result records) are never counted as calls, but
+    they carry pass/fail signals used by :func:`_entry_failed`.
+
+    Failure-recovery tracking keeps a FIFO (``pending_failure_ops``) of the
+    operations that failed and have not yet seen a follow-up action.  The
+    *immediately-following action* of a failure is the next non-outcome call
+    -- which may itself fail (a second failed ``exec`` is still the first
+    failure's next action).  When that call arrives, every pending failure
+    records it as its recovery action and leaves the queue, so consecutive
+    failures each get their own recovery entry instead of the last one
+    overwriting the rest.
+    """
+    eff = _effective_operation(entry)
+    is_outcome = _is_outcome_entry(entry)
+
+    # ── call counting ──
+    if not is_outcome:
+        run["op_calls"][eff] = run["op_calls"].get(eff, 0) + 1
+
+    # ── failure counting ──
+    if _entry_failed(entry):
+        run["op_failures"][eff] = run["op_failures"].get(eff, 0) + 1
+        if not is_outcome:
+            # A failing call is still an action: it is the immediately-
+            # following action of any previously pending failures, so flush
+            # the queue with it before enqueuing itself.
+            _flush_recovery(run, eff)
+        run["pending_failure_ops"].append(eff)
+    elif not is_outcome and run["pending_failure_ops"]:
+        # First non-outcome call after one or more failures → recovery action.
+        _flush_recovery(run, eff)
+
+
+def _flush_recovery(run: dict[str, Any], action: str) -> None:
+    """Record *action* as the recovery action of every pending failure and
+    clear the pending queue (mutates *run*)."""
+    rec = run["failure_recovery"]
+    for prev in run["pending_failure_ops"]:
+        if prev not in rec:
+            rec[prev] = {}
+        rec[prev][action] = rec[prev].get(action, 0) + 1
+    run["pending_failure_ops"] = []
 
 
 def _recompute_durations(run: dict[str, Any]) -> None:

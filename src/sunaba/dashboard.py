@@ -16,10 +16,12 @@ import html as _html
 import json
 import secrets
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from sunaba.insights import compute_all_insights
 from sunaba.journal import (
     get_active_environments,
     get_journal_path,
@@ -28,7 +30,7 @@ from sunaba.journal import (
     get_tool_usage,
     read_journal,
 )
-from sunaba.phase import aggregate_run_phases, phase_state_for_run
+from sunaba.phase import _PHASE_MAP, aggregate_run_phases, phase_state_for_run
 from sunaba.security import KIND_PROXY, KIND_SANDBOX
 from sunaba.tools.container import list_managed_containers, sandbox_stop
 
@@ -109,6 +111,7 @@ details { font-size: 10px; color: #484f58; margin-top: 8px; }
 _NAV: str = """<nav>
   <a href="/" class="{home_cls}">Dashboard</a>
   <a href="/containers" class="{containers_cls}">Containers</a>
+  <a href="/insights" class="{insights_cls}">Insights</a>
 </nav>"""
 
 _DASHBOARD_HTML: str = """<!DOCTYPE html>
@@ -637,6 +640,7 @@ def _render_nav(active: str) -> str:
     return _NAV.format(
         home_cls="active" if active == "home" else "",
         containers_cls="active" if active == "containers" else "",
+        insights_cls="active" if active == "insights" else "",
     )
 
 
@@ -870,6 +874,264 @@ def _render_containers_page(failed_stop: str | None = None) -> str:
     )
 
 
+
+# ──────────────────────────────────────────────────────────────────
+# Insights page (#777)
+# ──────────────────────────────────────────────────────────────────
+
+_INSIGHTS_HTML: str = """<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Sandbox MCP — Insights</title>
+{style}
+</head>
+<body>
+<h1>Insights</h1>
+<div class="subtitle">Cross-run friction metrics — all numbers, no gut feel</div>
+{nav}
+
+<div class="filter-form" style="margin-bottom:16px">
+  <form method="get" action="/insights" style="display:flex;gap:8px;align-items:center">
+    <span style="color:#8b949e;font-size:11px">Period:</span>
+    <a href="/insights" style="color:#58a6ff;font-size:11px;text-decoration:none;padding:2px 6px;border-radius:4px;{all_cls}">all time</a>
+    <a href="/insights?period=7" style="color:#58a6ff;font-size:11px;text-decoration:none;padding:2px 6px;border-radius:4px;{d7_cls}">7 days</a>
+    <a href="/insights?period=30" style="color:#58a6ff;font-size:11px;text-decoration:none;padding:2px 6px;border-radius:4px;{d30_cls}">30 days</a>
+  </form>
+</div>
+
+<div class="grid">
+  {error_rate_panel}
+  {first_verify_panel}
+</div>
+
+<div class="grid">
+  {roundtrip_panel}
+  {unused_panel}
+</div>
+
+{run_dist_panel}
+
+</body>
+</html>"""
+
+
+def _render_insights_page(
+    insights: dict[str, Any],
+    period_days: int | None,
+) -> str:
+    """Render the /insights page from computed metrics."""
+    d = insights
+
+    # Period filter styling
+    all_cls = "border:1px solid #30363d;background:#21262d;"
+    d7_cls = "border:1px solid #30363d;background:#21262d;"
+    d30_cls = "border:1px solid #30363d;background:#21262d;"
+    active_cls = "border:1px solid #58a6ff;background:#1f2b3f;"
+    if period_days is None:
+        all_cls = active_cls
+    elif period_days == 7:
+        d7_cls = active_cls
+    elif period_days == 30:
+        d30_cls = active_cls
+
+    # ── Metric 1: Per-tool error rate ──
+    err = d["per_tool_error_rate"]
+    err_rows: list[str] = []
+    for tool in err["by_tool"]:
+        rate_color = "#7ee787" if tool["failure_rate"] == 0 else (
+            "#ffa657" if tool["failure_rate"] < 0.2 else "#f97583"
+        )
+        err_rows.append(
+            f'<tr>'
+            f'<td class="mono">{_escape(tool["operation"])}</td>'
+            f'<td>{tool["calls"]}</td>'
+            f'<td>{tool["failures"]}</td>'
+            f'<td style="color:{rate_color}">{tool["failure_rate"]:.1%}</td>'
+            f'</tr>'
+        )
+    err_table = (
+        f'<table><thead><tr>'
+        f'<th>Operation</th><th>Calls</th><th>Failures</th><th>Rate</th>'
+        f'</tr></thead><tbody>{"".join(err_rows)}</tbody></table>'
+        if err_rows else '<div class="empty">No tool calls recorded</div>'
+    )
+
+    # Recovery distribution (sub-table)
+    recovery_html = ""
+    if err.get("recovery_distribution"):
+        rec_parts: list[str] = []
+        for failed_op in sorted(err["recovery_distribution"].keys()):
+            next_ops = err["recovery_distribution"][failed_op]
+            for next_op in sorted(next_ops.keys(), key=lambda k: -next_ops[k]):
+                rec_parts.append(
+                    f'<div style="font-size:10px;color:#8b949e">'
+                    f'{_escape(failed_op)} → {_escape(next_op)}: {next_ops[next_op]}'
+                    f'</div>'
+                )
+        if rec_parts:
+            recovery_html = (
+                f'<details><summary>Recovery actions (next op after failure)</summary>'
+                f'{"".join(rec_parts)}'
+                f'</details>'
+            )
+
+    error_rate_panel = (
+        f'<div class="card">'
+        f'<h2>1. Per-Tool Error Rate '
+        f'<span style="font-size:11px;color:#8b949e;font-weight:400">'
+        f'({err["total_calls"]} calls, {err["total_failures"]} failures)'
+        f'</span></h2>'
+        f'{err_table}'
+        f'{recovery_html}'
+        f'</div>'
+    )
+
+    # ── Metric 2: First-verify failure rate by image ──
+    fv = d["first_verify_failure_by_image"]
+    fv_rows: list[str] = []
+    for img in fv["by_image"]:
+        rate_color = "#7ee787" if img["failure_rate"] == 0 else (
+            "#ffa657" if img["failure_rate"] < 0.3 else "#f97583"
+        )
+        fv_rows.append(
+            f'<tr>'
+            f'<td class="mono">{_escape(img["image"])}</td>'
+            f'<td>{img["total_runs"]}</td>'
+            f'<td>{img["first_verify_failed"]}</td>'
+            f'<td style="color:{rate_color}">{img["failure_rate"]:.1%}</td>'
+            f'</tr>'
+        )
+    overall = fv["overall"]
+    fv_table = (
+        f'<table><thead><tr>'
+        f'<th>Image</th><th>Runs</th><th>Failed</th><th>Rate</th>'
+        f'</tr></thead><tbody>{"".join(fv_rows)}</tbody></table>'
+        if fv_rows else '<div class="empty">No runs with verify data</div>'
+    )
+
+    first_verify_panel = (
+        f'<div class="card">'
+        f'<h2>2. First-Verify Failure by Image '
+        f'<span style="font-size:11px;color:#8b949e;font-weight:400">'
+        f'(overall: {overall["total_first_failed"]}/{overall["total_runs_with_verify"]} = {overall["failure_rate"]:.1%})'
+        f'</span></h2>'
+        f'{fv_table}'
+        f'</div>'
+    )
+
+    # ── Metric 3: Roundtrip distribution ──
+    rd = d["roundtrip_distribution"]
+    max_count = max(item["count"] for item in rd["histogram"]) if rd["histogram"] else 1
+    rt_bars = ""
+    for item in rd["histogram"]:
+        rt_bars += _render_bar(item["count"], max_count, item["bucket"], color="#d2a8ff")
+    rt_mean_html = (
+        f'<div style="font-size:12px;color:#f0f6fc;margin-top:8px">'
+        f'Mean: {rd["mean_roundtrips"]} roundtrips/run ({rd["total_runs"]} runs)'
+        f'</div>'
+    )
+    roundtrip_panel = (
+        f'<div class="card">'
+        f'<h2>3. Edit→Verify Roundtrip Distribution</h2>'
+        f'{rt_bars}'
+        f'{rt_mean_html}'
+        f'</div>'
+    )
+
+    # ── Metric 4: Unused tools ──
+    unused = d["unused_tools"]
+    unused_rows: list[str] = []
+    for item in unused:
+        unused_rows.append(
+            f'<tr><td class="mono">{_escape(item["operation"])}</td>'
+            f'<td class="dim">{_escape(item.get("reason", ""))}</td></tr>'
+        )
+    unused_table = (
+        f'<table><thead><tr><th>Operation</th><th>Reason</th></tr></thead>'
+        f'<tbody>{"".join(unused_rows)}</tbody></table>'
+        if unused_rows else '<div class="empty">All known tools have been used</div>'
+    )
+    unused_panel = (
+        f'<div class="card">'
+        f'<h2>4. Unused Tools '
+        f'<span style="font-size:11px;color:#8b949e;font-weight:400">'
+        f'({len(unused)} candidate{"" if len(unused) == 1 else "s"})'
+        f'</span></h2>'
+        f'{unused_table}'
+        f'</div>'
+    )
+
+    # ── Metric 5: Run duration & op-count distributions ──
+    rdists = d["run_distributions"]
+
+    # By repo
+    repo_rows: list[str] = []
+    for item in rdists.get("by_repo", []):
+        ds = item["duration_stats"]
+        os_ = item["op_count_stats"]
+        repo_rows.append(
+            f'<tr>'
+            f'<td class="mono">{_escape(item["key"])}</td>'
+            f'<td>{item["run_count"]}</td>'
+            f'<td>{_fmt_duration(ds["min"])} – {_fmt_duration(ds["max"])} (mean {_fmt_duration(ds["mean"])})</td>'
+            f'<td>{os_["min"]} – {os_["max"]} (mean {os_["mean"]:.1f})</td>'
+            f'</tr>'
+        )
+    repo_table = (
+        f'<table><thead><tr><th>Repo</th><th>Runs</th><th>Duration</th><th>Ops</th></tr></thead>'
+        f'<tbody>{"".join(repo_rows)}</tbody></table>'
+        if repo_rows else '<div class="empty">No run data</div>'
+    )
+
+    # By session_label
+    label_rows: list[str] = []
+    for item in rdists.get("by_session_label", []):
+        ds = item["duration_stats"]
+        os_ = item["op_count_stats"]
+        label_rows.append(
+            f'<tr>'
+            f'<td class="mono">{_escape(item["key"])}</td>'
+            f'<td>{item["run_count"]}</td>'
+            f'<td>{_fmt_duration(ds["min"])} – {_fmt_duration(ds["max"])} (mean {_fmt_duration(ds["mean"])})</td>'
+            f'<td>{os_["min"]} – {os_["max"]} (mean {os_["mean"]:.1f})</td>'
+            f'</tr>'
+        )
+    label_table = (
+        f'<table><thead><tr><th>Session</th><th>Runs</th><th>Duration</th><th>Ops</th></tr></thead>'
+        f'<tbody>{"".join(label_rows)}</tbody></table>'
+        if label_rows else '<div class="empty">No run data</div>'
+    )
+
+    run_dist_panel = (
+        f'<div class="grid">'
+        f'<div class="card">'
+        f'<h2>5a. Run Distribution by Repo</h2>'
+        f'{repo_table}'
+        f'</div>'
+        f'<div class="card">'
+        f'<h2>5b. Run Distribution by Session Label</h2>'
+        f'{label_table}'
+        f'</div>'
+        f'</div>'
+    )
+
+    return _INSIGHTS_HTML.format(
+        style=_STYLE,
+        nav=_render_nav("insights"),
+        all_cls=all_cls,
+        d7_cls=d7_cls,
+        d30_cls=d30_cls,
+        error_rate_panel=error_rate_panel,
+        first_verify_panel=first_verify_panel,
+        roundtrip_panel=roundtrip_panel,
+        unused_panel=unused_panel,
+        run_dist_panel=run_dist_panel,
+    )
+
+
+
 class _DashboardHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the dashboard."""
 
@@ -906,6 +1168,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._serve_api_journal()
         elif path == "/api/tool-usage":
             self._serve_api_tool_usage()
+        elif path == "/insights":
+            self._serve_insights()
         elif path.startswith("/trace/"):
             self._serve_trace(path)
         else:
@@ -1061,6 +1325,35 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             run_rows="\n".join(run_rows_parts) if run_rows_parts else '<tr><td colspan="7" class="empty">No runs recorded</td></tr>',
             tool_usage_panel=tool_usage_panel,
         )
+        self._send_html(html_content)
+
+    def _serve_insights(self) -> None:
+        """Serve the /insights page with cross-run friction metrics (#777)."""
+        # Parse period filter from query string
+        period: int | None = None  # days; None = all time
+        if "?" in self.path:
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            period_raw = qs.get("period", [None])[0]
+            if period_raw and period_raw.isdigit():
+                period = int(period_raw)
+
+        entries = read_journal()
+        agg_state = aggregate_run_phases(None, entries)
+
+        # Compute time bounds for the period filter
+        from_ts: str | None = None
+        if period is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=period)
+            from_ts = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        insights = compute_all_insights(
+            agg_state,
+            from_ts=from_ts,
+            all_tools=set(_PHASE_MAP.keys()),
+        )
+
+        html_content = _render_insights_page(insights, period)
         self._send_html(html_content)
 
     def _serve_api_runs(self) -> None:

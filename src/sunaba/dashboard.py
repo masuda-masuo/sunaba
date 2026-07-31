@@ -24,12 +24,16 @@ from urllib.parse import parse_qs, unquote, urlparse
 from sunaba.health import HEALTH_ORDER, classify_all_runs, classify_run_health
 from sunaba.insights import compute_all_insights
 from sunaba.journal import (
+    _MAX_JOURNAL_SIZE,
     get_active_environments,
+    get_journal_live_size,
     get_journal_path,
     get_run_id_per_container,
     get_runs,
     get_tool_usage,
     read_journal,
+    read_journal_snapshot,
+    read_journal_tail,
 )
 from sunaba.phase import _PHASE_MAP, aggregate_run_phases, phase_state_for_run
 from sunaba.security import KIND_PROXY, KIND_SANDBOX
@@ -125,38 +129,25 @@ _DASHBOARD_HTML: str = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="10">
 <title>Code Sandbox MCP — Dashboard</title>
 {style}
 </head>
 <body>
 <h1>Code Sandbox MCP</h1>
-<div class="subtitle">Observability Dashboard — localhost only — auto-refresh 10s</div>
+<div class="subtitle">Observability Dashboard — localhost only — live update</div>
 {nav}
 
 <div class="grid">
-  <div class="card">
+  <div class="card" id="stats-card">
     <h2>Stats</h2>
-    <div class="meta">Total Runs</div>
-    <div class="val">{total_runs}</div>
-    <div class="meta" style="margin-top:8px">Total Operations</div>
-    <div class="val">{total_ops}</div>
-    <div class="meta" style="margin-top:8px">Boundary Crossings</div>
-    <div class="val">{boundary_count}</div>
-    <div class="meta" style="margin-top:8px">VCS Operations</div>
-    <div class="val">{vcs_ops}</div>
-    <div class="meta" style="margin-top:8px">Running Services</div>
-    <div class="val">{running_services}</div>
+    {stats_card}
   </div>
 
   {tool_usage_panel}
 
-  <div class="card">
+  <div class="card" id="journal-card">
     <h2>Journal</h2>
-    <div class="meta">Path</div>
-    <div class="mono">{journal_path}</div>
-    <div class="meta" style="margin-top:8px">Entries</div>
-    <div class="val">{journal_entries}</div>
+    {journal_card}
   </div>
 
 </div>
@@ -175,10 +166,11 @@ _DASHBOARD_HTML: str = """<!DOCTYPE html>
   <th>Trace</th>
 </tr>
 </thead>
-<tbody>
+<tbody id="run-rows">
 {run_rows}
 </tbody>
 </table>
+{live_script}
 </body>
 </html>"""
 _RUN_ROW: str = """<tr>
@@ -199,16 +191,16 @@ _CONTAINERS_HTML: str = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="10">
 <title>Code Sandbox MCP — Containers</title>
 {style}
 </head>
 <body>
 <h1>Containers</h1>
-<div class="subtitle">Live from Docker (managed containers) — auto-refresh 10s</div>
+<div class="subtitle">Live from Docker (managed containers) — live update</div>
 {nav}
 
-{error}
+<div id="stop-error">{stop_error}</div>
+<div id="containers-error">{error}</div>
 
 <table>
 <thead>
@@ -223,12 +215,13 @@ _CONTAINERS_HTML: str = """<!DOCTYPE html>
   <th></th>
 </tr>
 </thead>
-<tbody>
+<tbody id="container-rows">
 {rows}
 </tbody>
 </table>
 
-{sidecars}
+<div id="sidecars">{sidecars}</div>
+{live_script}
 </body>
 </html>"""
 
@@ -340,23 +333,242 @@ tr:hover {{ background: #161b22; }}
 <a href="/">← Dashboard</a>
 <h1>Run Trace — {run_id} <a class="json-link" href="/trace/{run_id}?fmt=json">JSON</a></h1>
 <div class="summary">
-  <div class="badge"><strong>Started:</strong> {started}</div>
-  <div class="badge"><strong>Ended:</strong> {ended}</div>
-  <div class="badge"><strong>Operations:</strong> {op_count}</div>
-  <div class="badge"><strong>Boundary crossings:</strong> {boundary_count}</div>
-  <div class="badge"><strong>Health:</strong> <span class="{health_cls}">{health}</span></div>
+  <div class="badge"><strong>Started:</strong> <span id="badge-started">{started}</span></div>
+  <div class="badge"><strong>Ended:</strong> <span id="badge-ended">{ended}</span></div>
+  <div class="badge"><strong>Operations:</strong> <span id="badge-ops">{op_count}</span></div>
+  <div class="badge"><strong>Boundary crossings:</strong> <span id="badge-boundary">{boundary_count}</span></div>
+  <div class="badge"><strong>Health:</strong> <span id="health-badge" class="{health_cls}">{health}</span></div>
 </div>
-{phase_view}
+<div id="phase-view">{phase_view}</div>
 <table>
 <thead>
 <tr><th>Time</th><th>Operation</th><th>Details</th></tr>
 </thead>
-<tbody>
+<tbody id="trace-rows">
 {rows}
 </tbody>
 </table>
+{live_script}
 </body>
 </html>"""
+
+
+
+# ---------------------------------------------------------------------------
+# Live update script (Issue #776)
+# ---------------------------------------------------------------------------
+
+#: Inline polling script injected into the live-updated pages.  It is a
+#: *value* passed to ``str.format`` (as ``{live_script}``), never formatted
+#: itself, so its braces are plain JS syntax; ``__VIEW__`` / ``__OFFSET__`` /
+#: ``__RUN_ID__`` tokens are substituted by :func:`_live_script`.
+#
+# Security contract (mirrors the server's): journal-derived strings are
+# inserted into the DOM with ``textContent`` only.  The single ``innerHTML``
+# uses are for fragments rendered by the server's own view functions, which
+# HTML-escape everything they interpolate -- the same trust level as the
+# initial page load.
+_LIVE_SCRIPT: str = """<script>
+(function () {
+  "use strict";
+  var POLL_MS = 1500;
+  var view = __VIEW__;
+  var offset = __OFFSET__;
+  var runId = __RUN_ID__;
+
+  // Trace-page counters, seeded from the server-rendered summary badges.
+  var ops = 0;
+  var crossings = 0;
+
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) { el.textContent = text; }
+  }
+
+  function entryDetails(e) {
+    var op = e.operation || "";
+    if (op === "initialize") {
+      return "image=" + (e.image || "") + " net=" + (e.allow_network === undefined ? "" : e.allow_network);
+    }
+    if (op === "exec") {
+      return (e.commands || []).join(" && ") + " exit=" + (e.exit_code === undefined ? "" : e.exit_code);
+    }
+    if (op === "boundary_crossing") {
+      return (e.sub_operation || "") + " " + (e.details || "");
+    }
+    if (op === "write_file") {
+      return (e.file_name || "") + " \\u2192 " + (e.dest_dir || "") + " (" + (e.byte_count || 0) + " bytes)";
+    }
+    if (op === "copy_project" || op === "copy_file") {
+      return (e.local_src || "") + " \\u2192 " + (e.dest_dir || "");
+    }
+    if (op === "test_environment") {
+      var svcs = (e.services || []).map(function (s) { return s.name || "?"; }).join(", ");
+      return "services=[" + svcs + "] status=" + (e.environment_status || "");
+    }
+    if (op === "tool_use") {
+      return e.tool_name || "";
+    }
+    return "";
+  }
+
+  // Every value is a journal string, so it goes in via textContent.
+  function rowForEntry(e) {
+    var tr = document.createElement("tr");
+    var tdTs = document.createElement("td");
+    tdTs.textContent = e.ts || "";
+    var tdOp = document.createElement("td");
+    tdOp.textContent = e.operation || "unknown";
+    tdOp.className = "op " + (e.operation || "unknown");
+    if (e.boundary_crossing) { tdOp.className += " crossing"; }
+    var tdDet = document.createElement("td");
+    tdDet.textContent = entryDetails(e);
+    tr.appendChild(tdTs);
+    tr.appendChild(tdOp);
+    tr.appendChild(tdDet);
+    return tr;
+  }
+
+  function seedCounters() {
+    var o = document.getElementById("badge-ops");
+    var b = document.getElementById("badge-boundary");
+    ops = o ? (parseInt(o.textContent, 10) || 0) : 0;
+    crossings = b ? (parseInt(b.textContent, 10) || 0) : 0;
+  }
+
+  function applyTrace(data) {
+    var tbody = document.getElementById("trace-rows");
+    (data.entries || []).forEach(function (e) {
+      if (e.run_id !== runId) { return; }
+      ops += 1;
+      if (e.boundary_crossing || e.operation === "boundary_crossing") { crossings += 1; }
+      if (tbody) { tbody.appendChild(rowForEntry(e)); }
+      if (e.ts) { setText("badge-ended", e.ts); }
+    });
+    setText("badge-ops", String(ops));
+    setText("badge-boundary", String(crossings));
+    // Server-rendered fragments: phase view (escaped HTML) and the health
+    // badge (plain label + class), recomputed over the full journal.
+    if (data.phase_view !== undefined) {
+      var pv = document.getElementById("phase-view");
+      if (pv) { pv.innerHTML = data.phase_view; }
+    }
+    if (data.health !== undefined) {
+      var hb = document.getElementById("health-badge");
+      if (hb) {
+        hb.textContent = data.health;
+        hb.className = data.health_cls || "";
+      }
+    }
+  }
+
+  function applyDashboard(data) {
+    if (data.stats_card !== undefined) {
+      var sc = document.getElementById("stats-card");
+      if (sc) { sc.innerHTML = data.stats_card; }
+    }
+    if (data.journal_card !== undefined) {
+      var jc = document.getElementById("journal-card");
+      if (jc) { jc.innerHTML = data.journal_card; }
+    }
+    if (data.run_rows !== undefined) {
+      var rr = document.getElementById("run-rows");
+      if (rr) { rr.innerHTML = data.run_rows; }
+    }
+  }
+
+  function applyContainers(data) {
+    var rows = document.getElementById("container-rows");
+    if (rows && data.rows_html !== undefined) { rows.innerHTML = data.rows_html; }
+    var sc = document.getElementById("sidecars");
+    if (sc && data.sidecars_html !== undefined) { sc.innerHTML = data.sidecars_html; }
+    var err = document.getElementById("containers-error");
+    if (err && data.error_html !== undefined) { err.innerHTML = data.error_html; }
+  }
+
+  var gen = null;
+  var inFlight = false;
+
+  function poll() {
+    // In-flight guard: a poll slower than the interval must not overlap the
+    // next one -- two concurrent polls would read from the same offset and
+    // append the same trace rows twice.
+    if (inFlight) { return; }
+    inFlight = true;
+    var url = "/api/journal?offset=" + offset + "&view=" + view;
+    if (gen !== null) { url += "&gen=" + gen; }
+    if (runId !== null) { url += "&run_id=" + encodeURIComponent(runId); }
+    fetch(url)
+      .then(function (r) {
+        if (!r.ok) { throw new Error("journal poll failed: " + r.status); }
+        return r.json();
+      })
+      .then(function (data) {
+        inFlight = false;
+        if (data.generation !== undefined) { gen = data.generation; }
+        if (data.rotated) {
+          // Rotation: the live file was replaced by journal.log.1 and a new
+          // journal.log started, so our byte offset no longer exists.  Reset
+          // to 0; the next poll re-reads the new file from the top and the
+          // server re-renders every fragment from the full history (backup
+          // included), so the display re-syncs without a page reload.
+          offset = 0;
+          return;
+        }
+        offset = data.next_offset;
+        if (view === "trace") { applyTrace(data); }
+        else if (view === "containers") { applyContainers(data); }
+        else if (view === "dashboard") { applyDashboard(data); }
+      })
+      .catch(function () { inFlight = false; /* transient error: keep polling */ });
+  }
+
+  seedCounters();
+  setInterval(poll, POLL_MS);
+})();
+</script>"""
+
+
+def _js_string(value: str) -> str:
+    """Encode *value* as a JS string literal safe to embed in ``<script>``.
+
+    ``json.dumps`` quotes and escapes correctly for JS but leaves ``<`` / ``>``
+    literal, and a literal ``</script>`` inside the string would terminate the
+    script element early (the HTML parser does not understand JS strings).
+    ``<``, ``>`` and ``&`` are therefore re-escaped as ``\\uXXXX``, which JS
+    decodes to the identical characters.
+    """
+    return (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def _live_script(
+    *,
+    view: str,
+    journal_offset: int,
+    run_id: str | None = None,
+) -> str:
+    """Return the live-update script for a page (Issue #776).
+
+    *view* is one of ``"trace"`` / ``"containers"`` / ``"dashboard"``.
+    *journal_offset* is the byte size of the live journal at render time, so
+    the first poll only returns entries written after this page was served.
+    *run_id* is set on the trace page so the server can include the phase
+    view and health badge fragments.
+
+    Token substitution (``__VIEW__`` etc.) keeps the script body free of
+    ``str.format`` placeholders -- its braces are JS syntax, not template
+    slots.
+    """
+    script = _LIVE_SCRIPT
+    script = script.replace("__VIEW__", _js_string(view))
+    script = script.replace("__OFFSET__", str(int(journal_offset)))
+    script = script.replace("__RUN_ID__", _js_string(run_id) if run_id else "null")
+    return script
 
 
 # ---------------------------------------------------------------------------
@@ -862,19 +1074,17 @@ def _render_stop_confirm(container_id: str, warning: str) -> str:
     )
 
 
-def _render_containers_page(
-    failed_stop: str | None = None,
-    now: str | None = None,
-) -> str:
-    """Render the ``/containers`` page from Docker's own view of the world.
+def _containers_fragments(now: str | None = None) -> dict[str, str]:
+    """Server-rendered fragments of the ``/containers`` page (Issue #776).
 
-    *failed_stop* is a stop that could not be carried out.  Both it and a
-    Docker-level listing failure are errors, which is why they share one banner
-    and both have their ``Error:`` prefix stripped -- the banner is never used
-    for anything that isn't a failure.
+    Shared by the initial render and the live-update poll, so a polled
+    fragment is byte-identical to what a reload would have rendered.  The
+    row data (status, health badges, run list) is Docker + journal state, so
+    it is re-rendered on every poll even when the journal delta is empty: a
+    container can die without writing a journal entry.
 
-    *now* is the classification timestamp (ISO-8601); defaults to the real
-    clock so callers can inject a fixed value for deterministic tests.
+    Returns ``rows_html`` (the ``<tbody>`` content), ``sidecars_html`` and
+    ``error_html`` (the listing-error banner; empty string when all is well).
     """
     containers, error = list_managed_containers()
     run_ids = get_run_id_per_container()
@@ -903,23 +1113,168 @@ def _render_containers_page(
     if not rows:
         rows = '<tr><td colspan="8" class="empty">No managed containers</td></tr>'
 
-    banner = error if error is not None else failed_stop
     error_html = ""
-    if banner is not None:
+    if error is not None:
         error_html = (
             f'<div class="card" style="margin-bottom:16px">'
             f'<span class="badge err">error</span> '
-            f'{_escape(_strip_error_prefix(banner))}'
+            f'{_escape(_strip_error_prefix(error))}'
+            f'</div>'
+        )
+
+    return {
+        "rows_html": rows,
+        "sidecars_html": _render_sidecars(sidecars),
+        "error_html": error_html,
+    }
+
+
+def _render_containers_page(
+    failed_stop: str | None = None,
+    now: str | None = None,
+) -> str:
+    """Render the ``/containers`` page from Docker's own view of the world.
+
+    *failed_stop* is a stop that could not be carried out.  It renders in its
+    own banner (``#stop-error``), separate from the Docker listing-error
+    banner (``#containers-error``): the live-update poll re-renders the
+    listing banner every cycle (#776), and a shared element would wipe the
+    stop failure one poll after the page loads.  Both banners strip the
+    ``Error:`` prefix -- they are never used for anything that isn't a
+    failure.
+
+    *now* is the classification timestamp (ISO-8601); defaults to the real
+    clock so callers can inject a fixed value for deterministic tests.
+    """
+    frag = _containers_fragments(now=now)
+
+    stop_error_html = ""
+    if failed_stop is not None:
+        stop_error_html = (
+            f'<div class="card" style="margin-bottom:16px">'
+            f'<span class="badge err">error</span> '
+            f'{_escape(_strip_error_prefix(failed_stop))}'
             f'</div>'
         )
 
     return _CONTAINERS_HTML.format(
         style=_STYLE,
         nav=_render_nav("containers"),
-        error=error_html,
-        rows=rows,
-        sidecars=_render_sidecars(sidecars),
+        stop_error=stop_error_html,
+        error=frag["error_html"],
+        rows=frag["rows_html"],
+        sidecars=frag["sidecars_html"],
+        live_script=_live_script(
+            view="containers",
+            journal_offset=get_journal_live_size(),
+        ),
     )
+
+
+def _dashboard_fragments() -> dict[str, str]:
+    """Server-rendered fragments of the ``/`` page (Issue #776).
+
+    Shared by the initial render and the live-update poll, so a polled
+    fragment is byte-identical to what a reload would have rendered.
+
+    Returns the ``stats_card`` and ``journal_card`` inner content plus the
+    ``run_rows`` ``<tbody>`` content.
+    """
+    runs = get_runs()
+    total_ops = 0
+    boundary_count = 0
+    vcs_ops = 0
+    for r in runs:
+        total_ops += r.get("operations", 0)
+        boundary_count += r.get("boundary_crossings", 0)
+        vcs_ops += r.get("vcs_operations", 0)
+
+    journal_entries = 0
+    jp = get_journal_path()
+    try:
+        with open(jp) as f:
+            journal_entries = sum(1 for _ in f)
+    except Exception:
+        pass
+
+    active_envs = get_active_environments()
+    running_services = sum(
+        len(env.get("services", [])) for env in active_envs
+    )
+
+    # Per-run health badges (Issue #775): one classification pass over
+    # the whole aggregation state, then a lookup per row.
+    health_map = classify_all_runs(
+        aggregate_run_phases(None, read_journal()),
+        _now_iso(),
+    )
+
+    run_rows_parts: list[str] = []
+    for r in runs[:20]:  # show last 20 runs
+        status = r.get("status", "running")
+        if status == "host":  # container-less run (#778), no lifecycle
+            status_cls = "boundary"
+        else:
+            status_cls = "err" if status == "running" else "ok"
+        image_short = _short_image(r.get("image", "unknown"))
+        run_rows_parts.append(_RUN_ROW.format(
+            run_id=r["run_id"],
+            health=_render_health_badge(health_map.get(r["run_id"], "progressing")),
+            started=r.get("started", ""),
+            image=_escape(image_short),
+            ops=r.get("operations", 0),
+            crossings=r.get("boundary_crossings", 0),
+            status=status,
+            status_cls=status_cls,
+        ))
+
+    return {
+        "stats_card": (
+            f'<div class="meta">Total Runs</div>'
+            f'<div class="val">{len(runs)}</div>'
+            f'<div class="meta" style="margin-top:8px">Total Operations</div>'
+            f'<div class="val">{total_ops}</div>'
+            f'<div class="meta" style="margin-top:8px">Boundary Crossings</div>'
+            f'<div class="val">{boundary_count}</div>'
+            f'<div class="meta" style="margin-top:8px">VCS Operations</div>'
+            f'<div class="val">{vcs_ops}</div>'
+            f'<div class="meta" style="margin-top:8px">Running Services</div>'
+            f'<div class="val">{running_services}</div>'
+        ),
+        "journal_card": (
+            f'<div class="meta">Path</div>'
+            f'<div class="mono">{_escape(jp)}</div>'
+            f'<div class="meta" style="margin-top:8px">Entries</div>'
+            f'<div class="val">{journal_entries}</div>'
+        ),
+        "run_rows": (
+            "\n".join(run_rows_parts)
+            if run_rows_parts
+            else '<tr><td colspan="8" class="empty">No runs recorded</td></tr>'
+        ),
+    }
+
+
+def _trace_fragments(run_id: str) -> dict[str, str]:
+    """Server-rendered header fragments for the trace page (Issue #776).
+
+    Recomputed per poll from the same aggregation the page itself uses
+    (:func:`aggregate_run_phases` over the full journal), so the phase view
+    and health badge always reflect the complete history -- backup file
+    included after a rotation.
+
+    Returns ``phase_view`` (escaped HTML), ``health`` (plain label) and
+    ``health_cls``.
+    """
+    agg_state = aggregate_run_phases(None, read_journal())
+    run_state = phase_state_for_run(agg_state, run_id)
+    health = classify_run_health(agg_state, run_id, _now_iso())
+    health_cls = f"health-{health}" if health in HEALTH_ORDER else "health-progressing"
+    return {
+        "phase_view": _build_phase_view(run_state),
+        "health": health,
+        "health_cls": health_cls,
+    }
 
 
 
@@ -1309,54 +1664,6 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self._send_json(usage)
 
     def _serve_dashboard(self) -> None:
-        runs = get_runs()
-        total_ops = 0
-        boundary_count = 0
-        vcs_ops = 0
-        for r in runs:
-            total_ops += r.get("operations", 0)
-            boundary_count += r.get("boundary_crossings", 0)
-            vcs_ops += r.get("vcs_operations", 0)
-
-        journal_entries = 0
-        jp = get_journal_path()
-        try:
-            with open(jp) as f:
-                journal_entries = sum(1 for _ in f)
-        except Exception:
-            pass
-
-        active_envs = get_active_environments()
-        running_services = sum(
-            len(env.get("services", [])) for env in active_envs
-        )
-
-        # Per-run health badges (Issue #775): one classification pass over
-        # the whole aggregation state, then a lookup per row.
-        health_map = classify_all_runs(
-            aggregate_run_phases(None, read_journal()),
-            _now_iso(),
-        )
-
-        run_rows_parts: list[str] = []
-        for r in runs[:20]:  # show last 20 runs
-            status = r.get("status", "running")
-            if status == "host":  # container-less run (#778), no lifecycle
-                status_cls = "boundary"
-            else:
-                status_cls = "err" if status == "running" else "ok"
-            image_short = _short_image(r.get("image", "unknown"))
-            run_rows_parts.append(_RUN_ROW.format(
-                run_id=r["run_id"],
-                health=_render_health_badge(health_map.get(r["run_id"], "progressing")),
-                started=r.get("started", ""),
-                image=_escape(image_short),
-                ops=r.get("operations", 0),
-                crossings=r.get("boundary_crossings", 0),
-                status=status,
-                status_cls=status_cls,
-            ))
-
         # Parse tool usage time range from query string
         tool_from: str | None = None
         tool_to: str | None = None
@@ -1366,20 +1673,19 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             tool_from = qs.get("tool_from", [None])[0]
             tool_to = qs.get("tool_to", [None])[0]
 
-        tool_usage_panel = _render_tool_usage_panel(tool_from, tool_to)
+        frag = _dashboard_fragments()
 
         html_content = _DASHBOARD_HTML.format(
             style=_STYLE,
             nav=_render_nav("home"),
-            total_runs=len(runs),
-            total_ops=total_ops,
-            boundary_count=boundary_count,
-            vcs_ops=vcs_ops,
-            running_services=running_services,
-            journal_path=str(get_journal_path()),
-            journal_entries=journal_entries,
-            run_rows="\n".join(run_rows_parts) if run_rows_parts else '<tr><td colspan="8" class="empty">No runs recorded</td></tr>',
-            tool_usage_panel=tool_usage_panel,
+            stats_card=frag["stats_card"],
+            journal_card=frag["journal_card"],
+            run_rows=frag["run_rows"],
+            tool_usage_panel=_render_tool_usage_panel(tool_from, tool_to),
+            live_script=_live_script(
+                view="dashboard",
+                journal_offset=get_journal_live_size(),
+            ),
         )
         self._send_html(html_content)
 
@@ -1417,8 +1723,114 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self._send_json(runs)
 
     def _serve_api_journal(self) -> None:
-        entries = read_journal(max_entries=500)
-        self._send_json(entries)
+        """Serve journal data; with an ``offset`` query, the diff endpoint.
+
+        Two shapes share this path (Issue #776):
+
+        * ``/api/journal`` (no ``offset``) -- the pre-#776 shape, kept
+          byte-compatible: a plain JSON array of the most recent entries.
+        * ``/api/journal?offset=N[&gen=G]`` -- the live-update endpoint: a
+          JSON object ``{"entries": [...], "next_offset": N', "rotated":
+          bool, "generation": G'}`` where *entries* are the complete
+          JSON-lines written since byte position N in the live
+          ``journal.log`` and *next_offset* is where the caller should poll
+          next.  A partial trailing line is never returned.  ``rotated`` is
+          ``True`` when the live file was replaced -- detected by the file
+          being *smaller* than N, or by its identity token ``generation``
+          differing from the echoed ``gen`` (which also catches a
+          replacement file that already grew past N); the caller must then
+          reset to 0, adopt the new ``generation`` and fully re-draw.
+
+        Optional view parameters (used only by the live-update pages, so the
+        base shape above stays thin):
+
+        * ``view=dashboard`` -- adds the ``/`` page fragments (stats card,
+          journal card, run rows) on every poll.
+        * ``view=containers`` -- adds the ``/containers`` row fragments on
+          every poll (Docker state can change without journal growth).
+        * ``view=trace&run_id=R`` -- adds the trace header fragments (phase
+          view, health badge) on every poll.
+
+        Fragments are re-rendered on every poll, not only when the delta is
+        non-empty, because health classification is time-dependent: a run
+        that stopped writing crosses the stall threshold with no journal
+        growth at all, and the badge must flip without a reload.
+
+        All fragments are rendered by the same view-layer functions the
+        pages themselves use.  The endpoint is read-only but still applies
+        the Host-header gate to both shapes: a DNS-rebinding page could
+        otherwise read journal contents through it.
+        """
+        qs = ""
+        if "?" in self.path:
+            qs = self.path.split("?", 1)[1]
+        params: dict[str, str] = {}
+        for pair in qs.split("&"):
+            if "=" in pair:
+                key, val = pair.split("=", 1)
+                params[key] = unquote(val)
+
+        denied = _check_host_header(self.headers.get("Host", ""))
+        if denied is not None:
+            self.send_error(403, denied)
+            return
+
+        if "offset" not in params:
+            self._send_json(read_journal(max_entries=500))
+            return
+
+        try:
+            offset = int(params["offset"])
+        except ValueError:
+            self.send_error(400, "offset must be an integer")
+            return
+        if offset < 0:
+            self.send_error(400, "offset must be >= 0")
+            return
+
+        # Bound the offset: a legitimate client offset is at most the file
+        # size it polled at (itself capped by the rotation ceiling), so any
+        # offset beyond the current size plus the ceiling plus a one-line
+        # margin is a hand-crafted value that ``seek`` could not represent
+        # (OverflowError) -- refuse it instead of dropping the connection.
+        # Offsets merely above the current size (rotation detection) are
+        # untouched.
+        live_size = get_journal_live_size()
+        if offset > live_size + _MAX_JOURNAL_SIZE + (1 << 20):
+            self.send_error(400, "offset out of range")
+            return
+
+        generation: int | None = None
+        if "gen" in params:
+            try:
+                generation = int(params["gen"])
+            except ValueError:
+                self.send_error(400, "gen must be an integer")
+                return
+
+        entries, next_offset, rotated, gen = read_journal_tail(offset, generation)
+
+        payload: dict[str, Any] = {
+            "entries": entries,
+            "next_offset": next_offset,
+            "rotated": rotated,
+            "generation": gen,
+        }
+
+        view = params.get("view", "")
+        if view == "containers":
+            # Rows are Docker + journal state; re-render every poll so an
+            # externally-killed container shows up without waiting for the
+            # next journal entry.
+            payload.update(_containers_fragments())
+        elif view == "dashboard":
+            payload.update(_dashboard_fragments())
+        elif view == "trace":
+            run_id = params.get("run_id")
+            if run_id:
+                payload.update(_trace_fragments(run_id))
+
+        self._send_json(payload)
 
     def _serve_trace(self, path: str) -> None:
         parts = path.split("/")
@@ -1436,7 +1848,19 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                     fmt = "json"
                     break
 
-        entries = read_journal(run_id=run_id)
+        # Single snapshot (#776): rows and the poll start offset come from
+        # one locked read, so the poll range exactly continues the rendered
+        # rows -- an entry appended between the render and the first poll is
+        # delivered by the poller, and nothing already rendered is
+        # re-delivered (the offset is embedded in the page as the poller's
+        # starting position).
+        entries, journal_offset = read_journal_snapshot(run_id=run_id)
+        if not entries:
+            # The real journal has nothing for this run, but the page's
+            # read_journal view may still (callers that supply a journal
+            # view through it): fall back before declaring the run missing.
+            entries = read_journal(run_id=run_id)
+            journal_offset = get_journal_live_size()
         if not entries:
             self.send_error(404, "Run not found")
             return
@@ -1534,6 +1958,11 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             health=_escape(health),
             health_cls=health_cls,
             rows="\n".join(rows_parts),
+            live_script=_live_script(
+                view="trace",
+                journal_offset=journal_offset,
+                run_id=run_id,
+            ),
         )
         self._send_html(html_content)
 

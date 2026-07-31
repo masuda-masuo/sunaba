@@ -16,10 +16,12 @@ import html as _html
 import json
 import secrets
 import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from sunaba.health import HEALTH_ORDER, classify_all_runs, classify_run_health
 from sunaba.journal import (
     get_active_environments,
     get_journal_path,
@@ -75,6 +77,11 @@ nav a.active { color: #f0f6fc; font-weight: 600; }
 .badge.net-off { background: #21262d; color: #8b949e; }
 .badge.net-unknown { background: #21262d; color: #484f58; }
 .badge.kind-proxy { background: #382a10; color: #ffa657; }
+.badge.health-done { background: #1b3820; color: #7ee787; }
+.badge.health-looping { background: #381620; color: #f97583; }
+.badge.health-stalled { background: #382a10; color: #ffa657; }
+.badge.health-regression { background: #2d1b38; color: #d2a8ff; }
+.badge.health-progressing { background: #21262d; color: #8b949e; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #21262d; }
 th { color: #8b949e; font-weight: 600; }
@@ -156,6 +163,7 @@ _DASHBOARD_HTML: str = """<!DOCTYPE html>
 <table>
 <thead>
 <tr>
+  <th>Health</th>
   <th>Run ID</th>
   <th>Started</th>
   <th>Image</th>
@@ -171,8 +179,8 @@ _DASHBOARD_HTML: str = """<!DOCTYPE html>
 </table>
 </body>
 </html>"""
-
 _RUN_ROW: str = """<tr>
+  <td>{health}</td>
   <td class="mono">{run_id}</td>
   <td>{started}</td>
   <td class="mono">{image}</td>
@@ -319,6 +327,11 @@ tr:hover {{ background: #161b22; }}
 .phase-check.pass {{ color: #7ee787; }}
 .phase-check.fail {{ color: #f97583; }}
 .phase-roundtrip {{ color: #ffa657; font-size: 11px; margin-left: 8px; }}
+.health-done {{ color: #7ee787; font-weight: 600; }}
+.health-looping {{ color: #f97583; font-weight: 600; }}
+.health-stalled {{ color: #ffa657; font-weight: 600; }}
+.health-regression {{ color: #d2a8ff; font-weight: 600; }}
+.health-progressing {{ color: #8b949e; font-weight: 600; }}
 </style>
 </head>
 <body>
@@ -329,6 +342,7 @@ tr:hover {{ background: #161b22; }}
   <div class="badge"><strong>Ended:</strong> {ended}</div>
   <div class="badge"><strong>Operations:</strong> {op_count}</div>
   <div class="badge"><strong>Boundary crossings:</strong> {boundary_count}</div>
+  <div class="badge"><strong>Health:</strong> <span class="{health_cls}">{health}</span></div>
 </div>
 {phase_view}
 <table>
@@ -346,6 +360,21 @@ tr:hover {{ background: #161b22; }}
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
+
+def _now_iso() -> str:
+    """Current UTC time in the journal's ISO-8601 format (``Z`` suffix)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _render_health_badge(health: str) -> str:
+    """Render a run-health badge (Issue #775).
+
+    *health* is one of :data:`sunaba.health.HEALTH_ORDER`; unknown values
+    fall back to the neutral ``progressing`` style.
+    """
+    cls = f"health-{health}" if health in HEALTH_ORDER else "health-progressing"
+    return f'<span class="badge {cls}">{_escape(health)}</span>'
 
 
 def _escape(text: str) -> str:
@@ -686,6 +715,7 @@ def _render_container_row(
     c: dict[str, Any],
     run_ids: dict[str, str],
     envs: dict[str, dict[str, Any]],
+    health_map: dict[str, str] | None = None,
 ) -> str:
     cid = c.get("container_id", "")
     name = c.get("name")
@@ -713,6 +743,10 @@ def _render_container_row(
         if run_id
         else '<span class="dim">—</span>'
     )
+    if run_id:
+        health = (health_map or {}).get(run_id)
+        if health:
+            run_cell = f'{_render_health_badge(health)} {run_cell}'
 
     return _CONTAINER_ROW.format(
         name=_escape(name) if name else '<span class="dim">(unnamed)</span>',
@@ -825,13 +859,19 @@ def _render_stop_confirm(container_id: str, warning: str) -> str:
     )
 
 
-def _render_containers_page(failed_stop: str | None = None) -> str:
+def _render_containers_page(
+    failed_stop: str | None = None,
+    now: str | None = None,
+) -> str:
     """Render the ``/containers`` page from Docker's own view of the world.
 
     *failed_stop* is a stop that could not be carried out.  Both it and a
     Docker-level listing failure are errors, which is why they share one banner
     and both have their ``Error:`` prefix stripped -- the banner is never used
     for anything that isn't a failure.
+
+    *now* is the classification timestamp (ISO-8601); defaults to the real
+    clock so callers can inject a fixed value for deterministic tests.
     """
     containers, error = list_managed_containers()
     run_ids = get_run_id_per_container()
@@ -840,6 +880,13 @@ def _render_containers_page(failed_stop: str | None = None) -> str:
         for env in get_active_environments()
     }
 
+    # Per-run health badges (Issue #775): aggregated from the journal, keyed
+    # by run_id, so each row can badge the run its container is attached to.
+    health_map = classify_all_runs(
+        aggregate_run_phases(None, read_journal()),
+        now if now is not None else _now_iso(),
+    )
+
     sandboxes = [c for c in containers if c.get("kind") != KIND_PROXY]
     sidecars = [c for c in containers if c.get("kind") == KIND_PROXY]
 
@@ -847,7 +894,9 @@ def _render_containers_page(failed_stop: str | None = None) -> str:
     # reason this page exists, so they sort to the top.
     sandboxes.sort(key=lambda c: c.get("idle_seconds") or 0.0, reverse=True)
 
-    rows = "\n".join(_render_container_row(c, run_ids, envs) for c in sandboxes)
+    rows = "\n".join(
+        _render_container_row(c, run_ids, envs, health_map) for c in sandboxes
+    )
     if not rows:
         rows = '<tr><td colspan="8" class="empty">No managed containers</td></tr>'
 
@@ -1019,6 +1068,13 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             len(env.get("services", [])) for env in active_envs
         )
 
+        # Per-run health badges (Issue #775): one classification pass over
+        # the whole aggregation state, then a lookup per row.
+        health_map = classify_all_runs(
+            aggregate_run_phases(None, read_journal()),
+            _now_iso(),
+        )
+
         run_rows_parts: list[str] = []
         for r in runs[:20]:  # show last 20 runs
             status = r.get("status", "running")
@@ -1029,6 +1085,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             image_short = _short_image(r.get("image", "unknown"))
             run_rows_parts.append(_RUN_ROW.format(
                 run_id=r["run_id"],
+                health=_render_health_badge(health_map.get(r["run_id"], "progressing")),
                 started=r.get("started", ""),
                 image=_escape(image_short),
                 ops=r.get("operations", 0),
@@ -1058,7 +1115,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             running_services=running_services,
             journal_path=str(get_journal_path()),
             journal_entries=journal_entries,
-            run_rows="\n".join(run_rows_parts) if run_rows_parts else '<tr><td colspan="7" class="empty">No runs recorded</td></tr>',
+            run_rows="\n".join(run_rows_parts) if run_rows_parts else '<tr><td colspan="8" class="empty">No runs recorded</td></tr>',
             tool_usage_panel=tool_usage_panel,
         )
         self._send_html(html_content)
@@ -1167,10 +1224,13 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             if e.get("boundary_crossing") or e.get("operation") == "boundary_crossing"
         )
 
-        # Phase aggregation
-        agg_state = aggregate_run_phases(None, entries)
+        # Phase aggregation (per-run) and health classification (full-state:
+        # the regression rule compares against other runs on the same repo).
+        agg_state = aggregate_run_phases(None, read_journal())
         run_state = phase_state_for_run(agg_state, run_id)
         phase_view_html = _build_phase_view(run_state)
+        health = classify_run_health(agg_state, run_id, _now_iso())
+        health_cls = f"health-{health}" if health in HEALTH_ORDER else "health-progressing"
 
         html_content = _TRACE_HTML.format(
             run_id=run_id,
@@ -1179,6 +1239,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             op_count=len(entries),
             boundary_count=boundary_count,
             phase_view=phase_view_html,
+            health=_escape(health),
+            health_cls=health_cls,
             rows="\n".join(rows_parts),
         )
         self._send_html(html_content)

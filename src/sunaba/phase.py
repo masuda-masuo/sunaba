@@ -6,6 +6,13 @@ via a single lookup table.  The core function :func:`aggregate_run_phases`
 has the incremental contract ``(state, new_entries) → state`` so live-update
 consumers can push tail deltas through the same function.
 
+Each per-run state also carries health-relevant markers for the rule-based
+classifier in :mod:`sunaba.health` (Issue #775): ``published`` (a
+``boundary:publish`` crossing was seen), ``stopped`` (a ``stop`` entry was
+seen) and ``last_op`` (the effective operation of the most recent entry).
+The markers are monotonic and idempotent, so the incremental contract is
+preserved.
+
 No LLM calls, no new journal record types, no agent-facing MCP tools.
 """
 
@@ -186,6 +193,9 @@ def _new_run_state(run_id: str) -> dict[str, Any]:
         "touched_files": [],
         "verify_timeline": [],
         "edit_verify_roundtrips": 0,
+        "published": False,
+        "stopped": False,
+        "last_op": "",
     }
 
 
@@ -262,6 +272,17 @@ def _incorporate(run: dict[str, Any], entry: dict[str, Any]) -> None:
             m = _REPO_RE.search(details)
             if m:
                 run["repo"] = m.group(1)
+
+    # \u2500\u2500 health markers (Issue #775) \u2500\u2500
+    # Monotonic, idempotent flags consumed by ``sunaba.health``: ``published``
+    # (saw a boundary:publish crossing), ``stopped`` (saw a stop entry) and
+    # ``last_op`` (effective operation of the most recent entry, used by the
+    # stalled rule's long-running-operation exemption).
+    run["last_op"] = eff
+    if eff == "boundary:publish":
+        run["published"] = True
+    if op == "stop":
+        run["stopped"] = True
 
     # ── touched files ─────────────────────────────────────────
     fp = _file_path_from_entry(entry)

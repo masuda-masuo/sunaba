@@ -2,7 +2,7 @@
 
 For optimal performance and security, Sunaba is designed to run as a resident background service (daemon) under `systemd`. 
 
-Standard stdio-based MCP setups are subject to client-side 60-second timeouts, which can abort long-running Docker pulls or test runs. Running Sunaba as a systemd service using the `streamable-http` transport completely avoids stdio timeouts, handles automatic credential rotation, and allows sharing the sandbox container across multiple IDE clients (e.g., opencode and Claude Desktop).
+Running Sunaba as a systemd service using the `streamable-http` transport avoids client-side timeouts, handles automatic credential rotation, and allows sharing the sandbox container across multiple IDE clients (e.g., opencode and Claude Desktop).
 
 ```
 Claude Desktop ── mcp-remote ┐

@@ -75,7 +75,7 @@ The heavy data (repositories, full diffs, raw logs) lives and dies inside the co
 
 ## Quick Start (WSL2 / Linux Daemon Setup)
 
-Sunaba is designed to run as a resident background service (daemon) under `systemd` to avoid stdio client timeouts (60 seconds) and support persistent token rotation.
+Sunaba is designed to run as a resident background service (daemon) under `systemd` to support persistent token rotation and long-running Docker operations without client timeouts.
 
 Follow these three phases to install and start the service:
 
@@ -114,7 +114,7 @@ For client configurations (such as connecting Claude Desktop via `mcp-remote`) a
 ## Prerequisites & First-Run Pitfalls
 
 *   **Docker daemon must be running**: `docker info` should succeed before you start.
-*   **The first initialization can take several minutes**: The first call to `sandbox_initialize` pulls the base sandbox images from GHCR. If using stdio, this can trigger client timeouts. We recommend using the [systemd Daemon Setup](docs/daemon_setup.md) to handle this.
+*   **The first initialization can take several minutes**: The first call to `sandbox_initialize` pulls the base sandbox images from GHCR. We recommend running Sunaba as a [systemd daemon](docs/daemon_setup.md) to handle long-running operations.
 *   **Network is off by default**: Anything that touches the network inside the container (e.g. `package_install`, `publish`) requires setting `allow_network=True` during initialization.
 
 ### Troubleshooting

@@ -20,7 +20,7 @@
 | **UC-6** | **Dependency installation & upgrade verification**| `package_install` (Python) → `verify_in_container` | **○** (Pip only. See §3.3) |
 | **UC-7** | **JS / TS project development** | Edit-verify loop (`search` / `eslint` / `tsc` / `jest`) → `verify_in_container` | **◎** (Resolved in #493) |
 | **UC-8** | **Go project development** | Edit-verify loop in `sandbox:go` image → `verify_in_container` (via `go test -json`) | **◎** (Resolved in #493) |
-| **UC-9** | **Long-running jobs** (compilations, large test suites) | `sandbox_exec_background` → `sandbox_exec_check` (over SSE/HTTP) | **○** (Job dictionary is in-memory) |
+| **UC-9** | **Long-running jobs** (compilations, large test suites) | `sandbox_exec_background` → `sandbox_exec_check` (over streamable-http) | **○** (Job dictionary is in-memory) |
 | **UC-10**| **Web servers / multi-service integration testing** | Start server inside container → run `curl` from within same container | **△** (See §3.5) |
 | **UC-11**| **Human post-hoc audit & code review** | Review via `journal.log` / `traces` / web dashboard / notifications | **◎** |
 | **UC-12**| **Writing investigation summaries & comments** | `sandbox_issue_write` | **○** |

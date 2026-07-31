@@ -21,6 +21,7 @@ from sunaba.journal import (
     record_boundary_crossing,
     record_copy,
     record_exec,
+    record_exec_start,
     record_file_write,
     record_initialize,
     record_initialize_complete,
@@ -102,6 +103,64 @@ class TestJournalWrite:
 
         entries = _read_log(log_path)
         assert entries[0]["exit_code"] == 1
+
+    def test_record_exec_start_creates_start_entry(self, tmp_path: Path):
+        """record_exec_start writes the pre-execution entry: same identity
+        fields as the completion, but no exit_code / outcome fields
+        (Issue #789)."""
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
+            record_exec_start("abc123", ["pytest tests/ -x"], verbose="summary")
+
+        entries = _read_log(log_path)
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["operation"] == "exec"
+        assert e["container_id"] == "abc123"
+        assert e["commands"] == ["pytest tests/ -x"]
+        assert e["verbose"] == "summary"
+        assert "exit_code" not in e  # the outcome belongs to the completion
+        assert "output_size" not in e
+        assert "max_output_tokens" not in e
+
+    def test_exec_start_then_completion_pair(self, tmp_path: Path):
+        """A foreground exec journals start then completion; the pair is
+        distinguished by the presence of ``exit_code`` (Issue #789)."""
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
+            record_exec_start("abc123", ["pytest tests/ -x"], verbose="summary")
+            record_exec("abc123", ["pytest tests/ -x"], exit_code=0, verbose="summary")
+
+        entries = _read_log(log_path)
+        assert len(entries) == 2
+        assert "exit_code" not in entries[0]
+        assert entries[1]["exit_code"] == 0
+        assert entries[0]["run_id"] == entries[1]["run_id"]
+
+    def test_get_tool_usage_counts_exec_pair_once(self, tmp_path: Path):
+        """get_tool_usage counts one exec per start+completion pair: the
+        start entry is not a separate operation (Issue #789)."""
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
+            get_or_create_run_id("abc123")
+            record_exec_start("abc123", ["ls"], verbose="summary")
+            record_exec("abc123", ["ls"], exit_code=0, verbose="summary")
+            usage = get_tool_usage()
+
+        assert usage["exec_ops"] == 1
+        assert usage["exec_entry_count"] == 1
 
     def test_record_stop_creates_entry(self, tmp_path: Path):
         journal_dir = tmp_path / "journal"

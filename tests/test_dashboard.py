@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -126,24 +128,19 @@ class TestHealthBadges:
             {"ts": "2026-01-01T00:00:00Z", "run_id": "run-1", "container_id": "abc", "operation": "initialize"},
             {"ts": "2026-01-01T00:00:01Z", "run_id": "run-1", "container_id": "abc", "operation": "stop"},
         ]
-        run_summary = [{
-            "run_id": "run-1",
-            "started": "2026-01-01T00:00:00Z",
-            "image": "python:3.12",
-            "operations": 2,
-            "boundary_crossings": 0,
-            "vcs_operations": 0,
-            "status": "stopped",
-        }]
         start_dashboard(host="127.0.0.1", port=0)
         try:
             with (
-                patch("sunaba.dashboard.get_runs", return_value=run_summary),
-                patch("sunaba.dashboard.read_journal", return_value=entries),
+                # The fragments render from the incremental cache (Issue
+                # #789); it primes from read_journal_snapshot, so that is
+                # the hook that feeds the fixture entries in -- rows and
+                # health badges both come from the same state now.
+                patch("sunaba.dashboard.read_journal_snapshot", return_value=(entries, 0)),
             ):
                 html = self._serve("/")
                 assert 'class="badge health-done"' in html
                 assert ">done<" in html
+                assert "run-1" in html  # the run row itself
         finally:
             stop_dashboard()
 
@@ -169,9 +166,13 @@ class TestHealthBadges:
         try:
             with (
                 patch("sunaba.dashboard.list_managed_containers", return_value=([container], None)),
-                patch("sunaba.dashboard.get_run_id_per_container", return_value={"abc123def456": "run-9"}),
-                patch("sunaba.dashboard.get_active_environments", return_value=[]),
-                patch("sunaba.dashboard.read_journal", return_value=entries),
+                # The fragments now read the run mapping and environments
+                # from the incremental cache accessors (Issue #789), so the
+                # patches move to those hooks.
+                patch("sunaba.dashboard._cached_run_ids", return_value={"abc123def456": "run-9"}),
+                patch("sunaba.dashboard._cached_active_envs", return_value=[]),
+                # The aggregation (health badges) primes from the snapshot.
+                patch("sunaba.dashboard.read_journal_snapshot", return_value=(entries, 0)),
             ):
                 html = self._serve("/containers")
                 assert 'class="badge health-done"' in html
@@ -187,10 +188,17 @@ class TestHealthBadges:
         ]
         start_dashboard(host="127.0.0.1", port=0)
         try:
-            with patch("sunaba.dashboard.read_journal", return_value=entries):
+            with (
+                # The trace rows come from read_journal_snapshot and the
+                # header aggregation from the incremental cache (Issue #789),
+                # which primes from the same function -- one patch feeds both.
+                patch("sunaba.dashboard.read_journal_snapshot", return_value=(entries, 0)),
+            ):
                 html = self._serve("/trace/run-1")
                 assert "<strong>Health:</strong>" in html
-                assert "health-done" in html
+                # The badge value itself (not just the stylesheet class):
+                # run-1 has a stop entry, so the header must say "done".
+                assert 'id="health-badge" class="health-done">done<' in html
         finally:
             stop_dashboard()
 
@@ -468,8 +476,10 @@ class TestJournalDiffEndpoint:
         try:
             with (
                 patch("sunaba.dashboard.list_managed_containers", return_value=([], None)),
-                patch("sunaba.dashboard.get_run_id_per_container", return_value={}),
-                patch("sunaba.dashboard.get_active_environments", return_value=[]),
+                # The fragments read the run mapping and environments from
+                # the incremental cache accessors (Issue #789).
+                patch("sunaba.dashboard._cached_run_ids", return_value={}),
+                patch("sunaba.dashboard._cached_active_envs", return_value=[]),
             ):
                 _, data = self._fetch(self._journal_url() + "?offset=0&view=containers")
             assert "rows_html" in data
@@ -652,8 +662,10 @@ class TestLiveUpdatePages:
         try:
             with (
                 patch("sunaba.dashboard.list_managed_containers", return_value=([], None)),
-                patch("sunaba.dashboard.get_run_id_per_container", return_value={}),
-                patch("sunaba.dashboard.get_active_environments", return_value=[]),
+                # The fragments read the run mapping and environments from
+                # the incremental cache accessors (Issue #789).
+                patch("sunaba.dashboard._cached_run_ids", return_value={}),
+                patch("sunaba.dashboard._cached_active_envs", return_value=[]),
             ):
                 html = self._serve("/containers")
             assert 'id="container-rows"' in html
@@ -691,9 +703,10 @@ class TestLiveUpdatePages:
 
         with (
             patch("sunaba.dashboard.list_managed_containers", return_value=([], None)),
-            patch("sunaba.dashboard.get_run_id_per_container", return_value={}),
-            patch("sunaba.dashboard.get_active_environments", return_value=[]),
-            patch("sunaba.dashboard.read_journal", return_value=[]),
+            # The fragments read the run mapping and environments from
+            # the incremental cache accessors (Issue #789).
+            patch("sunaba.dashboard._cached_run_ids", return_value={}),
+            patch("sunaba.dashboard._cached_active_envs", return_value=[]),
         ):
             html = _render_containers_page(failed_stop="Error: stop went wrong")
             frag = _containers_fragments()
@@ -705,3 +718,227 @@ class TestLiveUpdatePages:
         assert "stop went wrong" in stop_div
         # The polled fragment never carries the stop failure.
         assert "stop went wrong" not in frag["error_html"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #789: incremental aggregation cache
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalAggCache:
+    """Per-poll fragment rendering must stop re-parsing the whole journal.
+
+    The aggregation state is maintained server-side: one full read primes
+    the cache, every later call reads only the live-file tail and folds the
+    delta through ``aggregate_run_phases`` (the #774 incremental contract).
+    These tests property-check the cache against a from-scratch aggregation
+    over the whole journal (two chunks), and against the post-rotation
+    journal (rebuild once, then continue incrementally).
+
+    The autouse ``_isolate_journal`` fixture redirects the journal to a
+    per-test tmp dir, and the cache is keyed by journal path, so each test
+    gets an independent cache and journal.
+    """
+
+    _ENTRY_INIT = {"ts": "2026-01-01T00:00:00Z", "run_id": "run-1", "container_id": "abc", "operation": "initialize", "image": "python:3.12"}
+    # Issue #789 exec double-entry: a start (no exit_code) then the completion.
+    _ENTRY_EXEC_START = {"ts": "2026-01-01T00:00:01Z", "run_id": "run-1", "container_id": "abc", "operation": "exec", "commands": ["pytest tests/ -x"], "verbose": "summary"}
+    _ENTRY_EXEC_DONE = {"ts": "2026-01-01T00:00:02Z", "run_id": "run-1", "container_id": "abc", "operation": "exec", "commands": ["pytest tests/ -x"], "exit_code": 0}
+    _ENTRY_EDIT = {"ts": "2026-01-01T00:00:03Z", "run_id": "run-1", "container_id": "abc", "operation": "tool_use", "tool_name": "edit_file", "params": {"file_path": "a.py"}}
+    _ENTRY_STOP = {"ts": "2026-01-01T00:00:04Z", "run_id": "run-1", "container_id": "abc", "operation": "stop"}
+
+    def _journal_path(self):
+        from sunaba import journal as jmod
+        return jmod._JOURNAL_PATH
+
+    def _write(self, *entries: dict) -> None:
+        """Append JSON-lines entries to the test-isolated live journal."""
+        path = self._journal_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+    def _from_scratch(self) -> dict:
+        """Aggregate the whole journal (backup + live) at once."""
+        from sunaba.journal import read_journal
+        from sunaba.phase import aggregate_run_phases
+        return aggregate_run_phases(None, read_journal())
+
+    def test_incremental_matches_from_scratch(self):
+        """Chunk 2 folded through the cache == aggregating both chunks at once.
+
+        The exec double-entry must also survive: the cached state counts
+        exec exactly once in ``op_calls`` (no double application).
+        """
+        from sunaba.dashboard import _cached_agg_state
+
+        self._write(self._ENTRY_INIT, self._ENTRY_EXEC_START, self._ENTRY_EXEC_DONE)
+        state1 = _cached_agg_state()  # primes with a full read
+        assert state1 == self._from_scratch()
+        assert state1["run-1"]["op_calls"]["exec"] == 1
+
+        # The rest of the journal arrives; the cache applies only the delta.
+        self._write(self._ENTRY_EDIT, self._ENTRY_STOP)
+        state2 = _cached_agg_state()
+        assert state2 == self._from_scratch()
+        assert state2["run-1"]["op_calls"]["exec"] == 1  # still one call
+        assert state2["run-1"]["published"] is False
+
+        # An empty delta leaves the state unchanged (same object content).
+        state3 = _cached_agg_state()
+        assert state3 == state2
+
+        # The derived views (journal-card stat, run mapping, environments)
+        # are maintained from the same deltas at the same offset.
+        from sunaba.dashboard import _cached_journal_entry_count
+        assert _cached_journal_entry_count() == 5  # init+exec+exec+edit+stop
+
+    def test_run_summaries_match_get_runs(self):
+        """The state-derived run summaries mirror journal.get_runs for the
+        same journal (Issue #789): the per-poll rows keep the old shape and
+        semantics without full-parsing."""
+        from sunaba.dashboard import _cached_agg_state, _run_summaries_from_state
+        from sunaba.journal import get_runs
+
+        self._write(
+            self._ENTRY_INIT, self._ENTRY_EXEC_START, self._ENTRY_EXEC_DONE,
+            self._ENTRY_EDIT,
+            {"ts": "2026-01-01T00:00:04Z", "run_id": "run-1", "container_id": "abc",
+             "operation": "boundary_crossing", "sub_operation": "publish",
+             "details": "https://github.com/o/r/pull/1"},
+            self._ENTRY_STOP,
+        )
+        state = _cached_agg_state()
+        summaries = _run_summaries_from_state(state)
+        expected = get_runs()
+
+        assert len(summaries) == len(expected) == 1
+        for key in (
+            "run_id", "started", "image", "operations",
+            "boundary_crossings", "vcs_operations", "status",
+        ):
+            assert summaries[0][key] == expected[0][key], key
+        # The fixture run ends with a stop: both views agree it is stopped
+        # and count one publish crossing / one vcs op.
+        assert summaries[0]["status"] == "stopped"
+        assert summaries[0]["boundary_crossings"] == 1
+        assert summaries[0]["vcs_operations"] == 1
+
+    def test_cache_returns_isolated_snapshots(self):
+        """Each call returns a fresh deep copy, never the live cache state.
+
+        ``aggregate_run_phases`` folds later deltas into the same per-run
+        dicts in place; renders iterate counter dicts, and a dict resize
+        mid-iteration would raise.  The snapshot contract keeps renders
+        safe and means mutating a returned state cannot corrupt the cache.
+        """
+        from sunaba.dashboard import _cached_agg_state
+
+        self._write(self._ENTRY_INIT, self._ENTRY_EXEC_START, self._ENTRY_EXEC_DONE)
+        s1 = _cached_agg_state()
+        s2 = _cached_agg_state()
+        assert s1 is not s2  # fresh object per call, not the stored state
+        assert s1 == s2
+
+        # Mutating a returned snapshot leaves the cache untouched.
+        s1["run-1"]["op_calls"]["exec"] = 999
+        s1["run-1"]["touched_files"].append("polluted")
+        fresh = _cached_agg_state()
+        assert fresh["run-1"]["op_calls"]["exec"] == 1
+        assert "polluted" not in fresh["run-1"]["touched_files"]
+
+    def test_rotation_rebuild_matches_from_scratch(self):
+        """After the live file is replaced the cache rebuilds once from a
+        full read (backup included) and keeps matching from-scratch."""
+        from sunaba import journal as jmod
+        from sunaba.dashboard import _cached_agg_state
+
+        self._write(self._ENTRY_INIT, self._ENTRY_EXEC_START, self._ENTRY_EXEC_DONE)
+        _cached_agg_state()
+
+        # Rotate exactly as _rotate_if_needed_unlocked does: live ->
+        # journal.log.1, then new writes into a fresh journal.log.
+        path = self._journal_path()
+        path.replace(jmod._JOURNAL_BACKUP_PATH)
+        self._write(self._ENTRY_EDIT, self._ENTRY_STOP)
+
+        state = _cached_agg_state()  # detects rotation, rebuilds once
+        assert state == self._from_scratch()
+        assert state["run-1"]["stopped"] is True
+
+        # ...and continues incrementally after the rebuild.
+        self._write(self._ENTRY_EDIT)  # a further write after rotation
+        assert _cached_agg_state() == self._from_scratch()
+
+    def test_fragments_do_not_full_parse(self):
+        """The per-poll fragment paths must not full-parse the journal.
+
+        Issue #789 acceptance: ``_trace_fragments`` / ``_containers_fragments``
+        / ``_dashboard_fragments`` no longer call ``read_journal()`` on a
+        poll -- directly or transitively through the journal summary
+        helpers (``get_runs`` / ``get_run_id_per_container`` /
+        ``get_active_environments``) -- and no longer scan the whole file
+        for the entries stat.  Only the incremental cache reads the tail
+        (and the rotation-rebuild path, through ``read_journal_snapshot``).
+        """
+        from sunaba.dashboard import (
+            _containers_fragments,
+            _dashboard_fragments,
+            _trace_fragments,
+        )
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("full journal parse called from a fragment path")
+
+        with (
+            patch("sunaba.journal.read_journal", side_effect=_boom),
+            patch("sunaba.journal.get_runs", side_effect=_boom),
+            patch("sunaba.journal.get_run_id_per_container", side_effect=_boom),
+            patch("sunaba.journal.get_active_environments", side_effect=_boom),
+            patch("sunaba.dashboard.read_journal", side_effect=_boom),
+            patch("sunaba.dashboard.get_runs", side_effect=_boom),
+            patch("sunaba.dashboard.list_managed_containers", return_value=([], None)),
+        ):
+            _containers_fragments()
+            _dashboard_fragments()
+            _trace_fragments("run-1")
+
+    def test_concurrent_polls_apply_each_delta_once(self):
+        """Concurrent polls never double-apply a delta.
+
+        Polls arrive on ThreadingHTTPServer threads; the cache lock
+        serializes delta application, so after all writers finish the
+        cached state equals a from-scratch aggregation -- counters like
+        ``op_calls`` would be corrupted by a duplicated application.
+        """
+        from sunaba.dashboard import _cached_agg_state
+
+        self._write(self._ENTRY_INIT, self._ENTRY_EXEC_START, self._ENTRY_EXEC_DONE)
+        _cached_agg_state()
+
+        errors: list[BaseException] = []
+
+        def poller() -> None:
+            try:
+                for _ in range(50):
+                    _cached_agg_state()
+            except BaseException as e:  # pragma: no cover - failure path
+                errors.append(e)
+
+        threads = [threading.Thread(target=poller) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for i in range(40):
+            self._write(self._ENTRY_EDIT)
+            time.sleep(0.001)
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        state = _cached_agg_state()
+        assert state == self._from_scratch()
+        assert state["run-1"]["op_calls"]["exec"] == 1
+        # Chunk 1 had no edit; all 40 concurrent-phase writes were applied
+        # exactly once each.
+        assert state["run-1"]["op_calls"]["tool:edit_file"] == 40

@@ -222,8 +222,9 @@ class TestStop:
                 "sunaba.dashboard.sandbox_stop",
                 return_value="Error: container abc123def456 not found",
             ),
-            patch("sunaba.dashboard.get_run_id_per_container", return_value={}),
-            patch("sunaba.dashboard.get_active_environments", return_value=[]),
+            # The row data now comes from the incremental cache accessors.
+            patch("sunaba.dashboard._cached_run_ids", return_value={}),
+            patch("sunaba.dashboard._cached_active_envs", return_value=[]),
         ):
             status, body = _post(
                 dashboard,
@@ -277,8 +278,9 @@ class TestStopButtonRendering:
                 "sunaba.dashboard.list_managed_containers",
                 return_value=([_sandbox(), _proxy()], None),
             ),
-            patch("sunaba.dashboard.get_run_id_per_container", return_value={}),
-            patch("sunaba.dashboard.get_active_environments", return_value=[]),
+            # The row data now comes from the incremental cache accessors.
+            patch("sunaba.dashboard._cached_run_ids", return_value={}),
+            patch("sunaba.dashboard._cached_active_envs", return_value=[]),
         ):
             with urllib.request.urlopen(dashboard + "/containers") as resp:
                 body = resp.read().decode("utf-8")

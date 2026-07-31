@@ -52,6 +52,22 @@ def _pytest(ts: str, exit_code: int = 1, **kwargs) -> dict:
     return _entry("exec", ts, commands=["pytest tests/"], exit_code=exit_code, **kwargs)
 
 
+def _exec_start(ts: str, **kwargs) -> dict:
+    """An exec START entry (no ``exit_code``) -- Issue #789.
+
+    Recorded before a foreground ``sandbox_exec`` runs; the completion
+    entry carrying the real exit code follows when it finishes.
+    """
+    return _entry("exec", ts, commands=["pytest tests/ -x"], **kwargs)
+
+
+def _exec_completion(ts: str, exit_code: int = 0, **kwargs) -> dict:
+    """The exec completion entry carrying the real exit code."""
+    return _entry(
+        "exec", ts, commands=["pytest tests/ -x"], exit_code=exit_code, **kwargs
+    )
+
+
 def _verify_pending(ts: str, **kwargs) -> dict:
     """A verify_in_container call recorded before execution (no result)."""
     return _tool("verify_in_container", ts, **kwargs)
@@ -303,6 +319,121 @@ class TestStalled:
     def test_no_timestamp_run_is_not_stalled(self):
         state = aggregate_run_phases(None, [_entry("initialize", "")])
         assert classify_run_health(state, "test-run", "2026-01-01T03:00:00Z") == "progressing"
+
+
+class TestExecInFlight:
+    """Exec START entries (Issue #789) get the same bounded in-flight
+    exemption as pending verify: within the grace window the run is busy,
+    past it (or after the completion entry) it stalls normally."""
+
+    def test_exec_start_last_entry_is_not_stalled_within_grace(self):
+        """A >10-minute test suite via foreground sandbox_exec writes
+        nothing to the journal while running; 15 minutes after the START
+        entry the run must not read as stalled."""
+        entries = [
+            _entry("initialize", _seq(0)),
+            _exec_start(_seq(1)),
+        ]
+        state = aggregate_run_phases(None, entries)
+        assert state["test-run"]["exec_in_flight"] is True
+        assert classify_run_health(state, "test-run", "2026-01-01T00:15:00Z") == "progressing"
+
+    def test_exec_start_exemption_lapses_after_grace(self):
+        """40+ minutes after the START with no completion means the session
+        died mid-exec (or the tool never finished) -- stalled."""
+        entries = [
+            _entry("initialize", _seq(0)),
+            _exec_start(_seq(1)),
+        ]
+        state = aggregate_run_phases(None, entries)
+        assert classify_run_health(state, "test-run", "2026-01-01T00:40:00Z") == "stalled"
+
+    def test_exec_start_grace_argument_override(self):
+        entries = [
+            _entry("initialize", _seq(0)),
+            _exec_start(_seq(1)),
+        ]
+        state = aggregate_run_phases(None, entries)
+        now = "2026-01-01T00:15:00Z"
+        assert classify_run_health(state, "test-run", now) == "progressing"
+        assert (
+            classify_run_health(state, "test-run", now, inflight_grace_minutes=12)
+            == "stalled"
+        )
+
+    def test_exec_completion_stalls_normally(self):
+        """Once the completion entry is written the exec finished; 15
+        minutes of silence after it is real idle time -- stalled."""
+        entries = [
+            _entry("initialize", _seq(0)),
+            _exec_completion(_seq(1), exit_code=0),
+        ]
+        state = aggregate_run_phases(None, entries)
+        assert state["test-run"]["exec_in_flight"] is False
+        assert classify_run_health(state, "test-run", "2026-01-01T00:15:00Z") == "stalled"
+
+    def test_background_dispatch_sentinel_gets_no_exemption(self):
+        """A background-exec dispatch sentinel (exit_code=-1) is
+        completion-shaped: the run is not treated as in-flight (Issue #789,
+        background execs are out of scope for the exemption)."""
+        entries = [
+            _entry("initialize", _seq(0)),
+            _exec_completion(_seq(1), exit_code=-1, verbose="background"),
+        ]
+        state = aggregate_run_phases(None, entries)
+        assert state["test-run"]["exec_in_flight"] is False
+        assert classify_run_health(state, "test-run", "2026-01-01T00:15:00Z") == "stalled"
+
+
+class TestHostRuns:
+    """Host-scoped runs (run_id prefixed ``host-``, #778) are never
+    ``stalled`` (Issue #789): they have no session-end lifecycle -- no
+    ``stop`` entry is ever written for them -- so idle time is expected
+    and must not read as a dead session.  Every other rule still applies.
+    """
+
+    def _host_journal(self, run_id: str = "host-abc123") -> list[dict]:
+        return [
+            _boundary("issue_write", _seq(0), run_id=run_id, container_id=None),
+            _boundary("issue_view", _seq(1), run_id=run_id, container_id=None),
+        ]
+
+    def test_host_run_idle_for_hours_is_not_stalled(self):
+        state = aggregate_run_phases(None, self._host_journal())
+        assert state["host-abc123"]["host"] is True
+        assert (
+            classify_run_health(state, "host-abc123", "2026-01-01T06:00:00Z")
+            == "progressing"
+        )
+
+    def test_container_run_same_fixture_is_stalled(self):
+        """The exclusion is host-only: a container run with the same idle
+        fixture still reads as stalled."""
+        entries = self._host_journal(run_id="deadbeef12ab")
+        state = aggregate_run_phases(None, entries)
+        assert state["deadbeef12ab"]["host"] is False
+        assert (
+            classify_run_health(state, "deadbeef12ab", "2026-01-01T06:00:00Z")
+            == "stalled"
+        )
+
+    def test_published_host_run_is_done(self):
+        entries = self._host_journal() + [
+            _boundary(
+                "publish", _seq(2), run_id="host-abc123", container_id=None,
+                details="https://github.com/o/r/pull/1",
+            ),
+        ]
+        state = aggregate_run_phases(None, entries)
+        assert classify_run_health(state, "host-abc123", "2026-01-01T06:00:00Z") == "done"
+
+    def test_looping_host_run_is_still_looping(self):
+        """Only the stalled rule is excluded; looping still fires."""
+        entries = _looping_journal(3, run_id="host-abc123")
+        state = aggregate_run_phases(None, entries)
+        assert state["host-abc123"]["host"] is True
+        assert state["host-abc123"]["edit_verify_roundtrips"] == 3
+        assert classify_run_health(state, "host-abc123", "2026-01-01T03:00:00Z") == "looping"
 
 
 class TestThresholdClamping:

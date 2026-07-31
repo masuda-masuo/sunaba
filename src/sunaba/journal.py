@@ -424,6 +424,48 @@ def record_exec(
     _update_container_state(container_id, used=True)
 
 
+def record_exec_start(
+    container_id: str,
+    commands: list[str],
+    verbose: str = "summary",
+    allow_network: bool = False,
+    session_label: str | None = None,
+) -> None:
+    """Append an ``exec`` START entry to the run journal (Issue #789).
+
+    A foreground ``sandbox_exec`` can run for minutes without any other
+    journal activity, so the completion-only record made the run look idle
+    (and, on the dashboard, ``stalled``) while it was busy.  This call is
+    recorded *before* execution begins; the completion entry
+    (:func:`record_exec`, unchanged) follows when the exec finishes.
+
+    The two entries are distinguished by the presence of ``exit_code``:
+    the start entry has none (and no ``output_size`` / ``max_output_tokens``
+    -- nothing outcome-shaped), the completion entry carries them.  Readers
+    that count exec *calls* count the start entry; readers that need the
+    outcome read the completion entry.  Background-exec dispatch sentinels
+    are written via :func:`record_exec` with ``exit_code=-1`` and are
+    untouched (Issue #359).
+    """
+    if session_label is not None:
+        set_session_label(container_id, session_label)
+    run_id = get_or_create_run_id(container_id)
+    entry: dict[str, Any] = {
+        "ts": _utcnow_iso(),
+        "run_id": run_id,
+        "container_id": container_id,
+        "operation": "exec",
+        "commands": commands,
+        "verbose": verbose,
+        "boundary_crossing": allow_network,
+    }
+    label = get_session_label(container_id)
+    if label is not None:
+        entry["session_label"] = label
+    _append_json(entry)
+    _update_container_state(container_id, used=True)
+
+
 def record_stop(container_id: str) -> None:
     """Record a container stop event."""
     run_id = get_or_create_run_id(container_id)
@@ -1090,6 +1132,11 @@ def get_tool_usage(
             continue
 
         if op == "exec":
+            # Issue #789: every foreground exec journals a start entry
+            # (no ``exit_code``) before running and the completion after;
+            # count each exec once, from its completion.
+            if "exit_code" not in entry:
+                continue
             exec_ops += 1
             exec_entry_count += 1
             commands = entry.get("commands", [])

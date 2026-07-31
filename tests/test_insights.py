@@ -80,12 +80,17 @@ class TestPerToolErrorRate:
 
     def test_basic_counts(self):
         """Operations that fail increment op_failures; op_calls count all calls."""
+        # Issue #789: each exec journals a start (no exit_code -- the call)
+        # then the completion (the outcome); two execs must be two calls,
+        # one failure -- never double-counted.
         entries = [
             _entry("initialize", ts=_ts(1), image="python:3.12"),
             _tool_entry("edit_file", ts=_ts(2)),
             _tool_entry("edit_file", ts=_ts(3)),
-            _entry("exec", ts=_ts(4), commands=["pytest"], exit_code=1),  # fail
-            _entry("exec", ts=_ts(5), commands=["pytest"], exit_code=0),
+            _entry("exec", ts=_ts(4), commands=["pytest"]),  # start
+            _entry("exec", ts=_ts(5), commands=["pytest"], exit_code=1),  # fail
+            _entry("exec", ts=_ts(6), commands=["pytest"]),  # start
+            _entry("exec", ts=_ts(7), commands=["pytest"], exit_code=0),
         ]
         state = aggregate_run_phases(None, entries)
         result = per_tool_error_rate(state)
@@ -167,10 +172,15 @@ class TestPerToolErrorRate:
         """exec → exec-fail → edit: the second exec is the first failure's
         immediately-following action, edit recovers the second (review
         finding: consecutive failures lost the first one's recovery)."""
+        # Issue #789: each exec journals a start (the call) then the
+        # completion (the outcome); the second exec's start is the first
+        # failure's immediately-following action.
         entries = [
-            _entry("exec", ts=_ts(1), commands=["a"], exit_code=1),
-            _entry("exec", ts=_ts(2), commands=["b"], exit_code=1),
-            _tool_entry("edit_file", ts=_ts(3)),
+            _entry("exec", ts=_ts(1), commands=["a"]),  # start
+            _entry("exec", ts=_ts(2), commands=["a"], exit_code=1),  # fail
+            _entry("exec", ts=_ts(3), commands=["b"]),  # start: recovers first
+            _entry("exec", ts=_ts(4), commands=["b"], exit_code=1),  # fail
+            _tool_entry("edit_file", ts=_ts(5)),  # recovers second
         ]
         state = aggregate_run_phases(None, entries)
         result = per_tool_error_rate(state)

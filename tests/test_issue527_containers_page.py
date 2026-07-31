@@ -221,11 +221,14 @@ class TestContainersPage:
                     "sunaba.dashboard.list_managed_containers",
                     return_value=(containers, None),
                 ),
+                # The containers fragment reads the run mapping and active
+                # environments from the incremental cache accessors
+                # (Issue #789); those are the hooks the row data comes from.
                 patch(
-                    "sunaba.dashboard.get_run_id_per_container",
+                    "sunaba.dashboard._cached_run_ids",
                     return_value=run_ids or {},
                 ),
-                patch("sunaba.dashboard.get_active_environments", return_value=[]),
+                patch("sunaba.dashboard._cached_active_envs", return_value=[]),
             ):
                 return self._get("/containers")
         finally:

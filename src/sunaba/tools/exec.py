@@ -13,6 +13,7 @@ from docker.errors import NotFound
 from pydantic import BeforeValidator
 
 from sunaba.journal import record_exec as journal_record_exec
+from sunaba.journal import record_exec_start as journal_record_exec_start
 from sunaba.journal import record_tool_use
 from sunaba.output_control import (
     OutputMetadata,
@@ -115,100 +116,126 @@ def sandbox_exec(
         assert commands is not None  # guaranteed by validation above
         journal_subject = commands
 
-    # --- Execute ---
-    if use_argv:
-        assert argv is not None  # guaranteed by validation above
-        # Direct execve: no /bin/sh, so the program receives argv
-        # verbatim.  ``timeout(1)`` is prepended as argv (rather than a
-        # shell wrapper) to preserve the timeout semantics.
-        run_argv = ["timeout", str(timeout), *argv] if timeout > 0 else list(argv)
-        exec_kwargs: dict[str, Any] = {"stdout": True, "stderr": True, "demux": True}
-        if working_dir:
-            exec_kwargs["workdir"] = working_dir
-        exit_code, output = container.exec_run(run_argv, **exec_kwargs)
-    else:
-        assert commands is not None  # guaranteed by validation above
-        joined = " && ".join(commands)
-        encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
-        tmpf = f"/tmp/.sx_{os.urandom(4).hex()}.sh"
-        runner = f"timeout {timeout} {tmpf}" if timeout > 0 else tmpf
-        cmd = (
-            f"echo {shlex.quote(encoded)} | base64 -d > {tmpf}"
-            f" && chmod +x {tmpf}"
-            f" && {runner}; rc=$?"
-            f"; rm -f {tmpf}"
-            f"; exit $rc"
-        )
-        exit_code, output = container.exec_run(
-            ["/bin/bash", "-c", cmd],
-            stdout=True,
-            stderr=True,
-            demux=True,
-        )
-    stdout_part, stderr_part = output
-    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+    # Record the exec START before it runs (Issue #789).  A long-running
+    # exec writes nothing to the journal while busy, so without this entry
+    # the run would cross the dashboard's stall threshold mid-execution.
+    # The completion entry below carries the real exit code; the start
+    # entry (no exit_code) is the "call" for op counting in phase.py.
+    journal_record_exec_start(
+        container_id[:12],
+        journal_subject,
+        verbose=verbose,
+    )
 
-    # Merge for output processing: success shows stdout only,
-    # failure merges both so AI sees the full failure context
-    if exit_code == 0:
-        raw_output = stdout_text
-    else:
-        if stdout_text and stderr_text:
-            raw_output = stdout_text + "\n" + stderr_text
+    try:
+        # --- Execute ---
+        if use_argv:
+            assert argv is not None  # guaranteed by validation above
+            # Direct execve: no /bin/sh, so the program receives argv
+            # verbatim.  ``timeout(1)`` is prepended as argv (rather than a
+            # shell wrapper) to preserve the timeout semantics.
+            run_argv = ["timeout", str(timeout), *argv] if timeout > 0 else list(argv)
+            exec_kwargs: dict[str, Any] = {"stdout": True, "stderr": True, "demux": True}
+            if working_dir:
+                exec_kwargs["workdir"] = working_dir
+            exit_code, output = container.exec_run(run_argv, **exec_kwargs)
         else:
-            raw_output = stdout_text or stderr_text
+            assert commands is not None  # guaranteed by validation above
+            joined = " && ".join(commands)
+            encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
+            tmpf = f"/tmp/.sx_{os.urandom(4).hex()}.sh"
+            runner = f"timeout {timeout} {tmpf}" if timeout > 0 else tmpf
+            cmd = (
+                f"echo {shlex.quote(encoded)} | base64 -d > {tmpf}"
+                f" && chmod +x {tmpf}"
+                f" && {runner}; rc=$?"
+                f"; rm -f {tmpf}"
+                f"; exit $rc"
+            )
+            exit_code, output = container.exec_run(
+                ["/bin/bash", "-c", cmd],
+                stdout=True,
+                stderr=True,
+                demux=True,
+            )
+        stdout_part, stderr_part = output
+        stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+        stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
-    raw_size = len(raw_output.encode("utf-8"))
-    clean = sanitize_output(raw_output)
+        # Merge for output processing: success shows stdout only,
+        # failure merges both so AI sees the full failure context
+        if exit_code == 0:
+            raw_output = stdout_text
+        else:
+            if stdout_text and stderr_text:
+                raw_output = stdout_text + "\n" + stderr_text
+            else:
+                raw_output = stdout_text or stderr_text
 
-    # Compress repeated lines
-    compressed = compress_repeated_lines(clean)
+        raw_size = len(raw_output.encode("utf-8"))
+        clean = sanitize_output(raw_output)
 
-    # Compress isomorphic failures
-    if exit_code != 0:
-        compressed = compress_failures(compressed)
+        # Compress repeated lines
+        compressed = compress_repeated_lines(clean)
 
-    # Token-budget truncation (takes precedence over line-based)
-    if max_output_tokens > 0:
-        display, original_tokens = truncate_by_tokens(compressed, max_output_tokens)
-        meta = OutputMetadata(
-            shown=len(display.split("\n")),
-            total_lines=original_tokens,
-            truncated=original_tokens > max_output_tokens,
-        )
-        display += "\n[resource: run output available via sandbox_read_journal]"
-    else:
-        display, meta = truncate_output(
-            compressed,
-            max_lines=max_lines,
+        # Compress isomorphic failures
+        if exit_code != 0:
+            compressed = compress_failures(compressed)
+
+        # Token-budget truncation (takes precedence over line-based)
+        if max_output_tokens > 0:
+            display, original_tokens = truncate_by_tokens(compressed, max_output_tokens)
+            meta = OutputMetadata(
+                shown=len(display.split("\n")),
+                total_lines=original_tokens,
+                truncated=original_tokens > max_output_tokens,
+            )
+            display += "\n[resource: run output available via sandbox_read_journal]"
+        else:
+            display, meta = truncate_output(
+                compressed,
+                max_lines=max_lines,
+                verbose=verbose,
+                exit_code=exit_code,
+                stderr=stderr_text,
+            )
+
+        page = paginate_output(display, offset=offset, limit=limit)
+
+        if exit_code == 0:
+            status = "ok"
+        elif timeout > 0 and exit_code == 124:
+            status = "timeout"
+        else:
+            status = "error"
+
+        result: dict[str, Any] = {
+            "status": status,
+            "output": page.content,
+            "shown": meta.shown,
+            "total_lines": meta.total_lines,
+            "truncated": meta.truncated,
+            "next_offset": page.next_offset,
+            "has_more": page.has_more,
+        }
+        if exit_code != 0:
+            result["exit_code"] = exit_code
+        if stderr_text and verbose != "error_only":
+            result["stderr"] = stderr_text
+    except BaseException:
+        # The START entry above must never be orphaned (#789 review):
+        # without a closing record the run reads as in-flight until
+        # the health grace window expires, and the call stays a
+        # phantom in the op counters.  -2 is a synthetic exit code
+        # meaning "exec aborted before completion"; any nonzero
+        # value counts as a failure in phase.py.
+        journal_record_exec(
+            container_id[:12],
+            journal_subject,
+            -2,
             verbose=verbose,
-            exit_code=exit_code,
-            stderr=stderr_text,
         )
-
-    page = paginate_output(display, offset=offset, limit=limit)
-
-    if exit_code == 0:
-        status = "ok"
-    elif timeout > 0 and exit_code == 124:
-        status = "timeout"
-    else:
-        status = "error"
-
-    result: dict[str, Any] = {
-        "status": status,
-        "output": page.content,
-        "shown": meta.shown,
-        "total_lines": meta.total_lines,
-        "truncated": meta.truncated,
-        "next_offset": page.next_offset,
-        "has_more": page.has_more,
-    }
-    if exit_code != 0:
-        result["exit_code"] = exit_code
-    if stderr_text and verbose != "error_only":
-        result["stderr"] = stderr_text
+        raise
 
     journal_record_exec(
         container_id[:12],

@@ -28,6 +28,7 @@ from sunaba.journal import (
     get_tool_usage,
     read_journal,
 )
+from sunaba.phase import aggregate_run_phases, phase_state_for_run
 from sunaba.security import KIND_PROXY, KIND_SANDBOX
 from sunaba.tools.container import list_managed_containers, sandbox_stop
 
@@ -302,6 +303,22 @@ tr:hover {{ background: #161b22; }}
 .exit-err {{ color: #f97583; }}
 .cmds {{ font-family: monospace; font-size: 12px; max-width: 500px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }}
 .json-link {{ float: right; font-size: 12px; }}
+.phase-view {{ margin-bottom: 20px; }}
+.phase-line {{ display: flex; align-items: baseline; gap: 8px; padding: 5px 0; font-size: 13px; border-bottom: 1px solid #21262d; }}
+.phase-name {{ font-weight: 600; min-width: 70px; }}
+.phase-name.init {{ color: #7ee787; }}
+.phase-name.explore {{ color: #a5d6ff; }}
+.phase-name.edit {{ color: #d2a8ff; }}
+.phase-name.verify {{ color: #ffa657; }}
+.phase-name.publish {{ color: #f0883e; }}
+.phase-name.other {{ color: #8b949e; }}
+.phase-detail {{ color: #c9d1d9; }}
+.phase-detail .dim {{ color: #484f58; }}
+.phase-files {{ color: #8b949e; font-size: 12px; }}
+.phase-check {{ font-size: 11px; }}
+.phase-check.pass {{ color: #7ee787; }}
+.phase-check.fail {{ color: #f97583; }}
+.phase-roundtrip {{ color: #ffa657; font-size: 11px; margin-left: 8px; }}
 </style>
 </head>
 <body>
@@ -313,6 +330,7 @@ tr:hover {{ background: #161b22; }}
   <div class="badge"><strong>Operations:</strong> {op_count}</div>
   <div class="badge"><strong>Boundary crossings:</strong> {boundary_count}</div>
 </div>
+{phase_view}
 <table>
 <thead>
 <tr><th>Time</th><th>Operation</th><th>Details</th></tr>
@@ -338,6 +356,126 @@ def _escape(text: str) -> str:
     Not suitable for ``href``, ``style``, ``on*``, or raw URL contexts.
     """
     return _html.escape(text, quote=True)
+
+
+def _build_phase_view(run_state: dict[str, Any] | None) -> str:
+    """Render the aggregated phase view for a run as HTML.
+
+    Returns an empty string when *run_state* is ``None`` or has no phases.
+    """
+    if not run_state or not run_state.get("phases"):
+        return ""
+
+    phases = run_state["phases"]
+    lines: list[str] = []
+
+    # ── header ──
+    img = _escape(_short_image(run_state.get("image", "unknown")))
+    sl = run_state.get("session_label")
+    label_str = f" · {_escape(sl)}" if sl else ""
+    repo = run_state.get("repo")
+    repo_str = f" · {_escape(repo)}" if repo else ""
+    lines.append(
+        f'<div style="font-size:12px;color:#8b949e;margin-bottom:6px">'
+        f'{img}{label_str}{repo_str}</div>'
+    )
+
+    # ── phase lines ──
+    for seg in phases:
+        p = seg["phase"]
+        count = seg["op_count"]
+        dur = seg.get("duration_s")
+        dur_str = _fmt_duration(dur) if dur else ""
+        bd = seg.get("breakdown", {})
+
+        # Per-operation breakdown (compact)
+        bd_parts: list[str] = []
+        for op_key, n in sorted(bd.items(), key=lambda x: -x[1]):
+            # Shorten tool: and boundary: prefixes
+            short = op_key
+            if op_key.startswith("tool:"):
+                short = op_key[5:]
+            elif op_key.startswith("boundary:"):
+                short = op_key[9:]
+            bd_parts.append(f"{_escape(short)} {n}")
+        bd_str = " / ".join(bd_parts) if bd_parts else ""
+
+        dur_html = f' <span class="dim">{dur_str}</span>' if dur_str else ""
+
+        line = (
+            f'<div class="phase-line">'
+            f'<span class="phase-name {p}">{p}</span>'
+            f'<span class="phase-detail">{count} ops'
+        )
+        if bd_str:
+            line += f' <span class="dim">({bd_str})</span>'
+        line += f'{dur_html}</span>'
+
+        # Verify check marks
+        if p == "verify":
+            vt = run_state.get("verify_timeline", [])
+            vs = seg.get("start_ts", "")
+            ve = seg.get("end_ts", "")
+
+            # Collect outcomes from pipeline runs and verify_outcome entries.
+            passes = 0
+            fails = 0
+            check_marks: list[str] = []
+            for vt_entry in vt:
+                vts = vt_entry.get("ts", "")
+                if not (vs <= vts <= ve):
+                    continue
+                vtype = vt_entry.get("type", "")
+                if vtype in ("pytest_run", "verify_outcome"):
+                    passed = vt_entry.get("passed")
+                    if passed is True:
+                        passes += 1
+                        check_marks.append(
+                            ' <span class="phase-check pass">\u2713</span>'
+                        )
+                    elif passed is False:
+                        fails += 1
+                        check_marks.append(
+                            ' <span class="phase-check fail">\u2717</span>'
+                        )
+            line += "".join(check_marks)
+
+            # Show pass/fail counts
+            if passes or fails:
+                parts = []
+                if passes:
+                    parts.append(f'<span class="pass">{passes} pass</span>')
+                if fails:
+                    parts.append(f'<span class="fail">{fails} fail</span>')
+                line += " " + " ".join(parts)
+
+        line += "</div>"
+        lines.append(line)
+
+    # ── touched files ──
+    touched = run_state.get("touched_files", [])
+    if touched:
+        files_str = ", ".join(_escape(f) for f in touched[:20])
+        if len(touched) > 20:
+            files_str += f" ... ({len(touched)} total)"
+        lines.append(
+            f'<div class="phase-files" style="margin-top:4px">'
+            f'\u2192 touched: {files_str}'
+            f'</div>'
+        )
+
+    # ── edit-verify roundtrips ──
+    rtrips = run_state.get("edit_verify_roundtrips", 0)
+    if rtrips:
+        lines.append(
+            f'<div class="phase-roundtrip">'
+            f'{rtrips} edit \u2192 verify-fail \u2192 edit roundtrip(s)'
+            f'</div>'
+        )
+
+    if not lines:
+        return ""
+    return '<div class="phase-view">' + "\n".join(lines) + "</div>"
 
 
 def _render_bar(n: int, max_val: int, label: str, color: str = "#58a6ff") -> str:
@@ -630,6 +768,33 @@ def _host_allowed(hostname: str) -> bool:
     return hostname in _ALLOWED_CONTROL_HOSTS
 
 
+def _check_csrf(token: str) -> str | None:
+    """Return a refusal reason for an invalid CSRF token, or ``None`` to allow.
+
+    Factorised out of ``_DashboardHandler._check_control_request`` so the
+    CSRF guard survives future handler/adaptor swaps.
+    """
+    if not secrets.compare_digest(token, _CSRF_TOKEN):
+        return "CSRF token mismatch"
+    return None
+
+
+def _check_host_header(host_header: str) -> str | None:
+    """Return a refusal reason for a disallowed Host header, or ``None``.
+
+    Factorised out of ``_DashboardHandler._check_control_request`` so the
+    Host-allowlist guard survives future handler/adaptor swaps.
+    """
+    hostname = (
+        host_header.split("]")[0] + "]"
+        if host_header.startswith("[")
+        else host_header.split(":")[0]
+    )
+    if not _host_allowed(hostname):
+        return "control plane is loopback-only"
+    return None
+
+
 def _strip_error_prefix(message: str) -> str:
     """Drop the ``Error:`` prefix the tool layer adds for its LLM caller.
 
@@ -772,27 +937,18 @@ class _DashboardHandler(BaseHTTPRequestHandler):
     def _check_control_request(self, fields: dict[str, list[str]]) -> str | None:
         """Return a refusal reason for an untrusted POST, or ``None`` to allow.
 
-        Two gates, both cheap:
+        Two gates, both cheap — delegated to module-level functions so the
+        protection survives future handler/adaptor swaps:
 
-        * **Host** — the bind address is 127.0.0.1, but a page on the open web
-          can point its own domain at 127.0.0.1 (DNS rebinding) and reach us as
-          same-origin.  Such a request still carries the attacker's hostname in
-          ``Host``, so pinning it to loopback names shuts that door.
-        * **CSRF token** — same-origin policy stops a hostile page from reading
-          the token out of the dashboard, so requiring it on POST means only
-          the real page can drive the control plane.
+        * **Host** :func:`_check_host_header`
+        * **CSRF token** :func:`_check_csrf`
         """
         host = self.headers.get("Host", "")
-        hostname = (
-            host.split("]")[0] + "]" if host.startswith("[") else host.split(":")[0]
-        )
-        if not _host_allowed(hostname):
-            return "control plane is loopback-only"
-
+        denied = _check_host_header(host)
+        if denied is not None:
+            return denied
         token = (fields.get("csrf") or [""])[0]
-        if not secrets.compare_digest(token, _CSRF_TOKEN):
-            return "CSRF token mismatch"
-        return None
+        return _check_csrf(token)
 
     def _stop_container(self, container_id: str, *, force: bool) -> None:
         # Allowlist, not denylist: this endpoint may stop a container only
@@ -1011,12 +1167,18 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             if e.get("boundary_crossing") or e.get("operation") == "boundary_crossing"
         )
 
+        # Phase aggregation
+        agg_state = aggregate_run_phases(None, entries)
+        run_state = phase_state_for_run(agg_state, run_id)
+        phase_view_html = _build_phase_view(run_state)
+
         html_content = _TRACE_HTML.format(
             run_id=run_id,
             started=started,
             ended=ended,
             op_count=len(entries),
             boundary_count=boundary_count,
+            phase_view=phase_view_html,
             rows="\n".join(rows_parts),
         )
         self._send_html(html_content)

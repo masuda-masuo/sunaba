@@ -198,3 +198,49 @@ class TestSandboxIssueWriteContainerless:
         assert result["status"] == "ok"
         mock_docker.assert_not_called()
         assert mock_record.call_args[0][0] is None
+
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
+    def test_api_failure_without_container(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+    ) -> None:
+        """The failure path also journals under the host scope (#779 review)."""
+        with patch(
+            "sunaba.tools.vcs.issues._github_api_request",
+            side_effect=RuntimeError("boom"),
+        ):
+            result = _decode(sandbox_issue_write(
+                repo="owner/repo", method="create", title="T",
+            ))
+
+        assert result["status"] == "error"
+        mock_docker.assert_not_called()
+        mock_record.assert_called_once()
+        assert mock_record.call_args[0][0] is None
+        assert mock_record.call_args.kwargs["approved"] is False
+
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
+    def test_empty_container_id_counts_as_omitted(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+    ) -> None:
+        """container_id="" must not be looked up as a container named "" (#779 review)."""
+        with patch(
+            "sunaba.tools.vcs.issues._github_api_request",
+            return_value={"number": 6, "html_url": "https://github.com/owner/repo/issues/6"},
+        ):
+            result = _decode(sandbox_issue_write(
+                repo="owner/repo", method="create", title="T", container_id="",
+            ))
+
+        assert result["status"] == "ok"
+        mock_docker.assert_not_called()
+        assert mock_record.call_args[0][0] is None

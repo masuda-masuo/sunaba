@@ -150,3 +150,51 @@ class TestSandboxIssueWriteExecute:
         assert result["status"] == "error"
         assert "403" in result["error"]
         assert mock_record.call_args.kwargs["approved"] is False
+
+
+class TestSandboxIssueWriteContainerless:
+    """container_id omitted: no docker interaction, host-scoped journal (#778)."""
+
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
+    def test_create_without_container(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+    ) -> None:
+        with patch(
+            "sunaba.tools.vcs.issues._github_api_request",
+            return_value={"number": 5, "html_url": "https://github.com/owner/repo/issues/5"},
+        ):
+            result = _decode(sandbox_issue_write(
+                repo="owner/repo", method="create", title="T", body="b",
+            ))
+
+        assert result["status"] == "ok"
+        assert result["number"] == 5
+        mock_docker.assert_not_called()
+        mock_record.assert_called_once()
+        assert mock_record.call_args[0][0] is None
+
+    @patch("sunaba.tools.vcs.issues._resolve_vcs_token", return_value="ghs_tok")
+    @patch("sunaba.tools.vcs.issues._docker")
+    @patch("sunaba.tools.vcs.issues.record_boundary_crossing")
+    def test_comment_without_container(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        mock_resolve: MagicMock,
+    ) -> None:
+        with patch(
+            "sunaba.tools.vcs.issues._github_api_request",
+            return_value={"html_url": "https://github.com/owner/repo/issues/5#c"},
+        ):
+            result = _decode(sandbox_issue_write(
+                repo="owner/repo", method="comment", issue_number=5, body="hi",
+            ))
+
+        assert result["status"] == "ok"
+        mock_docker.assert_not_called()
+        assert mock_record.call_args[0][0] is None

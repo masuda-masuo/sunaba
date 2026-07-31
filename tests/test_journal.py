@@ -146,6 +146,23 @@ class TestJournalWrite:
         entries = _read_log(log_path)
         assert entries[0]["approved"] is None
 
+    def test_record_boundary_crossing_containerless(self, tmp_path: Path):
+        """container_id=None records under the process-lifetime host run (#778)."""
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
+            record_boundary_crossing(None, "issue_write", "repo=o/r issue_create", approved=True)
+            record_boundary_crossing(None, "pr_review_write", "repo=o/r pr=#1", approved=True)
+
+        entries = _read_log(log_path)
+        assert len(entries) == 2
+        assert entries[0]["container_id"] is None
+        assert entries[0]["run_id"].startswith("host-")
+        assert entries[0]["run_id"] == entries[1]["run_id"]
+
     def test_record_file_write(self, tmp_path: Path):
         journal_dir = tmp_path / "journal"
         journal_dir.mkdir()

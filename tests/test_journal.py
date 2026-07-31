@@ -15,6 +15,7 @@ from sunaba.journal import (
     get_or_create_run_id,
     get_runs,
     get_session_label,
+    get_tool_usage,
     read_container_states,
     read_journal,
     record_boundary_crossing,
@@ -320,6 +321,31 @@ class TestGetRuns:
              patch("sunaba.journal._JOURNAL_DIR", journal_dir):
             runs = get_runs()
             assert runs[0]["boundary_crossings"] == 1
+
+    def test_get_runs_host_run_is_distinct(self, tmp_path: Path):
+        """Container-less entries surface as a 'host' run apart from container runs (#779 review)."""
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        _append_json_test(log_path, {"ts": "2026-01-01T00:00:00Z", "run_id": "run1", "container_id": "abc", "operation": "initialize", "image": "test"})
+
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
+            record_boundary_crossing(None, "issue_write", "repo=o/r issue_create", approved=True)
+
+            runs = get_runs()
+            by_status = {r["status"]: r for r in runs}
+            assert set(by_status) == {"running", "host"}
+            host_run = by_status["host"]
+            assert host_run["run_id"].startswith("host-")
+            assert host_run["boundary_crossings"] == 1
+            assert host_run["run_id"] != by_status["running"]["run_id"]
+
+            # Other journal consumers must tolerate container-less entries:
+            # the container-state sidecar skips them, tool usage aggregates.
+            assert None not in read_container_states()
+            get_tool_usage()
 
 
 class TestJournalPath:

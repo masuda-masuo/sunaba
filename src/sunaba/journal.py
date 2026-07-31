@@ -108,6 +108,7 @@ def get_or_create_run_id(container_id: str) -> str:
 
 #: Process-lifetime run id for host-scoped (container-less) operations.
 _host_run_id: str | None = None
+_host_run_id_lock: threading.Lock = threading.Lock()
 
 
 def get_host_run_id() -> str:
@@ -116,9 +117,12 @@ def get_host_run_id() -> str:
     Host-scoped boundary crossings (e.g. ``sandbox_issue_write`` without a
     container) are grouped under one run per server process, so the audit
     trail stays attributable without a throwaway container.
+
+    Process-local, like every run-id map here: assumes the single-process
+    FastMCP server.  A forked child would inherit and reuse the parent's id.
     """
     global _host_run_id
-    with _run_map_lock:
+    with _host_run_id_lock:
         if _host_run_id is None:
             _host_run_id = "host-" + generate_run_id()
         return _host_run_id
@@ -674,7 +678,10 @@ def get_runs() -> list[dict[str, Any]]:
                 "boundary_crossings": 0,
                 "vcs_operations": 0,
                 "last_ts": entry.get("ts"),
-                "status": "running",
+                # Host-scoped runs (#778) have no lifecycle: never "running",
+                # never stopped -- a distinct status keeps them out of the
+                # dashboard's live-container semantics.
+                "status": "host" if rid.startswith("host-") else "running",
             }
         run = runs[rid]
         run["operations"] += 1

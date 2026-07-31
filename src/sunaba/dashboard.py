@@ -866,7 +866,10 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         run_rows_parts: list[str] = []
         for r in runs[:20]:  # show last 20 runs
             status = r.get("status", "running")
-            status_cls = "err" if status == "running" else "ok"
+            if status == "host":  # container-less run (#778), no lifecycle
+                status_cls = "boundary"
+            else:
+                status_cls = "err" if status == "running" else "ok"
             image_short = _short_image(r.get("image", "unknown"))
             run_rows_parts.append(_RUN_ROW.format(
                 run_id=r["run_id"],

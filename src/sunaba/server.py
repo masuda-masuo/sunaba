@@ -20,6 +20,7 @@ from sunaba.security import (
     validate_image_ref,
 )
 
+from .tools.common import docker_bound, recovery_bound
 from .tools.container import (
     run_container_and_exec,
     sandbox_attach,
@@ -103,29 +104,52 @@ sunaba: Docker-sandboxed dev workflow. All tools take the container_id returned 
 Issue/PR ops: issue_view (read), sandbox_issue_write (create/comment), sandbox_pr_review_write (formal reviews).
 Prefer dedicated tools over raw sandbox_exec: grep->search_in_container, cat->read_file_range, sed->edit_file/transform_file, pip->package_install, pytest/ruff/pyright->verify/lint/type_check_in_container, git push/gh pr->publish.
 File transfer is one-way (host->container; egress-proxy boundary). To move work between containers: checkpoint + publish from the original, or start fresh with sandbox_initialize(clone_repo=...).
+Concurrency: docker-bound tools return a JSON error with "busy": true when the docker caps are reached (24 in flight, 6 per container) instead of hanging; wait and retry, and note it is JSON, not tool output. sandbox_stop / sandbox_list_containers run on a separate recovery pool (4 slots) and stay callable; sandbox_stop (force=False) refuses when it cannot verify unpushed checkpoints.
 """
 
 mcp = FastMCP("sunaba", instructions=SERVER_INSTRUCTIONS)
 
 
+sandbox_exec = docker_bound(sandbox_exec)
 sandbox_exec = mcp.tool()(sandbox_exec)
+sandbox_exec_background = docker_bound(sandbox_exec_background)
 sandbox_exec_background = mcp.tool()(sandbox_exec_background)
+sandbox_exec_check = docker_bound(sandbox_exec_check)
 sandbox_exec_check = mcp.tool()(sandbox_exec_check)
 
+issue_view = docker_bound(issue_view)
 issue_view = mcp.tool()(issue_view)
+publish = docker_bound(publish)
 publish = mcp.tool()(publish)
+sandbox_issue_write = docker_bound(sandbox_issue_write)
 sandbox_issue_write = mcp.tool()(sandbox_issue_write)
+sandbox_pr_review_write = docker_bound(sandbox_pr_review_write)
 sandbox_pr_review_write = mcp.tool()(sandbox_pr_review_write)
+checkpoint = docker_bound(checkpoint)
 checkpoint = mcp.tool()(checkpoint)
+checkpoint_list = docker_bound(checkpoint_list)
 checkpoint_list = mcp.tool()(checkpoint_list)
+checkpoint_restore = docker_bound(checkpoint_restore)
 checkpoint_restore = mcp.tool()(checkpoint_restore)
+merge_base = docker_bound(merge_base)
 merge_base = mcp.tool(exclude_args=["_container"])(merge_base)
+merge_complete = docker_bound(merge_complete)
 merge_complete = mcp.tool(exclude_args=["_container"])(merge_complete)
+merge_abort = docker_bound(merge_abort)
 merge_abort = mcp.tool(exclude_args=["_container"])(merge_abort)
+secret_scan_override = docker_bound(secret_scan_override)
 secret_scan_override = mcp.tool()(secret_scan_override)
 
 # Container naming / discovery tools (Issue #478)
+# Recovery tools run on the dedicated recovery pool (recovery_bound), not
+# docker_bound: they must stay callable exactly when the docker caps are
+# saturated, i.e. when a wedged container's permits are fully held (issue
+# #784 review -- the escape hatch must not be gated by the caps it breaks).
+sandbox_list_containers = recovery_bound(sandbox_list_containers)
 sandbox_list_containers = mcp.tool()(sandbox_list_containers)
+# sandbox_attach's container argument is named name_or_id, so the
+# per-container cap must key on it explicitly (issue #784 review).
+sandbox_attach = docker_bound(sandbox_attach, key_on="name_or_id")
 sandbox_attach = mcp.tool()(sandbox_attach)
 
 
@@ -134,32 +158,50 @@ sandbox_attach = mcp.tool()(sandbox_attach)
 # sandbox_initialize is exposed via its async wrapper (Issue #298): slow setup
 # phases emit progress notifications so the request never times out and leaks a
 # container.  The synchronous sandbox_initialize remains importable for reuse.
+sandbox_initialize_tool = docker_bound(sandbox_initialize_tool)
 sandbox_initialize_tool = mcp.tool(name="sandbox_initialize")(sandbox_initialize_tool)
+sandbox_stop = recovery_bound(sandbox_stop)
 sandbox_stop = mcp.tool()(sandbox_stop)
+run_container_and_exec = docker_bound(run_container_and_exec)
 run_container_and_exec = mcp.tool()(run_container_and_exec)
 
 # File tool registrations
+write_file = docker_bound(write_file)
 write_file = mcp.tool()(write_file)
+edit_file = docker_bound(edit_file)
 edit_file = mcp.tool()(edit_file)
+undo_file_edit = docker_bound(undo_file_edit)
 undo_file_edit = mcp.tool()(undo_file_edit)
+copy_project = docker_bound(copy_project)
 copy_project = mcp.tool()(copy_project)
+copy_file = docker_bound(copy_file)
 copy_file = mcp.tool()(copy_file)
+read_file_range = docker_bound(read_file_range)
 read_file_range = mcp.tool()(read_file_range)
+list_files = docker_bound(list_files)
 list_files = mcp.tool()(list_files)
 
 
 # Package install tool registration
+package_install = docker_bound(package_install)
 package_install = mcp.tool()(package_install)
 
 # Diff tool registration
+diff_in_container = docker_bound(diff_in_container)
 diff_in_container = mcp.tool()(diff_in_container)
 
 # Verify tool registrations
+transform_file = docker_bound(transform_file)
 transform_file = mcp.tool()(transform_file)
+run_python = docker_bound(run_python)
 run_python = mcp.tool()(run_python)
+search_in_container = docker_bound(search_in_container)
 search_in_container = mcp.tool()(search_in_container)
+lint_in_container = docker_bound(lint_in_container)
 lint_in_container = mcp.tool()(lint_in_container)
+type_check_in_container = docker_bound(type_check_in_container)
 type_check_in_container = mcp.tool()(type_check_in_container)
+verify_in_container = docker_bound(verify_in_container)
 verify_in_container = mcp.tool()(verify_in_container)
 
 

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shlex
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -55,6 +56,7 @@ from sunaba.tools.common import (
     RECOVERY_DOCKER_TIMEOUT,
     WORKSPACE,
     _coerce_list_arg,
+    _docker_client_timeout_scope,
 )
 from sunaba.tools.vcs import (
     checkpoint_list,
@@ -827,6 +829,54 @@ async def sandbox_initialize_tool(
     return await future
 
 
+#: sandbox_stop(force=False) refusal when the unpushed-checkpoint guard
+#: cannot positively establish "no checkpoints" (issue #784 review): a busy
+#: refusal, a docker-level failure, an exec-level failure without git's
+#: literal "not a git repository" marker, an unparseable response, an
+#: exception from the inner calls, or the recovery-timeout deadline firing
+#: while a wedged exec still holds the inner worker.  Destroying the
+#: container then would silently drop the Issue #264 warning and lose local
+#: checkpoints -- refuse instead; force=True is the documented override.
+_CHECKPOINT_GUARD_REFUSAL = (
+    "Error: cannot verify unpushed checkpoints (checkpoint check failed or "
+    "docker concurrency limit reached); refusing to destroy the container. "
+    "Retry once docker operations finish, or pass force=True to override."
+)
+
+
+def _run_checkpoint_guard(
+    container: Any,
+    container_id: str,
+    working_dir: str | None,
+    outcome: dict[str, Any],
+) -> None:
+    """Run the guard's inner calls under the recovery-timeout client scope.
+
+    Executes on a daemon worker thread spawned by ``sandbox_stop`` (the
+    thread-local timeout scope must be established here, inside the worker).
+    docker-py reads the hijacked exec output stream with an unbounded poll
+    -- the client timeout only bounds the HTTP phases (``containers.get``,
+    ``exec_create``/``exec_start``) -- so a wedged exec (Issue #181: the
+    daemon answers, the in-container process stalls) can block indefinitely
+    no matter what timeout the client was built with (issue #784 review
+    round 4).  The caller joins with :data:`RECOVERY_DOCKER_TIMEOUT` and
+    fails closed when this thread is still alive, so the recovery permit is
+    released at the deadline even when the exec output read never returns.
+    Any exception here (e.g. the client-timeout ``ReadTimeout`` on a bounded
+    phase) is swallowed: the caller sees no ``outcome["raw"]`` and fails
+    closed.  The worker is a daemon so a wedged exec can never block server
+    shutdown; the recovery pool (default 4) caps how many such workers can
+    exist at once, and a later ``force=True`` stop un-wedges them by
+    removing the container.
+    """
+    try:
+        with _docker_client_timeout_scope(RECOVERY_DOCKER_TIMEOUT):
+            resolved = resolve_git_root(container, working_dir)
+            outcome["raw"] = checkpoint_list(container_id, resolved)
+    except Exception:
+        pass
+
+
 def sandbox_stop(
     container_id: str,
     force: bool = False,
@@ -864,8 +914,68 @@ def sandbox_stop(
 
     # Check for unpushed checkpoints (Issue #264) — reuse checkpoint_list
     if not force:
-        working_dir = resolve_git_root(container, working_dir)
-        result = json.loads(checkpoint_list(container_id, working_dir))
+        # The guard holds a recovery permit while it checks, so the check is
+        # bounded by a HARD wall-clock deadline of RECOVERY_DOCKER_TIMEOUT.
+        # Threading the timeout into the client is not enough: docker-py
+        # reads the hijacked exec output stream with an unbounded poll, so
+        # on a partially wedged container (containers.get answers, the exec
+        # stalls -- Issue #181) exec_run blocks indefinitely regardless of
+        # the client timeout (issue #784 review round 4).  The inner calls
+        # therefore run on a daemon worker thread (under the recovery-
+        # timeout client scope, which still bounds the HTTP phases); when
+        # the deadline fires the stop refuses fail-closed and the recovery
+        # permit is released as the tool returns -- the 4-slot recovery
+        # pool can never be exhausted by wedged checkpoint checks, so
+        # force=True stops and sandbox_list_containers stay callable.
+        outcome: dict[str, Any] = {}
+        worker = threading.Thread(
+            target=_run_checkpoint_guard,
+            args=(container, container_id, working_dir, outcome),
+            name=f"checkpoint-guard-{cid}",
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=RECOVERY_DOCKER_TIMEOUT)
+        if worker.is_alive() or "raw" not in outcome:
+            # The deadline fired while the inner calls were still wedged,
+            # or they failed (e.g. the client-timeout ReadTimeout on a
+            # bounded phase): "no checkpoints" was NOT positively
+            # established -- fail closed (issue #784 review round 4).
+            return _CHECKPOINT_GUARD_REFUSAL
+        raw = outcome["raw"]
+        try:
+            result = json.loads(raw)
+        except (ValueError, TypeError):
+            result = None
+        # Fail CLOSED (issue #784 review): the guard may conclude "no
+        # unpushed checkpoints" only from a checkpoint_list result that
+        # positively established it.  The outcomes below mean the check did
+        # NOT happen, so destroying the container would silently drop the
+        # Issue #264 warning and lose local checkpoints -- refuse instead
+        # (the caller can retry once docker operations drain or pass
+        # force=True):
+        #
+        # * a busy refusal (``"busy": true`` -- docker concurrency limit;
+        #   future-proof: the inner call is raw today, not docker_bound),
+        # * an unparseable response (``result is None``), and
+        # * a docker-level failure (``status: error`` without the exec
+        #   ``step`` marker -- no exec ran).
+        #
+        # An exec-level failure (*with* the ``step`` marker) is treated as
+        # "no checkpoints" ONLY when the error output positively carries
+        # git's literal "not a git repository" marker -- that alone proves
+        # there is no repo on the container (Issue #264 contract, tested in
+        # test_issue181_resilience.py).  Any other exec failure (corrupted
+        # .git, missing git binary, dubious ownership, OOM) did not
+        # establish "no checkpoints" -- refuse (issue #784 review round 3).
+        if result is None or result.get("busy"):
+            return _CHECKPOINT_GUARD_REFUSAL
+        if result.get("status") == "error":
+            if "step" not in result:
+                return _CHECKPOINT_GUARD_REFUSAL
+            error_text = str(result.get("error") or "")
+            if "not a git repository" not in error_text:
+                return _CHECKPOINT_GUARD_REFUSAL
         checkpoints = result.get("checkpoints", [])
         if checkpoints:
             return f"Error: Container has {len(checkpoints)} unpushed checkpoint(s). Use force=True to override."

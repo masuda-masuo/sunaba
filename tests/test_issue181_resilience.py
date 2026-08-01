@@ -440,6 +440,44 @@ class TestSandboxStopUnpushedCheckpoints:
         container.remove.assert_called_once_with(force=True)
         assert "stopped and removed" in result
 
+    @patch("sunaba.tools.container.lifecycle.record_stop")
+    @patch("sunaba.tools.vcs.checkpoints._docker")
+    @patch("sunaba.tools.container._docker")
+    def test_git_error_without_marker_fails_closed(
+        self,
+        mock_docker: MagicMock,
+        mock_docker_vcs: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        """An exec-level git failure whose output does NOT carry git's literal
+        "not a git repository" marker (corrupted .git, missing git binary,
+        dubious ownership, OOM) must fail the stop CLOSED (issue #784 review
+        round 3, [low] finding): "no checkpoints" was never established, so
+        destroying the container would silently drop the Issue #264 warning.
+        Only the literal marker positively proves there is no repo -- that
+        is the no-repo fast path (test_no_git_proceeds)."""
+        container = MagicMock()
+        container.exec_run.return_value = (0, (b"__NO_REPO__", b""))
+        client = MagicMock()
+        client.containers.get.return_value = container
+        mock_docker.return_value = client
+
+        vcs_container = MagicMock()
+        vcs_container.exec_run.return_value = (
+            128,
+            b"fatal: detected dubious ownership in repository at '/workspace'",
+        )
+        vcs_client = MagicMock()
+        vcs_client.containers.get.return_value = vcs_container
+        mock_docker_vcs.return_value = vcs_client
+
+        result = sandbox_stop("abc123def456")
+
+        assert "cannot verify unpushed checkpoints" in result
+        assert "force=True" in result
+        container.kill.assert_not_called()
+        container.remove.assert_not_called()
+        mock_record.assert_not_called()
 
     @patch("sunaba.tools.container.lifecycle.record_stop")
     @patch("sunaba.tools.container.lifecycle.resolve_git_root", return_value="/tmp/repo/sunaba")

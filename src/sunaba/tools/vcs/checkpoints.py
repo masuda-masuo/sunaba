@@ -8,7 +8,11 @@ import shlex
 from docker.errors import NotFound
 
 from sunaba.journal import record_boundary_crossing, record_tool_use
-from sunaba.tools.common import _docker, container_not_found_error
+from sunaba.tools.common import (
+    _docker,
+    _scoped_docker_timeout,
+    container_not_found_error,
+)
 from sunaba.tools.vcs.gitroot import resolve_git_root
 
 # ---------------------------------------------------------------------------
@@ -126,7 +130,12 @@ def checkpoint_list(
         JSON string with ``checkpoints`` array, each entry with
         ``sha``, ``message``, and ``date``.
     """
-    client = _docker()
+    # Normal tool calls run outside any scope and keep docker-py's 60s
+    # default; only sandbox_stop's checkpoint guard runs the inner call
+    # inside _docker_client_timeout_scope(RECOVERY_DOCKER_TIMEOUT), so a
+    # wedged exec aborts at the recovery timeout while the guard holds its
+    # recovery permit (issue #784 review round 3).
+    client = _docker(timeout=_scoped_docker_timeout())
     try:
         container = client.containers.get(container_id)
     except NotFound:
@@ -147,14 +156,19 @@ def checkpoint_list(
         stdout=True,
         stderr=True,
     )
-    stdout, _ = (out if isinstance(out, tuple) else (out, b""))
+    stdout, stderr = (out if isinstance(out, tuple) else (out, b""))
     stdout_text = stdout.decode("utf-8", errors="replace") if stdout else ""
+    stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
 
     if ec != 0:
+        # git's diagnostics (including the literal "fatal: not a git
+        # repository" marker) go to stderr; surface them so sandbox_stop's
+        # guard can positively identify the no-repo case (issue #784 review
+        # round 3).
         return json.dumps({
             "status": "error",
             "step": "checkpoint_list",
-            "error": stdout_text,
+            "error": stderr_text or stdout_text,
         })
 
     checkpoints = []

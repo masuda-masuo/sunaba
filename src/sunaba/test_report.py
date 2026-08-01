@@ -775,17 +775,45 @@ class TapAdapter:
         """Extract up to 5 lines of the YAML block after a test point.
 
         The block runs from the ``not ok`` line's next line until the
-        indented ``...`` terminator or the first non-indented line.  The
-        ``error:`` key's value (block scalar or inline) is preferred;
-        without an ``error:`` key, the first lines of the block itself
-        are used.  Returns ``""`` when no block follows.
+        closing ``...`` or the first non-indented line.  Per TAP 13 the
+        closing ``...`` is paired with the ``---`` opener's indentation,
+        so only a ``...`` at exactly that indent terminates the block; a
+        deeper-indented ``...`` (the closer of an inner TAP fragment
+        echoed inside the error text) is content, matching
+        ``_collect_failures``.  The ``error:`` key's value (block
+        scalar or inline) is preferred; without an ``error:`` key, the
+        first lines of the block itself are used.  Returns ``""`` when
+        no block follows.
         """
         block: list[str] = []
+        opener_indent: int | None = None
         for line in lines[start:]:
             if line.strip() == "":
                 block.append(line)
                 continue
-            if not line[:1].isspace() or line.strip() == "...":
+            indent = len(line) - len(line.lstrip())
+            if opener_indent is None:
+                # Only the very first line after the test point can be
+                # the ``---`` opener (matching ``_collect_failures``,
+                # which pairs the opener with the immediately preceding
+                # test point).  Remember its indent so the closing
+                # ``...`` can be matched to it, and skip the opener
+                # itself from the collected content (it never appears
+                # in the excerpt).  With no opener there is no block:
+                # keep the legacy stop rule (any indented line until a
+                # non-indented line or ``...``) unchanged -- an
+                # interior ``---`` in an opener-less block is content,
+                # not a late opener.
+                if not block and line.strip() == "---" and line[:1].isspace():
+                    opener_indent = indent
+                    continue
+                if not line[:1].isspace() or line.strip() == "...":
+                    break
+                block.append(line)
+                continue
+            if line.strip() == "..." and indent == opener_indent:
+                break
+            if not line[:1].isspace():
                 break
             block.append(line)
 

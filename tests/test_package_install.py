@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
 from docker.errors import NotFound
 
 from sunaba.tools.package import package_install
@@ -245,3 +246,135 @@ class TestPackageInstall:
             for c in seen_cmds
             if isinstance(c, list) and c[:2] != ["sh", "-c"]
         )
+
+
+class TestPackageInstallNpm:
+    """manager='npm' axis of package_install (#798)."""
+
+    @staticmethod
+    def _client(exec_returns):
+        container = MagicMock()
+        container.exec_run.side_effect = exec_returns
+        client = MagicMock()
+        client.containers.get.return_value = container
+        return client
+
+    @patch("sunaba.tools.package._docker")
+    def test_npm_packages_runs_npm_install(self, mock_docker: MagicMock) -> None:
+        client = self._client([
+            (0, (b"added 5 packages, and audited 3 packages in 2s", b"")),
+        ])
+        mock_docker.return_value = client
+
+        result = json.loads(package_install(
+            container_id="abc123",
+            packages="requests",
+            manager="npm",
+        ))
+        assert result["status"] == "ok"
+        assert result["manager"] == "npm"
+        assert result["command"] == "npm install requests"
+        assert result["changed"] == 5
+        assert "added 5 packages" in result["output"]
+        # No lockfile probe: packages given -> npm install directly.
+        assert client.containers.get.return_value.exec_run.call_args_list[0][0][0] == [
+            "npm", "install", "requests",
+        ]
+
+    @patch("sunaba.tools.package._docker")
+    def test_npm_no_packages_with_lockfile_runs_ci(self, mock_docker: MagicMock) -> None:
+        client = self._client([
+            (0, (b"locked", b"")),  # lockfile probe
+            (0, (b"added 42 packages, and audited 42 packages in 3s", b"")),
+        ])
+        mock_docker.return_value = client
+
+        result = json.loads(package_install(
+            container_id="abc123",
+            manager="npm",
+        ))
+        assert result["status"] == "ok"
+        assert result["command"] == "npm ci"
+        assert result["changed"] == 42
+
+    @patch("sunaba.tools.package._docker")
+    def test_npm_no_packages_without_lockfile_runs_install(self, mock_docker: MagicMock) -> None:
+        client = self._client([
+            (0, (b"unlocked", b"")),  # lockfile probe
+            (0, (b"up to date", b"")),
+        ])
+        mock_docker.return_value = client
+
+        result = json.loads(package_install(
+            container_id="abc123",
+            manager="npm",
+        ))
+        assert result["status"] == "ok"
+        assert result["command"] == "npm install"
+        assert result["changed"] == 0
+
+    @patch("sunaba.tools.package._docker")
+    def test_npm_changed_summary_sums_added_removed_changed(
+        self, mock_docker: MagicMock
+    ) -> None:
+        client = self._client([
+            (0, (b"locked", b"")),
+            (0, (b"added 5 packages, removed 2 packages, changed 1 package", b"")),
+        ])
+        mock_docker.return_value = client
+
+        result = json.loads(package_install(container_id="abc123", manager="npm"))
+        assert result["status"] == "ok"
+        assert result["changed"] == 8
+
+    @patch("sunaba.tools.package._docker")
+    def test_npm_failure_is_structured_error(self, mock_docker: MagicMock) -> None:
+        client = self._client([
+            (0, (b"locked", b"")),
+            (1, (b"", b"npm ERR! code E404")),
+        ])
+        mock_docker.return_value = client
+
+        result = json.loads(package_install(container_id="abc123", manager="npm"))
+        assert result["status"] == "error"
+        assert result["manager"] == "npm"
+        assert result["command"] == "npm ci"
+        assert "npm ci failed (exit code 1)" in result["error"]
+        assert "npm ERR! code E404" in result["stderr"]
+
+    @pytest.mark.parametrize(
+        ("kwarg", "value"),
+        [
+            ("editable", "/path/to/project"),
+            ("constraints", "constraints.txt"),
+            ("requirements", "requirements.txt"),
+            ("extras", "[dev]"),
+            ("upgrade", True),
+        ],
+    )
+    @patch("sunaba.tools.package._docker")
+    def test_npm_rejects_pip_only_args(
+        self, mock_docker: MagicMock, kwarg: str, value
+    ) -> None:
+        client = self._client([])
+        mock_docker.return_value = client
+
+        result = json.loads(package_install(
+            container_id="abc123",
+            manager="npm",
+            **{kwarg: value},
+        ))
+        assert result["status"] == "error"
+        assert "does not support" in result["error"]
+        assert kwarg in result["error"]
+        # No exec at all: rejected before touching the container.
+        client.containers.get.return_value.exec_run.assert_not_called()
+
+    def test_invalid_manager_rejected(self) -> None:
+        result = json.loads(package_install(
+            container_id="abc123",
+            packages="requests",
+            manager="cargo",
+        ))
+        assert result["status"] == "error"
+        assert "cargo" in result["error"]

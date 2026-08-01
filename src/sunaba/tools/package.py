@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from typing import Annotated
 
@@ -50,6 +51,70 @@ def _package_to_key(pkg: dict[str, str]) -> str:
     return f"{pkg['name']}=={pkg.get('version', '?')}"
 
 
+_NPM_CHANGED_RE = re.compile(r"\b(?:added|removed|changed)\s+(\d+)\s+package")
+
+
+def _npm_changed_summary(output: str) -> int:
+    """Parse npm's own "added/removed/changed N packages" summary lines."""
+    return sum(int(m.group(1)) for m in _NPM_CHANGED_RE.finditer(output))
+
+
+def _npm_output_tail(stdout_text: str, stderr_text: str) -> str:
+    """Raw output tail for the npm result (npm ci output can be large)."""
+    raw = (stdout_text.strip() or stderr_text.strip())
+    return raw[-2000:] if len(raw) > 2000 else raw
+
+
+def _run_npm_install(container_id: str, packages: list[str] | None) -> str:
+    """npm axis of package_install: ``npm install <pkgs>`` or project deps.
+
+    With *packages*, installs them in the container's project root.  Without
+    them, installs the project deps: ``npm ci`` when ``package-lock.json``
+    pins the tree, ``npm install`` otherwise.
+    """
+    if packages:
+        cmd = ["npm", "install", *packages]
+        command_label = " ".join(cmd)
+    else:
+        ec, stdout, _ = _run_in_container(
+            container_id,
+            ["sh", "-c", "[ -f package-lock.json ] && echo locked || echo unlocked"],
+        )
+        lockfile = ec == 0 and stdout.strip() == "locked"
+        cmd = ["npm", "ci"] if lockfile else ["npm", "install"]
+        command_label = " ".join(cmd)
+
+    ec, stdout_text, stderr_text = _run_in_container(container_id, cmd)
+
+    journal_record_exec(
+        container_id[:12],
+        cmd,
+        ec,
+        verbose="package_install",
+    )
+
+    changed = _npm_changed_summary(stdout_text)
+    tail = _npm_output_tail(stdout_text, stderr_text)
+
+    if ec != 0:
+        return json.dumps({
+            "status": "error",
+            "manager": "npm",
+            "command": command_label,
+            "error": f"{command_label} failed (exit code {ec})",
+            "stderr": stderr_text or stdout_text,
+            "changed": changed,
+            "output": tail,
+        })
+    return json.dumps({
+        "status": "ok",
+        "manager": "npm",
+        "command": command_label,
+        "changed": changed,
+        "output": tail,
+    })
+
+
 def package_install(
     container_id: str,
     packages: Annotated[str | list[str], BeforeValidator(_coerce_list_arg)] | None = None,
@@ -58,11 +123,13 @@ def package_install(
     requirements: str | None = None,
     upgrade: bool = False,
     extras: str | None = None,
+    manager: str = "pip",
 ) -> str:
-    """Install Python packages inside the sandbox container.
+    """Install packages inside the sandbox container.
 
     First-class pip install returning structured output instead of raw
-    pip logs.
+    pip logs. manager='npm' installs JS project deps (npm ci when a
+    lockfile is present).
 
     Args:
         container_id: Container ID prefix.
@@ -73,11 +140,42 @@ def package_install(
         requirements: Requirements file path in the container (-r).
         upgrade: Pass --upgrade to pip.
         extras: Extras for the editable install (e.g. '[dev]').
+        manager: Package manager: 'pip' (default) or 'npm'.
 
     Returns:
         JSON: status, installed_packages ("name==version"), changed,
-        output; error and stderr on failure.
+        output; error and stderr on failure.  npm results add manager
+        and the command run.
     """
+    if manager not in ("pip", "npm"):
+        return json.dumps({
+            "status": "error",
+            "error": f"manager must be 'pip' or 'npm', got {manager!r}",
+        })
+
+    if manager == "npm":
+        # pip-only arguments have no npm meaning; reject rather than ignore.
+        pip_only = [
+            name
+            for name, val in (
+                ("editable", editable),
+                ("constraints", constraints),
+                ("requirements", requirements),
+                ("extras", extras),
+                ("upgrade", upgrade),
+            )
+            if val
+        ]
+        if pip_only:
+            return json.dumps({
+                "status": "error",
+                "error": f"manager='npm' does not support: {', '.join(pip_only)}",
+            })
+        pkg_list = None
+        if packages:
+            pkg_list = [packages] if isinstance(packages, str) else list(packages)
+        return _run_npm_install(container_id, pkg_list)
+
     # --- Validate arguments ---
     if not any([packages, editable, constraints, requirements]):
         return json.dumps({

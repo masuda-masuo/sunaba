@@ -186,7 +186,9 @@ class TestRunContainerAndExecPipExtras:
         ))
 
         assert result["status"] == "ok"
-        assert mock_container.exec_run.call_count == 1
+        # Manifest probe + user command: no pip install exec.
+        assert mock_container.exec_run.call_count == 2
+        assert result["deps"] == "deps: no manifest detected — skipped"
 
     @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
@@ -200,8 +202,9 @@ class TestRunContainerAndExecPipExtras:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
         mock_container.exec_run.side_effect = [
-            (0, (b"", b"")),
-            (0, (b"output", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
+            (0, (b"", b"")),  # pip install
+            (0, (b"output", b"")),  # user command
         ]
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
@@ -216,9 +219,9 @@ class TestRunContainerAndExecPipExtras:
         ))
 
         assert result["status"] == "ok"
-        assert mock_container.exec_run.call_count == 2
-        first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
-        assert "pip install -e '.[dev]' -q" in first_cmd
+        assert mock_container.exec_run.call_count == 3
+        pip_cmd = mock_container.exec_run.call_args_list[1][0][0][-1]
+        assert "pip install -e '.[dev]' -q" in pip_cmd
 
     @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
@@ -234,8 +237,9 @@ class TestRunContainerAndExecPipExtras:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
         mock_container.exec_run.side_effect = [
-            (0, (b"Installed", b"")),
-            (0, (b"output", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
+            (0, (b"Installed", b"")),  # pip install
+            (0, (b"output", b"")),  # user command
         ]
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
@@ -252,9 +256,9 @@ class TestRunContainerAndExecPipExtras:
         assert result["status"] == "ok"
         # Network is auto-enabled by clone_repo, so pip install runs
         # before the user command.
-        assert mock_container.exec_run.call_count == 2
-        first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
-        assert "pip install -e '.[dev]' -q" in first_cmd
+        assert mock_container.exec_run.call_count == 3
+        pip_cmd = mock_container.exec_run.call_args_list[1][0][0][-1]
+        assert "pip install -e '.[dev]' -q" in pip_cmd
 
     @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
@@ -268,8 +272,9 @@ class TestRunContainerAndExecPipExtras:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
         mock_container.exec_run.side_effect = [
-            (0, (b"", b"")),
-            (0, (b"output", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
+            (0, (b"", b"")),  # pip install
+            (0, (b"output", b"")),  # user command
         ]
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
@@ -284,8 +289,8 @@ class TestRunContainerAndExecPipExtras:
             allow_network=True,
         ))
 
-        first_cmd = mock_container.exec_run.call_args_list[0][0][0][-1]
-        assert "pip install -e '.[test]' -q" in first_cmd
+        pip_cmd = mock_container.exec_run.call_args_list[1][0][0][-1]
+        assert "pip install -e '.[test]' -q" in pip_cmd
 
     @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
@@ -299,8 +304,9 @@ class TestRunContainerAndExecPipExtras:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
         mock_container.exec_run.side_effect = [
-            (1, (b"", b"ERROR")),
-            (0, (b"output", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
+            (1, (b"", b"ERROR")),  # pip install fails
+            (0, (b"output", b"")),  # user command
         ]
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
@@ -316,7 +322,7 @@ class TestRunContainerAndExecPipExtras:
 
         assert result["status"] == "ok"
         assert "clone_warning" in result
-        assert "pip install" in result["clone_warning"]
+        assert "pip install -e .[dev] failed" in result["clone_warning"]
 
     @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
@@ -473,7 +479,9 @@ class TestPipArgs:
     ) -> None:
         container = MagicMock()
         container.id = "abc123def456"
-        container.exec_run.return_value = (0, (b"output", b""))
+        # Probe reports pyproject.toml so the pip step runs (manifest-aware
+        # dispatch, #798); every later exec reuses the same return value.
+        container.exec_run.return_value = (0, (b"pyproject.toml\n", b""))
         client = MagicMock()
         client.containers.run.return_value = container
         mock_docker.return_value = client
@@ -507,7 +515,9 @@ class TestPipArgs:
     ) -> None:
         container = MagicMock()
         container.id = "abc123def456"
-        container.exec_run.return_value = (0, (b"output", b""))
+        # Probe reports pyproject.toml so the pip step runs (manifest-aware
+        # dispatch, #798); every later exec reuses the same return value.
+        container.exec_run.return_value = (0, (b"pyproject.toml\n", b""))
         client = MagicMock()
         client.containers.run.return_value = container
         mock_docker.return_value = client

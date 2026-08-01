@@ -62,8 +62,12 @@ from sunaba.tools.vcs import (
 )
 
 from .clone import (
+    _install_repo_deps,
     _normalize_pip_extras,
-    _run_pip_install,
+    # Kept importable: tests patch sunaba.tools.container.lifecycle._run_pip_install
+    # (inert now that deps go through _install_repo_deps, but the name must
+    # exist in this namespace for the patch target).
+    _run_pip_install,  # noqa: F401
     _setup_branch,
     _setup_pr_branch,
     _try_clone_into_container,
@@ -657,12 +661,17 @@ def sandbox_initialize(
             clone_msg = f" (clone_repo failed: {err})"
         else:
             clone_msg = " " + (msg or "")
-        if pip_extras is not None and err is None:
-            pip_err = _run_pip_install(
-                container, clone_repo, clone_dest, pip_extras, allow_network, pip_args
+        if err is None:
+            deps = _install_repo_deps(
+                container,
+                clone_repo,
+                clone_dest,
+                pip_extras,
+                allow_network=allow_network,
+                pip_args=pip_args,
             )
-            if pip_err is not None:
-                clone_msg += f" (pip install failed: {pip_err})"
+            if deps.note:
+                clone_msg += f" ({deps.note})"
     elif clone_repo and pr is not None:
         logger.info(
             "Skipping clone_repo=%s (pr=%s handles its own clone)",
@@ -1078,6 +1087,9 @@ def run_container_and_exec(
     # When pr is set, _setup_pr_branch handles its own clone.
     # When branch is set, _setup_branch handles its own clone.
     clone_error: str | None = None
+    # Manifest-aware deps outcome (pip/npm steps) for the clone_repo path;
+    # carried in result["deps"] on success (failures land in clone_warning).
+    deps_note: str = ""
     # Same ground truth as sandbox_initialize: a proxied container holds no
     # token (#356), so the network clone must go anonymous (#403 fallout).
     container_has_token = "GITHUB_TOKEN" in env or "GH_TOKEN" in env
@@ -1107,12 +1119,19 @@ def run_container_and_exec(
             container_has_token,
             open_read_grant=open_read_grant,
         )
-        if pip_extras is not None and clone_error is None:
-            pip_error = _run_pip_install(
-                container, clone_repo, clone_dest, pip_extras, allow_network, pip_args
+        if clone_error is None:
+            deps = _install_repo_deps(
+                container,
+                clone_repo,
+                clone_dest,
+                pip_extras,
+                allow_network=allow_network,
+                pip_args=pip_args,
             )
-            if pip_error is not None:
-                clone_error = pip_error
+            if deps.failed:
+                clone_error = deps.note
+            else:
+                deps_note = deps.note
     elif clone_repo and pr is not None:
         logger.info(
             "Skipping clone_repo=%s (pr=%s handles its own clone)",
@@ -1243,6 +1262,8 @@ def run_container_and_exec(
         result["stderr"] = stderr_text
     if clone_error:
         result["clone_warning"] = clone_error
+    if deps_note:
+        result["deps"] = deps_note
     if pr_error:
         result["pr_warning"] = pr_error
 

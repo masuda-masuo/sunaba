@@ -38,6 +38,7 @@ class TestSetupPrBranch:
             (0, (_PR_INFO_JSON.encode(), b"")),
             (0, (b"Cloned repo\n", b"")),
             (0, (b"Switched to branch\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"Installed\n", b"")),
             (0, (b"", b"")),
         ])
@@ -90,6 +91,7 @@ class TestSetupPrBranch:
             (0, (_PR_INFO_JSON.encode(), b"")),
             (0, (b"Cloned\n", b"")),
             (0, (b"Switched\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (1, (b"", b"install failed")),
             (0, (b"", b"")),
         ])
@@ -246,6 +248,7 @@ class TestSetupPrBranchAnonymous:
         container = _make_container_mock([
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
             (0, (b"Switched to branch 'feature-branch'\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"Installed\n", b"")),
             (0, (b"", b"")),
         ])
@@ -334,6 +337,7 @@ class TestSetupPrBranchReadGrant:
         container = _make_container_mock([
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
             (0, (b"Switched to branch 'feature-branch'\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"Installed\n", b"")),
             (0, (b"", b"")),
         ])
@@ -390,6 +394,7 @@ class TestSetupPrBranchReadGrant:
             (0, (b'{"headRefName": "feature-branch", "baseRefName": "main"}', b"")),
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
             (0, (b"Switched to branch 'feature-branch'\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"Installed\n", b"")),
             (0, (b"", b"")),
         ])
@@ -409,6 +414,7 @@ class TestSetupPrBranchReadGrant:
         container = _make_container_mock([
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
             (0, (b"Switched to branch 'feature-branch'\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"Installed\n", b"")),
             (0, (b"", b"")),
         ])
@@ -444,6 +450,7 @@ class TestSetupPrBranchReadGrant:
         container = _make_container_mock([
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
             (0, (b"Switched to branch 'feature-branch'\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"Installed\n", b"")),
             (0, (b"", b"")),
         ])
@@ -741,6 +748,7 @@ class TestPipExtrasParam:
             (0, (_PR_INFO_JSON.encode(), b"")),
             (0, (b"Cloned\n", b"")),
             (0, (b"Switched\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"Installed\n", b"")),
             (0, (b"", b"")),
         ])
@@ -755,16 +763,20 @@ class TestPipExtrasParam:
         # The editable install must target the repo dir ("."), i.e.
         # `pip install -e '.[testing]'` -- NOT `pip install -e '[testing]'`,
         # which is an invalid spec that silently no-ops so the dev install
-        # never takes effect.
-        install_cmd = container.exec_run.call_args_list[3][0][0][2]
+        # never takes effect.  Exec order: gh view, clone, checkout,
+        # manifest probe, pip install, meta write.
+        install_cmd = container.exec_run.call_args_list[4][0][0][2]
         assert "pip install -e '.[testing]'" in install_cmd
 
     def test_pip_extras_none_skips_install(self):
-        # 4 exec calls: gh view, clone, checkout, meta write. No pip install.
+        # 5 exec calls: gh view, clone, checkout, manifest probe, meta
+        # write. No pip install exec (pip_extras=None skips only the
+        # python step; npm would still run, but the probe finds none).
         container = _make_container_mock([
             (0, (_PR_INFO_JSON.encode(), b"")),
             (0, (b"Cloned\n", b"")),
             (0, (b"Switched\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"", b"")),
         ])
 
@@ -775,8 +787,8 @@ class TestPipExtrasParam:
             )
 
         assert "PR #136" in result
-        # Should be exactly 4 exec calls (no pip install, +1 meta write)
-        assert container.exec_run.call_count == 4
+        # No pip install exec, but the manifest probe still ran.
+        assert container.exec_run.call_count == 5
 
 
 class TestCloneRepoPrInteraction:

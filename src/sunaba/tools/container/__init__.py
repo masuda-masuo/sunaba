@@ -27,10 +27,15 @@ from .image import (
 from .clone import (
     _CLONE_REPO_PATTERN,
     _clone_repo_via_network,
+    _detect_manifests,
     _editable_install_cmd,
+    _install_repo_deps,
+    _manifest_probe_cmd,
     _normalize_pip_extras,
+    _npm_install_cmd,
     _resolve_default_branch,
     _resolve_pr_head_ref,
+    _run_npm_install,
     _run_pip_install,
     _setup_branch,
     _setup_pr_branch,
@@ -38,6 +43,7 @@ from .clone import (
     _validate_clone_repo,
     _write_clone_meta,
     CloneResult,
+    DepsResult,
 )
 
 # -- reaper.py ----------------------------------------------------------

@@ -14,7 +14,7 @@ Manage the lifecycle of disposable Docker sandbox containers.
 
 | Tool Name | Parameters | Description |
 |---|---|---|
-| `sandbox_initialize` | `clone_repo` (opt), `repo` (opt), `pr` (opt), `image` (opt), `allow_network` (opt), `pip_extras` (opt), `name` (opt) | Spawns a sandbox container. Returns a 12-character `container_id`. `clone_repo="owner/name"` clones in the same call; `repo` + `pr=N` checks out a PR branch instead. |
+| `sandbox_initialize` | `clone_repo` (opt), `repo` (opt), `pr` (opt), `image` (opt), `allow_network` (opt), `pip_extras` (opt), `name` (opt) | Spawns a sandbox container. Returns a 12-character `container_id`. `clone_repo="owner/name"` clones in the same call; `repo` + `pr=N` checks out a PR branch instead. After a clone, deps are auto-installed per manifest: pip for `pyproject.toml`/`setup.py`, `npm ci`/`npm install` for `package.json` (go/rust are fetch-on-build). |
 | `sandbox_stop` | `container_id`, `force` (opt) | Stops and removes the sandbox container. |
 | `run_container_and_exec` | `commands` (opt), `image` (opt), `allow_network` (opt), `clone_repo` (opt) | One-shot execution: creates a container, runs the commands sequentially, and tears it down. |
 | `sandbox_list_containers`| — | Lists all currently active and managed containers along with `idle_seconds`. |
@@ -30,7 +30,7 @@ Run commands and manage packages inside the container.
 | `sandbox_exec` | `container_id`, `commands` or `argv`, `working_dir` (opt), `timeout` (opt), `verbose` (opt) | Runs commands synchronously inside the container. `commands` are chained with `&&` through a shell; `argv` runs an argument vector directly (no shell quoting). Outputs structured results with pagination options. |
 | `sandbox_exec_background` | `container_id`, `commands`, `working_dir` (opt) | Spawns commands in the background. Returns a `job_id` immediately. |
 | `sandbox_exec_check` | `container_id`, `job_id` | Checks the status of a background job. Returns output if finished, or `"running"`. |
-| `package_install` | `container_id`, `packages` (opt), `editable` (opt), `requirements` (opt), `extras` (opt), `constraints` (opt), `upgrade` (opt) | Structured wrapper for package installs (`pip`/`uv`). Returns installed package versions and avoids log pollution. |
+| `package_install` | `container_id`, `packages` (opt), `editable` (opt), `requirements` (opt), `extras` (opt), `constraints` (opt), `upgrade` (opt), `manager` (opt) | Structured wrapper for package installs (`pip`/`uv`; `manager="npm"` for JS deps). Returns installed package versions and avoids log pollution. |
 | `run_python` | `container_id`, `code`, `working_dir` (opt) | Executes arbitrary Python code inside the container. Base64-transported (no quoting hell). Returns stdout/stderr/exit_code. |
 
 ---

@@ -250,6 +250,207 @@ def _run_pip_install(
     return None
 
 
+_MANIFEST_FILES: tuple[str, ...] = (
+    "pyproject.toml",
+    "setup.py",
+    "package.json",
+    "package-lock.json",
+    "go.mod",
+    "Cargo.toml",
+)
+
+
+def _manifest_probe_cmd(clone_dest: str) -> str:
+    """Build the manifest-probe shell command for *clone_dest*.
+
+    The loop must exit 0 even when the last entry is absent: the exit
+    status of a ``for`` loop is that of its last executed command, so a
+    bare ``[ -e "$f" ] && printf ...`` body exits 1 for every repo without
+    a root ``Cargo.toml`` (the last probed file), and the caller would
+    discard the manifest names the loop already printed (issue #798
+    review).  ``|| true`` pins the per-iteration status to 0; only a
+    failed ``cd`` (missing dest) leaves the probe nonzero.
+    """
+    return (
+        f"cd {shlex.quote(clone_dest)} && "
+        f"for f in {' '.join(_MANIFEST_FILES)}; do "
+        '[ -e "$f" ] && printf \'%s\\n\' "$f" || true; done'
+    )
+
+
+def _detect_manifests(container: Any, clone_dest: str) -> set[str]:
+    """Probe *clone_dest* for dependency manifests with one in-container exec.
+
+    Returns the set of manifest file names present.  A failed probe is
+    treated as "no manifests": dependency install is non-fatal and must
+    never take init down, so detection failures degrade to a skip note
+    rather than an error.
+    """
+    probe = _manifest_probe_cmd(clone_dest)
+    try:
+        exit_code, output = container.exec_run(
+            ["/bin/sh", "-c", probe],
+            stdout=True,
+            stderr=True,
+            demux=True,
+        )
+    except Exception as e:
+        logger.warning("Manifest detection failed for %s: %s", clone_dest, e)
+        return set()
+    if exit_code != 0:
+        return set()
+    stdout_part, _ = output or (b"", b"")
+    text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    return {line.strip() for line in text.splitlines() if line.strip()}
+
+
+def _npm_install_cmd(clone_dest: str, lockfile: bool) -> str:
+    """Build the npm install command for *clone_dest*.
+
+    ``npm ci`` requires a lockfile and is the reproducible install; without
+    one ``npm install`` resolves the tree from ``package.json``.
+    """
+    cmd = "npm ci" if lockfile else "npm install"
+    return f"cd {shlex.quote(clone_dest)} && {cmd}"
+
+
+def _run_npm_install(
+    container: Any,
+    clone_repo: str,
+    clone_dest: str,
+    allow_network: bool = True,
+    lockfile: bool = False,
+) -> str | None:
+    """Run npm install inside the container after a successful clone.
+
+    Mirrors :func:`_run_pip_install`: non-fatal, returns an error message
+    string on failure and ``None`` on success.
+
+    Args:
+        container: Docker container object.
+        clone_repo: Repository in ``"owner/name"`` format.
+        clone_dest: Destination directory for the clone.
+        allow_network: Whether the container has network access.  The npm
+            registry is unreachable without it, so skip the install.
+        lockfile: Whether ``package-lock.json`` is present; ``npm ci`` when
+            ``True``, ``npm install`` otherwise.
+
+    Returns:
+        Error message string on failure, ``None`` on success.
+    """
+    if not allow_network:
+        logger.info(
+            "Skipping npm install for %s: container has no network access",
+            clone_repo,
+        )
+        return None
+    install_cmd = _npm_install_cmd(clone_dest, lockfile)
+    exit_code, output = container.exec_run(
+        ["/bin/sh", "-c", install_cmd],
+        stdout=True,
+        stderr=True,
+        demux=True,
+    )
+    stdout_part, stderr_part = output or (b"", b"")
+    install_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+    if exit_code != 0:
+        detail = (stderr_text or install_output).strip()
+        name = "npm ci" if lockfile else "npm install"
+        logger.warning(
+            "npm install deps failed (lockfile=%s, exit=%d): %s",
+            lockfile,
+            exit_code,
+            detail,
+        )
+        return f"{name} failed (exit {exit_code}): {detail}"
+    return None
+
+
+class DepsResult(NamedTuple):
+    """Outcome of :func:`_install_repo_deps`."""
+
+    note: str
+    failed: bool
+
+
+def _install_repo_deps(
+    container: Any,
+    clone_repo: str,
+    clone_dest: str,
+    pip_extras: str | None = "[dev]",
+    *,
+    allow_network: bool = True,
+    pip_args: str | None = None,
+) -> DepsResult:
+    """Manifest-aware dependency install after a successful clone/checkout.
+
+    The dispatcher all four post-clone install sites go through
+    (sandbox_initialize, run_container_and_exec, _setup_branch and
+    _setup_pr_branch): it probes *clone_dest* for manifests and runs every
+    applicable installer -- the existing pip path for python projects
+    (``pyproject.toml``/``setup.py``) and ``npm ci``/``npm install`` for JS
+    projects (``package.json``).  go/rust manifests are fetch-on-build
+    toolchains: noted, never installed.  Multi-language repos run both the
+    python and npm installers.
+
+    *pip_extras* ``None`` skips only the python step (its historical
+    meaning: "None skips pip install"); the npm step still runs when
+    ``package.json`` is present.  *allow_network* ``False`` skips every
+    install (no hang), exactly like the pip path.
+
+    Returns:
+        DepsResult(note, failed): *note* describes what ran, was skipped,
+        or failed (empty when nothing applies, e.g. no network); *failed*
+        is True when an installer reported an error.
+    """
+    if not allow_network:
+        logger.info(
+            "Skipping deps install for %s: container has no network access",
+            clone_repo,
+        )
+        return DepsResult("", False)
+    manifests = _detect_manifests(container, clone_dest)
+    has_py = "pyproject.toml" in manifests or "setup.py" in manifests
+    has_js = "package.json" in manifests
+    has_go = "go.mod" in manifests
+    has_cargo = "Cargo.toml" in manifests
+
+    notes: list[str] = []
+    errors: list[str] = []
+
+    if has_py:
+        if pip_extras is None:
+            notes.append("pip skipped (pip_extras=None)")
+        else:
+            err = _run_pip_install(
+                container, clone_repo, clone_dest, pip_extras, True, pip_args
+            )
+            if err is not None:
+                errors.append(err)
+            else:
+                notes.append("pip install ok")
+    if has_js:
+        lockfile = "package-lock.json" in manifests
+        err = _run_npm_install(container, clone_repo, clone_dest, True, lockfile)
+        if err is not None:
+            errors.append(err)
+        else:
+            notes.append("npm ci ok" if lockfile else "npm install ok")
+    if has_go and not has_py and not has_js:
+        notes.append("go.mod detected — delegated to fetch-on-build")
+    if has_cargo and not has_py and not has_js:
+        notes.append("Cargo.toml detected — delegated to fetch-on-build")
+    if not has_py and not has_js and not has_go and not has_cargo:
+        notes.append("no manifest detected — skipped")
+
+    if not notes and not errors:
+        # Unreachable in practice (the no-manifest branch above), kept so
+        # the composition below is total.
+        return DepsResult("", False)
+    return DepsResult(f"deps: {'; '.join(notes + errors)}", bool(errors))
+
+
 def _try_clone_into_container(
     container: Any,
     container_id: str,
@@ -531,30 +732,11 @@ def _setup_pr_branch(
         cid,
     )
 
-    # Step 4: Install dev dependencies (non-fatal)
-    pip_msg = ""
-    local_pip_args = pip_args or ""
-    if pip_extras is not None:
-        install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
-        exit_code, output = container.exec_run(
-            ["/bin/sh", "-c", install_cmd],
-            stdout=True,
-            stderr=True,
-            demux=True,
-        )
-        stdout_part, stderr_part = output or (b"", b"")
-        install_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-        stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-
-        if exit_code != 0:
-            detail = (stderr_text or install_output).strip()
-            logger.warning(
-                "pip install deps failed (extras=%s, exit=%d): %s",
-                pip_extras,
-                exit_code,
-                detail,
-            )
-            pip_msg = f" (pip install -e .{pip_extras} failed (exit {exit_code}): {detail})"
+    # Step 4: Install dev dependencies (non-fatal).  Manifest-aware: pip
+    # for python projects, npm ci/install for JS projects, a fetch-on-build
+    # note for go/rust, a skip note when nothing to install (#798).
+    deps = _install_repo_deps(container, repo, clone_dest, pip_extras, pip_args=pip_args)
+    deps_msg = f" ({deps.note})" if deps.note else ""
 
     _write_clone_meta(container, clone_dest, base_branch=base_ref)
 
@@ -565,7 +747,7 @@ def _setup_pr_branch(
         safe_dest,
     )
 
-    return f"PR #{pr_number} ({head_ref}) → {clone_dest} in container {cid}{pip_msg}"
+    return f"PR #{pr_number} ({head_ref}) → {clone_dest} in container {cid}{deps_msg}"
 
 
 def _resolve_default_branch(repo: str, *, token: str | None = None) -> str:
@@ -797,42 +979,11 @@ def _setup_branch(
         container, clone_dest, base_branch=base_branch or None,
     )
 
-    # Install dev dependencies (non-fatal)
-    pip_msg = ""
-    local_pip_args = pip_args or ""
-    if pip_extras is not None:
-        install_cmd = (
-            f"cd {safe_dest}"
-            f" && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
-        )
-        exit_code, output = container.exec_run(
-            ["/bin/sh", "-c", install_cmd],
-            stdout=True,
-            stderr=True,
-            demux=True,
-        )
-        stdout_part, stderr_part = output or (b"", b"")
-        install_output = (
-            stdout_part.decode("utf-8", errors="replace")
-            if stdout_part else ""
-        )
-        stderr_text = (
-            stderr_part.decode("utf-8", errors="replace")
-            if stderr_part else ""
-        )
-
-        if exit_code != 0:
-            detail = (stderr_text or install_output).strip()
-            logger.warning(
-                "pip install deps failed (extras=%s, exit=%d): %s",
-                pip_extras,
-                exit_code,
-                detail,
-            )
-            pip_msg = (
-                f" (pip install -e .{pip_extras} failed"
-                f" (exit {exit_code}): {detail})"
-            )
+    # Install dev dependencies (non-fatal).  Manifest-aware: pip for python
+    # projects, npm ci/install for JS projects, a fetch-on-build note for
+    # go/rust, a skip note when nothing to install (#798).
+    deps = _install_repo_deps(container, repo, clone_dest, pip_extras, pip_args=pip_args)
+    deps_msg = f" ({deps.note})" if deps.note else ""
 
     record_copy(
         cid,
@@ -842,5 +993,5 @@ def _setup_branch(
     )
 
     return (
-        f"Branch {branch_name} → {clone_dest} in container {cid}{pip_msg}"
+        f"Branch {branch_name} → {clone_dest} in container {cid}{deps_msg}"
     )

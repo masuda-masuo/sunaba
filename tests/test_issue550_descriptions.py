@@ -101,8 +101,14 @@ class TestServerInstructions:
 #   Both are exactly the measured cost of the new surface (description +545 B,
 #   parameter +110 B); the paragraph was trimmed to the essential contract and
 #   the long-form guidance lives in the workflow guide, not the docstring.
-TOTAL_DESCRIPTION_BYTE_LIMIT = 11809
-TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10520
+# - descriptions 11809 -> 11844, param descriptions 10520 -> 10562: #798 added
+#   the manager= axis to package_install (npm install / npm ci with a
+#   lockfile).  The description body gained one npm-semantics line (and
+#   dropped the now-wrong "Python" wording, net +69 B); the schema gained the
+#   manager= parameter (+42 B, exactly its description).  Both are the
+#   measured cost of the new surface, per this file's protocol.
+TOTAL_DESCRIPTION_BYTE_LIMIT = 11844
+TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10562
 
 
 def _param_desc_bytes(tool) -> int:

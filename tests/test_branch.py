@@ -32,6 +32,7 @@ class TestSetupBranch:
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
             (0, (b"feature-x\n", b"")),
             (0, (b"Installed\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"", b"")),
         ])
 
@@ -63,6 +64,7 @@ class TestSetupBranch:
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
             (0, (b"feature-y\n", b"")),
             (0, (b"Installed\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"", b"")),
         ])
 
@@ -121,6 +123,7 @@ class TestSetupBranch:
             (0, (b"Cloned\n", b"")),
             (0, (b"feature-z\n", b"")),
             (0, (b"", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (1, (b"", b"install failed")),
         ])
 
@@ -155,6 +158,7 @@ class TestSetupBranch:
             (0, (b"Cloned\n", b"")),
             (0, (b"feature-z\n", b"")),
             (0, (b"", b"")),
+            (0, (b"", b"")),  # manifest probe: no manifests -> skip note
         ])
 
         with patch(
@@ -182,6 +186,7 @@ class TestSetupBranch:
             (0, (b"", b"")),
             (0, (b"feature\n", b"")),
             (0, (b"", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"", b"")),
         ])
 
@@ -213,6 +218,7 @@ class TestSetupBranch:
             (0, (b"", b"")),
             (0, (b"feature\n", b"")),
             (0, (b"", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"", b"")),
         ])
 
@@ -270,6 +276,7 @@ class TestSetupBranchReadGrant:
             (0, (b"Cloning into '/tmp/repo/repo'...\n", b"")),
             (0, (b"feature\n", b"")),
             (0, (b"Installed\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"", b"")),
         ])
 
@@ -333,6 +340,7 @@ class TestSetupBranchReadGrant:
             (0, (b"Cloned\n", b"")),
             (0, (b"feature\n", b"")),
             (0, (b"Installed\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"", b"")),
         ])
 
@@ -358,6 +366,7 @@ class TestSetupBranchReadGrant:
             (0, (b"Cloned\n", b"")),
             (0, (b"feature\n", b"")),
             (0, (b"Installed\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"", b"")),
         ])
 
@@ -396,6 +405,7 @@ class TestSetupBranchReadGrant:
             (0, (b"Cloned\n", b"")),
             (0, (b"feature\n", b"")),
             (0, (b"Installed\n", b"")),
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
             (0, (b"", b"")),
         ])
 

@@ -183,8 +183,15 @@ class TestSandboxInitializeCloneRepoPipExtras:
         mock_docker: MagicMock,
         mock_clone: MagicMock,
     ) -> None:
+        """pip_extras=None skips only the python step (#798): with a python
+        manifest present, no pip exec runs and the init result reports the
+        pip skip; the manifest probe still runs (npm must be detected even
+        when pip is disabled)."""
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
+        mock_container.exec_run.side_effect = [
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
+        ]
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -197,7 +204,11 @@ class TestSandboxInitializeCloneRepoPipExtras:
         )
 
         assert "abc123def456" in result
-        assert mock_container.exec_run.call_count == 0
+        # Only the manifest probe exec ran: no pip install command, and the
+        # result says the python step was skipped.
+        assert mock_container.exec_run.call_count == 1
+        assert "pip skipped (pip_extras=None)" in result
+        assert "no manifest detected" not in result
 
     @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
@@ -212,7 +223,10 @@ class TestSandboxInitializeCloneRepoPipExtras:
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"Installed", b""))
+        mock_container.exec_run.side_effect = [
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
+            (0, (b"Installed", b"")),  # pip install
+        ]
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -225,7 +239,7 @@ class TestSandboxInitializeCloneRepoPipExtras:
         )
 
         assert "abc123def456" in result
-        assert mock_container.exec_run.call_count == 1
+        assert mock_container.exec_run.call_count == 2
         call_cmd = mock_container.exec_run.call_args[0][0][-1]
         assert "pip install -e '.[dev]' -q" in call_cmd
 
@@ -244,7 +258,10 @@ class TestSandboxInitializeCloneRepoPipExtras:
         install is always possible."""
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"Installed", b""))
+        mock_container.exec_run.side_effect = [
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
+            (0, (b"Installed", b"")),  # pip install
+        ]
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -258,7 +275,7 @@ class TestSandboxInitializeCloneRepoPipExtras:
 
         assert "abc123def456" in result
         # Network is auto-enabled by clone_repo, so pip install runs.
-        assert mock_container.exec_run.call_count == 1
+        assert mock_container.exec_run.call_count == 2
         call_cmd = mock_container.exec_run.call_args[0][0][-1]
         assert "pip install -e '.[dev]' -q" in call_cmd
 
@@ -275,7 +292,10 @@ class TestSandboxInitializeCloneRepoPipExtras:
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_container.exec_run.side_effect = [
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
+            (0, (b"", b"")),  # pip install
+        ]
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -304,7 +324,10 @@ class TestSandboxInitializeCloneRepoPipExtras:
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (1, (b"", b"ERROR"))
+        mock_container.exec_run.side_effect = [
+            (0, (b"pyproject.toml\n", b"")),  # manifest probe
+            (1, (b"", b"ERROR")),  # pip install fails
+        ]
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -318,7 +341,9 @@ class TestSandboxInitializeCloneRepoPipExtras:
 
         assert "abc123def456" in result
         assert "clone_repo failed" not in result
-        assert "pip install failed" in result
+        # The pip failure is non-fatal and reported in the deps note
+        # (format: "deps: pip install -e .[dev] failed (exit N): detail").
+        assert "pip install -e .[dev] failed" in result
 
     @patch("sunaba.tools.container.clone._clone_repo_via_network")
     @patch("sunaba.tools.container._docker")
@@ -347,6 +372,123 @@ class TestSandboxInitializeCloneRepoPipExtras:
         assert "clone_repo failed" in result
         assert mock_container.exec_run.call_count == 0
 
+
+class TestSandboxInitializeDepsManifests:
+    """Manifest-aware dependency install at init (#798): the dispatcher probes
+    the clone dest and runs every applicable installer (pip / npm), notes
+    fetch-on-build toolchains, and never runs pip on a repo without a python
+    manifest."""
+
+    _IMAGE = "python@sha256:" + "0" * 64
+
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+
+    def _run_init(self, exec_returns, **kwargs) -> tuple[str, MagicMock]:
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_container.exec_run.side_effect = exec_returns
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        with patch("sunaba.tools.container.clone._clone_repo_via_network",
+                   return_value="Clone OK"), patch(
+            "sunaba.tools.container._docker", return_value=mock_client
+        ), patch("sunaba.tools.container.lifecycle._ensure_image"), patch(
+            "sunaba.tools.container.lifecycle.validate_image_ref"
+        ):
+            return sandbox_initialize(
+                image=self._IMAGE,
+                clone_repo="owner/repo",
+                allow_network=True,
+                **kwargs,
+            ), mock_container
+
+    def test_js_only_with_lockfile_runs_npm_ci(self) -> None:
+        """package.json + package-lock.json -> npm ci, no pip command."""
+        result, container = self._run_init([
+            (0, (b"package.json\npackage-lock.json\n", b"")),  # probe
+            (0, (b"added 42 packages", b"")),  # npm ci
+        ])
+        assert "npm ci ok" in result
+        assert "pip" not in result
+        calls = [c.args[0][-1] for c in container.exec_run.call_args_list]
+        assert calls[0].startswith("cd /workspace && for f in")
+        assert calls[1] == "cd /workspace && npm ci"
+        assert not any("pip install" in cmd for cmd in calls)
+
+    def test_js_only_without_lockfile_runs_npm_install(self) -> None:
+        """package.json without a lockfile -> npm install, no pip command."""
+        result, container = self._run_init([
+            (0, (b"package.json\n", b"")),  # probe
+            (0, (b"added 7 packages in 2s", b"")),  # npm install
+        ])
+        assert "npm install ok" in result
+        assert "pip" not in result
+        calls = [c.args[0][-1] for c in container.exec_run.call_args_list]
+        assert calls[1] == "cd /workspace && npm install"
+        assert not any("pip install" in cmd for cmd in calls)
+
+    def test_js_only_npm_still_runs_with_pip_extras_none(self) -> None:
+        """pip_extras=None skips ONLY the python step; npm still runs (#798)."""
+        result, container = self._run_init(
+            [
+                (0, (b"package.json\n", b"")),  # probe
+                (0, (b"up to date", b"")),  # npm install
+            ],
+            pip_extras=None,
+        )
+        assert "npm install ok" in result
+        calls = [c.args[0][-1] for c in container.exec_run.call_args_list]
+        assert any(cmd == "cd /workspace && npm install" for cmd in calls)
+        assert not any("pip install" in cmd for cmd in calls)
+
+    def test_both_manifests_run_both_installers(self) -> None:
+        """pyproject.toml + package.json -> pip and npm both run."""
+        result, container = self._run_init([
+            (0, (b"pyproject.toml\npackage.json\npackage-lock.json\n", b"")),
+            (0, (b"Installed", b"")),  # pip
+            (0, (b"added 3 packages", b"")),  # npm ci
+        ])
+        assert "pip install ok" in result
+        assert "npm ci ok" in result
+        calls = [c.args[0][-1] for c in container.exec_run.call_args_list]
+        assert any("pip install" in cmd for cmd in calls)
+        assert calls[2] == "cd /workspace && npm ci"
+
+    def test_go_mod_only_notes_fetch_on_build(self) -> None:
+        """go.mod alone: no installer runs; the result says delegated."""
+        result, container = self._run_init([
+            (0, (b"go.mod\n", b"")),  # probe
+        ])
+        assert "go.mod detected — delegated to fetch-on-build" in result
+        # Only the probe exec ran.
+        assert container.exec_run.call_count == 1
+
+    def test_cargo_toml_only_notes_fetch_on_build(self) -> None:
+        result, container = self._run_init([
+            (0, (b"Cargo.toml\n", b"")),
+        ])
+        assert "Cargo.toml detected — delegated to fetch-on-build" in result
+        assert container.exec_run.call_count == 1
+
+    def test_no_manifest_notes_skipped(self) -> None:
+        """No manifest at all: no installer, short skip note in the result."""
+        result, container = self._run_init([
+            (0, (b"", b"")),  # probe finds nothing
+        ])
+        assert "no manifest detected — skipped" in result
+        assert container.exec_run.call_count == 1
+        assert "pip install" not in result
+
+    def test_npm_failure_non_fatal_and_reported(self) -> None:
+        """npm ci failure is non-fatal and reported in the deps note."""
+        result, container = self._run_init([
+            (0, (b"package.json\npackage-lock.json\n", b"")),
+            (1, (b"", b"npm ERR! code ENOENT")),
+        ])
+        assert "npm ci failed (exit 1): npm ERR! code ENOENT" in result
+        assert container.exec_run.call_count == 2
 
 class TestSandboxInitializeEgressProxy:
     """Egress-proxy wiring in sandbox_initialize (#358, #509): default-on, fail closed."""

@@ -644,9 +644,12 @@ class TapAdapter:
         # duration_ms NNN.NNN
 
     This adapter extracts the summary block and maps it to a
-    :class:`TestReport`.  Per-test detail (YAML blocks, individual
-    TAP lines) is **not** parsed — the summary block alone provides
-    the counts needed by :func:`~sunaba.edit_verify.test_runners._run_npm_test_verify`.
+    :class:`TestReport`, and additionally collects per-test failures
+    from ``not ok`` lines (test names plus a short excerpt of the
+    YAML diagnostic block that follows them) into
+    ``TestReport.failures`` — so a failing run names each failing
+    test even when the failure scrolls out of the raw output tail
+    (Issue #804).  Summary counts still come from the summary block.
 
     Raises :class:`ValueError` when no parseable summary block is
     found, allowing callers to distinguish ``not_available`` output
@@ -656,6 +659,171 @@ class TapAdapter:
     _SUMMARY_RE = re.compile(
         r"^#\s+(tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)\s+([\d.]+)",
     )
+    #: ``not ok <N> - <name>`` test-point lines, at any indentation depth
+    #: (node --test indents nested subtests).  At least one of the test
+    #: number or the ``- `` separator is required, so console output that
+    #: merely echoes a bare ``not ok <text>`` line is not misread.  Lines
+    #: inside YAML diagnostic blocks are excluded separately by
+    #: :meth:`_collect_failures` -- node --test passes test console output
+    #: through to the TAP stream, so an echoed ``not ok <N> - <text>`` line
+    #: inside an ``error:`` block would match even this tightened pattern.
+    _NOT_OK_RE = re.compile(
+        r"^not ok\s+(?:(?:\d+\s+)?-\s+|(?:\d+\s+))(?P<name>.*)$"
+    )
+    #: TAP directives that mark a test point as *not* a failure: ``# SKIP``
+    #: (test not run) and ``# TODO`` (known/expected failure).
+    _DIRECTIVE_RE = re.compile(r"#\s*(SKIP|TODO)\b", re.IGNORECASE)
+    #: Maximum number of per-test failures to collect (Issue #804).  When
+    #: more failing test points exist, a synthetic entry reports the rest.
+    _MAX_FAILURES = 50
+
+    @staticmethod
+    def _collect_failures(lines: list[str]) -> list[TestFailure]:
+        """Collect failing test points from ``not ok`` lines.
+
+        Scans the whole output in stream order (test points are emitted
+        before the trailing summary), matching ``not ok`` lines at any
+        indentation depth.  ``# SKIP`` / ``# TODO`` test points are not
+        failures per TAP semantics and are excluded.
+
+        Lines inside a YAML diagnostic block (the indented region opened
+        by a ``---`` line right after a test point) are skipped entirely:
+        node --test passes test console output through to the TAP stream,
+        so ``not ok``-shaped text echoed inside an ``error:`` block must
+        not be read as a test point (Issue #804 review finding 1).  The
+        block ends at a ``...`` line at the ``---`` opener's indentation
+        (TAP 13 semantics): deeper-indented ``...`` lines -- such as the
+        closers of an inner TAP fragment embedded in an ``error:``
+        message -- are content, not the terminator.  An unterminated
+        block (no ``...`` at the opener's indent) is closed by the first
+        non-indented line, so real test points after it are still
+        collected.
+
+        The list is capped at :data:`_MAX_FAILURES` entries; when capped,
+        a final synthetic entry reports how many more were not shown.
+        """
+        failures_list: list[TestFailure] = []
+        overflow = 0
+        in_yaml_block = False
+        block_indent = 0
+        prev_test_point = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if in_yaml_block:
+                # Content lines of a YAML diagnostic block are arbitrary
+                # test output, not TAP test points.  TAP 13 pairs the
+                # closing ``...`` with the ``---`` opener's indentation,
+                # so only a ``...`` at exactly that indent ends the
+                # block; a deeper-indented ``...`` (the closer of an
+                # inner TAP fragment embedded in the error text) is
+                # content.  A non-indented non-empty line closes an
+                # unterminated block so later real test points are not
+                # silently dropped.
+                if stripped == "..." and indent == block_indent:
+                    in_yaml_block = False
+                elif stripped and not line[:1].isspace():
+                    in_yaml_block = False
+                else:
+                    continue
+            if stripped == "---" and line[:1].isspace() and prev_test_point:
+                # The indented ``---`` right after a test point opens the
+                # YAML diagnostic block; skip its content until the
+                # matching ``...``.
+                in_yaml_block = True
+                block_indent = indent
+                continue
+            prev_test_point = (
+                stripped.startswith("not ok")
+                or stripped == "ok"
+                or stripped.startswith("ok ")
+            )
+            m = TapAdapter._NOT_OK_RE.match(stripped)
+            if not m:
+                continue
+            if TapAdapter._DIRECTIVE_RE.search(stripped):
+                continue
+            # Trailing TAP directives/comments (`` # ...``) are not part
+            # of the test name.
+            name = re.sub(r"\s+#.*$", "", m.group("name")).strip()
+            if not name:
+                continue
+            if len(failures_list) < TapAdapter._MAX_FAILURES:
+                failures_list.append(
+                    TestFailure(
+                        test=name,
+                        error=TapAdapter._error_from_block(lines, i + 1),
+                        file="",
+                        line=0,
+                    )
+                )
+            else:
+                overflow += 1
+        if overflow:
+            failures_list.append(
+                TestFailure(
+                    test=f"... ({overflow} more not shown)",
+                    error="",
+                    file="",
+                    line=0,
+                )
+            )
+        return failures_list
+
+    @staticmethod
+    def _error_from_block(lines: list[str], start: int) -> str:
+        """Extract up to 5 lines of the YAML block after a test point.
+
+        The block runs from the ``not ok`` line's next line until the
+        indented ``...`` terminator or the first non-indented line.  The
+        ``error:`` key's value (block scalar or inline) is preferred;
+        without an ``error:`` key, the first lines of the block itself
+        are used.  Returns ``""`` when no block follows.
+        """
+        block: list[str] = []
+        for line in lines[start:]:
+            if line.strip() == "":
+                block.append(line)
+                continue
+            if not line[:1].isspace() or line.strip() == "...":
+                break
+            block.append(line)
+
+        err_idx = -1
+        err_indent = 0
+        for k, line in enumerate(block):
+            s = line.strip()
+            if s.startswith("error:"):
+                err_idx = k
+                err_indent = len(line) - len(line.lstrip())
+                break
+
+        if err_idx >= 0:
+            after = block[err_idx].strip()[len("error:"):].strip()
+            if after and not re.fullmatch(r"[|>][-+]?", after):
+                # Inline scalar: ``error: <text>``.
+                return after
+            # Block scalar (``error: |-`` etc.): the following lines that
+            # are indented more deeply than the key itself.
+            content: list[str] = []
+            for line in block[err_idx + 1:]:
+                if line.strip() == "":
+                    content.append("")
+                    continue
+                if len(line) - len(line.lstrip()) > err_indent:
+                    content.append(line.strip())
+                else:
+                    break
+            return "\n".join(content[:5]).strip()
+
+        # No ``error:`` key: fall back to the first lines of the block
+        # (excluding the ``---`` opener) so some diagnostic text remains.
+        fallback = [
+            ln.strip()
+            for ln in block
+            if ln.strip() and ln.strip() not in ("---", "...")
+        ]
+        return "\n".join(fallback[:5])
 
     @staticmethod
     def parse(raw: str) -> TestReport:
@@ -671,7 +839,12 @@ class TapAdapter:
         TestReport
             With ``total`` (test count), ``passed``, ``failed``,
             ``skipped``, ``todo`` and ``duration`` (converted from
-            milliseconds to seconds) populated.
+            milliseconds to seconds) populated.  Failing runs also
+            carry ``failures``: one :class:`TestFailure` per ``not ok``
+            test point, in stream order, with the test name and a short
+            excerpt of its YAML diagnostic block (``file``/``line`` are
+            always ``""``/``0`` — TAP has no location info).  Passing
+            runs leave ``failures`` absent.
 
         Raises
         ------
@@ -718,11 +891,14 @@ class TapAdapter:
         duration_ms = float(summary.get("duration_ms", 0))
         duration_s = duration_ms / 1000.0
 
+        failures_list = TapAdapter._collect_failures(lines)
+
         return TestReport(
             status="failed" if failed > 0 else "ok",
             duration=duration_s,
             passed=passed,
             failed=failed,
+            failures=failures_list if failed > 0 and failures_list else None,
             total=total,
             skipped=skipped,
             todo=todo,

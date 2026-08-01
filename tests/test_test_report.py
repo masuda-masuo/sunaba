@@ -685,3 +685,289 @@ class TestTapAdapter:
         report = TapAdapter.parse_json(raw)
         # The fixture has duration_ms around 47.8 → ~0.048 seconds.
         assert 0.01 < report.duration < 0.5
+
+    # ------------------------------------------------------------------
+    # Per-test failures from ``not ok`` lines (Issue #804)
+    # ------------------------------------------------------------------
+
+    def test_midstream_failure_outside_tail(self) -> None:
+        """A failure early in the stream is captured even when 20+ passing
+        lines follow it (the raw_tail window would miss it)."""
+        raw = self._load("tap_fail_midstream.txt")
+        report = TapAdapter.parse_json(raw)
+        d = report.to_dict()
+
+        failures = report.failures
+        assert failures is not None
+        assert [f.test for f in failures] == ["the failing test"]
+        assert failures[0].file == ""
+        assert failures[0].line == 0
+        assert failures[0].error == "Expected values to be strictly equal:\n\n1 !== 2"
+
+        # Summary counts unchanged.
+        assert d["status"] == "failed"
+        assert d["passed"] == 25
+        assert d["failed"] == 1
+        assert d["total"] == 26
+
+        # Guard: the failure is genuinely outside the 20-line tail.
+        tail = "\n".join(raw.strip().split("\n")[-20:])
+        assert "the failing test" not in tail
+
+    def test_nested_subtest_failure(self) -> None:
+        """Indented ``not ok`` lines (nested subtests) are captured in
+        stream order, alongside the parent suite's own ``not ok``."""
+        raw = self._load("tap_fail_nested.txt")
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        assert [f.test for f in failures] == ["subtracts", "math"]
+        assert failures[0].error == "Expected 5 to equal 4"
+
+    def test_not_ok_skip_todo_excluded(self) -> None:
+        """``not ok ... # SKIP`` / ``# TODO`` are not failures per TAP."""
+        raw = self._load("tap_fail_skip_todo_notok.txt")
+        report = TapAdapter.parse_json(raw)
+        d = report.to_dict()
+        failures = report.failures
+        assert failures is not None
+        assert [f.test for f in failures] == ["real failure"]
+        assert d["failed"] == 1
+        assert d["skipped"] == 1
+        assert d["todo"] == 1
+
+    def test_yaml_error_block_echo_not_collected(self) -> None:
+        """A ``not ok``-shaped line inside a YAML ``error:`` block (test
+        console output echoed through the TAP stream) is not read as a
+        test point: exactly one failure is reported, the real one
+        (Issue #804 review finding 1)."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - the failing test\n"
+            "  ---\n"
+            "  error: |-\n"
+            "    not ok 9 - text echoed inside the error block\n"
+            "    some other line\n"
+            "  ...\n"
+            "1..1\n"
+            "# tests 1\n"
+            "# suites 0\n"
+            "# pass 0\n"
+            "# fail 1\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 10.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        # Exactly ONE failure entry -- the echoed line inside the YAML
+        # block must not fabricate a phantom "text echoed inside the
+        # error block" test point.
+        assert [f.test for f in failures] == ["the failing test"]
+        assert failures[0].file == ""
+        assert failures[0].line == 0
+        # The excerpt still carries the diagnostic content (the echoed
+        # line is part of the error text); only its *collection* as a
+        # separate failure is prevented.
+        assert "not ok 9 - text echoed inside the error block" in failures[0].error
+
+    def test_bare_not_ok_without_number_or_dash_not_collected(self) -> None:
+        """A bare ``not ok`` line with neither a test number nor a ``- ``
+        separator (console echo shape, outside any YAML block) is not a
+        TAP test point and is not collected."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - real failure\n"
+            "  ---\n"
+            "  error: |-\n"
+            "    boom\n"
+            "  ...\n"
+            "not ok plain echo with neither number nor dash\n"
+            "not ok\n"
+            "1..1\n"
+            "# tests 1\n"
+            "# suites 0\n"
+            "# pass 0\n"
+            "# fail 1\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 10.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        assert [f.test for f in failures] == ["real failure"]
+
+    def test_embedded_tap_in_error_block_not_collected(self) -> None:
+        """An inner TAP fragment embedded in an ``error:`` message (e.g.
+        a test asserting on a nested ``node --test`` run) carries its own
+        ``---``/``...`` pairs and ``not ok`` lines at a deeper
+        indentation.  Only a ``...`` at the ``---`` opener's indent ends
+        the outer block (TAP 13 semantics), so the inner fragment's
+        ``...`` and its ``not ok 2 - inner two`` line are content:
+        exactly one failure is reported (Issue #804 review finding 1)."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - embedded inner TAP with two failures\n"
+            "  ---\n"
+            "  error: |-\n"
+            "    inner run output:\n"
+            "    TAP version 13\n"
+            "    not ok 1 - inner one\n"
+            "      ---\n"
+            "      error: |-\n"
+            "        boom one\n"
+            "      ...\n"
+            "    not ok 2 - inner two\n"
+            "      ---\n"
+            "      error: |-\n"
+            "        boom two\n"
+            "      ...\n"
+            "    1..2\n"
+            "  code: 'ERR_TEST_FAILURE'\n"
+            "  ...\n"
+            "1..1\n"
+            "# tests 1\n"
+            "# suites 0\n"
+            "# pass 0\n"
+            "# fail 1\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 10.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        # Exactly ONE failure entry -- the inner fragment's ``not ok``
+        # lines and ``...`` closers must not fabricate phantoms.
+        assert [f.test for f in failures] == [
+            "embedded inner TAP with two failures"
+        ]
+        assert all("inner two" != f.test for f in failures)
+
+    def test_unterminated_block_keeps_later_test_points(self) -> None:
+        """A YAML block with no ``...`` at the opener's indent (truncated
+        or malformed output) is closed by the first non-indented line, so
+        real test points after it are still collected instead of being
+        silently dropped."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - first failure\n"
+            "  ---\n"
+            "  error: |-\n"
+            "    boom\n"
+            "not ok 2 - second failure\n"
+            "1..2\n"
+            "# tests 2\n"
+            "# suites 0\n"
+            "# pass 0\n"
+            "# fail 2\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 10.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        assert [f.test for f in failures] == ["first failure", "second failure"]
+
+    def test_failure_without_diagnostic_block(self) -> None:
+        """A ``not ok`` with no YAML block yields error == \"\"."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - bare failure\n"
+            "# Subtest: another\n"
+            "ok 2 - another\n"
+            "1..2\n"
+            "# tests 2\n"
+            "# suites 0\n"
+            "# pass 1\n"
+            "# fail 1\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 10.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        assert len(failures) == 1
+        assert failures[0].test == "bare failure"
+        assert failures[0].error == ""
+        assert failures[0].file == ""
+        assert failures[0].line == 0
+
+    def test_failure_error_excerpt_truncated_to_5_lines(self) -> None:
+        """The YAML ``error:`` block scalar lands in ``error`` truncated."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - failing test\n"
+            "  ---\n"
+            "  error: |-\n"
+            "    line one\n"
+            "    line two\n"
+            "    line three\n"
+            "    line four\n"
+            "    line five\n"
+            "    line six\n"
+            "    line seven\n"
+            "  ...\n"
+            "1..1\n"
+            "# tests 1\n"
+            "# suites 0\n"
+            "# pass 0\n"
+            "# fail 1\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 20.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        assert failures[0].test == "failing test"
+        assert failures[0].error == "\n".join(
+            f"line {n}" for n in ("one", "two", "three", "four", "five")
+        )
+
+    def test_failures_capped_at_50(self) -> None:
+        """More than 50 failing test points are capped with a synthetic entry."""
+        lines = ["TAP version 13"]
+        lines += [f"not ok {i} - failing test {i}" for i in range(1, 53)]
+        lines += [
+            "1..52",
+            "# tests 52",
+            "# suites 0",
+            "# pass 0",
+            "# fail 52",
+            "# cancelled 0",
+            "# skipped 0",
+            "# todo 0",
+            "# duration_ms 100.0",
+        ]
+        report = TapAdapter.parse_json("\n".join(lines))
+        failures = report.failures
+        assert failures is not None
+        assert len(failures) == 51
+        assert failures[0].test == "failing test 1"
+        assert failures[49].test == "failing test 50"
+        assert failures[50].test == "... (2 more not shown)"
+        assert failures[50].error == ""
+
+    def test_all_pass_failures_absent(self) -> None:
+        """Passing runs keep the exact pre-#804 dict shape (no ``failures``)."""
+        raw = self._load("tap_ok.txt")
+        report = TapAdapter.parse_json(raw)
+        d = report.to_dict()
+        assert "failures" not in d
+        assert d == {
+            "status": "ok",
+            "duration": 47.844101 / 1000.0,
+            "passed": 3,
+            "total": 3,
+        }

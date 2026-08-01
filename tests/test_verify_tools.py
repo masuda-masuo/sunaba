@@ -1654,6 +1654,27 @@ class TestRunNpmTestVerify:
         "# todo 0\n"
         "# duration_ms 20.0\n"
     )
+    # TAP output whose single failure appears mid-stream, followed by 25
+    # passing test points (well outside the 20-line raw_tail window).
+    _TAP_FAIL_MIDSTREAM = (
+        "TAP version 13\n"
+        "not ok 1 - the failing test\n"
+        "  ---\n"
+        "  error: |-\n"
+        "    Expected values to be strictly equal:\n"
+        "    1 !== 2\n"
+        "  ...\n"
+        + "".join(f"ok {i} - passing test {i - 1}\n" for i in range(2, 27))
+        + "1..26\n"
+        "# tests 26\n"
+        "# suites 0\n"
+        "# pass 25\n"
+        "# fail 1\n"
+        "# cancelled 0\n"
+        "# skipped 0\n"
+        "# todo 0\n"
+        "# duration_ms 100.0\n"
+    )
 
     def _make_container(self, side_effects: list) -> MagicMock:
         container = MagicMock()
@@ -1730,6 +1751,34 @@ class TestRunNpmTestVerify:
         detail = json.loads(result.detail)
         assert detail["failed"] == 1
         assert detail["total"] == 1
+
+    def test_npm_test_failure_name_in_detail(self) -> None:
+        """The failing test name (mid-stream, outside raw_tail) appears in
+        the returned detail JSON (Issue #804)."""
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),        # cat package.json
+            (1, (self._TAP_FAIL_MIDSTREAM.encode(), b"")),  # npm test (TAP, fail)
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "findings"
+        assert result.tool == "npm test"
+        assert result.exit_code == 1
+        detail = json.loads(result.detail)
+        assert detail["failed"] == 1
+        assert detail["total"] == 26
+        failures = detail.get("failures")
+        assert failures is not None
+        assert failures[0]["test"] == "the failing test"
+        assert failures[0]["error"] == "Expected values to be strictly equal:\n1 !== 2"
+        assert failures[0]["file"] == ""
+        assert failures[0]["line"] == 0
+        # The name is outside the 20-line raw_tail window — the failures
+        # extraction (not the tail) is what surfaces it.
+        raw_tail = detail.get("raw_tail", "")
+        assert "the failing test" not in raw_tail
+        assert "passing test 25" in raw_tail
 
     # --- (e) test failure with non-TAP output ------------------------------
 

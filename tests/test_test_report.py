@@ -849,6 +849,177 @@ class TestTapAdapter:
         ]
         assert all("inner two" != f.test for f in failures)
 
+    def test_deeper_ellipsis_before_error_key_keeps_excerpt(self) -> None:
+        """A ``...`` at a deeper indentation than the ``---`` opener
+        (the closer of an inner TAP fragment echoed inside the block,
+        before the ``error:`` key) is content, not the terminator: the
+        excerpt is still extracted from the ``error:`` key past it.
+        Only a ``...`` at the opener's own indent ends the block (TAP
+        13 semantics; #809)."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - failing test\n"
+            "  ---\n"
+            "  code: 'ERR_TEST_FAILURE'\n"
+            "    inner fragment echoed before the error key:\n"
+            "    TAP version 13\n"
+            "    not ok 1 - inner test\n"
+            "      ---\n"
+            "      some inner detail\n"
+            "      ...\n"
+            "  error: |-\n"
+            "    the real error text\n"
+            "  ...\n"
+            "1..1\n"
+            "# tests 1\n"
+            "# suites 0\n"
+            "# pass 0\n"
+            "# fail 1\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 10.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        # Exactly ONE failure entry -- the inner fragment's ``not ok``
+        # line is block content, not a test point.
+        assert [f.test for f in failures] == ["failing test"]
+        # The excerpt comes from the real ``error:`` key, not truncated
+        # at the deeper ``...`` before it.
+        assert failures[0].error == "the real error text"
+
+    def test_opener_indent_ellipsis_still_terminates_block(self) -> None:
+        """The block's real closer -- a ``...`` at the ``---`` opener's
+        own indentation -- still terminates the block: indented lines
+        after it must not leak into the excerpt (TAP 13; #809)."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - failing test\n"
+            "  ---\n"
+            "  error: |-\n"
+            "    the real error text\n"
+            "  ...\n"
+            "    this line is after the block closer\n"
+            "ok 2 - next test\n"
+            "1..2\n"
+            "# tests 2\n"
+            "# suites 0\n"
+            "# pass 1\n"
+            "# fail 1\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 10.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        assert [f.test for f in failures] == ["failing test"]
+        # Nothing after the closer leaks into the excerpt.
+        assert failures[0].error == "the real error text"
+        assert "after the block closer" not in failures[0].error
+
+    def test_deeper_ellipsis_inside_fallback_region_keeps_lines(self) -> None:
+        """Without an ``error:`` key, a deeper-indented ``...`` inside
+        the block (the fallback region) is content too: diagnostic
+        lines after it are still included in the first-lines fallback
+        excerpt (TAP 13; #809)."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - failing test\n"
+            "  ---\n"
+            "  code: 'ERR_TEST_FAILURE'\n"
+            "  first diagnostic line\n"
+            "    ...\n"
+            "  second diagnostic line\n"
+            "  ...\n"
+            "1..1\n"
+            "# tests 1\n"
+            "# suites 0\n"
+            "# pass 0\n"
+            "# fail 1\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 10.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        assert [f.test for f in failures] == ["failing test"]
+        assert failures[0].error == "\n".join(
+            [
+                "code: 'ERR_TEST_FAILURE'",
+                "first diagnostic line",
+                "second diagnostic line",
+            ]
+        )
+
+    def test_interior_dashes_in_openerless_block_stay_legacy(self) -> None:
+        """Without a leading ``---`` opener there is no YAML block, and
+        an interior ``---`` line must not switch the excerpt into
+        opener mode: the legacy stop rule (any-indent ``...``
+        terminates) applies to the whole opener-less region (#809
+        review finding 1)."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - failing test\n"
+            "  line one\n"
+            "  ---\n"
+            "  line two\n"
+            "    ...\n"
+            "  line three\n"
+            "1..1\n"
+            "# tests 1\n"
+            "# suites 0\n"
+            "# pass 0\n"
+            "# fail 1\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 10.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        assert [f.test for f in failures] == ["failing test"]
+        # Legacy rule: the any-indent ``...`` still terminates the
+        # opener-less region, so ``line three`` is excluded; the
+        # interior ``---`` is filtered from the fallback excerpt.
+        assert failures[0].error == "line one\nline two"
+
+    def test_deeper_ellipsis_inside_error_scalar_is_content(self) -> None:
+        """A deeper-indented ``...`` inside the ``error:`` block scalar
+        itself (an inner TAP fragment echoed within the error text --
+        the docstring's motivating case) is content: the scalar lines
+        after it are kept in the excerpt (TAP 13; #809)."""
+        raw = (
+            "TAP version 13\n"
+            "not ok 1 - failing test\n"
+            "  ---\n"
+            "  error: |-\n"
+            "    inner:\n"
+            "    ...\n"
+            "    more text\n"
+            "  ...\n"
+            "1..1\n"
+            "# tests 1\n"
+            "# suites 0\n"
+            "# pass 0\n"
+            "# fail 1\n"
+            "# cancelled 0\n"
+            "# skipped 0\n"
+            "# todo 0\n"
+            "# duration_ms 10.0\n"
+        )
+        report = TapAdapter.parse_json(raw)
+        failures = report.failures
+        assert failures is not None
+        assert [f.test for f in failures] == ["failing test"]
+        assert failures[0].error == "inner:\n...\nmore text"
+
     def test_unterminated_block_keeps_later_test_points(self) -> None:
         """A YAML block with no ``...`` at the opener's indent (truncated
         or malformed output) is closed by the first non-indented line, so

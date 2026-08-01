@@ -5,9 +5,10 @@
 #
 # Dockerfile.python と Dockerfile.full の *両方* がこのスクリプトを叩く。
 # 2 箇所に別々のインストール手順があると必ずドリフトする — #584 はまさにそれで、
-# verify は pytest を --json-report 付きで起動するのに、そのプラグインは python
-# イメージにしか焼かれておらず、別イメージで起動したコンテナは初回 verify が必ず
-# 落ちていた。
+# verify が前提にしていた pytest-json-report プラグインが python イメージにしか
+# 焼かれておらず、別イメージで起動したコンテナは初回 verify が必ず落ちていた。
+# #785 で verify は pytest 組込みの --junit-xml に切り替えたため、プラグインの
+# 前提自体が消えた（このスクリプトからも除去済み）。
 #
 # イメージの契約: **verify が dispatch しうるツールは全て存在すること。**
 # 各 Dockerfile の HEALTHCHECK がこれを実行時に表明する。
@@ -20,7 +21,6 @@ uv pip install \
     ruff \
     pyright \
     pytest \
-    pytest-json-report \
     pytest-xdist
 
 # pytest-xdist は「焼くが既定では使わない」。verify は直列で pytest を回す。

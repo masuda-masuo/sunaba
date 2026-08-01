@@ -5,8 +5,10 @@
 #
 # Dockerfile.js と Dockerfile.full の *両方* がこのスクリプトを叩く。2 箇所に
 # 別々のインストール手順があると必ずドリフトする -- #584 はまさにそれ
-# （pytest-json-report が python イメージにしか焼かれておらず、他イメージから
-# 起動したコンテナは初回 verify が必ず落ちていた）。
+# （verify が前提にしていた pytest-json-report プラグインが python イメージに
+# しか焼かれておらず、他イメージから起動したコンテナは初回 verify が必ず
+# 落ちていた。#785 で verify は組込みの --junit-xml に切り替え、プラグイン
+# 前提は消滅）。
 #
 # sandbox ユーザーで実行すること。npm のグローバルインストール先は
 # Dockerfile.base の NPM_CONFIG_PREFIX（/home/sandbox/.npm-global）で

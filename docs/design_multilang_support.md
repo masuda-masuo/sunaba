@@ -106,7 +106,11 @@ Every validation layer (lint, type check, test) must return a structured status 
 
 *   **`sandbox:base`**: Contains language-agnostic utilities (`ripgrep`, `ast-grep`, `fd`, `sd`, `ctags`, `git`, `gh`, `jq`, `uv`) + **Python runtime + Node runtime** (+ a non-root npm global prefix, `NPM_CONFIG_PREFIX`, so backend layers can `npm install -g` without root).
 *   **Backend Layers** (inherit from `sandbox:base` using `FROM`):
-    *   `sandbox:python`: Ruff, Pyright, Pytest + pytest-json-report.
+    *   `sandbox:python`: Ruff, Pyright, Pytest + pytest-xdist (verify uses
+        pytest's built-in `--junit-xml` and passes `-n auto` only when
+        pytest-xdist is importable in the target environment, with a serial
+        fallback otherwise — so no report plugin is needed and plain pytest
+        still verifies — #785).
     *   `sandbox:go`: Go compiler and build toolchains.
     *   `sandbox:js`: eslint, typescript (tsc), jest (Issue #588).
     *   `sandbox:rust`: rustc, cargo, clippy, rustfmt (via rustup; `install-rust.sh`) + the `x86_64-pc-windows-gnu` cross-compile target.
@@ -123,7 +127,7 @@ Every validation layer (lint, type check, test) must return a structured status 
 | `sandbox:rust` | base + rust | Lean image, reachable only via an explicit `image=` (#749/#753). |
 | `sandbox:minimal` | Core Git + Python | Lightweight environment for rapid tests. |
 
-The toolchain installs live in `docker/install-python-tools.sh` / `install-go.sh` / `install-js-tools.sh` / `install-rust.sh`, which `Dockerfile.python` / `Dockerfile.go` / `Dockerfile.js` / `Dockerfile.rust` / `Dockerfile.full` all source. Two copies of an install step drift, and that drift *was* #584: `pytest-json-report` was baked into the python image only, so every container started from any other image failed its first verify.
+The toolchain installs live in `docker/install-python-tools.sh` / `install-go.sh` / `install-js-tools.sh` / `install-rust.sh`, which `Dockerfile.python` / `Dockerfile.go` / `Dockerfile.js` / `Dockerfile.rust` / `Dockerfile.full` all source. Two copies of an install step drift, and that drift *was* #584: `pytest-json-report` was baked into the python image only, so every container started from any other image failed its first verify. #785 removed the plugin dependency altogether: verify runs pytest's built-in `--junit-xml`, so **no image has to ship a plugin (or even pytest-xdist) for verify to work** — `-n auto` is passed only when pytest-xdist is importable in the target environment, with a serial fallback otherwise.
 
 **js dev tools are baked, not pip-install-like.** Unlike Python's `pip install -e .[dev]`, which writes into the same venv the image already put on `PATH` so the repo naturally wins, `npm install -g` and a repo's own `node_modules` are two entirely separate trees -- nothing makes the repo win by default. A globally baked eslint 9 hitting a repo pinned to eslint 8's config is a silent version mismatch, not an error. So `edit_verify`'s eslint/tsc/jest runners resolve `node_modules/.bin/<tool>` relative to the verify working directory *first*, falling back to the image-baked global only when the repo has no local install, and always record which one ran in the `VerifyResult.detail` field (`_resolve_js_tool` / `_annotate_resolution`, Issue #588). This is a resolution-order fix, not an image-splitting one: shipping a separate `sandbox:js` image does not by itself solve the version-mismatch problem -- the per-invocation resolution does.
 

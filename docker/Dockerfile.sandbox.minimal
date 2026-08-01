@@ -34,7 +34,8 @@ RUN uv venv --seed /home/sandbox/.venv
 ENV VIRTUAL_ENV="/home/sandbox/.venv" \
     PATH="/home/sandbox/.venv/bin:/home/sandbox/.local/bin:${PATH}"
 
-RUN uv pip install pytest pytest-json-report
+# pytest のみ。verify は組込みの --junit-xml を使うためプラグイン不要（#785）
+RUN uv pip install pytest
 
 # ── ヘルスチェック (minimal が保有するツールのみ) ────────────────
 # pip --version は venv の健全性を兼ねて確認する（壊れたツールを隠さない）

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,8 +17,10 @@ from src.sunaba.test_report import (
     TapAdapter,
     TestFailure,
     TestReport,
+    build_pytest_cmd,
     export_test_report,
     prune_library_frames,
+    split_pytest_output,
 )
 
 # ===================================================================
@@ -143,84 +148,62 @@ class TestPruneLibraryFrames:
 
 # ===================================================================
 # Pytest adapter tests
-# ===================================================================
-
-
 class TestPytestAdapter:
+    """PytestAdapter parses pytest's built-in JUnit XML (--junit-xml, #785)."""
+
+    def _suite(self, body: str) -> str:
+        """Wrap *body* in the exact <testsuites>/<testsuite> shape pytest emits."""
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<testsuites name="pytest tests"><testsuite name="pytest" '
+            f'{body}</testsuite></testsuites>'
+        )
 
     def test_all_passed(self) -> None:
-        data = {
-            "summary": {"total": 5, "passed": 5, "failed": 0},
-            "duration": 0.8,
-            "tests": [
-                {"nodeid": "test_a.py::test_one", "outcome": "passed"},
-                {"nodeid": "test_a.py::test_two", "outcome": "passed"},
-            ],
-        }
-        report = PytestAdapter.parse(data)
+        xml = self._suite(
+            'errors="0" failures="0" skipped="0" tests="5" time="0.8" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="test_a" name="test_one" time="0.1" />'
+            '<testcase classname="test_a" name="test_two" time="0.1" />'
+        )
+        report = PytestAdapter.parse(xml)
         assert report.status == "ok"
         assert report.passed == 5
         assert report.failed == 0
         assert report.duration == 0.8
         d = report.to_dict()
-        assert d == {"status": "ok", "duration": 0.8, "passed": 5}
+        assert d == {"status": "ok", "duration": 0.8, "passed": 5, "total": 5}
 
     def test_some_failed(self) -> None:
-        data = {
-            "summary": {"total": 4, "passed": 2, "failed": 1, "errors": 1},
-            "duration": 2.1,
-            "tests": [
-                {"nodeid": "test_a.py::test_pass", "outcome": "passed"},
-                {"nodeid": "test_a.py::test_pass2", "outcome": "passed"},
-                {
-                    "nodeid": "test_a.py::test_fail",
-                    "outcome": "failed",
-                    "call": {
-                        "crash": {
-                            "path": "test_a.py",
-                            "lineno": 10,
-                            "message": "AssertionError\nassert False",
-                        },
-                        "longrepr": (
-                            "def test_fail():\n"
-                            "    assert False\n"
-                            "E   AssertionError\n"
-                            "\n"
-                            "test_a.py:10: AssertionError"
-                        ),
-                        "traceback": [
-                            {"path": "test_a.py", "lineno": 10, "message": "AssertionError"},
-                        ],
-                    },
-                },
-                {
-                    "nodeid": "test_b.py::test_error",
-                    "outcome": "error",
-                    "setup": {
-                        "crash": {
-                            "path": "test_b.py",
-                            "lineno": 5,
-                            "message": "RuntimeError: fixture boom",
-                        },
-                        "longrepr": (
-                            "    @pytest.fixture\n"
-                            "    def boom():\n"
-                            ">       raise RuntimeError(\"fixture boom\")\n"
-                            "E       RuntimeError: fixture boom\n"
-                            "\n"
-                            "test_b.py:5: RuntimeError"
-                        ),
-                    },
-                    "call": {},
-                },
-            ],
-        }
-        report = PytestAdapter.parse(data)
+        xml = self._suite(
+            'errors="1" failures="1" skipped="0" tests="4" time="2.1" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="test_a" name="test_pass" time="0.01" />'
+            '<testcase classname="test_a" name="test_pass2" time="0.01" />'
+            '<testcase classname="test_a" name="test_fail" time="0.02">'
+            '<failure message="AssertionError&#10;assert False">'
+            "def test_fail():\n"
+            "    assert False\n"
+            "E   AssertionError\n"
+            "\n"
+            "test_a.py:10: AssertionError"
+            "</failure></testcase>"
+            '<testcase classname="test_b" name="test_error" time="0.02">'
+            '<error message="failed on setup with &quot;RuntimeError: fixture boom&quot;">'
+            "    @pytest.fixture\n"
+            "    def boom():\n"
+            "&gt;       raise RuntimeError(\"fixture boom\")\n"
+            "E       RuntimeError: fixture boom\n"
+            "\n"
+            "test_b.py:5: RuntimeError"
+            "</error></testcase>"
+        )
+        report = PytestAdapter.parse(xml)
         assert report.status == "failed"
         assert report.failed == 2
         assert report.passed == 2
         assert len(report.failures) == 2
-        assert report.failures[0].test == "test_a.py::test_fail"
+        assert report.failures[0].test == "test_a::test_fail"
         assert report.failures[0].error == (
             "def test_fail():\n"
             "    assert False\n"
@@ -230,142 +213,212 @@ class TestPytestAdapter:
         )
         assert report.failures[0].file == "test_a.py"
         assert report.failures[0].line == 10
-        assert report.failures[1].test == "test_b.py::test_error"
+        assert report.failures[1].test == "test_b::test_error"
         assert report.failures[1].file == "test_b.py"
         assert report.failures[1].line == 5
 
-    def test_error_outcome_setup_crash(self) -> None:
-        """error outcome with crash in setup stage (fixture failure)."""
-        data = {
-            "summary": {"total": 2, "passed": 0, "failed": 0, "errors": 1},
-            "duration": 0.5,
-            "tests": [
-                {
-                    "nodeid": "test_fixture.py::test_uses_fixture",
-                    "outcome": "error",
-                    "setup": {
-                        "crash": {
-                            "path": "test_fixture.py",
-                            "lineno": 8,
-                            "message": "ValueError: invalid fixture param",
-                        },
-                        "longrepr": (
-                            "    @pytest.fixture\n"
-                            "    def param():\n"
-                            ">       raise ValueError(\"invalid fixture param\")\n"
-                            "E       ValueError: invalid fixture param\n"
-                            "\n"
-                            "test_fixture.py:8: ValueError"
-                        ),
-                    },
-                    "call": {},
-                },
-                {"nodeid": "test_ok.py::test_ok", "outcome": "passed"},
-            ],
-        }
-        report = PytestAdapter.parse(data)
+    def test_error_setup_fixture(self) -> None:
+        """An <error> testcase (fixture failure in setup) is a structured failure."""
+        xml = self._suite(
+            'errors="1" failures="0" skipped="0" tests="2" time="0.5" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="test_fixture" name="test_uses_fixture" time="0.02">'
+            '<error message="failed on setup with &quot;ValueError: invalid fixture param&quot;">'
+            "    @pytest.fixture\n"
+            "    def param():\n"
+            "&gt;       raise ValueError(\"invalid fixture param\")\n"
+            "E       ValueError: invalid fixture param\n"
+            "\n"
+            "test_fixture.py:8: ValueError"
+            "</error></testcase>"
+            '<testcase classname="test_ok" name="test_ok" time="0.01" />'
+        )
+        report = PytestAdapter.parse(xml)
         assert report.status == "failed"
         assert report.failed == 1
         assert report.passed == 1
         assert len(report.failures) == 1
-        assert report.failures[0].test == "test_fixture.py::test_uses_fixture"
+        assert report.failures[0].test == "test_fixture::test_uses_fixture"
         assert "ValueError" in report.failures[0].error
         assert report.failures[0].file == "test_fixture.py"
         assert report.failures[0].line == 8
 
-    def test_failure_without_longrepr_falls_back_to_crash_message(self) -> None:
-        """When longrepr is missing, fall back to crash.message."""
-        data = {
-            "summary": {"total": 1, "passed": 0, "failed": 1},
-            "duration": 0.3,
-            "tests": [
-                {
-                    "nodeid": "test_x.py::test_x",
-                    "outcome": "failed",
-                    "call": {
-                        "crash": {
-                            "path": "test_x.py",
-                            "lineno": 3,
-                            "message": "AssertionError: x should be 3",
-                        },
-                    },
-                },
-            ],
-        }
-        report = PytestAdapter.parse(data)
+    def test_failure_without_body_falls_back_to_message(self) -> None:
+        """failure element with no body: fall back to the message attribute."""
+        xml = self._suite(
+            'errors="0" failures="1" skipped="0" tests="1" time="0.3" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="test_x" name="test_x" time="0.02">'
+            '<failure message="AssertionError: x should be 3" />'
+            "</testcase>"
+        )
+        report = PytestAdapter.parse(xml)
         assert report.status == "failed"
         assert report.failed == 1
         assert len(report.failures) == 1
         assert report.failures[0].error == "AssertionError: x should be 3"
-        assert report.failures[0].file == "test_x.py"
-        assert report.failures[0].line == 3
+        # xunit2-shaped testcase (no file= attribute) and no location line
+        # in the body: the location is honestly empty -- never a
+        # classname-derived path to a file that does not exist (#785 review).
+        assert report.failures[0].file == ""
+        assert report.failures[0].line == 0
+
+    def test_failure_no_body_location_uses_testcase_file_attr(self) -> None:
+        """No location in the body: the testcase's file= attribute wins.
+
+        pytest's junitxml always emits ``file=``/``line=`` on the testcase,
+        so the fallback must prefer them over the classname derivation --
+        folding the class name in (``tests/test_x/TestClass.py``) invents
+        a path that does not exist.
+        """
+        xml = self._suite(
+            'errors="0" failures="1" skipped="0" tests="1" time="0.3" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="tests.test_x.TestClass" '
+            'file="tests/test_x.py" line="7" name="test_x" time="0.02">'
+            '<failure message="AssertionError: x should be 3">'
+            "E   AssertionError: x should be 3"
+            "</failure></testcase>"
+        )
+        report = PytestAdapter.parse(xml)
+        assert report.status == "failed"
+        assert report.failed == 1
+        assert len(report.failures) == 1
+        assert report.failures[0].test == "tests.test_x.TestClass::test_x"
+        assert report.failures[0].error == "E   AssertionError: x should be 3"
+        # file= attribute path, not the classname-derived fake path.
+        assert report.failures[0].file == "tests/test_x.py"
+        assert report.failures[0].line == 7
+
+    def test_skipped_counts(self) -> None:
+        """skipped/xfailed testcases surface as a skipped count, not failures."""
+        xml = self._suite(
+            'errors="0" failures="0" skipped="2" tests="3" time="0.4" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="test_s" name="test_ok" time="0.01" />'
+            '<testcase classname="test_s" name="test_skip" time="0.01">'
+            '<skipped type="pytest.skip" message="not now">test_s.py:5: not now</skipped>'
+            "</testcase>"
+            '<testcase classname="test_s" name="test_xfail" time="0.01">'
+            '<skipped type="pytest.xfail" message="known" />'
+            "</testcase>"
+        )
+        report = PytestAdapter.parse(xml)
+        assert report.status == "ok"
+        assert report.passed == 1
+        assert report.failed == 0
+        assert report.skipped == 2
+        assert report.failures is None
+        d = report.to_dict()
+        assert d["skipped"] == 2
 
     def test_empty_report(self) -> None:
-        data = {"summary": {"total": 0, "passed": 0, "failed": 0}, "duration": 0.0, "tests": []}
-        report = PytestAdapter.parse(data)
+        xml = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<testsuites name="pytest tests"><testsuite name="pytest" '
+            'errors="0" failures="0" skipped="0" tests="0" time="0.0" '
+            'timestamp="2026-01-01T00:00:00" hostname="h" />'
+            "</testsuites>"
+        )
+        report = PytestAdapter.parse(xml)
         assert report.status == "ok"
         assert report.passed == 0
         assert report.failed == 0
         assert report.failures is None
 
-    def test_parse_json_round_trip(self) -> None:
-        raw = json.dumps(
-            {
-                "summary": {"total": 1, "passed": 1, "failed": 0},
-                "duration": 0.3,
-                "tests": [{"nodeid": "t.py::t", "outcome": "passed"}],
-            }
+    def test_collection_error_testcase(self) -> None:
+        """A collection-error testcase (classname='') parses as a failure entry."""
+        xml = self._suite(
+            'errors="1" failures="0" skipped="0" tests="1" time="0.5" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="" name="broken.test_broken" time="0.000">'
+            '<error message="collection failure">'
+            "ImportError while importing test module '/tmp/broken/test_broken.py'.\n"
+            "Traceback:\n"
+            "broken/test_broken.py:1: in &lt;module&gt;\n"
+            "    import nonexistent_module_xyz\n"
+            "E   ModuleNotFoundError: No module named 'nonexistent_module_xyz'"
+            "</error></testcase>"
         )
-        report = PytestAdapter.parse_json(raw)
+        report = PytestAdapter.parse(xml)
+        assert report.status == "failed"
+        assert report.failed == 1
+        assert len(report.failures) == 1
+        assert report.failures[0].test == "broken.test_broken"
+        assert report.failures[0].file == "broken/test_broken.py"
+        assert report.failures[0].line == 1
+
+    def test_parse_xml_round_trip(self) -> None:
+        xml = self._suite(
+            'errors="0" failures="0" skipped="0" tests="1" time="0.3" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="t" name="t" time="0.01" />'
+        )
+        report = PytestAdapter.parse_xml(xml)
+        assert report.status == "ok"
+        assert report.passed == 1
+
+    def test_parse_accepts_element_root(self) -> None:
+        """parse() also accepts an already-parsed ElementTree node."""
+        from xml.etree import ElementTree as ET
+
+        xml = self._suite(
+            'errors="0" failures="0" skipped="0" tests="1" time="0.3" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="t" name="t" time="0.01" />'
+        )
+        report = PytestAdapter.parse(ET.fromstring(xml))
         assert report.status == "ok"
         assert report.passed == 1
 
     def test_snapshot_real_data(self) -> None:
-        """Real pytest-json-report output shape (snapshot test)."""
-        raw = json.dumps({
-            "summary": {"total": 2, "passed": 1, "failed": 1, "errors": 0},
-            "duration": 0.42,
-            "tests": [
-                {"nodeid": "test_x.py::test_ok", "outcome": "passed"},
-                {
-                    "nodeid": "test_x.py::test_fail",
-                    "outcome": "failed",
-                    "call": {
-                        "crash": {
-                            "path": "/work/test_x.py",
-                            "lineno": 6,
-                            "message": "AssertionError: x should be 3\nassert 2 == 3",
-                        },
-                        "traceback": [
-                            {"path": "test_x.py", "lineno": 6, "message": "AssertionError"},
-                        ],
-                        "longrepr": (
-                            "def test_fail():\n"
-                            "        x = 2\n"
-                            ">       assert x == 3, \"x should be 3\"\n"
-                            "E       AssertionError: x should be 3\n"
-                            "E       assert 2 == 3\n"
-                            "\n"
-                            "test_x.py:6: AssertionError"
-                        ),
-                    },
-                },
-            ],
-        })
-        report = PytestAdapter.parse_json(raw)
+        """Real pytest --junit-xml output shape (snapshot test)."""
+        xml = self._suite(
+            'errors="1" failures="1" skipped="2" tests="5" time="0.104" '
+            'timestamp="2026-08-01T14:31:04.179564+00:00" hostname="host">'
+            '<testcase classname="test_demo" name="test_ok" time="0.001" />'
+            '<testcase classname="test_demo" name="test_fail" time="0.002">'
+            '<failure message="AssertionError: x should be 3&#10;assert 2 == 3">'
+            "def test_fail():\n"
+            "        x = 2\n"
+            "&gt;       assert x == 3, \"x should be 3\"\n"
+            "E       AssertionError: x should be 3\n"
+            "E       assert 2 == 3\n"
+            "\n"
+            "test_demo.py:8: AssertionError"
+            "</failure></testcase>"
+            '<testcase classname="test_demo" name="test_skip" time="0.001">'
+            '<skipped type="pytest.skip" message="not now">/tmp/test_demo.py:10: not now</skipped>'
+            "</testcase>"
+            '<testcase classname="test_demo" name="test_xfail" time="0.002">'
+            '<skipped type="pytest.xfail" message="known" />'
+            "</testcase>"
+            '<testcase classname="test_demo" name="test_error" time="0.001">'
+            '<error message="failed on setup with &quot;RuntimeError: fixture boom&quot;">'
+            "@pytest.fixture\n"
+            "    def boom():\n"
+            "&gt;       raise RuntimeError(\"fixture boom\")\n"
+            "E       RuntimeError: fixture boom\n"
+            "\n"
+            "test_demo.py:20: RuntimeError"
+            "</error></testcase>"
+        )
+        report = PytestAdapter.parse_xml(xml)
         assert report.status == "failed"
-        assert report.failed == 1
+        assert report.failed == 2
         assert report.passed == 1
-        assert len(report.failures) == 1
+        assert report.skipped == 2
+        assert len(report.failures) == 2
         f = report.failures[0]
-        assert f.test == "test_x.py::test_fail"
+        assert f.test == "test_demo::test_fail"
         assert "assert 2 == 3" in f.error
-        assert f.file == "/work/test_x.py"
-        assert f.line == 6
+        assert f.file == "test_demo.py"
+        assert f.line == 8
+        assert report.failures[1].test == "test_demo::test_error"
+        assert report.failures[1].file == "test_demo.py"
+        assert report.failures[1].line == 20
 
 
-# ===================================================================
-# Jest adapter tests
 # ===================================================================
 
 
@@ -1142,3 +1195,117 @@ class TestTapAdapter:
             "passed": 3,
             "total": 3,
         }
+
+
+# ===================================================================
+# build_pytest_cmd: xdist availability decides parallel vs serial
+# ===================================================================
+
+
+class TestBuildPytestCmd:
+    """build_pytest_cmd probes pytest-xdist in the *target* environment.
+
+    The decision must be made where pytest runs (the container's own
+    python3 decides), so these tests execute the real command string
+    with a fake ``python3`` shim on PATH: the shim answers the ``-c``
+    probe and forwards the actual pytest run, recording its argv.
+    """
+
+    def _shim(self, tmp_path: Path, xdist_available: bool) -> Path:
+        """A python3 shim: -c probe reports xdist availability, rest is real."""
+        shim = tmp_path / "python3"
+        log = tmp_path / "argv.log"
+        flag = "1" if xdist_available else "0"
+        shim.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "-c" ]; then\n'
+            f"  [ \"{flag}\" = \"1\" ] && exit 0 || exit 1\n"
+            "fi\n"
+            f'echo "$@" >> "{log}"\n'
+            f'exec {sys.executable} "$@"\n'
+        )
+        shim.chmod(0o755)
+        return shim
+
+    def _run(self, tmp_path: Path, xdist_available: bool) -> tuple[int, str, str]:
+        """Run the real built pytest command under a controlled python3."""
+        self._shim(tmp_path, xdist_available)
+        (tmp_path / "test_demo.py").write_text("def test_ok():\n    assert True\n")
+        cmd = build_pytest_cmd(
+            str(tmp_path / "report.xml"),
+            str(tmp_path / "raw.txt"),
+            "",
+            "test_demo.py",
+        )
+        env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}")
+        proc = subprocess.run(
+            ["/bin/sh", "-c", cmd],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode, proc.stdout, (tmp_path / "argv.log").read_text()
+
+    def test_xdist_absent_falls_back_to_serial(self, tmp_path: Path) -> None:
+        """No pytest-xdist in the target env: pytest runs without -n auto.
+
+        This is the #785 acceptance scenario in full: a plain-pytest image
+        (no xdist) must verify green through the python path.
+        """
+        ec, stdout, log = self._run(tmp_path, xdist_available=False)
+        assert ec == 0
+        assert "--junit-xml" in log  # pytest was actually invoked
+        assert "-n auto" not in log  # ... serially, no xdist flag
+        xml_part, _raw = split_pytest_output(stdout)
+        report = PytestAdapter.parse(xml_part)
+        assert report.status == "ok"
+        assert report.passed == 1
+
+    def test_xdist_present_keeps_parallel(self, tmp_path: Path) -> None:
+        """pytest-xdist importable: -n auto is passed (behaviour unchanged)."""
+        ec, stdout, log = self._run(tmp_path, xdist_available=True)
+        assert ec == 0
+        assert "-n auto" in log
+        xml_part, _raw = split_pytest_output(stdout)
+        report = PytestAdapter.parse(xml_part)
+        assert report.status == "ok"
+        assert report.passed == 1
+
+    def test_real_bare_failure_locates_via_xunit1_file_attr(self, tmp_path: Path) -> None:
+        """Real default-config pytest, failure body without a location line.
+
+        Under ``--tb=no`` (via addopts in the target repo) the failure body
+        carries no ``path:line:`` tail; the xunit2 default would also strip
+        the testcase ``file=`` attribute, leaving no location source at
+        all.  build_pytest_cmd requests ``junit_family=xunit1`` precisely
+        so this case still yields the real file -- and never a
+        classname-derived path to a nonexistent file (#785 review).
+        """
+        self._shim(tmp_path, xdist_available=False)
+        (tmp_path / "test_demo.py").write_text(
+            "class TestDemo:\n    def test_fails(self):\n        assert False\n"
+        )
+        (tmp_path / "pytest.ini").write_text("[pytest]\naddopts = --tb=no\n")
+        cmd = build_pytest_cmd(
+            str(tmp_path / "report.xml"),
+            str(tmp_path / "raw.txt"),
+            "",
+            "test_demo.py",
+        )
+        env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}")
+        proc = subprocess.run(
+            ["/bin/sh", "-c", cmd],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert "-o junit_family=xunit1" in cmd
+        xml_part, _raw = split_pytest_output(proc.stdout)
+        report = PytestAdapter.parse(xml_part)
+        assert report.status == "failed"
+        assert report.failures and len(report.failures) == 1
+        # Located via the xunit1 file= attribute -- the real file, not the
+        # fabricated "test_demo/TestDemo.py".
+        assert report.failures[0].file == "test_demo.py"

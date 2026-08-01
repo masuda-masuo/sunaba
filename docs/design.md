@@ -169,7 +169,8 @@ To optimize AI reasoning, test results are parsed into structured JSON format in
 ```
 
 Support is provided for four testing frameworks:
-*   **Pytest**: Parsed via `pytest-json-report` (`--json-report`).
+*   **Pytest**: Parsed via pytest's built-in JUnit XML (`--junit-xml`); no
+    third-party plugin is a prerequisite of verify (Issue #785).
 *   **Jest**: Parsed via `jest --json`.
 *   **Go Test**: Parsed via `go test -json`.
 *   **TAP version 13**: Parsed from the runner's own output by `TapAdapter`. This is the

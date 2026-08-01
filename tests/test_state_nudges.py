@@ -86,22 +86,25 @@ class TestVerifyNudges:
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         with patch("sunaba.tools.verify._docker", return_value=mock_client):
-            import json as j
             gate_ok = {
                 "gate_passed": True, "incomplete": False,
                 "lint": [], "types": [], "gate_fail_reasons": [],
             }
-            json_report = j.dumps({
-                "summary": {"collected": 1, "total": 1, "passed": 1, "failed": 0},
-                "duration": 0.1, "tests": [],
-            })
+            junit_xml = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<testsuites name="pytest tests"><testsuite name="pytest" '
+                'errors="0" failures="0" skipped="0" tests="1" time="0.1" '
+                'timestamp="2026-01-01T00:00:00" hostname="h">'
+                '<testcase classname="test_a" name="test_one" time="0.01" />'
+                "</testsuite></testsuites>"
+            )
             nl = "\n"
             mock_container.exec_run.side_effect = [
                 (0, (b"", b"")),  # git diff HEAD --numstat
                 (0, (b"", b"")),  # git diff --cached --numstat
                 (0, (b"", b"")),  # git ls-files --others --exclude-standard
                 (0, (b"", b"")),  # src/tests dir probe
-                (0, (f"{json_report}{nl}---PYTEST-RAW---{nl}".encode(), b"")),  # pytest
+                (0, (f"{junit_xml}{nl}---PYTEST-RAW---{nl}".encode(), b"")),  # pytest
             ]
             from sunaba.edit_verify import DetectionResult
             det = DetectionResult(languages={"python"}, scope={"python": "."}, reason=None)
@@ -113,7 +116,7 @@ class TestVerifyNudges:
                 raw = verify_in_container(
                     container_id="abc123def456", path="tests/",
                 )
-        parsed = j.loads(raw)
+        parsed = json.loads(raw)
         assert parsed["gate_passed"] is True
         assert parsed.get("recommended_next_action") == "publish"
 
@@ -311,17 +314,20 @@ class TestVerifyRecordsSuccess:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        json_report = json.dumps({
-            "summary": {"collected": 3, "total": 3, "passed": 3, "failed": 0, "errors": 0},
-            "duration": 0.1,
-            "tests": [],
-        })
+        junit_xml = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<testsuites name="pytest tests"><testsuite name="pytest" '
+            'errors="0" failures="0" skipped="0" tests="3" time="0.1" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="test_a" name="test_one" time="0.01" />'
+            "</testsuite></testsuites>"
+        )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),  # src/tests dir probe
-            (0, (f"{json_report}\n---PYTEST-RAW---\n".encode(), b"")),  # pytest
+            (0, (f"{junit_xml}\n---PYTEST-RAW---\n".encode(), b"")),  # pytest
         ]
 
         with patch(

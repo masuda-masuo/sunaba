@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -17,24 +18,25 @@ from typing import Any
 # Shared test-runner helpers
 # ---------------------------------------------------------------------------
 
-#: Marker used by :func:`_build_pytest_cmd` to separate JSON report from
-#: raw pytest output in the combined stdout stream.
+#: Marker used by :func:`build_pytest_cmd` to separate the JUnit XML report
+#: from raw pytest output in the combined stdout stream.
 PYTEST_RAW_MARKER = "---PYTEST-RAW---"
 _PYTEST_RAW_LINES = 40
 
 
 def build_pytest_cmd(
-    json_file: str,
+    junit_file: str,
     raw_file: str,
     filter_args: str,
     path: str | list[str],
     sandbox_env: str = "",
 ) -> str:
-    """Build a pytest --json-report command that emits JSON + raw tail.
+    """Build a pytest --junit-xml command that emits XML + raw tail.
 
-    The command writes JSON report to *json_file*, captures full raw
-    output to *raw_file*, then prints the JSON followed by
-    :data:`PYTEST_RAW_MARKER` and the last :data:`_PYTEST_RAW_LINES`
+    The command writes pytest's built-in JUnit XML report (``--junit-xml``
+    -- no third-party plugin required, Issue #785) to *junit_file*,
+    captures full raw output to *raw_file*, then prints the XML followed
+    by :data:`PYTEST_RAW_MARKER` and the last :data:`_PYTEST_RAW_LINES`
     lines of raw output.  Both temp files are cleaned up on exit.
 
     *path* is a single file/dir path, or a list of paths (each quoted
@@ -44,8 +46,19 @@ def build_pytest_cmd(
     nothing.
 
     Runs tests in parallel via ``-n auto`` (capped at CPU count) for
-    faster verification (Issue #590).  The sandbox image's ``pids.max``
-    is high enough that Python xdist workers do not exhaust it.
+    faster verification (Issue #590) -- but only when pytest-xdist is
+    importable in the *target* environment (probed inside the command,
+    so the server never decides for the container); without xdist the
+    run falls back to plain serial pytest.  The sandbox image's
+    ``pids.max`` is high enough that Python xdist workers do not exhaust
+    it.
+
+    The report is requested with ``-o junit_family=xunit1`` because the
+    default xunit2 family strips the per-testcase ``file=``/``line=``
+    attributes that :func:`_pytest_location` needs when a failure body
+    carries no ``path:line:`` tail (e.g. under ``--tb=no``/``--tb=line``
+    in the target repo's addopts); xunit1 differs only in those extra
+    attributes, not in suite or failure structure (#785 review).
 
     Callers should split the result with :func:`split_pytest_output`.
     """
@@ -54,24 +67,27 @@ def build_pytest_cmd(
     else:
         quoted_path = shlex.quote(path)
     return (
-        f"{sandbox_env}python3 -m pytest --json-report "
-        f"--json-report-file={json_file} -n auto -q{filter_args} "
+        f"{sandbox_env}python3 -c 'import xdist' >/dev/null 2>&1 "
+        f"&& _np='-n auto' || _np=''; "
+        f"{sandbox_env}python3 -m pytest --junit-xml={junit_file} "
+        f"-o junit_family=xunit1 "
+        f"$_np -q{filter_args} "
         f"{quoted_path} >{raw_file} 2>&1; "
-        f"_ec=$?; cat {json_file} 2>/dev/null; "
+        f"_ec=$?; cat {junit_file} 2>/dev/null; "
         f"echo '{PYTEST_RAW_MARKER}'; tail -n {_PYTEST_RAW_LINES} {raw_file} 2>/dev/null; "
-        f"rm -f {json_file} {raw_file}; exit $_ec"
+        f"rm -f {junit_file} {raw_file}; exit $_ec"
     )
 
 
 def split_pytest_output(stdout_text: str) -> tuple[str, str]:
     """Split combined stdout at :data:`PYTEST_RAW_MARKER`.
 
-    Returns ``(json_part, raw_tail)``.  Either may be empty.
+    Returns ``(xml_part, raw_tail)``.  Either may be empty.
     """
     parts = stdout_text.split(PYTEST_RAW_MARKER, 1)
-    json_part = parts[0].strip() if parts else ""
+    xml_part = parts[0].strip() if parts else ""
     raw_tail = parts[1].strip() if len(parts) > 1 else ""
-    return json_part, raw_tail
+    return xml_part, raw_tail
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +125,8 @@ class TestReport:
     total: int | None = None  # total test count (None = not reported)
     skipped: int = 0
     todo: int = 0
+    # Extra fields used by the pytest (JUnit XML) adapter
+    errors: int = 0  # tests that errored (e.g. fixture setup failure)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the common JSON schema.
@@ -129,6 +147,8 @@ class TestReport:
             base["skipped"] = self.skipped
         if self.todo:
             base["todo"] = self.todo
+        if self.errors:
+            base["errors"] = self.errors
         if self.failed:
             base["failed"] = self.failed
         if self.failures:
@@ -206,52 +226,65 @@ def prune_library_frames(
 
 @dataclass
 class PytestAdapter:
-    """Adapt **pytest-json-report** output (``pytest --json-report``).
+    """Adapt pytest's built-in **JUnit XML** output (``pytest --junit-xml``).
 
-    Expects the JSON report dict as produced by the plugin, with keys:
-    ``summary``, ``tests``, ``duration``, etc.
+    Parses the XML written by pytest's junitxml plugin -- a pytest
+    built-in, so no third-party plugin (pytest-json-report) is a
+    prerequisite of verify anymore (Issue #785).  Expects a
+    ``<testsuite>`` element carrying ``tests``/``failures``/``errors``/
+    ``skipped``/``time`` attributes and one ``<testcase>`` per test;
+    pytest wraps it in a ``<testsuites>`` root, which is accepted too.
     """
 
     @staticmethod
-    def parse(report: dict[str, Any]) -> TestReport:
-        """Parse a pytest-json-report dict into a TestReport."""
-        summary = report.get("summary", {})
-        duration = float(report.get("duration", 0.0))
-        total = int(summary.get("total", 0))
-        passed = int(summary.get("passed", 0))
-        failed = int(summary.get("failed", 0))
-        errors = int(summary.get("errors", 0))
-        # Fallback for reports that lack "passed" count but have total/failed.
-        passed = total - failed - errors if passed == 0 and total > 0 else passed
-        failed_total = failed + errors
+    def parse(xml: str | ET.Element) -> TestReport:
+        """Parse pytest --junit-xml output into a TestReport.
+
+        *xml* may be the raw XML text or an already-parsed ElementTree
+        node (the ``<testsuite>`` element or the ``<testsuites>`` wrapper
+        pytest emits).
+        """
+        root = xml if isinstance(xml, ET.Element) else ET.fromstring(xml)
+        suite = root if root.tag == "testsuite" else root.find("testsuite")
+        if suite is None:
+            # No <testsuite>: nothing to report (should not happen in
+            # practice; exit-code handling short-circuits before parse).
+            return TestReport(status="ok", duration=0.0, passed=0)
+
+        total = int(suite.get("tests", 0))
+        failures = int(suite.get("failures", 0))
+        errors = int(suite.get("errors", 0))
+        skipped = int(suite.get("skipped", 0))
+        duration = float(suite.get("time", 0.0))
+        # pytest accounts every testcase as exactly one of passed / failed /
+        # errored / skipped (xfail is reported as skipped).
+        passed = max(total - failures - errors - skipped, 0)
+        failed_total = failures + errors
 
         failures_list: list[TestFailure] = []
-        tests = report.get("tests", [])
-        for t in tests:
-            outcome = t.get("outcome", "")
-            if outcome not in ("failed", "error"):
+        for tc in suite.findall("testcase"):
+            stage = tc.find("failure")
+            if stage is None:
+                stage = tc.find("error")
+            if stage is None:
                 continue
-            # Search for the failing stage: call → setup → teardown
-            stage: dict[str, Any] = {}
-            for name in ("call", "setup", "teardown"):
-                s = t.get(name) or {}
-                if s.get("outcome") in ("failed", "error") or s.get("crash"):
-                    stage = s
-                    break
-            crash = stage.get("crash") or {}
-            longrepr = stage.get("longrepr", "") or ""
-            error_text = prune_library_frames(longrepr) if longrepr else ""
+            classname = tc.get("classname", "")
+            name = tc.get("name", "unknown")
+            # Rebuild the structured test name (module[.Class]::test),
+            # mirroring the nodeid structure json-report used to carry.
+            test = f"{classname}::{name}" if classname else name
+            body = (stage.text or "").strip()
+            error_text = prune_library_frames(body) if body else ""
             if not error_text:
-                error_text = crash.get("message", "unknown")
-            nodeid = t.get("nodeid", t.get("name", "unknown"))
+                error_text = stage.get("message", "unknown")
+            file, line = _pytest_location(body or stage.get("message", ""), tc)
 
             failures_list.append(
                 TestFailure(
-                    test=nodeid,
+                    test=test,
                     error=error_text,
-                    file=crash.get("path", "") or nodeid.split("::", 1)[0],
-                    # or 0 guards against crash.lineno being None (which int() rejects).
-                    line=int(crash.get("lineno", t.get("lineno", 0)) or 0),
+                    file=file,
+                    line=line,
                 )
             )
 
@@ -262,13 +295,45 @@ class PytestAdapter:
             passed=passed,
             failed=failed_total,
             failures=failures_list if failures_list else None,
+            total=total,
+            skipped=skipped,
+            errors=errors,
         )
 
     @classmethod
-    def parse_json(cls, raw: str) -> TestReport:
-        """Parse a raw JSON string (from pytest --json-report) into a TestReport."""
-        data = json.loads(raw)
-        return cls.parse(data)
+    def parse_xml(cls, raw: str) -> TestReport:
+        """Parse raw JUnit XML text (from pytest --junit-xml) into a TestReport."""
+        return cls.parse(raw)
+
+
+#: Matches pytest's failure-body location line (``file.py:12: Error``).
+_PYTEST_LOCATION_RE = re.compile(r"^(.+?):(\d+): ")
+
+
+def _pytest_location(body: str, tc: ET.Element) -> tuple[str, int]:
+    """Extract ``file``/``line`` from a pytest junit failure/error testcase.
+
+    pytest ends each failure body with a location line like
+    ``test_x.py:6: AssertionError``; the *last* such line is the failing
+    location.  When the body carries no location, fall back to the
+    testcase's own ``file``/``line`` attributes -- present because
+    :func:`build_pytest_cmd` requests ``junit_family=xunit1`` (the
+    default xunit2 family strips them, #785 review).  When neither
+    source establishes a location (foreign XML, collection errors),
+    return an honest empty location: deriving a path from ``classname``
+    fabricates files that do not exist (``tests/test_x/TestClass.py``
+    for class-based tests) and consumers treat ``file`` as a real hint.
+    """
+    for line in reversed(body.splitlines()):
+        m = _PYTEST_LOCATION_RE.match(line)
+        if m:
+            return m.group(1), int(m.group(2))
+    file_attr = tc.get("file")
+    if file_attr:
+        line_attr = tc.get("line")
+        line = int(line_attr) if line_attr and line_attr.isdigit() else 0
+        return file_attr, line
+    return "", 0
 
 
 # ---------------------------------------------------------------------------

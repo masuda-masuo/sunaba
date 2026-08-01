@@ -75,7 +75,6 @@ RUN sh /tmp/install-js-tools.sh && rm /tmp/install-js-tools.sh
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD rg --version && sg --version && node --version && npm --version && pip --version \
    && ruff --version && pyright --version && pytest --version \
-   && python3 -c "import pytest_jsonreport" \
    && python3 -c "import xdist" \
    && go version \
    && eslint --version && tsc --version && jest --version \

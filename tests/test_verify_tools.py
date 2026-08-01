@@ -996,20 +996,20 @@ class TestVerifyInContainer:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        json_report = json.dumps({
-            "summary": {
-                "collected": 10, "total": 10,
-                "passed": 10, "failed": 0, "errors": 0,
-            },
-            "duration": 1.5,
-            "tests": [],
-        })
+        junit_xml = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<testsuites name="pytest tests"><testsuite name="pytest" '
+            'errors="0" failures="0" skipped="0" tests="10" time="1.5" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="test_a" name="test_one" time="0.1" />'
+            "</testsuite></testsuites>"
+        )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
-            (0, (f"{json_report}\n---PYTEST-RAW---\n".encode(), b"")),
+            (0, (f"{junit_xml}\n---PYTEST-RAW---\n".encode(), b"")),
         ]
 
         gate_ret = {
@@ -1170,12 +1170,15 @@ class TestVerifyInContainer:
         assert "pytest not available" in result["gate_fail_reasons"][0]
 
     @patch("sunaba.tools.verify._docker")
-    def test_missing_json_report_plugin_is_not_available(self, mock_docker: MagicMock) -> None:
-        """Missing pytest-json-report → not_available, never a test verdict (#584).
+    def test_python_verify_works_without_json_report_plugin(
+        self, mock_docker: MagicMock
+    ) -> None:
+        """Acceptance #785: a pytest WITHOUT pytest-json-report still verifies.
 
-        The plugin is verify's own prerequisite.  Reporting its absence as
-        ``no_tests`` ("this project has no tests") was the #584 failure: a
-        tooling gap that read like a finding about the code.
+        The python path runs pytest's built-in ``--junit-xml`` (Issue #785),
+        so the plugin is not a prerequisite at all -- a custom image with a
+        plain pytest (no plugin) must verify green.  The fixture below is
+        exactly what such a container produces: pure JUnit XML.
         """
         from sunaba.edit_verify import DetectionResult
 
@@ -1184,7 +1187,68 @@ class TestVerifyInContainer:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        # pytest exits 4 (usage error) and writes no JSON report.
+        junit_xml = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<testsuites name="pytest tests"><testsuite name="pytest" '
+            'errors="0" failures="0" skipped="0" tests="2" time="0.1" '
+            'timestamp="2026-01-01T00:00:00" hostname="h">'
+            '<testcase classname="test_a" name="test_one" time="0.01" />'
+            '<testcase classname="test_a" name="test_two" time="0.01" />'
+            "</testsuite></testsuites>"
+        )
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
+            (0, (b"", b"")),
+            (0, (f"{junit_xml}\n---PYTEST-RAW---\n".encode(), b"")),
+        ]
+
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "sunaba.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "sunaba.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+            ))
+
+        # The plugin-less environment verifies green through built-ins only.
+        tests = result["tests"]["full"]
+        assert tests["status"] == "ok"
+        assert tests["passed"] == 2
+        assert result["gate_passed"] is True
+        # And the command actually run never references the plugin's flag.
+        cmd = mock_container.exec_run.call_args_list[-1].args[0]
+        cmd_str = cmd[-1] if isinstance(cmd, list) else str(cmd)
+        assert "--junit-xml" in cmd_str
+        assert "--json-report" not in cmd_str
+
+    @patch("sunaba.tools.verify._docker")
+    def test_usage_error_is_not_available(self, mock_docker: MagicMock) -> None:
+        """pytest usage error → not_available, never a test verdict (#584).
+
+        A bad command line is verify's own problem, not the code's.  Reporting
+        it as ``no_tests`` ("this project has no tests") was the #584 failure:
+        a tooling gap that read like a finding about the code.
+        """
+        from sunaba.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        # pytest exits 4 (usage error) and writes no XML report.
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
@@ -1192,7 +1256,7 @@ class TestVerifyInContainer:
             (0, (b"", b"")),
             (4, (
                 b"---PYTEST-RAW---\n"
-                b"pytest: error: unrecognized arguments: --json-report\n",
+                b"pytest: error: unrecognized arguments: --bogus-flag\n",
                 b"",
             )),
         ]
@@ -1217,16 +1281,16 @@ class TestVerifyInContainer:
 
         tests = result["tests"]["full"]
         assert tests["status"] == "not_available"
-        assert "pytest-json-report" in tests["error"]
+        assert "usage error" in tests["error"]
         assert result["gate_passed"] is False
 
     @patch("sunaba.tools.verify._docker")
-    def test_crash_without_json_report_is_error_not_no_tests(
+    def test_crash_without_report_is_error_not_no_tests(
         self, mock_docker: MagicMock
     ) -> None:
         """pytest died producing no report → error, not "no tests found" (#584).
 
-        A non-zero exit with no JSON means the run broke.  Laundering that into
+        A non-zero exit with no XML means the run broke.  Laundering that into
         ``no_tests`` would report a benign verdict for a run that never happened.
         """
         from sunaba.edit_verify import DetectionResult
@@ -1236,7 +1300,7 @@ class TestVerifyInContainer:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        # Exit 3 (internal error), no JSON, no recognizable tool-absence marker.
+        # Exit 3 (internal error), no XML, no recognizable tool-absence marker.
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
             (0, (b"", b"")),
@@ -1928,15 +1992,22 @@ class TestVerifyAffectedScope:
     CID = "aff7812c0ffee"
 
     GREEN_REPORT = (
-        b'{"summary": {"collected": 3, "total": 3, "passed": 3, '
-        b'"failed": 0, "errors": 0}, "duration": 0.1, "tests": []}\n'
+        b'<?xml version="1.0" encoding="utf-8"?>'
+        b'<testsuites name="pytest tests"><testsuite name="pytest" '
+        b'errors="0" failures="0" skipped="0" tests="3" time="0.1" '
+        b'timestamp="2026-01-01T00:00:00" hostname="h">'
+        b'<testcase classname="tests.test_app" name="test_x" time="0.01" />'
+        b"</testsuite></testsuites>\n"
         b"---PYTEST-RAW---\n3 passed\n"
     )
     FAILED_REPORT = (
-        b'{"summary": {"collected": 3, "total": 3, "passed": 2, '
-        b'"failed": 1, "errors": 0}, "duration": 0.1, '
-        b'"tests": [{"nodeid": "tests/test_app.py::test_x", '
-        b'"outcome": "failed", "call": {"longrepr": "boom"}}]}\n'
+        b'<?xml version="1.0" encoding="utf-8"?>'
+        b'<testsuites name="pytest tests"><testsuite name="pytest" '
+        b'errors="0" failures="1" skipped="0" tests="3" time="0.1" '
+        b'timestamp="2026-01-01T00:00:00" hostname="h">'
+        b'<testcase classname="tests.test_app" name="test_x" time="0.01">'
+        b'<failure message="boom">boom\n\ntests/test_app.py:5: AssertionError</failure>'
+        b"</testcase></testsuite></testsuites>\n"
         b"---PYTEST-RAW---\n1 failed\n"
     )
     # numstat + name-status halves joined by the marker line, matching the

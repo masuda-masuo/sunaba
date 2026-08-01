@@ -24,7 +24,7 @@ The original design document (§4) specified that version 1.0 must support **pyt
 ## 2. Strategy
 
 1.  **Node Runtime in the Base Layer; Dev Tools in Backend Layers**: Node itself is a cross-cutting *runtime* (needed for Pyright as well as frontend code) and is bundled into the base image. JS *development* tools (`eslint` / `tsc` / `jest`) are not part of that cross-cutting concern -- they are project-specific dev/testing packages, so (mirroring Python and Go) they live in a dedicated backend layer (`docker/Dockerfile.js`, sharing `install-js-tools.sh` with `Dockerfile.full`; Issue #588) rather than in `base`.
-2.  **Unified Dispatch Matrix / Modular Images**: Language detection rules will support Python, JS, TS, and Go. Missing tools will be treated as first-class `not_available` statuses rather than silent skips.
+2.  **Unified Dispatch Matrix / Modular Images**: Language detection rules will support Python, JS, TS, Go, and Rust. Missing tools will be treated as first-class `not_available` statuses rather than silent skips.
 3.  **Monolith Prevention (revised by #584)**: The *layer split* stands — runtimes required by cross-cutting infra belong in the `base` image, language-specific development/testing packages belong in their respective backend layers. What was wrong was applying that principle to the **runtime default**. See §6.1.
 4.  **Eradicate Silent Failures**: All verification layers must return a **status envelope** rather than a bare list of findings. Unverified or crashed executions must fail the gate.
 
@@ -42,8 +42,10 @@ Detection priority (primary matches take precedence, polyglots aggregate all mat
     *   `.js`, `.jsx`, `.mjs`, `.cjs` → JS
     *   `.ts`, `.tsx` → TS (scans upward for `tsconfig.json` to confirm project setup)
     *   `.go` → Go
+    *   `.rs` → Rust
 3.  **Directory Paths (Project Marker Scan)**:
     *   `go.mod` → Go
+    *   `Cargo.toml` → Rust
     *   `package.json` → JS (maps to TS if `tsconfig.json` is present)
     *   `pyproject.toml` / `setup.py` / `requirements*.txt` / `Pipfile` / `tox.ini` → Python
     *   *Excludes directories like `node_modules`, `.venv`, `vendor`, `dist`, and `build`.*
@@ -107,19 +109,21 @@ Every validation layer (lint, type check, test) must return a structured status 
     *   `sandbox:python`: Ruff, Pyright, Pytest + pytest-json-report.
     *   `sandbox:go`: Go compiler and build toolchains.
     *   `sandbox:js`: eslint, typescript (tsc), jest (Issue #588).
+    *   `sandbox:rust`: rustc, cargo, clippy, rustfmt (via rustup; `install-rust.sh`) + the `x86_64-pc-windows-gnu` cross-compile target.
 
 ### Image Tags (Pinned to SHA-256 Digests)
 
 | Tag | Layer Composition | Use Case |
 |---|---|---|
-| `sandbox:full` | base + python + go + js | **The default.** Started whenever `image=` is omitted. |
+| `sandbox:full` | base + python + go + js + rust | **The default.** Started whenever `image=` is omitted. |
 | `sandbox:base` | base | `FROM` parent of the variants. Not a runtime default (#584). |
 | `sandbox:python` | base + python | Lean image, reachable only via an explicit `image=`. |
 | `sandbox:go` | base + go | Lean image, reachable only via an explicit `image=`. |
 | `sandbox:js` | base + js | Lean image, reachable only via an explicit `image=` (#588). |
+| `sandbox:rust` | base + rust | Lean image, reachable only via an explicit `image=` (#749/#753). |
 | `sandbox:minimal` | Core Git + Python | Lightweight environment for rapid tests. |
 
-The toolchain installs live in `docker/install-python-tools.sh` / `install-go.sh` / `install-js-tools.sh`, which `Dockerfile.python` / `Dockerfile.go` / `Dockerfile.js` / `Dockerfile.full` all source. Two copies of an install step drift, and that drift *was* #584: `pytest-json-report` was baked into the python image only, so every container started from any other image failed its first verify.
+The toolchain installs live in `docker/install-python-tools.sh` / `install-go.sh` / `install-js-tools.sh` / `install-rust.sh`, which `Dockerfile.python` / `Dockerfile.go` / `Dockerfile.js` / `Dockerfile.rust` / `Dockerfile.full` all source. Two copies of an install step drift, and that drift *was* #584: `pytest-json-report` was baked into the python image only, so every container started from any other image failed its first verify.
 
 **js dev tools are baked, not pip-install-like.** Unlike Python's `pip install -e .[dev]`, which writes into the same venv the image already put on `PATH` so the repo naturally wins, `npm install -g` and a repo's own `node_modules` are two entirely separate trees -- nothing makes the repo win by default. A globally baked eslint 9 hitting a repo pinned to eslint 8's config is a silent version mismatch, not an error. So `edit_verify`'s eslint/tsc/jest runners resolve `node_modules/.bin/<tool>` relative to the verify working directory *first*, falling back to the image-baked global only when the repo has no local install, and always record which one ran in the `VerifyResult.detail` field (`_resolve_js_tool` / `_annotate_resolution`, Issue #588). This is a resolution-order fix, not an image-splitting one: shipping a separate `sandbox:js` image does not by itself solve the version-mismatch problem -- the per-invocation resolution does.
 
@@ -137,12 +141,12 @@ The accurate detector ran *after* the irreversible decision. When the probe fail
 
 The fix is to remove the guess, not to make it more reliable: **the default image is a superset of the dispatch matrix.** Whatever the in-container detector concludes, the tools are there. Host-side detection (`image_selection.py`) is deleted; `image=` remains the escape hatch and the only way to ask for a lean variant.
 
-This costs almost nothing. The server prewarms images anyway, and it used to prewarm base + python + go (≈1.34 GB resident on the host) precisely so detection would never hit a cold pull. The all-in-one image is the same ≈1.34 GB, and it is now the *only* one prewarmed. Unused binaries cost nothing at runtime; layers are shared copy-on-write across containers.
+This costs almost nothing. The server prewarms images anyway, and it used to prewarm base + python + go (≈1.34 GB resident on the host) precisely so detection would never hit a cold pull. The all-in-one image is the *only* one prewarmed; the ≈1.34 GB figure predates the Rust toolchain layer (with its Windows cross-compile target) added in 0.11.0 (#749/#753). Unused binaries cost nothing at runtime; layers are shared copy-on-write across containers.
 
 Consequences:
 
 *   **The image contract is "⊇ dispatch matrix."** Each image's `HEALTHCHECK` asserts the tools it owes verify; CI runs it with `docker run`, so a missing tool fails the build rather than a user's first verify.
-*   **`not_available` regains its meaning**: "sunaba has no toolchain for this language at all" (e.g. Rust) — an honest signal — rather than "the GitHub probe lost a coin flip."
+*   **`not_available` regains its meaning**: "sunaba has no toolchain for this language at all" (e.g. Java) — an honest signal — rather than "the GitHub probe lost a coin flip."
 *   **py+go polyglot works for the first time.** It used to fall back to the neutral base, which has *neither* toolchain, so the gate failed no matter what.
 
 ---
@@ -162,7 +166,7 @@ There is **no host-side auto-detection** (#584, §6.1). Language dispatch happen
     *   Standard CLI utilities, Python, and the **Node runtime** are placed in the base layer.
     *   Legacy monolithic files and workflows are removed (#313).
 *   `docker/Dockerfile.sandbox.minimal` remains unchanged and is preserved as `sandbox:minimal`.
-*   **CI Compilation Pipeline**: Base image builds ➔ determines base digest pin ➔ child variant images are compiled targeting the specific base digest ➔ all variants are published using `@sha256` digests. The `build-sandbox-variants.yml` workflow automatically creates PRs to update the `_NEUTRAL_IMAGE`, `_PYTHON_IMAGE`, and `_GO_IMAGE` digest constants inside `src/sunaba/tools/container.py` (#313).
+*   **CI Compilation Pipeline**: Base image builds ➔ determines base digest pin ➔ child variant images are compiled targeting the specific base digest ➔ all variants are published using `@sha256` digests. The `build-sandbox-variants.yml` workflow automatically creates PRs to update the variant image pins (`neutral`, `python`, `go`, `rust`, `full`, `js`) in `src/sunaba/image_pins.json` via `scripts/update_image_pins.py` (#313; the rust pin joined in 0.11.0, #753).
 
 ---
 
@@ -177,6 +181,6 @@ There is **no host-side auto-detection** (#584, §6.1). Language dispatch happen
 
 ## 10. Non-Goals (Out of Scope)
 
-*   **Additional Languages (Java, Ruby, Rust, etc.)**: Suspended for v1.0. Support is restricted to Python, JS/TS, and Go. Additional compilers can be introduced in subsequent backend layers.
+*   **Additional Languages (Java, Ruby, etc.)**: Suspended for v1.0. Support is restricted to Python, JS/TS, Go, and Rust (added post-v1.0-design in 0.11.0, ref #747/#749/#753). Additional compilers can be introduced in subsequent backend layers.
 *   **On-Demand Runtime Installation**: Installing tools at runtime (e.g. `apt-get` or `npm install`) is rejected due to default-off network postures (§2), verification timeouts, and execution reproducibility constraints. Support for new runtimes must be handled by baking them into the images. This is why #584 was fixed by widening the default image rather than by having `verify` `pip install` its own missing plugin: a container is network-off by default, and the next missing tool would reopen the same hole.
 *   **Persistent Snapshots & Custom Networking**: Deferred in alignment with core design policies.

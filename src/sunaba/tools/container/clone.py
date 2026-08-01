@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 from sunaba.journal import (
     record_boundary_crossing,
     record_copy,
+    record_initialize_progress,
 )
 from sunaba.proxy_client import authorized_read_grant
 from sunaba.tools.common import (
@@ -308,9 +309,13 @@ def _npm_install_cmd(clone_dest: str, lockfile: bool) -> str:
     """Build the npm install command for *clone_dest*.
 
     ``npm ci`` requires a lockfile and is the reproducible install; without
-    one ``npm install`` resolves the tree from ``package.json``.
+    one ``npm install --no-package-lock`` resolves the tree from
+    ``package.json`` without writing ``package-lock.json`` into the user's
+    clone (Issue #806: an init-time install must leave the worktree clean --
+    an untracked lockfile would break legacy-mode publish and dirty the
+    tree).  ``npm ci`` never writes the lockfile, so it needs no flag.
     """
-    cmd = "npm ci" if lockfile else "npm install"
+    cmd = "npm ci" if lockfile else "npm install --no-package-lock"
     return f"cd {shlex.quote(clone_dest)} && {cmd}"
 
 
@@ -333,7 +338,8 @@ def _run_npm_install(
         allow_network: Whether the container has network access.  The npm
             registry is unreachable without it, so skip the install.
         lockfile: Whether ``package-lock.json`` is present; ``npm ci`` when
-            ``True``, ``npm install`` otherwise.
+            ``True``, ``npm install --no-package-lock`` otherwise (the
+            no-lockfile form must not write a lockfile into the clone).
 
     Returns:
         Error message string on failure, ``None`` on success.
@@ -372,6 +378,31 @@ class DepsResult(NamedTuple):
 
     note: str
     failed: bool
+
+
+def _record_deps_progress(container: Any, note: str) -> None:
+    """Best-effort journal progress marker during init-time deps install.
+
+    ``container.exec_run`` writes no journal entry, so a long-running
+    installer step makes the container look journal-idle; a concurrent
+    session's opportunistic orphan GC could then reap it mid-install
+    (Issue #806).  This marker (journal op ``initialize_progress``)
+    refreshes the container's lifecycle age: the orphan reaper computes
+    age from the newest of ``init_ts`` / ``progress_ts``, so an init whose
+    last marker is inside the grace window is never reaped.
+
+    Best-effort by contract: a journal write failure must never break the
+    install, so exceptions are swallowed and logged (same spirit as the
+    reaper's own error handling).
+
+    Residual risk (accepted -- a heartbeat thread is explicitly out of
+    scope for Issue #806): a SINGLE installer step that silently exceeds
+    the orphan grace window without any further marker can still be reaped.
+    """
+    try:
+        record_initialize_progress(str(container.id)[:12], note)
+    except Exception as e:
+        logger.warning("Failed to record init progress %r: %s", note, e)
 
 
 def _install_repo_deps(
@@ -423,6 +454,7 @@ def _install_repo_deps(
         if pip_extras is None:
             notes.append("pip skipped (pip_extras=None)")
         else:
+            _record_deps_progress(container, "deps: pip install")
             err = _run_pip_install(
                 container, clone_repo, clone_dest, pip_extras, True, pip_args
             )
@@ -432,6 +464,9 @@ def _install_repo_deps(
                 notes.append("pip install ok")
     if has_js:
         lockfile = "package-lock.json" in manifests
+        _record_deps_progress(
+            container, "deps: npm ci" if lockfile else "deps: npm install"
+        )
         err = _run_npm_install(container, clone_repo, clone_dest, True, lockfile)
         if err is not None:
             errors.append(err)

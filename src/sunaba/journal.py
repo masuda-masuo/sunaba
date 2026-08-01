@@ -241,7 +241,13 @@ def _update_container_state(container_id: str, **updates: Any) -> None:
             states = {}
         s = states.setdefault(
             container_id,
-            {"complete": False, "used": False, "stopped": False, "init_ts": None},
+            {
+                "complete": False,
+                "used": False,
+                "stopped": False,
+                "init_ts": None,
+                "progress_ts": None,
+            },
         )
         for k, v in updates.items():
             if v is not None:
@@ -266,16 +272,26 @@ def _rebuild_states_unlocked() -> dict[str, dict[str, Any]]:
         if op == "stop":
             states.pop(cid, None)
             continue
-        if op not in ("initialize", "initialize_complete", "exec"):
+        if op not in ("initialize", "initialize_complete", "initialize_progress", "exec"):
             continue
         s = states.setdefault(
             cid,
-            {"complete": False, "used": False, "stopped": False, "init_ts": None},
+            {
+                "complete": False,
+                "used": False,
+                "stopped": False,
+                "init_ts": None,
+                "progress_ts": None,
+            },
         )
         if op == "initialize":
             s["init_ts"] = entry.get("ts")
         elif op == "initialize_complete":
             s["complete"] = True
+        elif op == "initialize_progress":
+            # Journal entries are read in append order, so the last write
+            # wins: this tracks the NEWEST progress timestamp (Issue #806).
+            s["progress_ts"] = entry.get("ts")
         else:
             s["used"] = True
     return states
@@ -382,6 +398,36 @@ def record_initialize_complete(container_id: str) -> None:
         entry["session_label"] = label
     _append_json(entry)
     _update_container_state(container_id, complete=True)
+
+
+def record_initialize_progress(container_id: str, note: str) -> None:
+    """Record an in-progress marker during ``sandbox_initialize`` (Issue #806).
+
+    Init-time dependency installs (``_install_repo_deps``) run ``exec_run``
+    directly and journal nothing of their own, so during a long pip/npm step
+    the container looks journal-idle and a concurrent session's opportunistic
+    orphan GC could reap it mid-install.  Each installer step writes this
+    marker *before* it starts; the orphan reaper computes the container's age
+    from the newest of ``init_ts`` / ``progress_ts``, so an init whose last
+    marker is inside the grace window is never reaped.
+
+    *note* is a short human-readable step description (e.g. ``"deps: pip
+    install"``).  The marker is best-effort at the call sites: a journal
+    write failure must never break the install.
+    """
+    run_id = get_or_create_run_id(container_id)
+    entry: dict[str, Any] = {
+        "ts": _utcnow_iso(),
+        "run_id": run_id,
+        "container_id": container_id,
+        "operation": "initialize_progress",
+        "note": note,
+    }
+    label = get_session_label(container_id)
+    if label is not None:
+        entry["session_label"] = label
+    _append_json(entry)
+    _update_container_state(container_id, progress_ts=entry["ts"])
 
 
 def record_exec(
@@ -1128,7 +1174,13 @@ def get_tool_usage(
     for entry in entries:
 
         op = entry.get("operation", "")
-        if op in ("initialize", "initialize_complete", "stop", "test_environment"):
+        if op in (
+            "initialize",
+            "initialize_complete",
+            "initialize_progress",
+            "stop",
+            "test_environment",
+        ):
             continue
 
         if op == "exec":

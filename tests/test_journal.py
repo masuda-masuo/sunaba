@@ -25,6 +25,7 @@ from sunaba.journal import (
     record_file_write,
     record_initialize,
     record_initialize_complete,
+    record_initialize_progress,
     record_stop,
     remove_run_id,
     set_session_label,
@@ -161,6 +162,27 @@ class TestJournalWrite:
 
         assert usage["exec_ops"] == 1
         assert usage["exec_entry_count"] == 1
+
+    def test_record_initialize_progress_creates_entry(self, tmp_path: Path):
+        """record_initialize_progress writes an initialize_progress entry
+        with the note field, same conventions as the other recorders
+        (Issue #806)."""
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
+            record_initialize("abc123", "python@sha256:abcd")
+            record_initialize_progress("abc123", "deps: pip install")
+
+        entries = _read_log(log_path)
+        assert len(entries) == 2
+        e = entries[1]
+        assert e["operation"] == "initialize_progress"
+        assert e["container_id"] == "abc123"
+        assert e["note"] == "deps: pip install"
+        assert e["run_id"] == entries[0]["run_id"]
 
     def test_record_stop_creates_entry(self, tmp_path: Path):
         journal_dir = tmp_path / "journal"
@@ -564,6 +586,21 @@ class TestContainerStateSidecar:
             states = read_container_states()
             assert states["aaa111"]["complete"] is True
             assert states["aaa111"]["used"] is True
+
+    def test_initialize_progress_round_trips(self, tmp_path: Path) -> None:
+        """Issue #806: record_initialize_progress flows into
+        read_container_states as progress_ts, matching the journaled ts;
+        complete / used are unaffected by the marker."""
+        with self._journal_at(tmp_path) as journal_dir:
+            record_initialize("aaa111", image="python:3.12")
+            record_initialize_progress("aaa111", "deps: pip install")
+            states = read_container_states()
+            entries = json.loads((journal_dir / "journal.log").read_text().splitlines()[1])
+
+            assert states["aaa111"]["progress_ts"] == entries["ts"]
+            assert states["aaa111"]["complete"] is False
+            assert states["aaa111"]["used"] is False
+            assert states["aaa111"]["init_ts"]  # marker must not clobber init_ts
 
     def test_stop_prunes_entry(self, tmp_path: Path) -> None:
         with self._journal_at(tmp_path) as journal_dir:

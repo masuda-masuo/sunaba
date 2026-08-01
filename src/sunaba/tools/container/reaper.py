@@ -65,8 +65,12 @@ def _reap_orphaned_init_containers(client: Any = None) -> list[str]:
       managed containers lack ``created_at`` and are skipped);
     - the journal shows no ``initialize_complete`` (setup never finished), no
       ``exec`` (never used), and no ``stop``;
-    - it is older than :data:`_ORPHAN_GRACE_SECONDS`, so a still-running init
-      (possibly in another session) is never mistaken for an orphan.
+    - its age -- computed from the newest of the ``initialize_progress`` /
+      ``initialize`` timestamps and the ``created_at`` label (Issue #806) --
+      exceeds :data:`_ORPHAN_GRACE_SECONDS`, so a still-running init
+      (possibly in another session) is never mistaken for an orphan.  An
+      init-time deps install that journals progress inside the grace window
+      keeps the container young even when total init time exceeds it.
 
     Failures are swallowed: GC must never break the caller's init.  Returns
     the list of reaped container-id prefixes.
@@ -97,7 +101,16 @@ def _reap_orphaned_init_containers(client: Any = None) -> list[str]:
         if s.get("complete") or s.get("used") or s.get("stopped"):
             # Setup finished, container used, or already stopped — not an orphan.
             continue
-        age = _age_seconds(s.get("init_ts") or created_label, now)
+        # Age from the NEWEST lifecycle timestamp (Issue #806).  An
+        # ``initialize_progress`` marker (written before each init-time deps
+        # install step) keeps an otherwise-stale init young while the install
+        # is in flight, so a clone+pip+npm init totalling > grace seconds is
+        # never reaped mid-install.  ``progress_ts`` is by construction newer
+        # than ``init_ts`` (recorded after the initialize event), which in
+        # turn is newer than the ``created_at`` label, so preferring the
+        # first present value yields the newest of the three.
+        age_ts = s.get("progress_ts") or s.get("init_ts") or created_label
+        age = _age_seconds(age_ts, now)
         if age is None or age < _ORPHAN_GRACE_SECONDS:
             # Unknown age or still within the grace grant (in-progress init).
             continue

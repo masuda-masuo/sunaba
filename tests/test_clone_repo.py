@@ -1,7 +1,7 @@
 """Tests for the sandbox_initialize clone path: validation and network clone."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -262,7 +262,11 @@ class TestNpmInstallCmd:
         assert _npm_install_cmd("/tmp/repo", lockfile=True) == "cd /tmp/repo && npm ci"
 
     def test_install_without_lockfile(self) -> None:
-        assert _npm_install_cmd("/tmp/repo", lockfile=False) == "cd /tmp/repo && npm install"
+        # --no-package-lock: an init-time install must not write a lockfile
+        # into the user's clone (Issue #806).
+        assert _npm_install_cmd("/tmp/repo", lockfile=False) == (
+            "cd /tmp/repo && npm install --no-package-lock"
+        )
 
 
 class TestInstallRepoDeps:
@@ -297,7 +301,7 @@ class TestInstallRepoDeps:
             "cd /tmp/repo && for f in pyproject.toml setup.py package.json "
             "package-lock.json go.mod Cargo.toml; do [ -e \"$f\" ] && printf "
             "'%s\\n' \"$f\" || true; done",
-            "cd /tmp/repo && npm install",
+            "cd /tmp/repo && npm install --no-package-lock",
         ]
 
     def test_multi_language_runs_both_installers(self) -> None:
@@ -333,6 +337,92 @@ class TestInstallRepoDeps:
         assert deps.note == "deps: no manifest detected — skipped"
         # No installer exec followed the failed probe.
         assert container.exec_run.call_count == 1
+
+    def test_progress_marker_before_each_installer_step(self) -> None:
+        """Issue #806: a python+js repo journals one initialize_progress
+        marker before the pip step and one before the npm step, each in
+        install order relative to the installer execs."""
+        exec_results = [
+            (0, (b"pyproject.toml\npackage.json\npackage-lock.json\n", b"")),  # probe
+            (0, (b"Installed", b"")),  # pip
+            (0, (b"added 9 packages", b"")),  # npm ci
+        ]
+        container = MagicMock()
+        container.id = "abc123def456"
+        events: list[str] = []
+
+        def exec_run(cmd, **kwargs):
+            shell = cmd[-1] if isinstance(cmd, list) and cmd else ""
+            if "for f in pyproject.toml" in shell:
+                tag = "exec:probe"
+            elif "pip install" in shell:
+                tag = "exec:pip"
+            elif "npm ci" in shell:
+                tag = "exec:npm-ci"
+            else:
+                tag = "exec:other"
+            events.append(tag)
+            return exec_results.pop(0)
+
+        container.exec_run.side_effect = exec_run
+
+        with patch(
+            "sunaba.tools.container.clone.record_initialize_progress",
+            side_effect=lambda cid, note: events.append(f"progress:{note}"),
+        ) as mock_progress:
+            deps = _install_repo_deps(container, "owner/repo", "/tmp/repo", "[dev]")
+
+        assert deps.failed is False
+        assert deps.note == "deps: pip install ok; npm ci ok"
+        assert mock_progress.call_args_list == [
+            call("abc123def456", "deps: pip install"),
+            call("abc123def456", "deps: npm ci"),
+        ]
+        # Each marker lands between its step's probe/installer execs.
+        assert events == [
+            "exec:probe",
+            "progress:deps: pip install",
+            "exec:pip",
+            "progress:deps: npm ci",
+            "exec:npm-ci",
+        ]
+
+    def test_progress_markers_skipped_for_skipped_steps(self) -> None:
+        """pip_extras=None skips the pip marker too; only the npm step
+        (which actually runs) journals one."""
+        container = self._container([
+            (0, (b"pyproject.toml\npackage.json\n", b"")),  # probe
+            (0, (b"added 3 packages", b"")),  # npm install
+        ])
+        container.id = "abc123def456"
+        with patch(
+            "sunaba.tools.container.clone.record_initialize_progress"
+        ) as mock_progress:
+            deps = _install_repo_deps(container, "owner/repo", "/tmp/repo", None)
+
+        assert deps.failed is False
+        assert mock_progress.call_args_list == [
+            call("abc123def456", "deps: npm install"),
+        ]
+
+    def test_progress_writer_failure_does_not_fail_install(self) -> None:
+        """A raising journal writer is swallowed: the install must still
+        complete and report success (Issue #806 best-effort contract)."""
+        container = self._container([
+            (0, (b"pyproject.toml\npackage.json\npackage-lock.json\n", b"")),
+            (0, (b"Installed", b"")),  # pip
+            (0, (b"added 9 packages", b"")),  # npm ci
+        ])
+        container.id = "abc123def456"
+        with patch(
+            "sunaba.tools.container.clone.record_initialize_progress",
+            side_effect=RuntimeError("journal down"),
+        ):
+            deps = _install_repo_deps(container, "owner/repo", "/tmp/repo", "[dev]")
+
+        assert deps.failed is False
+        assert deps.note == "deps: pip install ok; npm ci ok"
+        assert container.exec_run.call_count == 3
 
 
 class TestManifestProbeShellContract:
@@ -446,7 +536,11 @@ class TestInstallRepoDepsRealShell:
         install_cmds = [
             c for c in calls if isinstance(c, list) and "npm install" in c[2]
         ]
-        assert install_cmds == [["/bin/sh", "-c", f"cd {str(tmp_path)} && npm install"]]
+        assert install_cmds == [[
+            "/bin/sh",
+            "-c",
+            f"cd {str(tmp_path)} && npm install --no-package-lock",
+        ]]
 
     def test_python_only_repo_triggers_pip_install(self, tmp_path):
         """A python-only repo still gets the pip install (criterion 2)."""

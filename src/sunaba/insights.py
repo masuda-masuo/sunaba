@@ -5,7 +5,10 @@ and return computed metrics as plain dicts.  No HTTP, no rendering — just numb
 
 Each metric is a separate public function so the dashboard can call whichever
 it needs.  ``compute_all_insights`` is a convenience wrapper that returns all
-five metrics in one dict, optionally filtered to a time window.
+five metrics in one dict, optionally filtered to a time window.  The
+Issue #783 phase-1 resource observations (``initialize_duration_distribution``
+and ``busy_refusal_counts``) are separate public functions of the same shape,
+called alongside ``compute_all_insights`` by the /insights page.
 
 The module also accepts an optional *all_tools* set (keys from
 ``_PHASE_MAP``) so callers can supply the universe of known operations
@@ -19,7 +22,7 @@ from typing import Any
 from sunaba.phase import _parse_iso
 
 
-def _filter_runs_by_period(
+def filter_runs_by_period(
     state: dict[str, dict[str, Any]],
     from_ts: str | None,
     to_ts: str | None,
@@ -88,7 +91,7 @@ def compute_all_insights(
         A dict with keys ``per_tool_error_rate``, ``first_verify_failure_by_image``,
         ``roundtrip_distribution``, ``unused_tools``, ``run_distributions``.
     """
-    runs = _filter_runs_by_period(state, from_ts, to_ts)
+    runs = filter_runs_by_period(state, from_ts, to_ts)
     return {
         "per_tool_error_rate": per_tool_error_rate(runs),
         "first_verify_failure_by_image": first_verify_failure_by_image(runs),
@@ -287,8 +290,9 @@ def unused_tools(
 
     result: list[dict[str, Any]] = []
     for tool in sorted(all_tools - used):
-        # Skip "exec" and "stop" — these are always used implicitly.
-        if tool in ("exec", "stop"):
+        # Skip "exec" / "stop" (always used implicitly) and "busy_refusal"
+        # (a resource event, not a tool -- Issue #783).
+        if tool in ("exec", "stop", "busy_refusal"):
             continue
         result.append({
             "operation": tool,
@@ -367,23 +371,127 @@ def _bin_distribution(
     durations = [it["duration_s"] for it in items if it["duration_s"] is not None]
     op_counts = [it["op_count"] for it in items]
 
-    def _stats(values: list[float]) -> dict[str, Any]:
-        n = len(values)
-        if n == 0:
-            return {"count": 0, "min": 0, "max": 0, "mean": 0, "median": 0}
-        srt = sorted(values)
-        median = srt[n // 2] if n % 2 else (srt[n // 2 - 1] + srt[n // 2]) / 2
-        return {
-            "count": n,
-            "min": srt[0],
-            "max": srt[-1],
-            "mean": round(sum(values) / n, 1),
-            "median": round(median, 1),
-        }
-
     return {
         "key": key,
         "run_count": len(items),
         "duration_stats": _stats(durations),
         "op_count_stats": _stats(op_counts),
+    }
+
+
+def _stats(values: list[float]) -> dict[str, Any]:
+    """Summarise *values* as ``{count, min, max, mean, median}``.
+
+    All values are rounded to 1 decimal; an empty list yields all-zero
+    stats.  Shared by :func:`_bin_distribution` (metric 5) and the
+    Issue #783 initialize-duration metric.
+    """
+    n = len(values)
+    if n == 0:
+        return {"count": 0, "min": 0, "max": 0, "mean": 0, "median": 0}
+    srt = sorted(values)
+    median = srt[n // 2] if n % 2 else (srt[n // 2 - 1] + srt[n // 2]) / 2
+    return {
+        "count": n,
+        "min": srt[0],
+        "max": srt[-1],
+        "mean": round(sum(values) / n, 1),
+        "median": round(median, 1),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Metric 6: initialize duration distribution (Issue #783, observation 3)
+# ---------------------------------------------------------------------------
+
+
+def initialize_duration_distribution(
+    state: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Return the distribution of ``initialize`` -> ``initialize_complete``
+    durations across runs.
+
+    One observation per run that recorded a completion; the duration is
+    the span between the ``initialize`` and ``initialize_complete``
+    journal entries (captured by the aggregation state as
+    ``init_start_ts`` / ``init_complete_ts``).  Runs that recorded an
+    ``initialize`` but no completion are split by what the journal
+    positively establishes (issue #783 review): a run that also recorded
+    a ``stop`` is ``abandoned`` (it ended without ever completing init);
+    one that did not is ``in_flight`` (still initializing, or died
+    without a stop entry -- the journal cannot distinguish those, so the
+    label must not claim abandonment).
+
+    The histogram buckets are fixed second ranges: ``0-5``, ``5-15``,
+    ``15-30``, ``30-60``, ``60-120``, ``120-300`` and ``300+``.
+    """
+    durations: list[float] = []
+    abandoned = 0
+    in_flight = 0
+    for run in state.values():
+        s = _parse_iso(run.get("init_start_ts"))
+        e = _parse_iso(run.get("init_complete_ts"))
+        if s is None or e is None:
+            if run.get("init_start_ts") is not None:
+                if run.get("stopped"):
+                    abandoned += 1
+                else:
+                    in_flight += 1
+            continue
+        if e < s:
+            continue  # clock skew / malformed timestamps: not an observation
+        durations.append(round(e - s, 1))
+
+    buckets: list[tuple[float, float | None]] = [
+        (0, 5), (5, 15), (15, 30), (30, 60), (60, 120), (120, 300), (300, None),
+    ]
+    histogram: list[dict[str, Any]] = []
+    for lo, hi in buckets:
+        label = f"{int(lo)}-{int(hi)}" if hi is not None else f"{int(lo)}+"
+        if hi is None:
+            count = sum(1 for d in durations if lo <= d)
+        else:
+            count = sum(1 for d in durations if lo <= d < hi)
+        histogram.append({
+            "bucket": label,
+            "count": count,
+            "lo": lo,
+            "hi": hi,
+        })
+
+    return {
+        "stats": _stats(durations),
+        "histogram": histogram,
+        "abandoned": abandoned,
+        "in_flight": in_flight,
+        "total_runs": len(state),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Metric 7: per-pool busy-refusal counts (Issue #783, initialize-wait proxy)
+# ---------------------------------------------------------------------------
+
+
+def busy_refusal_counts(state: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Return per-pool concurrency-cap refusal counts (``busy_refusal``
+    journal entries, Issue #784).
+
+    In the post-#784 world docker-bound acquisition is non-blocking, so a
+    saturated pool *refuses* instead of queueing: per-pool refusal counts
+    are the observable proxy for "initialize wait".  The aggregation
+    state carries the counts per run (``busy_refusals`` keyed by pool
+    name -- ``docker`` / ``recovery``); this metric sums them across
+    runs, filtered by the caller's period window like every other
+    insight.
+    """
+    by_pool: dict[str, int] = {}
+    total = 0
+    for run in state.values():
+        for pool, n in run.get("busy_refusals", {}).items():
+            by_pool[pool] = by_pool.get(pool, 0) + n
+            total += n
+    return {
+        "by_pool": [{"pool": p, "count": n} for p, n in sorted(by_pool.items())],
+        "total": total,
     }

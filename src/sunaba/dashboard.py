@@ -23,7 +23,12 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from sunaba.health import HEALTH_ORDER, classify_all_runs, classify_run_health
-from sunaba.insights import compute_all_insights
+from sunaba.insights import (
+    busy_refusal_counts,
+    compute_all_insights,
+    filter_runs_by_period,
+    initialize_duration_distribution,
+)
 from sunaba.journal import (
     _MAX_JOURNAL_SIZE,
     get_journal_live_size,
@@ -33,8 +38,10 @@ from sunaba.journal import (
     read_journal,
     read_journal_snapshot,
     read_journal_tail,
+    timeline_from_lifecycle,
 )
 from sunaba.phase import _PHASE_MAP, aggregate_run_phases, phase_state_for_run
+from sunaba.resources import cached_disk_usage
 from sunaba.security import KIND_PROXY, KIND_SANDBOX
 from sunaba.tools.container import list_managed_containers, sandbox_stop
 
@@ -100,6 +107,7 @@ def _apply_delta(cached: dict[str, Any], entries: list[dict[str, Any]]) -> None:
     cached["entry_count"] += len(entries)
     run_ids = cached["run_ids"]
     active_envs = cached["active_envs"]
+    lifecycle = cached["container_lifecycle"]
     for entry in entries:
         cid = entry.get("container_id")
         if cid:
@@ -114,6 +122,16 @@ def _apply_delta(cached: dict[str, Any], entries: list[dict[str, Any]]) -> None:
                     active_envs.pop(cid, None)
                 else:
                     active_envs[cid] = entry
+            # Issue #783 observation 1: maintain the container-lifecycle map
+            # (initialize opens / stop closes a lifetime) incrementally,
+            # mirroring journal.container_concurrency_timeline.  The timeline
+            # is derived from this map via journal.timeline_from_lifecycle.
+            op = entry.get("operation")
+            if op == "initialize":
+                lifecycle[cid] = {"init_ts": entry.get("ts"), "stop_ts": None}
+            elif op == "stop":
+                lc = lifecycle.setdefault(cid, {"init_ts": None, "stop_ts": None})
+                lc["stop_ts"] = entry.get("ts")
     cached["state"] = aggregate_run_phases(cached["state"], entries)
 
 
@@ -138,6 +156,9 @@ def _cached_entry() -> dict[str, Any]:
             "entry_count": 0,
             "run_ids": {},
             "active_envs": {},
+            # Issue #783: container_id -> {"init_ts", "stop_ts"} lifecycle
+            # map maintained from journal deltas (see _apply_delta).
+            "container_lifecycle": {},
         }
         _journal_agg_cache[path] = cached
         _apply_delta(cached, entries)
@@ -173,6 +194,7 @@ def _cached_agg_state() -> dict[str, dict[str, Any]]:
             cached["entry_count"] = 0
             cached["run_ids"] = {}
             cached["active_envs"] = {}
+            cached["container_lifecycle"] = {}
             cached["state"] = None
             _apply_delta(cached, entries)
             cached["generation"] = read_journal_tail(offset, None)[3]
@@ -218,6 +240,20 @@ def _cached_journal_entry_count() -> int:
     with _journal_agg_lock:
         cached = _cached_entry()
         return cached["entry_count"]
+
+
+def _cached_concurrency_timeline() -> dict[str, Any]:
+    """Concurrent-container timeline at the cache's current journal offset.
+
+    Derives ``{current, peak, series}`` from the incrementally maintained
+    container-lifecycle map (Issue #783 observation 1) via the shared
+    pure function :func:`sunaba.journal.timeline_from_lifecycle` -- the
+    same computation the journal full-scan uses, so the two can never
+    drift apart.
+    """
+    with _journal_agg_lock:
+        cached = _cached_entry()
+        return timeline_from_lifecycle(cached["container_lifecycle"])
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +347,16 @@ _DASHBOARD_HTML: str = """<!DOCTYPE html>
   <div class="card" id="stats-card">
     <h2>Stats</h2>
     {stats_card}
+  </div>
+
+  <div class="card" id="concurrency-card">
+    <h2>Concurrent Containers</h2>
+    {concurrency_card}
+  </div>
+
+  <div class="card" id="disk-card">
+    <h2>Disk Usage</h2>
+    {disk_card}
   </div>
 
   {tool_usage_panel}
@@ -636,6 +682,14 @@ _LIVE_SCRIPT: str = """<script>
     if (data.stats_card !== undefined) {
       var sc = document.getElementById("stats-card");
       if (sc) { sc.innerHTML = data.stats_card; }
+    }
+    if (data.concurrency_card !== undefined) {
+      var cc = document.getElementById("concurrency-card");
+      if (cc) { cc.innerHTML = data.concurrency_card; }
+    }
+    if (data.disk_card !== undefined) {
+      var dc = document.getElementById("disk-card");
+      if (dc) { dc.innerHTML = data.disk_card; }
     }
     if (data.journal_card !== undefined) {
       var jc = document.getElementById("journal-card");
@@ -1064,12 +1118,29 @@ def _short_image(image: str) -> str:
 def _fmt_duration(seconds: float | None) -> str:
     """Render a duration compactly: ``45s`` / ``12m`` / ``21.3h``."""
     if seconds is None:
-        return "—"
+        return "\u2014"
     if seconds < 60:
         return f"{int(seconds)}s"
     if seconds < 3600:
         return f"{int(seconds // 60)}m"
     return f"{seconds / 3600:.1f}h"
+
+
+def _fmt_bytes(n: int | None) -> str:
+    """Render a byte count compactly: ``512 B`` / ``12.3 MB`` / ``4.1 GB``."""
+    if n is None:
+        return "\u2014"
+    for unit, div in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= div:
+            return f"{n / div:.1f} {unit}"
+    return f"{int(n)} B"
+
+
+def _fmt_hhmm(ts: str) -> str:
+    """Render an ISO timestamp as ``HH:MM:SS`` (UTC), or ``\u2014``."""
+    if not ts:
+        return "\u2014"
+    return ts[11:19] if len(ts) >= 19 else ts
 
 
 def _render_status_cell(status: str, env: dict[str, Any] | None) -> str:
@@ -1378,6 +1449,87 @@ def _dashboard_fragments() -> dict[str, str]:
         len(env.get("services", [])) for env in active_envs
     )
 
+    # Issue #783 observation 1: concurrent-container timeline from the
+    # incrementally maintained lifecycle map (current / peak / trend).
+    #
+    # The journal is the *trend* source and is labelled as such: it only
+    # sees initialize/stop entries, so a container removed without a
+    # journaled stop (VM reboot, external docker rm) never decrements the
+    # count, and a re-initialized container's earlier lifetime is not part
+    # of the peak.  The ground truth for "right now" is the live Docker
+    # listing (reconciled against the same managed-container view as the
+    # /containers page), shown separately so the headline cannot be
+    # silently inflated by journal blind spots.
+    timeline = _cached_concurrency_timeline()
+    series = timeline.get("series", [])
+    peak = timeline.get("peak", 0)
+    current = timeline.get("current", 0)
+    try:
+        live_containers, live_error = list_managed_containers()
+        if live_error is not None:
+            live_now = None  # docker daemon unreachable: degrade to a dash
+        else:
+            live_now = sum(1 for c in live_containers if c.get("kind") != KIND_PROXY)
+    except Exception:
+        live_now = None  # docker client unavailable: degrade to a dash
+        live_error = "docker unavailable"
+    live_val = str(live_now) if live_now is not None else "\u2014"
+    live_note = (
+        f'<div class="dim" style="font-size:10px">{_escape(live_error or "")}</div>'
+        if live_now is None
+        else ""
+    )
+    # Show the trend as a compact bar list -- last 20 events, oldest left.
+    shown = series[-20:]
+    max_count = max((max(s["count"] for s in shown), 1)) if shown else 1
+    bar_parts: list[str] = []
+    for s in shown:
+        bar_parts.append(
+            _render_bar(s["count"], max_count, _fmt_hhmm(s.get("ts", "")), color="#58a6ff")
+        )
+    trend_html = (
+        '<div class="section-header">Trend (initialize/stop events, UTC)</div>'
+        + "".join(bar_parts)
+        if shown
+        else '<div class="empty">No container lifecycle events recorded</div>'
+    )
+    concurrency_card = (
+        f'<div class="meta">Current (journal)</div>'
+        f'<div class="val">{current}</div>'
+        f'<div class="meta" style="margin-top:8px">Live now (docker)</div>'
+        f'<div class="val">{live_val}</div>'
+        f'{live_note}'
+        f'<div class="meta" style="margin-top:8px">Peak (journal)</div>'
+        f'<div class="val">{peak}</div>'
+        f'<div style="margin-top:8px">{trend_html}</div>'
+        f'<div class="metric-note" style="margin-top:6px">'
+        f'Journal timeline: containers removed without a journaled stop still '
+        f'count; a re-initialized container\'s earlier lifetime is not part of '
+        f'the peak'
+        f'</div>'
+    )
+
+    # Issue #783 observation 2: disk usage.  Rendered from the interval
+    # cache -- a page render (or 1.5s live poll) never triggers a host
+    # probe, it only re-reads the cached measurement (resources.py).
+    disk = cached_disk_usage()
+    docker_part = disk.get("docker", {})
+    jdir = disk.get("journal_dir", {})
+    measured_at = disk.get("measured_at", "")
+    disk_card = (
+        f'<div class="meta">Docker images</div>'
+        f'<div class="val">{_fmt_bytes(docker_part.get("images_bytes"))}</div>'
+        f'<div class="meta" style="margin-top:8px">Container layers (writable)</div>'
+        f'<div class="val">{_fmt_bytes(docker_part.get("containers_bytes"))}</div>'
+        f'<div class="meta" style="margin-top:8px">Journal / trace dir</div>'
+        f'<div class="val">{_fmt_bytes(jdir.get("bytes"))}</div>'
+        f'<div class="meta" style="margin-top:8px">Total (observed components)</div>'
+        f'<div class="val">{_fmt_bytes(disk.get("total_bytes"))}</div>'
+        f'<div class="meta" style="margin-top:8px">Measured {_escape(_fmt_hhmm(measured_at))} UTC '
+        f'<span class="dim">(probe interval 60s)</span></div>'
+        f'<div class="mono dim" style="margin-top:4px">{_escape(jdir.get("path", ""))}</div>'
+    )
+
     # Per-run health badges (Issue #775): one classification pass over
     # the whole aggregation state, then a lookup per row.  Classification
     # stays per-poll because health is time-dependent.
@@ -1421,6 +1573,8 @@ def _dashboard_fragments() -> dict[str, str]:
             f'<div class="meta" style="margin-top:8px">Entries</div>'
             f'<div class="val">{journal_entries}</div>'
         ),
+        "concurrency_card": concurrency_card,
+        "disk_card": disk_card,
         "run_rows": (
             "\n".join(run_rows_parts)
             if run_rows_parts
@@ -1523,6 +1677,11 @@ _INSIGHTS_HTML: str = """<!DOCTYPE html>
 </div>
 
 {run_dist_panel}
+
+<div class="grid">
+  {init_duration_panel}
+  {busy_refusals_panel}
+</div>
 
 </body>
 </html>"""
@@ -1728,6 +1887,72 @@ def _render_insights_page(
         f'</div>'
     )
 
+    # \u2500\u2500 Metric 6 (Issue #783): initialize duration distribution \u2500\u2500
+    initd = d["initialize_duration_distribution"]
+    init_stats = initd["stats"]
+    max_init_count = max(
+        (item["count"] for item in initd["histogram"]), default=1
+    )
+    init_bars = ""
+    for item in initd["histogram"]:
+        init_bars += _render_bar(item["count"], max_init_count, item["bucket"], color="#7ee787")
+    init_summary = (
+        f'<div style="font-size:12px;color:#f0f6fc;margin-top:8px">'
+        f'{init_stats["count"]} completed inits \u00b7 mean {_fmt_duration(init_stats["mean"])} '
+        f'\u00b7 median {_fmt_duration(init_stats["median"])} '
+        f'\u00b7 max {_fmt_duration(init_stats["max"])}'
+        f'</div>'
+    )
+    if initd["abandoned"]:
+        init_summary += (
+            f'<div style="font-size:11px;color:#ffa657;margin-top:4px">'
+            f'{initd["abandoned"]} run(s) stopped without completing initialize '
+            f'(abandoned init)'
+            f'</div>'
+        )
+    if initd["in_flight"]:
+        init_summary += (
+            f'<div style="font-size:11px;color:#8b949e;margin-top:4px">'
+            f'{initd["in_flight"]} run(s) with initialize not (yet) completed '
+            f'&mdash; in flight or ended without a stop record'
+            f'</div>'
+        )
+    init_duration_panel = (
+        f'<div class="card">'
+        f'<h2>6. Initialize Duration</h2>'
+        f'{init_bars}'
+        f'{init_summary}'
+        f'</div>'
+    )
+
+    # \u2500\u2500 Metric 7 (Issue #783): per-pool busy refusals (initialize-wait proxy) \u2500\u2500
+    busy = d["busy_refusal_counts"]
+    busy_rows: list[str] = []
+    for item in busy["by_pool"]:
+        pool_color = "#f97583" if item["count"] > 0 else "#8b949e"
+        busy_rows.append(
+            f'<tr><td class="mono">{_escape(item["pool"])}</td>'
+            f'<td style="color:{pool_color}">{item["count"]}</td></tr>'
+        )
+    busy_table = (
+        f'<table><thead><tr><th>Pool</th><th>Refusals</th></tr></thead>'
+        f'<tbody>{"".join(busy_rows)}</tbody></table>'
+        if busy_rows else '<div class="empty">No busy refusals recorded</div>'
+    )
+    busy_refusals_panel = (
+        f'<div class="card">'
+        f'<h2>7. Busy Refusals by Pool '
+        f'<span style="font-size:11px;color:#8b949e;font-weight:400">'
+        f'(total {busy["total"]})'
+        f'</span></h2>'
+        f'{busy_table}'
+        f'<div class="metric-note" style="margin-top:6px">'
+        f'Concurrency-cap refusals (#784) \u2014 the observable form of '
+        f'"initialize wait" (non-blocking acquire refuses instead of queueing)'
+        f'</div>'
+        f'</div>'
+    )
+
     return _INSIGHTS_HTML.format(
         style=_STYLE,
         nav=_render_nav("insights"),
@@ -1739,6 +1964,8 @@ def _render_insights_page(
         roundtrip_panel=roundtrip_panel,
         unused_panel=unused_panel,
         run_dist_panel=run_dist_panel,
+        init_duration_panel=init_duration_panel,
+        busy_refusals_panel=busy_refusals_panel,
     )
 
 
@@ -1888,6 +2115,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             nav=_render_nav("home"),
             stats_card=frag["stats_card"],
             journal_card=frag["journal_card"],
+            concurrency_card=frag["concurrency_card"],
+            disk_card=frag["disk_card"],
             run_rows=frag["run_rows"],
             tool_usage_panel=_render_tool_usage_panel(tool_from, tool_to),
             live_script=_live_script(
@@ -1921,6 +2150,13 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             from_ts=from_ts,
             all_tools=set(_PHASE_MAP.keys()),
         )
+        # Issue #783 phase-1 resource observations (observation 3): separate
+        # public metric functions of the same shape, computed on the same
+        # period-filtered runs as the five core metrics.  Not part of
+        # compute_all_insights, whose key set is a fixed contract (#777).
+        filtered = filter_runs_by_period(agg_state, from_ts, None)
+        insights["initialize_duration_distribution"] = initialize_duration_distribution(filtered)
+        insights["busy_refusal_counts"] = busy_refusal_counts(filtered)
 
         html_content = _render_insights_page(insights, period)
         self._send_html(html_content)

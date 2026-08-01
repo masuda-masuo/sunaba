@@ -73,6 +73,43 @@ type check in one call.
   repositories -- it once let two pyright errors through to a pushed branch.
 - `diff_summary` is structured JSON (`{unstaged, staged, untracked}`), not `git diff --stat`.
 
+### Affected-only runs (fast edit-loop feedback)
+
+Pass `test_scope` set to "affected" to run only the tests selected from the
+current change set (import-graph based, covering deferred function-body
+imports) instead of the whole suite -- the edit loop's dominant latency:
+
+    verify_in_container(container_id, path="tests/", test_scope="affected")
+
+- **It never passes the gate.** `gate_passed` stays false and
+  `partial_test_run` is true even when every selected test passes, and no
+  verify success is recorded: publish stays hard-blocked. A full verify
+  (default scope "full") of the same change set is still required before
+  publish; the result's stable `diff_hash` lets you pair the affected-green
+  run with that final full run.
+- **Never combine it with `test_filter` or `pytest_args`** -- that is a
+  conflict (affected mode selects the tests itself) and returns an error
+  result without running anything.
+- It widens to a genuine full run (normal gate semantics, reason recorded in
+  `test_selection`'s `widened_to_full_reason`) when the change set cannot be
+  narrowed safely: conftest.py / pyproject.toml / setup.cfg / pytest.ini /
+  tox.ini changes, any non-.py change, deleted or renamed files, a non-Python
+  language set, a broken changed file, or a selector failure. A widened run
+  may report `gate_passed` true -- it is a real full run. An unrelated broken
+  file elsewhere in the tree (a broken fixture, scratch file) does NOT widen.
+- **Selection is the true transitive closure, so hub-adjacent changes select
+  more.** A change to a module that a hub depends on (a package __init__.py
+  re-exporting its submodules, a widely-imported entry point) selects the
+  hub's whole importer population; on hub-dense repositories that can be a
+  substantial share of the suite. A genuinely leaf change stays a small
+  fraction. Affected runs never pass the gate, so the mandatory full verify
+  still guards correctness either way.
+- Only files under a test root (a tests/test directory component, or a
+  directory containing conftest.py) are executed by affected runs;
+  test_*-named source helpers are never passed to pytest.
+- Selected tests are passed to pytest as positional paths, never via `-k`
+  (a file path in `-k` yields "no tests found").
+
 ### diff_in_container's default base is the merge target
 
 The default `base` is the PR base branch recorded at `pr=N` checkout, or the repository's default branch (e.g. `main`) otherwise. The diff always ends at the **working tree**, so both committed and uncommitted work appears. Untracked files are listed in the `untracked` field.

@@ -57,6 +57,106 @@ def _tool_absence_detail(raw_tail: str, stderr_text: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Affected-scope test selection support (Issue #781)
+# ---------------------------------------------------------------------------
+#
+# ``test_scope="affected"`` runs only the tests the change set touches.  The
+# diff data below (numstat + name-status, staged and unstaged) is collected
+# in the same exec calls as the diff summary so the exec count per verify
+# call stays identical; the name-status half is split off the combined
+# output with a marker line.
+
+#: Marker separating ``--numstat`` output from ``--name-status`` output in
+#: one combined ``git diff`` exec (see :func:`_split_ns`).
+_NS_MARKER: str = "__SUNABA_NAMESTATUS__"
+
+
+def _split_ns(raw: str) -> tuple[str, str]:
+    """Split combined ``--numstat`` / ``--name-status`` output.
+
+    The verify diff collection runs ``git diff ... --numstat`` and
+    ``git diff ... --name-status`` in one exec, joined by a marker line, so
+    the numstat half keeps its existing exec call count.  Returns
+    ``(numstat_text, namestatus_text)``; a missing marker means the whole
+    output is numstat (the pre-#781 interpretation).
+    """
+    marker = f"\n{_NS_MARKER}\n"
+    if marker in raw:
+        numstat, namestatus = raw.split(marker, 1)
+        return numstat, namestatus
+    if raw.startswith(_NS_MARKER + "\n"):
+        return "", raw[len(_NS_MARKER) + 1:]
+    return raw, ""
+
+
+def _parse_name_status(raw: str) -> list[str]:
+    """Collect deleted/renamed paths from ``git diff --name-status`` output.
+
+    A deleted file (``D``) and both sides of a rename (``R``) mean the
+    change set is not a plain edit of existing files: affected selection
+    widens to the full suite for those (fail open).
+    """
+    special: list[str] = []
+    for line in raw.splitlines():
+        line = line.rstrip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        code = parts[0].strip()
+        if not code:
+            continue
+        if code[0] == "D":
+            special.append(parts[1])
+        elif code[0] == "R" and len(parts) > 2:
+            special.append(parts[1])
+            special.append(parts[2])
+    return special
+
+
+def _compute_diff_hash(
+    unstaged_files: list[dict],
+    staged_files: list[dict],
+    untracked_files: list[str],
+) -> str:
+    """Stable hash over the sorted changed paths + per-file add/del counts.
+
+    The same change set always yields the same hash (in full and affected
+    modes), so journal analysis can pair an affected-green run with the
+    subsequent full run of the same change set.
+    """
+    import hashlib
+
+    per_path: dict[str, str] = {}
+    for files in (unstaged_files, staged_files):
+        for f in files:
+            per_path.setdefault(
+                f["path"], f"{f.get('additions', 0)}:{f.get('deletions', 0)}"
+            )
+    for p in untracked_files:
+        per_path.setdefault(p, "new")
+    lines = sorted(f"{p}:{v}" for p, v in per_path.items())
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()[:16]
+
+
+def _empty_test_selection() -> dict:
+    """test_selection shape for error results (no diff data collected).
+
+    Validation errors are returned before any diff collection, so they
+    carry an empty selection and a null diff_hash instead of omitting the
+    fields entirely -- journal consumers can rely on the keys existing.
+    """
+    return {
+        "changed_files": [],
+        "selected_count": 0,
+        "selection_ms": 0,
+        "widened_to_full_reason": None,
+        "mode": "full",
+    }
+
+
 def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
     """Apply a unified diff to a file inside the sandbox container.
 
@@ -286,6 +386,7 @@ def verify_in_container(
     skip_lint_gate: bool = False,
     skip_type_gate: bool = False,
     skip_patch_targets_gate: bool = False,
+    test_scope: str = "full",
 ) -> str:
     """Run the lint/type gates then tests -- the pre-publish quality gate.
 
@@ -299,6 +400,16 @@ def verify_in_container(
     gate decision is always the full-suite result.  The response also
     carries a structured git diff summary so changes can be reviewed
     before publish.
+
+    **test_scope="affected"** runs only the tests selected from the
+    change set (fast edit-loop feedback) but NEVER passes the gate
+    (``gate_passed`` false, ``partial_test_run`` true, success
+    unrecorded) -- a full verify (default scope) is still required
+    before publish.  Unnarrowable change sets (config/conftest,
+    deletions, non-.py, non-Python, selector failure) widen to full;
+    reason: ``test_selection.widened_to_full_reason``.  Full and
+    affected runs carry ``test_selection`` and a stable ``diff_hash``;
+    errors carry an empty selection, null hash.
 
     Args:
         container_id: Container ID prefix.
@@ -317,11 +428,15 @@ def verify_in_container(
         skip_type_gate: Like skip_lint_gate, for the type gate.
         skip_patch_targets_gate: Like skip_lint_gate, for the
             check_patch_targets gate.
+        test_scope: 'full' (default) or 'affected'; 'affected' runs only
+            the tests selected from the change set and never passes the
+            gate, and is incompatible with test_filter/pytest_args.
 
     Returns:
         JSON: gate_passed, lint, types, patch_targets,
         lint_type_incomplete, partial_test_run, detected_languages,
-        tests, diff_summary, gate_fail_reasons.
+        tests, diff_summary, gate_fail_reasons, test_selection,
+        diff_hash.
     """
     import shlex
 
@@ -348,8 +463,43 @@ def verify_in_container(
     record_tool_use(
         container_id[:12],
         "verify_in_container",
-        {"path": path, "test_filter": test_filter, "verbose": verbose},
+        {
+            "path": path,
+            "test_filter": test_filter,
+            "verbose": verbose,
+            "test_scope": test_scope,
+        },
     )
+
+    # --- Validate test_scope before any exec work (Issue #781 review) ---
+    # Invalid scopes and the test_filter/pytest_args conflict are detected
+    # statically from the arguments; failing fast avoids the wasted
+    # language-detection and diff-collection execs.  The error results
+    # still carry test_selection (empty) and diff_hash (null) so journal
+    # consumers can rely on the keys existing.
+    if test_scope not in ("full", "affected"):
+        return json.dumps({
+            "status": "error",
+            "gate_passed": False,
+            "error": (
+                f"invalid test_scope {test_scope!r}: expected 'full' or 'affected'"
+            ),
+            "diff_hash": None,
+            "test_selection": _empty_test_selection(),
+        })
+    if test_scope == "affected" and (test_filter or pytest_args):
+        return json.dumps({
+            "status": "error",
+            "gate_passed": False,
+            "error": (
+                "test_scope='affected' cannot be combined with test_filter or "
+                "pytest_args (conflicting intent): affected mode selects the "
+                "tests itself from the change set. Run them separately, or "
+                "use the default test_scope='full'."
+            ),
+            "diff_hash": None,
+            "test_selection": _empty_test_selection(),
+        })
 
     # The repo root, which for a container created by sandbox_initialize is
     # simply its working directory (see resolve_git_root).
@@ -374,12 +524,86 @@ def verify_in_container(
         )
         return ec, stdout_text, stderr_text
 
+    def _run_affected_selector(
+        repo_root: str,
+        changed: list[str],
+        deleted_or_renamed: list[str],
+    ) -> dict:
+        """Stage and run the stdlib-only affected-test selector (Issue #781).
+
+        The selector source ships inside the sunaba package and is written
+        into the container at verify time (temp path), then executed with
+        the container's ``python3``.  It must NOT rely on the target repo
+        containing the script, and it must NOT require network -- both hold:
+        the source comes from the server's own install, and exec runs
+        locally inside the container.
+
+        Returns ``{ok, selected, widen_reason, selection_ms, error}``.
+        """
+        import time
+        from pathlib import Path
+
+        import sunaba.edit_verify.affected_tests as _affected_tests
+        from sunaba.edit_verify import write_file
+
+        try:
+            source = Path(_affected_tests.__file__).read_bytes().decode("utf-8")
+        except Exception as e:
+            return {
+                "ok": False, "selected": [], "widen_reason": None,
+                "selection_ms": 0, "error": f"cannot read selector source: {e}",
+            }
+        selector_path = "/tmp/sunaba_affected_tests.py"
+        try:
+            write_file(container, container_id[:12], selector_path, source)
+        except Exception as e:
+            return {
+                "ok": False, "selected": [], "widen_reason": None,
+                "selection_ms": 0, "error": f"cannot stage selector: {e}",
+            }
+        cmd = f"python3 {shlex.quote(selector_path)} --root {shlex.quote(repo_root)}"
+        for p in deleted_or_renamed:
+            cmd += f" --deleted {shlex.quote(p)}"
+        for p in changed:
+            cmd += f" {shlex.quote(p)}"
+        t0 = time.monotonic()
+        ec, stdout_text, stderr_text = _run(cmd)
+        selection_ms = int((time.monotonic() - t0) * 1000)
+        if ec != 0:
+            return {
+                "ok": False, "selected": [], "widen_reason": None,
+                "selection_ms": selection_ms,
+                "error": (
+                    f"selector exited {ec}: "
+                    f"{stderr_text.strip() or stdout_text.strip()[:200]}"
+                ),
+            }
+        try:
+            parsed = json.loads(stdout_text.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError, ValueError):
+            return {
+                "ok": False, "selected": [], "widen_reason": None,
+                "selection_ms": selection_ms,
+                "error": f"selector produced invalid output: {stdout_text.strip()[:200]}",
+            }
+        return {
+            "ok": True,
+            "selected": list(parsed.get("selected") or []),
+            "widen_reason": parsed.get("widen_reason"),
+            "selection_ms": selection_ms,
+        }
+
     # --- Get diff summary (structured JSON, issue #500, #687) ---
+    # The name-status half is chained into the same exec calls (split by
+    # _NS_MARKER) so the exec count per verify call is unchanged: deleted /
+    # renamed files are detectable for affected-scope selection (#781).
     unstaged_ec, unstaged_raw, _ = _run(
-        "git diff HEAD --numstat 2>/dev/null"
+        "git diff HEAD --numstat 2>/dev/null; "
+        f"echo {_NS_MARKER}; git diff HEAD --name-status 2>/dev/null"
     )
     staged_ec, staged_raw, _ = _run(
-        "git diff --cached --numstat 2>/dev/null"
+        "git diff --cached --numstat 2>/dev/null; "
+        f"echo {_NS_MARKER}; git diff --cached --name-status 2>/dev/null"
     )
     _, untracked_raw, _ = _run(
         "git ls-files --others --exclude-standard"
@@ -387,6 +611,12 @@ def verify_in_container(
     untracked_files = [
         f for f in untracked_raw.split("\n") if f.strip()
     ]
+
+    unstaged_numstat, unstaged_ns = _split_ns(unstaged_raw)
+    staged_numstat, staged_ns = _split_ns(staged_raw)
+    deleted_or_renamed_paths = list(dict.fromkeys(
+        _parse_name_status(unstaged_ns) + _parse_name_status(staged_ns)
+    ))
 
     def _build_diff_section(raw_text: str) -> dict:
         if not raw_text.strip():
@@ -405,9 +635,37 @@ def verify_in_container(
         }
 
     diff_summary = {
-        "unstaged": _build_diff_section(unstaged_raw),
-        "staged": _build_diff_section(staged_raw),
+        "unstaged": _build_diff_section(unstaged_numstat),
+        "staged": _build_diff_section(staged_numstat),
         "untracked": untracked_files,
+    }
+
+    # --- Change set for affected-scope selection (Issue #781) ---
+    changed_paths: list[str] = []
+    for section in (diff_summary["unstaged"], diff_summary["staged"]):
+        for f in section.get("files", []):
+            p = f.get("path")
+            if p and p not in changed_paths:
+                changed_paths.append(p)
+    for p in diff_summary["untracked"]:
+        if p not in changed_paths:
+            changed_paths.append(p)
+
+    # Stable hash over the change set, identical across full and affected
+    # runs so journal analysis can pair an affected-green run with the
+    # subsequent full run of the same change set (#781).
+    diff_hash = _compute_diff_hash(
+        diff_summary["unstaged"].get("files", []),
+        diff_summary["staged"].get("files", []),
+        diff_summary["untracked"],
+    )
+
+    test_selection: dict = {
+        "changed_files": sorted(changed_paths),
+        "selected_count": 0,
+        "selection_ms": 0,
+        "widened_to_full_reason": None,
+        "mode": "full",
     }
 
     # --- Determine if partial test run (filter provided) ---
@@ -426,6 +684,8 @@ def verify_in_container(
         "detected_languages": sorted(detected.languages),
         "tests": {},
         "diff_summary": diff_summary,
+        "diff_hash": diff_hash,
+        "test_selection": test_selection,
     }
     if detected.reason:
         result["detection_warning"] = detected.reason
@@ -474,8 +734,14 @@ def verify_in_container(
             return json.dumps(result)
 
     # --- Run tests (language-aware dispatch, Issue #493) ---
-    def _run_inline_pytest(filter_args: str) -> dict:
-        """Run pytest inline (kept for python-specific error detail)."""
+    def _run_inline_pytest(filter_args: str, targets: str | list[str] | None = None) -> dict:
+        """Run pytest inline (kept for python-specific error detail).
+
+        *targets* (a list of test paths) replaces the *path* argument:
+        affected-mode selections are passed to pytest as positional path
+        arguments, never via ``-k`` (a file path in ``-k`` matches no
+        tests -- see workflow_guide.md).
+        """
         from sunaba.test_report import (
             PytestAdapter,
             build_pytest_cmd,
@@ -483,7 +749,8 @@ def verify_in_container(
         )
         _json_file = "/tmp/_pytest_report.json"
         _raw_file = "/tmp/_pytest_raw.txt"
-        full_cmd = build_pytest_cmd(_json_file, _raw_file, filter_args, path, _SANDBOX_ENV)
+        target = targets if targets is not None else path
+        full_cmd = build_pytest_cmd(_json_file, _raw_file, filter_args, target, _SANDBOX_ENV)
         ec, stdout_text, stderr_text = _run(full_cmd)
 
         if ec == 127:
@@ -587,6 +854,88 @@ def verify_in_container(
                 overall_ok = False
 
         return results, overall_ok
+
+    # --- Affected-scope test selection (Issue #781) ---
+    # test_scope="affected" runs ONLY the tests the change set touches,
+    # passed to pytest as positional paths.  It never reports
+    # gate_passed=true and never records a verify success: the full suite
+    # is still required for the publish gate.  When the change set cannot
+    # be narrowed confidently the selector widens to full, and the run
+    # below the branch is then a genuine full run with normal gate
+    # semantics (the reason is recorded in test_selection).
+    if test_scope == "affected":
+        test_selection["mode"] = "affected"
+        widen_reason: str | None = None
+        selected: list[str] | None = None
+        if set(detected.languages) != {"python"}:
+            widen_reason = (
+                "affected test selection requires exactly {python}; "
+                f"detected {sorted(detected.languages)}"
+            )
+        elif not changed_paths and not deleted_or_renamed_paths:
+            widen_reason = "no changed files detected"
+        else:
+            selection = _run_affected_selector(
+                working_dir, changed_paths, deleted_or_renamed_paths
+            )
+            test_selection["selection_ms"] = selection["selection_ms"]
+            if not selection["ok"]:
+                widen_reason = f"affected-test selector failed: {selection['error']}"
+            elif selection["widen_reason"]:
+                widen_reason = selection["widen_reason"]
+            else:
+                selected = selection["selected"]
+                test_selection["selected_count"] = (
+                    len(selected) if selected is not None else 0
+                )
+                if not selected:
+                    widen_reason = "affected-test selector returned no tests"
+
+        if widen_reason is not None:
+            test_selection["widened_to_full_reason"] = widen_reason
+        else:
+            # Affected run: ONLY the selected tests, positionally.
+            affected_result = _run_inline_pytest("", targets=selected)
+            result["tests"]["full"] = affected_result
+            result["partial_test_run"] = True
+            result["gate_passed"] = False
+            result["gate_skipped_reason"] = (
+                "test_scope='affected': only affected tests ran; the full "
+                "suite is still required for the gate"
+            )
+            result["recommended_next_action"] = (
+                "verify_in_container with default test_scope='full' "
+                "(affected runs never pass the publish gate)"
+            )
+            status = affected_result.get("status", "unknown")
+            if status == "collection_error":
+                raw = affected_result.get("raw_output", "")
+                msg = (
+                    "affected tests collection error: "
+                    f"{affected_result.get('error', 'unknown')}"
+                )
+                if raw:
+                    msg += f"\n{raw}"
+                result["gate_fail_reasons"] = [msg]
+            elif status == "not_available":
+                result["gate_fail_reasons"] = [
+                    "affected tests not available: "
+                    f"{affected_result.get('error', 'unknown')}"
+                ]
+            elif status == "no_tests":
+                result["gate_fail_reasons"] = [
+                    "affected test selection matched no tests"
+                ]
+            elif status == "error":
+                result["gate_fail_reasons"] = [
+                    f"test execution error: {affected_result.get('error', 'unknown')}"
+                ]
+            elif status != "ok":
+                result["gate_fail_reasons"] = [
+                    f"affected tests: {affected_result.get('failed', 0)} failure(s)"
+                ]
+            _record_verify_outcome(container_id, result)
+            return json.dumps(result)
 
     if has_filter:
         if "python" in detected.languages:

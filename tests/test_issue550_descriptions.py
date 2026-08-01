@@ -93,8 +93,16 @@ class TestServerInstructions:
 #   margin is one parameter at roughly the median per-param cost -- deliberate,
 #   not leftover.  What was NOT cut: any statement of when a parameter applies
 #   (e.g. edit_file's "AST mode only"), which is the element #731 protects.
-TOTAL_DESCRIPTION_BYTE_LIMIT = 11264
-TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10410
+# - descriptions 11264 -> 11809, param descriptions 10410 -> 10520: #781 added
+#   the incremental test-selection mode to verify_in_container.  The
+#   description body gained the affected-mode contract (never gate_passed,
+#   partial_test_run semantics, widen-to-full behavior, test_selection /
+#   diff_hash in the result) and the schema gained the test_scope= parameter.
+#   Both are exactly the measured cost of the new surface (description +545 B,
+#   parameter +110 B); the paragraph was trimmed to the essential contract and
+#   the long-form guidance lives in the workflow guide, not the docstring.
+TOTAL_DESCRIPTION_BYTE_LIMIT = 11809
+TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10520
 
 
 def _param_desc_bytes(tool) -> int:

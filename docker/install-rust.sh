@@ -28,8 +28,12 @@ set -eux
 RUST_VERSION="$1"
 
 # ── C コンパイラ / リンカ（rusqlite bundled 等のネイティブ拡張ビルドに必要）──
+# gcc-mingw-w64-x86-64-posix は Windows クロスビルド用リンカ (issue #800)。
+# sagasu の出荷ターゲットが Windows のため、verify で .exe のリンクまで
+# 検証できる必要がある（cargo check はリンクを検証しない）。-posix 変種のみに
+# 絞る（+358MB）: メタパッケージ mingw-w64 は i686 分も連れてきて ~1GB 増える。
 apt-get update
-apt-get install -y --no-install-recommends build-essential
+apt-get install -y --no-install-recommends build-essential gcc-mingw-w64-x86-64-posix
 rm -rf /var/lib/apt/lists/*
 
 # ── rustup + ツールチェーン（sandbox ユーザー所有の場所へ、image に焼く）──
@@ -47,6 +51,13 @@ rm /tmp/rustup-init.sh
 # clippy と rustfmt は minimal profile に含まれないので明示的に足す
 # （cargo clippy / cargo fmt --check が要件のため）。
 "${CARGO_HOME}/bin/rustup" component add clippy rustfmt
+
+# Windows クロスビルドターゲットを焼き込む（+~40MB、issue #800）。
+# 実行時の `rustup target add` でも足せるが、コンテナごとの rust-std
+# ダウンロードを省く。リンカは上の gcc-mingw-w64-x86-64-posix
+# （rustc が x86_64-w64-mingw32-gcc を自動検出する）。msvc は
+# cargo-xwin が要るため対象外 -- gnu の .exe は自己完結で配布可。
+"${CARGO_HOME}/bin/rustup" target add x86_64-pc-windows-gnu
 
 # クロスコンパイル用ターゲットの実行時追加 (`rustup target add <triple>`) が
 # 非 root で通るように、sandbox ユーザーへ所有権を渡す。

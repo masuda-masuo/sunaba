@@ -418,7 +418,8 @@ class TestSandboxInitializeDepsManifests:
         assert not any("pip install" in cmd for cmd in calls)
 
     def test_js_only_without_lockfile_runs_npm_install(self) -> None:
-        """package.json without a lockfile -> npm install, no pip command."""
+        """package.json without a lockfile -> npm install --no-package-lock,
+        no pip command (Issue #806: no lockfile written into the clone)."""
         result, container = self._run_init([
             (0, (b"package.json\n", b"")),  # probe
             (0, (b"added 7 packages in 2s", b"")),  # npm install
@@ -426,7 +427,7 @@ class TestSandboxInitializeDepsManifests:
         assert "npm install ok" in result
         assert "pip" not in result
         calls = [c.args[0][-1] for c in container.exec_run.call_args_list]
-        assert calls[1] == "cd /workspace && npm install"
+        assert calls[1] == "cd /workspace && npm install --no-package-lock"
         assert not any("pip install" in cmd for cmd in calls)
 
     def test_js_only_npm_still_runs_with_pip_extras_none(self) -> None:
@@ -440,7 +441,7 @@ class TestSandboxInitializeDepsManifests:
         )
         assert "npm install ok" in result
         calls = [c.args[0][-1] for c in container.exec_run.call_args_list]
-        assert any(cmd == "cd /workspace && npm install" for cmd in calls)
+        assert any(cmd == "cd /workspace && npm install --no-package-lock" for cmd in calls)
         assert not any("pip install" in cmd for cmd in calls)
 
     def test_both_manifests_run_both_installers(self) -> None:

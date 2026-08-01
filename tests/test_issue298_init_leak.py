@@ -206,6 +206,59 @@ class TestReaper:
 
     @patch("sunaba.tools.container.reaper.record_stop")
     @patch("sunaba.tools.container.reaper.read_container_states")
+    def test_skips_init_with_fresh_progress(
+        self, mock_journal: MagicMock, mock_stop: MagicMock
+    ) -> None:
+        # Issue #806: an init whose deps install is in flight (a fresh
+        # initialize_progress marker) survives the orphan reaper even when
+        # the total init time -- and the init_ts -- exceed the grace window.
+        mock_journal.return_value = {
+            "busy12345678": {
+                "complete": False,
+                "used": False,
+                "stopped": False,
+                "init_ts": _iso(_ORPHAN_GRACE_SECONDS + 60),
+                "progress_ts": _iso(5),
+            },
+        }
+        c = _fake_container(
+            "busy12345678",
+            {MANAGED_LABEL: "true", CREATED_AT_LABEL: _iso(_ORPHAN_GRACE_SECONDS + 60)},
+        )
+        assert _reap_orphaned_init_containers(client=self._client_with(c)) == []
+        c.remove.assert_not_called()
+
+    @patch("sunaba.tools.container.reaper.record_stop")
+    @patch("sunaba.tools.container.reaper.read_container_states")
+    def test_reaps_init_with_stale_progress(
+        self, mock_journal: MagicMock, mock_stop: MagicMock
+    ) -> None:
+        # A progress marker older than the grace window is as dead as none:
+        # a genuinely stuck init is still reaped exactly like today.
+        mock_journal.return_value = {
+            "stale1234567": {
+                "complete": False,
+                "used": False,
+                "stopped": False,
+                "init_ts": _iso(_ORPHAN_GRACE_SECONDS + 120),
+                "progress_ts": _iso(_ORPHAN_GRACE_SECONDS + 60),
+            },
+        }
+        c = _fake_container(
+            "stale1234567",
+            {MANAGED_LABEL: "true", CREATED_AT_LABEL: _iso(_ORPHAN_GRACE_SECONDS + 120)},
+        )
+        client = self._client_with(c)
+
+        reaped = _reap_orphaned_init_containers(client=client)
+
+        assert reaped == ["stale1234567"]
+        c.kill.assert_called_once()
+        c.remove.assert_called_once_with(force=True)
+        mock_stop.assert_called_once_with("stale1234567")
+
+    @patch("sunaba.tools.container.reaper.record_stop")
+    @patch("sunaba.tools.container.reaper.read_container_states")
     def test_remove_failure_is_swallowed(self, mock_journal: MagicMock, mock_stop: MagicMock) -> None:
         mock_journal.return_value = {}
         c = _fake_container("gone12345678", {MANAGED_LABEL: "true", CREATED_AT_LABEL: _iso(_ORPHAN_GRACE_SECONDS + 60)})

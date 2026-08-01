@@ -41,6 +41,7 @@ _PHASE_MAP: dict[str, str] = {
     # ── init ────────────────────────────────────────────────────────
     "initialize":          "init",
     "initialize_complete": "init",
+    "initialize_progress": "init",
     "boundary:clone_repo": "init",
     "boundary:setup_pr_branch": "init",
     "boundary:setup_branch": "init",

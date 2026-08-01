@@ -91,6 +91,10 @@ _PHASE_MAP: dict[str, str] = {
     "stop":                    "other",
     "tool:run_python":         "other",
     "tool:sandbox_exec_check": "other",
+    # Issue #783: concurrency-cap refusals (busy JSON, #784) are host-side
+    # resource events, not workflow steps -- they must never inject an
+    # init/explore/... segment into a run's semantic phases.
+    "busy_refusal":            "other",
 }
 
 
@@ -285,6 +289,14 @@ def _new_run_state(run_id: str) -> dict[str, Any]:
         # i.e. the exec is still running; the completion entry clears it.
         "host": run_id.startswith("host-"),
         "exec_in_flight": False,
+        # Issue #783 (phase-1 resource observations): ``init_start_ts`` /
+        # ``init_complete_ts`` bracket the initialize -> initialize_complete
+        # span whose distribution is the "initialize duration" metric, and
+        # ``busy_refusals`` counts concurrency-cap refusals (journal op
+        # ``busy_refusal``, #784) per pool as the initialize-wait proxy.
+        "init_start_ts": None,
+        "init_complete_ts": None,
+        "busy_refusals": {},
     }
 
 
@@ -354,6 +366,28 @@ def _incorporate(run: dict[str, Any], entry: dict[str, Any]) -> None:
         img = entry.get("image")
         if img:
             run["image"] = img
+
+    # \u2500\u2500 resource observations (Issue #783) \u2500\u2500
+    # ``initialize`` opens the init span (kept on first sighting -- a run
+    # initializes once), ``initialize_complete`` closes it; together they
+    # feed the initialize-duration distribution on /insights.  Each
+    # ``busy_refusal`` entry (host- or container-attributed) increments the
+    # per-pool refusal counter that proxies "initialize wait" in the
+    # post-#784 world.
+    if op == "initialize" and not run["init_start_ts"]:
+        run["init_start_ts"] = ts
+    if op == "initialize_complete":
+        run["init_complete_ts"] = ts
+    if op == "busy_refusal":
+        # A refusal is a resource event, not agent activity: count it and
+        # stop.  It must not open/extend phase segments, bump entry_count,
+        # perturb ``last_op`` (health's long-running-operation exemption
+        # would mask the run's real last action) or reach the #777 op
+        # metrics (issue #783 review).  ``last_ts`` above still advances so
+        # period filtering sees the run.
+        pool = entry.get("pool") or "unknown"
+        run["busy_refusals"][pool] = run["busy_refusals"].get(pool, 0) + 1
+        return
 
     if eff == "boundary:clone_repo" and not run["repo"]:
         details = entry.get("details", "")
@@ -478,6 +512,18 @@ def _track_op_metrics(run: dict[str, Any], entry: dict[str, Any]) -> None:
     overwriting the rest.
     """
     eff = _effective_operation(entry)
+
+    # Issue #783: concurrency-cap refusals (``busy_refusal``) are resource
+    # events, not tool calls -- they must not pollute the five #777 metrics:
+    # no op_calls / op_failures entries (which would add a fake "busy_refusal"
+    # row to per_tool_error_rate and inflate run op counts), and no
+    # failure-recovery flush (a refused call is not a recovery action, so a
+    # pending failure must not be recorded as "recovered by busy_refusal").
+    # Mirrors the exclusions already made in insights.unused_tools and
+    # journal.get_tool_usage.
+    if eff == "busy_refusal":
+        return
+
     is_outcome = _is_outcome_entry(entry)
 
     # ── call counting ──

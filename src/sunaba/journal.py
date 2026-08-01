@@ -512,6 +512,60 @@ def record_exec_start(
     _update_container_state(container_id, used=True)
 
 
+def record_busy_refusal(
+    pool: str,
+    limit: str,
+    cap: int,
+    *,
+    tool: str | None = None,
+    container_id: str | None = None,
+) -> None:
+    """Record a docker/recovery concurrency-cap refusal (Issue #783).
+
+    Written when :func:`sunaba.tools.common.docker_bound` /
+    ``recovery_bound`` refuse a call because a pool is saturated (Issue
+    #784 busy JSON).  Refusals are the observable form of "initialize
+    wait" in the post-#784 world: acquisition is non-blocking, so a
+    saturated pool *refuses* instead of queueing, and per-pool refusal
+    counts are surfaced on the /insights page as a proxy metric.
+
+    The entry is attributed to the refused call's container run when that
+    run already exists (its per-container cap may be the reason);
+    otherwise -- no container named, or the container is unknown to the
+    process-local run map (e.g. it survived a server restart) -- it goes
+    to the host run.  A refusal must never MINT a run: a refusal-only run
+    has zero operations, shows up as a phantom "running" row and turns
+    into a false ``stalled`` badge (#783 review), while host runs are
+    exempt from stalled classification (#792) and the /insights refusal
+    metric is keyed by pool, not by run, so nothing is lost.  The
+    ``container_id`` field still records which container was concerned.
+    Best-effort by design: the refusal path must never crash because
+    observation failed, so any journaling error is swallowed here (the
+    busy JSON is still returned to the caller).
+    """
+    try:
+        run_id = None
+        if container_id:
+            with _run_map_lock:
+                run_id = _run_map.get(container_id)
+        if run_id is None:
+            run_id = get_host_run_id()
+        entry: dict[str, Any] = {
+            "ts": _utcnow_iso(),
+            "run_id": run_id,
+            "container_id": container_id,
+            "operation": "busy_refusal",
+            "pool": pool,
+            "limit": limit,
+            "cap": cap,
+        }
+        if tool:
+            entry["tool"] = tool
+        _append_json(entry)
+    except Exception:
+        pass  # best-effort observation (see docstring)
+
+
 def record_stop(container_id: str) -> None:
     """Record a container stop event."""
     run_id = get_or_create_run_id(container_id)
@@ -890,6 +944,17 @@ def get_journal_path() -> str:
     return str(_JOURNAL_PATH)
 
 
+def get_journal_dir() -> str:
+    """Return the absolute path of the journal directory (``~/.sunaba``).
+
+    The directory also holds the trace files (``~/.sunaba/traces``,
+    Issue #783 disk observation) and the container-state sidecar, so its
+    size is the "journal + trace" component of the dashboard's disk
+    usage card.
+    """
+    return str(_JOURNAL_DIR)
+
+
 def get_runs() -> list[dict[str, Any]]:
     """Return a summary of all runs found in the journal."""
     if not _JOURNAL_PATH.exists() and not _JOURNAL_BACKUP_PATH.exists():
@@ -1180,6 +1245,9 @@ def get_tool_usage(
             "initialize_progress",
             "stop",
             "test_environment",
+            # Issue #783: concurrency-cap refusals are resource events, not
+            # tool usage -- they are aggregated on the /insights page.
+            "busy_refusal",
         ):
             continue
 
@@ -1328,3 +1396,87 @@ def get_run_id_per_container() -> dict[str, str]:
         if run_id:
             run_ids[cid] = run_id
     return run_ids
+
+
+# ---------------------------------------------------------------------------
+# Concurrent-container timeline (Issue #783, observation 1)
+# ---------------------------------------------------------------------------
+
+
+def timeline_from_lifecycle(lifecycle: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Convert a container-lifecycle map into the concurrency timeline.
+
+    *lifecycle* maps ``container_id`` to
+    ``{"init_ts": str|None, "stop_ts": str|None}``.  Each container whose
+    lifetime was journaled contributes an ``initialize`` event (count +1)
+    and, when a stop is recorded, a ``stop`` event (count -1); events are
+    sorted by timestamp and the running count is sampled after every
+    event.  A ``stop`` without a journaled ``initialize`` is outside the
+    timeline contract and contributes nothing (it cannot close a lifetime
+    that was never observed open).
+
+    Returns ``{"current": int, "peak": int, "series": [...]}``:
+
+    * ``current`` -- the count after the last event (0 when the journal
+      holds no lifecycle events),
+    * ``peak`` -- the maximum concurrently-running count ever observed,
+    * ``series`` -- oldest-first ``{"ts": str, "count": int}`` samples,
+      one per event.
+
+    Pure function -- the single source of truth shared by the journal
+    full-scan (:func:`container_concurrency_timeline`) and the
+    dashboard's incremental cache (Issue #789), which maintains the
+    lifecycle map from journal deltas.
+    """
+    events: list[tuple[str, int]] = []
+    for lc in lifecycle.values():
+        if not lc.get("init_ts"):
+            continue  # stop without a journaled initialize: skip
+        events.append((lc["init_ts"], 1))
+        if lc.get("stop_ts"):
+            events.append((lc["stop_ts"], -1))
+    events.sort(key=lambda e: e[0])
+
+    count = 0
+    peak = 0
+    series: list[dict[str, Any]] = []
+    for ts, delta in events:
+        count += delta
+        if count > peak:
+            peak = count
+        series.append({"ts": ts, "count": count})
+    return {"current": count, "peak": peak, "series": series}
+
+
+def container_concurrency_timeline(
+    entries: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Reconstruct the concurrent-container timeline from journal entries.
+
+    Builds the lifecycle map from *entries* (default: the whole journal)
+    and feeds it through :func:`timeline_from_lifecycle`: an
+    ``initialize`` entry opens a container's lifetime, a ``stop`` entry
+    closes it, and a re-``initialize`` after a stop reopens it (matching
+    the sidecar's reset-on-init semantics in
+    :func:`_rebuild_states_unlocked`).  Host-run entries (no
+    ``container_id``) are ignored.
+
+    The result is the raw material for the dashboard's "Concurrent
+    Containers" observation (Issue #783): the current count, the all-time
+    peak, and the trend (a timestamped series of running counts).
+    """
+    if entries is None:
+        with _lock:
+            entries = _read_journal_unlocked()
+    lifecycle: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        cid = entry.get("container_id")
+        if not cid:
+            continue
+        op = entry.get("operation")
+        if op == "initialize":
+            lifecycle[cid] = {"init_ts": entry.get("ts"), "stop_ts": None}
+        elif op == "stop":
+            lc = lifecycle.setdefault(cid, {"init_ts": None, "stop_ts": None})
+            lc["stop_ts"] = entry.get("ts")
+    return timeline_from_lifecycle(lifecycle)

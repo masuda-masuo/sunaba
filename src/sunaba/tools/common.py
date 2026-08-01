@@ -421,9 +421,37 @@ def _busy_error(pool: str, limit: str, cap: int) -> str:
         "error": detail,
         "busy": True,
         "pool": pool,
+        "limit": limit,
+        "cap": cap,
         "recommended_next_action": next_action,
     }
     return json.dumps(payload)
+
+
+def _journal_busy_refusal(busy_json: str, tool: str, container_id: object) -> None:
+    """Best-effort journal record of a concurrency-cap refusal (Issue #783).
+
+    Parses the structured busy payload from :func:`_busy_error` and writes
+    a ``busy_refusal`` journal entry so per-pool refusal counts are
+    observable on the /insights page (the initialize-wait proxy in the
+    post-#784 world).  Never raises and never slows the refusal path: a
+    journal failure must not turn a busy refusal into a crash -- the busy
+    JSON is returned to the caller regardless.
+    """
+    try:
+        payload = json.loads(busy_json)
+        cid = container_id if isinstance(container_id, str) and container_id else None
+        from sunaba.journal import record_busy_refusal
+
+        record_busy_refusal(
+            pool=payload.get("pool", "unknown"),
+            limit=payload.get("limit", ""),
+            cap=int(payload.get("cap") or 0),
+            tool=tool,
+            container_id=cid,
+        )
+    except Exception:
+        pass  # best-effort observation (see docstring)
 
 
 def _try_acquire_docker_permits(
@@ -519,10 +547,16 @@ def _concurrency_bound(
         @functools.wraps(fn)
         async def _async_wrapper(*args: Any, **kwargs: Any) -> Any:
             timeout = _docker_acquire_timeout_seconds()
-            sem, per_sem, busy = await asyncio.to_thread(
-                acquire, _bound_container_id(args, kwargs), timeout
-            )
+            container_id = _bound_container_id(args, kwargs)
+            sem, per_sem, busy = await asyncio.to_thread(acquire, container_id, timeout)
             if busy is not None:
+                # Issue #783: make the refusal observable (per-pool counts on
+                # /insights) without changing the refusal itself.  The journal
+                # write is file I/O, so it hops to a worker thread -- the
+                # event loop is never blocked (issue #783 review).
+                await asyncio.to_thread(
+                    _journal_busy_refusal, busy, fn.__name__, container_id
+                )
                 return busy
             assert sem is not None  # success path always carries the primary permit
             try:
@@ -537,8 +571,12 @@ def _concurrency_bound(
     @functools.wraps(fn)
     def _wrapper(*args: Any, **kwargs: Any) -> Any:
         timeout = _docker_acquire_timeout_seconds()
-        sem, per_sem, busy = acquire(_bound_container_id(args, kwargs), timeout)
+        container_id = _bound_container_id(args, kwargs)
+        sem, per_sem, busy = acquire(container_id, timeout)
         if busy is not None:
+            # Issue #783: make the refusal observable (per-pool counts on
+            # /insights) without changing the refusal itself.
+            _journal_busy_refusal(busy, fn.__name__, container_id)
             return busy
         assert sem is not None  # success path always carries the primary permit
         try:

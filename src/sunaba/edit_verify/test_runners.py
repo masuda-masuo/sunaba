@@ -29,7 +29,10 @@ from .shell import _GO_ENV, _RUST_ENV, _SANDBOX_ENV, _exec_run, _quote_path
 def _run_pytest_verify(
     container: Any, path: str, workdir: str | None = None
 ) -> VerifyResult:
-    """Run pytest --json-report on *path*.  Returns VerifyResult envelope.
+    """Run pytest --junit-xml on *path*.  Returns VerifyResult envelope.
+
+    Uses pytest's built-in JUnit XML report (``--junit-xml``, Issue #785)
+    -- no third-party plugin (pytest-json-report) is a prerequisite.
 
     *workdir* defaults to the container's own working directory, which is
     the repo root; pass it only to run somewhere else (e.g. a subproject).
@@ -39,9 +42,9 @@ def _run_pytest_verify(
         build_pytest_cmd,
         split_pytest_output,
     )
-    _json_file = "/tmp/_pytest_report.json"
+    _junit_file = "/tmp/_pytest_report.xml"
     _raw_file = "/tmp/_pytest_raw.txt"
-    cmd = build_pytest_cmd(_json_file, _raw_file, "", _quote_path(path), _SANDBOX_ENV)
+    cmd = build_pytest_cmd(_junit_file, _raw_file, "", _quote_path(path), _SANDBOX_ENV)
     ec, stdout_text, stderr_text = _exec_run(
         container,
         ["/bin/sh", "-c", cmd],
@@ -61,16 +64,16 @@ def _run_pytest_verify(
     if ec not in (0, 1):
         return _envelope_error("pytest", stderr_text.strip() or f"exit code {ec}", ec)
 
-    json_part, raw_tail = split_pytest_output(stdout_text)
+    xml_part, raw_tail = split_pytest_output(stdout_text)
 
-    if not json_part:
+    if not xml_part:
         detail = "no test output produced"
         if raw_tail:
             detail += f"\n--- raw output ---\n{raw_tail}"
         return _envelope_skipped("pytest", detail)
 
     try:
-        report = PytestAdapter.parse_json(json_part)
+        report = PytestAdapter.parse(xml_part)
         d = report.to_dict()
         status = d.get("status", "ok")
         return VerifyResult(

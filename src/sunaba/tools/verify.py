@@ -26,30 +26,34 @@ from sunaba.verify_state import record_verify_success
 # verify must never map "my own prerequisite is missing" onto a verdict about
 # the code under test.  #584 was exactly that: the container lacked
 # ``pytest-json-report``, pytest rejected ``--json-report`` with a usage error,
-# no JSON was produced, and the result was reported as ``no_tests`` -- "this
+# no report was produced, and the result was reported as ``no_tests`` -- "this
 # project has no tests" -- which is a lie, and one that reads like a real
 # finding.  Tool absence is ``not_available``; a crashed run is ``error``; only
 # a *successful* pytest run may conclude anything about the tests
 # (``docs/design_multilang_support.md`` §4).
+#
+# Since #785 the python path uses pytest's built-in ``--junit-xml``, so the
+# plugin hole is closed at the root: no image needs to ship a plugin (or even
+# pytest-xdist) for verify to work.  ``-n auto`` is passed only when
+# pytest-xdist is importable in the *target* environment -- probed inside the
+# pytest command itself, with a serial fallback otherwise -- so a usage error
+# can only be a genuinely bad command line or a pytest too old to know
+# ``--junit-xml``.
 
 #: pytest's exit code for a usage error (bad/unknown command-line option).
 #: It means *our* command did not fit this pytest -- never that tests failed.
 _PYTEST_USAGE_ERROR: int = 4
 
-#: What pytest prints when the json-report plugin is not installed.
-_JSON_REPORT_ABSENT_MARKER: str = "unrecognized arguments: --json-report"
-
 
 def _tool_absence_detail(raw_tail: str, stderr_text: str) -> str:
     """Explain a pytest usage error in terms the caller can act on."""
-    if _JSON_REPORT_ABSENT_MARKER in raw_tail or _JSON_REPORT_ABSENT_MARKER in stderr_text:
+    combined = f"{raw_tail}\n{stderr_text}"
+    if "unrecognized arguments: -n" in combined or "xdist" in combined:
         return (
-            "verify runs pytest with --json-report, but the pytest-json-report "
-            "plugin is not installed in this container. The default sandbox image "
-            "bakes it in, so this container was most likely started from a custom "
-            "image=, or the project's own install replaced pytest. Install it "
-            "(package_install pytest-json-report) or re-initialize on the default "
-            "image."
+            "pytest rejected verify's -n auto even though pytest-xdist was "
+            "importable in the container -- the installed xdist is broken or "
+            "incompatible with this pytest. This is a tooling problem in the "
+            "container, not a test result."
         )
     return (
         "pytest rejected verify's command line (usage error). This is a tooling "
@@ -747,10 +751,10 @@ def verify_in_container(
             build_pytest_cmd,
             split_pytest_output,
         )
-        _json_file = "/tmp/_pytest_report.json"
+        _junit_file = "/tmp/_pytest_report.xml"
         _raw_file = "/tmp/_pytest_raw.txt"
         target = targets if targets is not None else path
-        full_cmd = build_pytest_cmd(_json_file, _raw_file, filter_args, target, _SANDBOX_ENV)
+        full_cmd = build_pytest_cmd(_junit_file, _raw_file, filter_args, target, _SANDBOX_ENV)
         ec, stdout_text, stderr_text = _run(full_cmd)
 
         if ec == 127:
@@ -768,16 +772,12 @@ def verify_in_container(
         if ec == 5:
             return {"status": "no_tests", "error": "no tests found"}
 
-        json_part, raw_tail = split_pytest_output(stdout_text)
+        xml_part, raw_tail = split_pytest_output(stdout_text)
 
-        if not json_part:
+        if not xml_part:
             if ("No module named pytest" in raw_tail
                     or "No module named pytest" in stderr_text):
                 return {"status": "not_available", "error": "pytest not installed",
-                        "raw_output": raw_tail}
-            if _JSON_REPORT_ABSENT_MARKER in raw_tail or _JSON_REPORT_ABSENT_MARKER in stderr_text:
-                return {"status": "not_available",
-                        "error": _tool_absence_detail(raw_tail, stderr_text),
                         "raw_output": raw_tail}
             if ec == 0:
                 return {"status": "no_tests", "error": "no test output produced",
@@ -786,16 +786,14 @@ def verify_in_container(
             # killed.  Reporting that as "no tests" would launder a broken run
             # into a benign verdict -- the exact failure mode #584 was made of.
             return {"status": "error",
-                    "error": f"pytest produced no JSON report (exit {ec})",
+                    "error": f"pytest produced no XML report (exit {ec})",
                     "raw_output": raw_tail}
 
         try:
-            raw_report = json.loads(json_part)
-            report = PytestAdapter.parse(raw_report)
+            report = PytestAdapter.parse(xml_part)
             d = report.to_dict()
-            summary = raw_report.get("summary", {})
-            d["collected"] = summary.get("collected", summary.get("total", 0))
-            d["collection_errors"] = summary.get("errors", 0)
+            d["collected"] = report.total if report.total is not None else 0
+            d["collection_errors"] = report.errors
             return d
         except Exception:
             result: dict = {"status": "error", "error": f"failed to parse pytest output (exit {ec})"}

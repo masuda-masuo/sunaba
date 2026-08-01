@@ -57,7 +57,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # ── Node.js (横断ランタイム) ─────────────────────────────────────
 # pyright（PyPI ラッパーだが実体は node アプリ）と将来の js dispatch が依存する。
 # base に置くことで pyright の実行時 node 取得バグ（design §1）も解消する。
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
   && rm -rf /var/lib/apt/lists/*
 

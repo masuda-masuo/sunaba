@@ -1857,3 +1857,291 @@ class TestRunNpmTestVerify:
         mock_jest.assert_called_once_with(container, "tests/", workdir="/repo")
         assert result.status == "ok"
         assert result.tool == "jest"
+
+
+# ===================================================================
+# verify_in_container: test_scope="affected" (Issue #781)
+# ===================================================================
+
+class TestVerifyAffectedScope:
+    """Tests for incremental (affected-only) test selection in verify.
+
+    ``test_scope="affected"`` runs ONLY the tests the change set touches
+    and NEVER passes the gate: ``gate_passed`` stays false,
+    ``partial_test_run`` is true, no verify success is recorded, and the
+    result carries ``test_selection`` metadata plus a stable ``diff_hash``
+    so journal analysis can pair an affected-green run with the
+    subsequent full run of the same change set.
+    """
+
+    # Container id unique to this class so the process-local verify-state
+    # map can be asserted without cross-test contamination.
+    CID = "aff7812c0ffee"
+
+    GREEN_REPORT = (
+        b'{"summary": {"collected": 3, "total": 3, "passed": 3, '
+        b'"failed": 0, "errors": 0}, "duration": 0.1, "tests": []}\n'
+        b"---PYTEST-RAW---\n3 passed\n"
+    )
+    FAILED_REPORT = (
+        b'{"summary": {"collected": 3, "total": 3, "passed": 2, '
+        b'"failed": 1, "errors": 0}, "duration": 0.1, '
+        b'"tests": [{"nodeid": "tests/test_app.py::test_x", '
+        b'"outcome": "failed", "call": {"longrepr": "boom"}}]}\n'
+        b"---PYTEST-RAW---\n1 failed\n"
+    )
+    # numstat + name-status halves joined by the marker line, matching the
+    # chained exec command verify builds (Issue #781).
+    NS = "__SUNABA_NAMESTATUS__"
+    CHANGED_UNSTAGED = (
+        b"1\t1\tsrc/app.py\n" + NS.encode() + b"\nM\tsrc/app.py\n"
+    )
+    EMPTY_STAGED = NS.encode() + b"\n"
+    SELECTOR_OK = b'{"selected": ["tests/test_app.py"], "widen_reason": null}\n'
+    SELECTOR_WIDEN = b'{"selected": [], "widen_reason": "change set includes pyproject.toml"}\n'
+
+    def _base_effects(self) -> list[tuple[int, tuple[bytes, bytes]]]:
+        return [
+            (0, (self.CHANGED_UNSTAGED, b"")),
+            (0, (self.EMPTY_STAGED, b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
+        ]
+
+    def _run(self, effects, languages, **kwargs) -> dict:
+        """Drive verify_in_container with the standard mocks."""
+        from sunaba.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_container.exec_run.side_effect = effects
+
+        with patch("sunaba.tools.verify._docker", return_value=mock_client), patch(
+            "sunaba.edit_verify.write_file",
+        ), patch(
+            "sunaba.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages=set(languages), scope={}, reason=None,
+            ),
+        ):
+            result = json.loads(verify_in_container(
+                container_id=self.CID,
+                path="tests/",
+                skip_lint_gate=True,
+                skip_type_gate=True,
+                skip_patch_targets_gate=True,
+                **kwargs,
+            ))
+            return result, mock_container.exec_run.call_args_list
+
+    def _exec_cmds(self, calls) -> list[str]:
+        """The shell command strings verify passed to exec_run."""
+        cmds = []
+        for call in calls:
+            cmd = call.args[0]
+            if isinstance(cmd, list) and cmd and cmd[0] == "/bin/sh":
+                cmds.append(cmd[-1] if isinstance(cmd[-1], bytes) else str(cmd[-1]))
+        return cmds
+
+    def test_affected_green_never_passes_gate(self) -> None:
+        """Affected green: gate_passed stays false, partial run, no success
+        recorded, and the selected tests are passed positionally (never -k)."""
+        from sunaba.verify_state import has_verify_success
+
+        effects = self._base_effects() + [
+            (0, (self.SELECTOR_OK, b"")),
+            (0, (self.GREEN_REPORT, b"")),
+        ]
+        with patch("sunaba.tools.verify.record_verify_success") as mock_record:
+            result, calls = self._run(effects, ["python"], test_scope="affected")
+
+        assert result["gate_passed"] is False
+        assert result["partial_test_run"] is True
+        assert result["tests"]["full"]["status"] == "ok"
+        assert "full suite is still required" in result["gate_skipped_reason"]
+        assert "test_scope='full'" in result["recommended_next_action"]
+        assert "gate_fail_reasons" not in result
+        mock_record.assert_not_called()
+        assert has_verify_success(self.CID) is False
+
+        ts = result["test_selection"]
+        assert ts["mode"] == "affected"
+        assert ts["changed_files"] == ["src/app.py"]
+        assert ts["selected_count"] == 1
+        assert ts["widened_to_full_reason"] is None
+        assert ts["selection_ms"] >= 0
+        assert result["diff_hash"]
+
+        # Selected tests arrive as positional pytest paths, never -k.
+        cmds = self._exec_cmds(calls)
+        pytest_cmds = [c for c in cmds if "python3 -m pytest" in c]
+        assert pytest_cmds, f"no pytest command in: {cmds}"
+        assert "tests/test_app.py" in pytest_cmds[0]
+        assert "-k" not in pytest_cmds[0]
+
+    def test_affected_red_reports_failures(self) -> None:
+        """Affected run with failures: gate_fail_reasons carries the count."""
+        effects = self._base_effects() + [
+            (0, (self.SELECTOR_OK, b"")),
+            (1, (self.FAILED_REPORT, b"")),
+        ]
+        result, _ = self._run(effects, ["python"], test_scope="affected")
+
+        assert result["gate_passed"] is False
+        assert result["partial_test_run"] is True
+        assert result["tests"]["full"]["status"] == "failed"
+        assert "1 failure(s)" in result["gate_fail_reasons"][0]
+
+    def test_affected_with_test_filter_conflict_errors(self) -> None:
+        """test_scope='affected' + test_filter -> error result, no tests run."""
+        effects = self._base_effects()
+        result, calls = self._run(effects, ["python"], test_scope="affected", test_filter="TestFoo")
+
+        assert result["status"] == "error"
+        assert result["gate_passed"] is False
+        assert "conflicting intent" in result["error"]
+        # Fails fast: NO exec work at all (validation happens before the
+        # diff-collection execs, Issue #781 review).
+        cmds = self._exec_cmds(calls)
+        assert cmds == [], f"expected no exec calls, got: {cmds}"
+        # Error results still carry the test_selection/diff_hash keys so
+        # journal consumers can rely on them existing.
+        assert result["diff_hash"] is None
+        ts = result["test_selection"]
+        assert ts["changed_files"] == []
+        assert ts["selected_count"] == 0
+        assert ts["widened_to_full_reason"] is None
+
+    def test_affected_with_pytest_args_conflict_errors(self) -> None:
+        """test_scope='affected' + pytest_args -> error result, no tests run."""
+        effects = self._base_effects()
+        result, calls = self._run(effects, ["python"], test_scope="affected", pytest_args="-x")
+
+        assert result["status"] == "error"
+        assert result["gate_passed"] is False
+        assert "conflicting intent" in result["error"]
+        assert result["diff_hash"] is None
+        assert result["test_selection"]["changed_files"] == []
+        cmds = self._exec_cmds(calls)
+        assert cmds == [], f"expected no exec calls, got: {cmds}"
+
+    def test_invalid_test_scope_errors(self) -> None:
+        effects = self._base_effects()
+        result, calls = self._run(effects, ["python"], test_scope="bogus")
+        assert result["status"] == "error"
+        assert "bogus" in result["error"]
+        assert result["diff_hash"] is None
+        assert result["test_selection"]["changed_files"] == []
+        cmds = self._exec_cmds(calls)
+        assert cmds == [], f"expected no exec calls, got: {cmds}"
+
+    def test_affected_widen_to_full_runs_full_suite(self) -> None:
+        """Selector widening -> genuine full run with normal gate semantics
+        and the widen reason recorded."""
+        effects = self._base_effects() + [
+            (0, (self.SELECTOR_WIDEN, b"")),
+            (0, (self.GREEN_REPORT, b"")),
+        ]
+        with patch("sunaba.tools.verify.record_verify_success") as mock_record:
+            result, _ = self._run(effects, ["python"], test_scope="affected")
+
+        assert result["gate_passed"] is True  # genuine full run
+        assert result["partial_test_run"] is False
+        ts = result["test_selection"]
+        assert ts["mode"] == "affected"
+        assert ts["selected_count"] == 0
+        assert ts["widened_to_full_reason"] == "change set includes pyproject.toml"
+        assert result["tests"]["full"]["status"] == "ok"
+        mock_record.assert_called_once_with(self.CID)
+
+    def test_affected_selector_failure_widens(self) -> None:
+        """A crashing selector must widen to full, never fail the verify."""
+        effects = self._base_effects() + [
+            (1, (b"", b"Traceback (most recent call last): ...")),
+            (0, (self.GREEN_REPORT, b"")),
+        ]
+        result, _ = self._run(effects, ["python"], test_scope="affected")
+
+        assert result["gate_passed"] is True
+        assert "affected-test selector failed" in result["test_selection"]["widened_to_full_reason"]
+
+    def test_affected_non_python_language_widens(self) -> None:
+        """A language set other than exactly {python} widens before any
+        selector run; the full suite then runs with normal semantics."""
+        from sunaba.edit_verify import DetectionResult, VerifyResult
+
+        mock_runner = MagicMock(return_value=VerifyResult(
+            tool="go test", status="ok", detail=json.dumps({
+                "status": "ok", "passed": 1, "duration": 0.1,
+            }),
+        ))
+        effects = self._base_effects()  # no selector exec expected
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_container.exec_run.side_effect = effects
+
+        with patch("sunaba.tools.verify._docker", return_value=mock_client), patch(
+            "sunaba.edit_verify.write_file",
+        ), patch(
+            "sunaba.edit_verify.detect_languages",
+            return_value=DetectionResult(languages={"go"}, scope={}, reason=None),
+        ), patch(
+            "sunaba.edit_verify._DISPATCH",
+            {"go": {"test": mock_runner, "lint": None, "type": None}},
+        ):
+            result = json.loads(verify_in_container(
+                container_id=self.CID,
+                path="tests/",
+                skip_lint_gate=True,
+                skip_type_gate=True,
+                skip_patch_targets_gate=True,
+                test_scope="affected",
+            ))
+            calls = mock_container.exec_run.call_args_list
+
+        assert result["gate_passed"] is True
+        reason = result["test_selection"]["widened_to_full_reason"]
+        assert "exactly {python}" in reason
+        assert "go" in reason
+        # No selector exec: nothing beyond the diff collection ran before
+        # the full suite (go dispatch runner).
+        cmds = self._exec_cmds(calls)
+        assert not [c for c in cmds if "affected_tests" in c]
+
+    def test_affected_empty_change_set_widens(self) -> None:
+        """No changed files -> widen to a genuine full run."""
+        effects = [
+            (0, (b"", b"")),
+            (0, (b"", b"")),
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
+            (0, (self.GREEN_REPORT, b"")),
+        ]
+        result, _ = self._run(effects, ["python"], test_scope="affected")
+
+        assert result["gate_passed"] is True
+        assert "no changed files detected" in result["test_selection"]["widened_to_full_reason"]
+        assert result["test_selection"]["changed_files"] == []
+
+    def test_diff_hash_stable_across_full_and_affected_modes(self) -> None:
+        """The same change set yields the same diff_hash in both modes."""
+        effects = self._base_effects() + [
+            (0, (self.SELECTOR_OK, b"")),
+            (0, (self.GREEN_REPORT, b"")),
+        ]
+        affected, _ = self._run(effects, ["python"], test_scope="affected")
+
+        full_effects = self._base_effects() + [
+            (0, (self.GREEN_REPORT, b"")),
+        ]
+        full, _ = self._run(full_effects, ["python"])
+
+        assert affected["diff_hash"] == full["diff_hash"]
+        assert affected["diff_hash"]
+        # Full mode carries the metadata too, with mode='full'.
+        ts = full["test_selection"]
+        assert ts["mode"] == "full"
+        assert ts["changed_files"] == ["src/app.py"]
+        assert ts["selected_count"] == 0
+        assert ts["widened_to_full_reason"] is None

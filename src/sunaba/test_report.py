@@ -27,7 +27,7 @@ def build_pytest_cmd(
     json_file: str,
     raw_file: str,
     filter_args: str,
-    path: str,
+    path: str | list[str],
     sandbox_env: str = "",
 ) -> str:
     """Build a pytest --json-report command that emits JSON + raw tail.
@@ -37,13 +37,22 @@ def build_pytest_cmd(
     :data:`PYTEST_RAW_MARKER` and the last :data:`_PYTEST_RAW_LINES`
     lines of raw output.  Both temp files are cleaned up on exit.
 
+    *path* is a single file/dir path, or a list of paths (each quoted
+    individually) so an affected-test selection can be passed as
+    positional pytest arguments (Issue #781).  Selected tests are always
+    passed positionally -- never via ``-k``, where a file path matches
+    nothing.
+
     Runs tests in parallel via ``-n auto`` (capped at CPU count) for
     faster verification (Issue #590).  The sandbox image's ``pids.max``
     is high enough that Python xdist workers do not exhaust it.
 
     Callers should split the result with :func:`split_pytest_output`.
     """
-    quoted_path = shlex.quote(path)
+    if isinstance(path, list):
+        quoted_path = " ".join(shlex.quote(p) for p in path)
+    else:
+        quoted_path = shlex.quote(path)
     return (
         f"{sandbox_env}python3 -m pytest --json-report "
         f"--json-report-file={json_file} -n auto -q{filter_args} "

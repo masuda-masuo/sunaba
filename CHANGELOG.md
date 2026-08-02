@@ -8,10 +8,38 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-02
+
+### Added
+
+- **`verify_in_container` `test_scope="affected"` incremental test selection** (#794, closes #781): verify can now run only the tests selected from the change set for fast edit-loop feedback; an affected run never passes the gate (`partial_test_run`, success unrecorded), and change sets that cannot be narrowed (config/conftest edits, deletions, non-Python files, selector failure) widen to the full suite. Full and affected runs carry `test_selection` and a stable `diff_hash`.
+- **Manifest-aware dependency install at init + npm axis on `package_install`** (#805): init-time dependency install now detects the repo's manifest — pip for Python projects, `npm ci` / `npm install` for JS projects, a fetch-on-build note for Go/Rust, a skip note when there is nothing to install — and `package_install` gained an npm manager axis (npm ci when a lockfile is present).
+- **Stage-1 resource observability — container timeline, disk usage, init durations, busy refusals** (#816, refs #783): host-side resource observations for the concurrent-worker era — container timeline, Docker disk footprint (cached with a probe interval so page renders never trigger a probe), init durations, and busy refusals — recorded in the journal and surfaced on the dashboard. Pure observation: no thresholds or policies yet (phase 2 decides those after real measurements).
+- **Incremental journal phase aggregation and trace-page phase view** (#787, closes #774): journal entries are aggregated into run phases incrementally, and the trace page shows a run's phases.
+- **Rule-based run health classification and dashboard badges** (#788, closes #775): each run's health is classified by rules over the phase aggregation (done / looping / stalled / regression / progressing) and the dashboard shows the badges.
+- **Insights page — cross-run friction metrics** (#790, closes #777): a new insights page reports cross-run friction metrics.
+- **Dashboard live update via journal diff polling** (#791, closes #776): the dashboard updates live by polling journal diffs instead of re-rendering wholesale.
+
 ### Changed
 
 - **verify's python path runs pytest's built-in `--junit-xml` instead of the `pytest-json-report` plugin** (#785): `build_pytest_cmd` / `PytestAdapter` now use JUnit XML (counts, per-test failures with name + message, skips, errors), so verify works on any image with a plain pytest — parallel execution via `-n auto` when pytest-xdist is importable in the target environment, serial fallback otherwise — the plugin hole that #584 closed at the image level is now closed at the root, and `pytest-json-report` is removed from `install-python-tools.sh` and `Dockerfile.sandbox.minimal`. The structured failure names from #804/#808 (module[.Class]::test + message) are preserved.
 - **`container_id` is now optional on `sandbox_issue_write` / `sandbox_pr_review_write`** (#779, closes #778): omit it (or pass `""`) for container-less, host-scoped calls — no throwaway container needed to file an issue or review. Such writes are journaled under a process-lifetime `host-` run, shown with a distinct `host` status in the dashboard. Passing a container keeps the previous attribution behaviour. The two parameters moved to the end of the signature; keyword callers (including all MCP clients) are unaffected.
+- **Sandbox base image: Node 20.x → 22.x LTS** (#797, closes #796): the sandbox base image's Node runtime moves to the 22.x LTS line.
+- **Rust image gains mingw-w64 (Windows cross-build linker)** (#801, closes #800): the rust image installs mingw-w64 so Windows cross-build linking works inside the sandbox.
+- **TapAdapter collects failing test names from TAP `not ok` lines** (#808): TAP output now contributes failing test names to structured verify failures, so TAP-based languages report which tests failed.
+- **Init-time dependency installs survive the orphan reaper; no-lockfile npm installs leave the clone clean** (#807): init-time deps installs journal progress markers that keep the container young, so a clone + pip + npm init totalling more than the orphan grace period is never reaped mid-install; no-lockfile npm installs use `npm install --no-package-lock`, leaving the user's clone clean (an untracked lockfile would break legacy-mode publish and dirty the tree).
+- **fastmcp dependency gets upper pin `<4`** (#771, closes #770): the fastmcp requirement gains an upper pin so CI and deploys cannot silently pick up FastMCP 4 (breaking MCP 2026-07-28 changes) before the planned migration (#769).
+
+### Fixed
+
+- **Docker-bound tool concurrency capped so wedged containers cannot starve the server** (#813, closes #784): docker-bound tools return a JSON error with `"busy": true` when the concurrency caps are reached (24 in flight, 6 per container) instead of hanging; `sandbox_stop` / `sandbox_list_containers` run on a separate recovery pool (4 slots) and stay callable.
+- **Health classification blind spots** (#792, closes #789): a run ending on an in-flight `sandbox_exec` START is treated as busy rather than stalled (exec journals START + completion, like verify), and host-scoped (`host-`) runs are never flagged `stalled` since they have no session-end lifecycle.
+- **`_error_from_block` YAML terminator rule matched to `_collect_failures`** (#812, closes #809): TAP YAML error-block extraction now pairs the closing `...` with the `---` opener's indentation per TAP 13, so a deeper-indented `...` from an inner TAP fragment echoed inside error text is content, and the opener is only recognized as the first line after the test point — matching the failure-collection path.
+
+### Removed
+
+- **stdio and sse transports retired (streamable-http only)** (#786, closes #773): `--transport` now accepts only `http` / `streamable-http` with streamable-http as the default; the stdio branch in `main()` is gone and `mcp.run()` always receives host/port. The `--transport` option itself is kept so existing systemd units (`--transport http` / `streamable-http`) continue to work unchanged. **This is the compatibility-relevant change of this release.**
+- **`scripts/refactor_aid.py` retired** (#803, closes #793): the AST refactor helper script and its tests are removed.
 
 ## [0.11.0] - 2026-07-29
 

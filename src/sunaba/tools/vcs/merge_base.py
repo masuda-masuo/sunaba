@@ -407,7 +407,8 @@ def merge_base(
                     "message": (
                         f"Merged origin/{resolved_base} into current branch. "
                         "The merge commit is at HEAD. "
-                        "Run publish(files=[...]) to push."
+                        f"Run publish(files=[...], "
+                        f"base_branch={resolved_base!r}) to push."
                     ),
                 })
 
@@ -647,7 +648,8 @@ def merge_complete(
         "message": (
             "Merge completed successfully. "
             f"HEAD is now {sha}. "
-            "Run publish(files=[...]) to push."
+            "Run publish(files=[...]) to push; pass base_branch=<PR base> "
+            "so the rebuilt commit preserves the merge lineage (#819)."
         ),
     })
 

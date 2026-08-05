@@ -706,6 +706,7 @@ class TestPublishManifest:
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # New path: resolve remote base
@@ -767,6 +768,7 @@ class TestPublishManifest:
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -815,6 +817,7 @@ class TestPublishManifest:
         container = _make_publish_container([(0, b"", b""),  # test -f 'newfile.py' (exists)
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # New path: resolve remote base
@@ -858,6 +861,7 @@ class TestPublishManifest:
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # Resolve base: origin/fix/x does NOT exist on remote
@@ -1073,6 +1077,7 @@ class TestPublishManifest:
             (1, b"", b""),  # test -f 'deleted.txt' -> not a regular file
             (0, b"", b""),  # git ls-files --error-unmatch 'deleted.txt' -> tracked
             (1, b"", b""),  # rev-parse --verify HEAD^2 (NOT merge)
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b feat/del
             (1, b"", b""),  # rev-parse --verify origin/feat/del (not on remote)
@@ -1171,6 +1176,7 @@ class TestPublishManifest:
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # Resolve base - branch does NOT exist on remote yet
@@ -1235,6 +1241,7 @@ class TestPublishManifest:
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b / checkout existing
             # Resolve base: origin/fix/x DOES exist on remote
@@ -1298,6 +1305,7 @@ class TestPublishManifest:
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -1346,6 +1354,7 @@ class TestPublishManifest:
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -1396,6 +1405,7 @@ class TestPublishManifest:
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -1640,6 +1650,7 @@ class TestPublishSecretScanIntegration:
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -1690,6 +1701,7 @@ class TestPublishSecretScanIntegration:
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x
@@ -1738,6 +1750,7 @@ class TestPublishSecretScanIntegration:
             (0, b"", b""),   # test -f 'changed.txt'
             (0, b"", b""),   # test -f 'unchanged.txt'
             (1, b"", b""),   # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),   # checkout -b
             (1, b"", b""),   # rev-parse --verify origin/fix/x (not on remote)
@@ -1785,6 +1798,7 @@ class TestPublishSecretScanIntegration:
         container = _make_publish_container([
             (0, b"", b""),   # test -f 'declared.txt'
             (1, b"", b""),   # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),   # checkout -b
             (1, b"", b""),   # rev-parse --verify origin/fix/x (not on remote)
@@ -1856,6 +1870,8 @@ class TestPublishBaseAutoInclude:
             (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
             (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
             (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
+            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (P2, #819 default-base fallback)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
             (1, b"", b""),                # rev-parse --verify origin/fix/x
@@ -1867,6 +1883,7 @@ class TestPublishBaseAutoInclude:
             # declared file staging
             (0, b"", b""),                # git add -- :(literal)declared.txt
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
+            (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (parent1; == P2 -> degenerate, single-parent commit)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
             (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),                # git status --porcelain -z
@@ -1925,6 +1942,204 @@ class TestPublishBaseAutoInclude:
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_merge_rebuilds_two_parent_commit(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When HEAD is a merge and base_branch is given, publish() rebuilds
+        the commit as a two-parent merge commit: parent2
+        (origin/<base_branch>) is resolved AFTER ``git fetch origin``, the
+        commit goes through ``git write-tree`` / ``git commit-tree -p -p`` /
+        ``git update-ref`` (a plain ``git commit`` cannot record two
+        parents), and ``merge_rebuilt_parents`` is reported in the response
+        (#818/#819)."""
+        auto_include_data = AutoIncludeResult(
+            included={"moved.txt": "moved content from host\n"},
+            skipped=[],
+        )
+
+        container = _make_publish_container([
+            (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
+            # Merge info capture (issue #711):
+            (0, b"merge1234def5678\n", b""),  # rev-parse HEAD (merge SHA)
+            (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
+            (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
+            (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
+            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"freshbase1234\n", b""),  # rev-parse origin/main (P2, after fetch)
+            (0, b"none\n", b""),          # MERGE_HEAD check
+            (0, b"", b""),                # checkout -b
+            (1, b"", b""),                # rev-parse --verify origin/fix/x
+            (0, b"abc1234\n", b""),       # rev-parse --verify origin/HEAD
+            (0, b"", b""),                # git reset --mixed origin/HEAD
+            # auto-include: write moved.txt via base64+echo
+            (0, b"", b""),                # echo | base64 -d > moved.txt
+            (0, b"", b""),                # git add -- :(literal)moved.txt
+            # declared file staging
+            (0, b"", b""),                # git add -- :(literal)declared.txt
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
+            # two-parent rebuild (#819):
+            (0, b"abc1234\n", b""),       # rev-parse origin/HEAD (parent1)
+            (1, b"", b""),                # git merge-base --is-ancestor p2 p1 (not ancestor)
+            (0, b"treeSHA1234\n", b""),   # git write-tree
+            (0, b"newSHAbcdef\n", b""),   # git commit-tree -p p1 -p p2
+            (0, b"", b""),                # git update-ref HEAD newSHA
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
+            (0, b"", b""),                # git status --porcelain -z
+            (0, b"pushed", b""),          # push
+            (0, b"newSHAbcdef", b""),     # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="ghp_test",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+                return_value=auto_include_data,
+            ) as mock_fetch,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                base_branch="main",
+            ))
+
+        assert result["status"] == "pushed"
+        # Two-parent commit: parent1 = resolved base_ref (origin/HEAD),
+        # parent2 = origin/main tip (base branch).
+        assert result["merge_rebuilt_parents"] == ["abc1234", "freshba"]
+        # Existing merge report fields are unchanged.
+        assert result["merge_discarded_sha"] == "merge12"
+        assert result["merge_parents"] == ["parent1", "parent2"]
+        assert result["push_transport"] == "native"
+        # base_branch is threaded into the host-side auto-include call.
+        mock_fetch.assert_called_once_with(
+            "owner/repo", "ghp_test", "fix/x", "main"
+        )
+
+        # Ordering (#818/#819): parent2 (rev-parse origin/main) must be
+        # resolved AFTER git fetch origin, and the rebuilt commit must go
+        # through the write-tree / commit-tree / update-ref sequence.
+        cmds = [
+            _exec_cmd(c) for c in container.exec_run.call_args_list
+        ]
+        fetch_idx = next(
+            i for i, c in enumerate(cmds) if "git fetch origin" in c
+        )
+        p2_idx = next(
+            i for i, c in enumerate(cmds)
+            if "rev-parse origin/main" in c
+        )
+        assert p2_idx > fetch_idx, (
+            "parent2 must be resolved after git fetch origin"
+        )
+        assert any("git write-tree" in c for c in cmds), (
+            "two-parent commit must be built via git write-tree"
+        )
+        # The commit-tree command is prefixed with -c user.name/-c user.email
+        # (same identity handling as the plain commit command), so match on
+        # the bare "commit-tree" token, not "git commit-tree".
+        assert any("commit-tree" in c for c in cmds), (
+            "two-parent commit must be built via git commit-tree"
+        )
+        assert any("git update-ref HEAD" in c for c in cmds), (
+            "two-parent commit must be recorded via git update-ref"
+        )
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_merge_default_base_branch_falls_back_to_origin_head(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When publish() is called after a merge WITHOUT base_branch (the
+        default ""), parent2 is resolved from origin/HEAD so the two-parent
+        rebuild still happens — the common call path must not silently
+        degrade to a single-parent commit (#819 reviewer finding)."""
+        auto_include_data = AutoIncludeResult(
+            included={"moved.txt": "moved content from host\n"},
+            skipped=[],
+        )
+
+        container = _make_publish_container([
+            (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
+            (0, b"merge1234def5678\n", b""),  # rev-parse HEAD (merge SHA)
+            (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
+            (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
+            (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
+            (0, b"", b""),                # git fetch origin (#818)
+            (0, b"freshbase1234\n", b""),  # rev-parse origin/HEAD (P2 fallback)
+            (0, b"none\n", b""),          # MERGE_HEAD check
+            (0, b"", b""),                # checkout -b
+            # Follow-up push: the branch EXISTS on the remote, so base_ref
+            # = origin/fix/x != origin/HEAD and the two-parent path runs.
+            (0, b"branchtip9876\n", b""),  # rev-parse --verify origin/fix/x
+            (0, b"", b""),                # git reset --mixed origin/fix/x
+            (0, b"", b""),                # echo | base64 -d > moved.txt
+            (0, b"", b""),                # git add -- :(literal)moved.txt
+            (0, b"", b""),                # git add -- :(literal)declared.txt
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code
+            # two-parent rebuild (#819):
+            (0, b"branchtip9876\n", b""),  # rev-parse origin/fix/x (parent1)
+            (1, b"", b""),                # merge-base --is-ancestor (not ancestor)
+            (0, b"treeSHA1234\n", b""),   # git write-tree
+            (0, b"newSHAbcdef\n", b""),   # git commit-tree -p p1 -p p2
+            (0, b"", b""),                # git update-ref HEAD newSHA
+            (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
+            (0, b"", b""),                # git status --porcelain -z
+            (0, b"pushed", b""),          # push
+            (0, b"newSHAbcdef", b""),     # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="ghp_test",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+                return_value=auto_include_data,
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                # NOTE: no base_branch — the default "" path under test.
+            ))
+
+        assert result["status"] == "pushed"
+        assert result["merge_rebuilt_parents"] == ["brancht", "freshba"]
+
+        # P2 must come from origin/HEAD (not origin/<base_branch>) and be
+        # resolved after the fetch.
+        cmds = [
+            _exec_cmd(c) for c in container.exec_run.call_args_list
+        ]
+        fetch_idx = next(
+            i for i, c in enumerate(cmds) if "git fetch origin" in c
+        )
+        p2_idx = next(
+            i for i, c in enumerate(cmds)
+            if "rev-parse origin/HEAD" in c and "--verify" not in c
+        )
+        assert p2_idx > fetch_idx
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_no_merge_does_not_call_fetch(
         self,
         mock_record: MagicMock,
@@ -1935,6 +2150,7 @@ class TestPublishBaseAutoInclude:
         container = _make_publish_container([
             (0, b"", b""),                # test -f 'declared.txt'
             (1, b"", b""),                # rev-parse --verify HEAD^2 (NOT merge)
+            (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
             (1, b"", b""),                # rev-parse --verify origin/fix/x
@@ -1995,6 +2211,8 @@ class TestPublishBaseAutoInclude:
             (0, b"p1aaaa1111bbb\n", b""),    # rev-parse HEAD^1
             (0, b"p2bbbb2222ccc\n", b""),    # rev-parse HEAD^2
             (0, b"declared.txt\nbase_advance.txt\ncheckpoint.txt\n", b""),  # diff HEAD^1 HEAD
+            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (P2, #819 default-base fallback)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
             (1, b"", b""),                # rev-parse --verify origin/fix/x
@@ -2006,6 +2224,7 @@ class TestPublishBaseAutoInclude:
             # declared file staging
             (0, b"", b""),                # git add -- :(literal)declared.txt
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
+            (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (parent1; == P2 -> degenerate, single-parent commit)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
             # The commit holds the auto-included path as well as the
             # declared one, so staged_files must report both.
@@ -2070,6 +2289,8 @@ class TestPublishBaseAutoInclude:
             (0, b"p1aaaa1111bbb\n", b""),    # rev-parse HEAD^1
             (0, b"p2bbbb2222ccc\n", b""),    # rev-parse HEAD^2
             (0, b"good.txt\nrenamed.txt\nnoencoding.txt\ndeclared.txt\n", b""),
+            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (P2, #819 default-base fallback)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
             (1, b"", b""),                # rev-parse --verify origin/fix/x
@@ -2081,6 +2302,7 @@ class TestPublishBaseAutoInclude:
             # declared file staging
             (0, b"", b""),                # git add -- :(literal)declared.txt
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
+            (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (parent1; == P2 -> degenerate, single-parent commit)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
             (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),                # git status --porcelain -z
@@ -2140,6 +2362,8 @@ class TestPublishBaseAutoInclude:
             (0, b"p1aaaa1111bbb\n", b""),    # rev-parse HEAD^1
             (0, b"p2bbbb2222ccc\n", b""),    # rev-parse HEAD^2
             (0, b"base.txt\ndeclared.txt\n", b""),
+            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (P2, #819 default-base fallback)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
             (1, b"", b""),                # rev-parse --verify origin/fix/x
@@ -2151,6 +2375,7 @@ class TestPublishBaseAutoInclude:
             # declared file staging
             (0, b"", b""),                # git add -- :(literal)declared.txt
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
+            (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (parent1; == P2 -> degenerate, single-parent commit)
             (0, b"[fix/x abc1234] Fix\n", b""),  # commit
             (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
             (0, b"", b""),                # git status --porcelain -z

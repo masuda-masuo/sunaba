@@ -62,6 +62,9 @@ def git_prepare_commit(
     author_name: str | None = None,
     author_email: str | None = None,
     base_auto_include: dict[str, str | bytes | None] | None = None,
+    is_merge: bool = False,
+    merge_parent_sha: str | None = None,
+    merge_result: dict | None = None,
 ) -> tuple[dict | None, list[str] | None]:
     """Checkout branch, stage, squash unpushed checkpoints, then commit.
 
@@ -74,6 +77,12 @@ def git_prepare_commit(
     ``(None, committed_paths)`` on success.  ``committed_paths`` is the
     list of paths that actually entered the commit, derived from
     ``git diff-tree HEAD^ HEAD`` (not from the *files* manifest).
+
+    When ``is_merge`` is True and ``merge_parent_sha`` is provided, the
+    commit is built as a two-parent merge commit (``git write-tree`` /
+    ``git commit-tree`` sequence) instead of ``git commit``.  The
+    ``merge_result`` dict, when passed, is populated with
+    ``merge_rebuilt_parents: [p1, p2]`` on success.
 
     Args:
         run: Injected exec callback.
@@ -91,6 +100,12 @@ def git_prepare_commit(
             #715).  Content is sourced host-side from GitHub API, never from
             the container.  Applied before declared files (declared files
             override).
+        is_merge: When True, build a two-parent merge commit instead of a
+            single-parent commit (#819).
+        merge_parent_sha: SHA of the base branch tip to use as parent 2
+            of the merge commit.  Only used when ``is_merge`` is True.
+        merge_result: When provided and non-None, populated with merge
+            rebuild info (e.g. ``merge_rebuilt_parents``).
 
     Returns ``(error_dict, None)`` on failure or
     ``(None, committed_paths)`` on success.
@@ -297,6 +312,9 @@ def git_prepare_commit(
         # (0 = no differences, 1 = differences, >1 = error) against the
         # base ref the index was reset to.  Auto-included non-declared
         # paths are excluded from this check.
+        # Exception: when this is a history-only merge (the resolution
+        # kept the branch side), byte-identical content is expected and
+        # the two-parent commit advances history (#819).
         if base_ref:
             diff_cmd = (
                 "git diff --cached --exit-code "
@@ -308,16 +326,23 @@ def git_prepare_commit(
             )
             diff_ec, diff_out, diff_err = run(diff_cmd)
             if diff_ec == 0:
-                return {
-                    "status": "error",
-                    "step": "empty_result",
-                    "error": (
-                        "Every declared path is byte-identical to what "
-                        + base_ref
-                        + " already contains. No change to publish."
-                    ),
-                    "declared_paths": files,
-                }, None
+                if is_merge:
+                    # History-only merge: the two-parent commit must
+                    # be pushed even though declared content is
+                    # unchanged (#819).
+                    if merge_result is not None:
+                        merge_result["history_only_merge"] = True
+                else:
+                    return {
+                        "status": "error",
+                        "step": "empty_result",
+                        "error": (
+                            "Every declared path is byte-identical to what "
+                            + base_ref
+                            + " already contains. No change to publish."
+                        ),
+                        "declared_paths": files,
+                    }, None
     else:
         # --- Legacy mode: git add -A with upstream-aware squash ---
         add_ec, add_out, add_err = run("git add -A")
@@ -365,22 +390,106 @@ def git_prepare_commit(
     )
     safe_name = shlex.quote(name_to_use)
     safe_email = shlex.quote(email_to_use)
-    git_commit_cmd = (
-        f"git -c user.name={safe_name} -c user.email={safe_email}"
-        f" commit -m {shlex.quote(message)}"
-    )
 
-    commit_ec, commit_out, commit_err = run(git_commit_cmd)
-    if commit_ec != 0:
-        # "nothing to commit" is OK -- everything is already committed
-        if "nothing to commit" in (commit_out + commit_err).lower():
-            pass
+    two_parent_built = False
+    if is_merge and merge_parent_sha and base_ref:
+        # --- Two-parent merge commit (#819) ---
+        # When publish detects HEAD is a merge, the rebuilt commit must
+        # preserve the merge lineage so GitHub can recompute the merge
+        # base and mark the PR mergeable.
+        _, parent1_out, _ = run(f"git rev-parse {base_ref}")
+        parent1 = parent1_out.strip()
+        parent2 = merge_parent_sha.strip()
+
+        # Degenerate guard: skip two-parent if parent2 == parent1 or
+        # parent2 is already an ancestor of parent1.
+        two_parent = True
+        if parent2 == parent1:
+            two_parent = False
         else:
-            return {
-                "status": "error",
-                "step": "git_commit",
-                "error": commit_err or commit_out,
-            }, None
+            anc_ec, _, _ = run(
+                f"git merge-base --is-ancestor {shlex.quote(parent2)}"
+                f" {shlex.quote(parent1)}"
+            )
+            if anc_ec == 0:
+                two_parent = False
+
+        if two_parent:
+            # Write the staged tree as a tree object.
+            tree_ec, tree_sha, tree_err = run("git write-tree")
+            if tree_ec != 0:
+                return {
+                    "status": "error",
+                    "step": "git_commit",
+                    "error": (
+                        "git write-tree failed: "
+                        f"{tree_err or tree_sha}"
+                    ),
+                }, None
+            tree_sha = tree_sha.strip()
+
+            # Create the commit manually with two parents.
+            ct_cmd = (
+                f"git -c user.name={safe_name}"
+                f" -c user.email={safe_email}"
+                f" commit-tree {shlex.quote(tree_sha)}"
+                f" -p {shlex.quote(parent1)}"
+                f" -p {shlex.quote(parent2)}"
+                f" -m {shlex.quote(message)}"
+            )
+            ct_ec, ct_sha, ct_err = run(ct_cmd)
+            if ct_ec != 0:
+                return {
+                    "status": "error",
+                    "step": "git_commit",
+                    "error": (
+                        "git commit-tree failed: "
+                        f"{ct_err or ct_sha}"
+                    ),
+                }, None
+            new_sha = ct_sha.strip()
+
+            # Point HEAD to the new commit.
+            ur_ec, ur_out, ur_err = run(
+                f"git update-ref HEAD {shlex.quote(new_sha)}"
+            )
+            if ur_ec != 0:
+                return {
+                    "status": "error",
+                    "step": "git_commit",
+                    "error": (
+                        "git update-ref failed: "
+                        f"{ur_err or ur_out}"
+                    ),
+                }, None
+
+            two_parent_built = True
+            if merge_result is not None:
+                merge_result["merge_rebuilt_parents"] = [
+                    parent1[:7], parent2[:7],
+                ]
+        else:
+            # Degenerate: fall through to standard git commit.
+            if merge_result is not None:
+                merge_result["merge_degenerate"] = True
+
+    if not two_parent_built:
+        git_commit_cmd = (
+            f"git -c user.name={safe_name} -c user.email={safe_email}"
+            f" commit -m {shlex.quote(message)}"
+        )
+
+        commit_ec, commit_out, commit_err = run(git_commit_cmd)
+        if commit_ec != 0:
+            # "nothing to commit" is OK -- everything is already committed
+            if "nothing to commit" in (commit_out + commit_err).lower():
+                pass
+            else:
+                return {
+                    "status": "error",
+                    "step": "git_commit",
+                    "error": commit_err or commit_out,
+                }, None
 
     # --- Derive the actual committed paths from the commit ---
     # These are the paths that really entered the commit, not the caller's
@@ -421,16 +530,30 @@ def git_prepare_commit(
         unchanged = sorted(declared_set - committed_set)
         if unchanged and len(unchanged) < len(files):
             ref_name = base_ref if base_ref else "the remote base"
-            return {
-                "status": "error",
-                "step": "declared_unchanged",
-                "declared_unchanged": unchanged,
-                "error": (
-                    f"These declared paths are identical to {ref_name} "
-                    f"and contributed nothing to the commit: "
-                    f"{', '.join(unchanged)}"
-                ),
-            }, None
+            if is_merge:
+                # In the merge-rebuild case, declared paths identical
+                # to base_ref are expected (the resolution kept the
+                # branch side).  Report informationally instead of
+                # erroring (#819).
+                if merge_result is not None:
+                    merge_result["declared_unchanged_merge"] = {
+                        "paths": unchanged,
+                        "note": (
+                            f"These declared paths are identical to "
+                            f"{ref_name} (resolution kept branch side)."
+                        ),
+                    }
+            else:
+                return {
+                    "status": "error",
+                    "step": "declared_unchanged",
+                    "declared_unchanged": unchanged,
+                    "error": (
+                        f"These declared paths are identical to {ref_name} "
+                        f"and contributed nothing to the commit: "
+                        f"{', '.join(unchanged)}"
+                    ),
+                }, None
 
     return None, committed_paths
 

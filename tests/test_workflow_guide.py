@@ -168,6 +168,7 @@ class TestDriftDetection:
         "widened_to_full_reason", # verify_in_container return JSON field (#781)
         "merge_discarded_sha",    # publish return JSON field
         "merge_discarded_undeclared",  # publish return JSON field
+        "merge_rebuilt_parents",  # publish return JSON field (#819)
         "mergeable",              # gh pr view JSON field
         "parents",                # gh pr view JSON field
         "staged",                 # diff_summary JSON key

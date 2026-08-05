@@ -1216,3 +1216,255 @@ class TestRealGitDeclaredPathNotOverwritten:
                 capture_output=True, text=True, cwd=str(clone),
             ).stdout
             assert committed == edited
+
+
+# ============================================================================
+# Two-parent merge commit (#818/#819)
+# ============================================================================
+
+
+class TestMergeRebuild:
+    """Two-parent merge commit, degenerate fallback, empty_result bypass."""
+
+    def test_two_parent_commit_built(self) -> None:
+        """When is_merge=True and a valid merge_parent_sha is given,
+        git_prepare_commit builds a two-parent commit via git write-tree/
+        commit-tree and reports merge_rebuilt_parents."""
+        merge_result: dict = {}
+
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout -b feat
+            (0, "existingSHA\n", ""),       # rev-parse --verify origin/feat
+            (0, "", ""),                     # git reset --mixed origin/feat
+            (0, "", ""),                     # git add declared.txt
+            (1, "diff --git a/d b/d\n", ""),  # git diff --cached --exit-code (diffs)
+            # Two-parent commit:
+            (0, "deadbeef\n", ""),           # git rev-parse origin/feat (parent1)
+            (1, "", ""),                     # git merge-base --is-ancestor (not ancestor)
+            (0, "treeSHA123\n", ""),         # git write-tree
+            (0, "newcommitSHA\n", ""),       # git commit-tree
+            (0, "", ""),                     # git update-ref HEAD
+            (0, "declared.txt\n", ""),       # git diff-tree HEAD^ HEAD
+        ])
+        result, committed = git_prepare_commit(
+            run, branch="feat", message="Merge rebuild",
+            files=["declared.txt"],
+            is_merge=True,
+            merge_parent_sha="basebranchSHA",
+            merge_result=merge_result,
+        )
+        assert result is None, f"Expected success, got {result}"
+        assert committed == ["declared.txt"]
+        assert "merge_rebuilt_parents" in merge_result
+        assert merge_result["merge_rebuilt_parents"] == [
+            "deadbee", "basebra",
+        ]
+
+    def test_two_parent_commit_calls_write_tree(self) -> None:
+        """The two-parent path runs git write-tree before commit-tree."""
+        merge_result: dict = {}
+
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout -b feat
+            (0, "existingSHA\n", ""),       # rev-parse --verify origin/feat
+            (0, "", ""),                     # git reset --mixed origin/feat
+            (0, "", ""),                     # git add declared.txt
+            (1, "diff\n", ""),               # git diff --cached --exit-code (diffs)
+            (0, "aaaaaaa\n", ""),            # git rev-parse origin/feat
+            (1, "", ""),                     # merge-base --is-ancestor (not)
+            (0, "treeSHA\n", ""),            # git write-tree
+            (0, "commitSHA\n", ""),          # git commit-tree
+            (0, "", ""),                     # git update-ref HEAD
+            (0, "declared.txt\n", ""),       # git diff-tree HEAD^ HEAD
+        ])
+        result, _ = git_prepare_commit(
+            run, branch="feat", message="Merge",
+            files=["declared.txt"],
+            is_merge=True,
+            merge_parent_sha="bbbbbbb",
+            merge_result=merge_result,
+        )
+        assert result is None
+        cmd_strs = [c[0] for c in run.calls]
+        assert any("write-tree" in c for c in cmd_strs), (
+            "git write-tree must be called for two-parent commit"
+        )
+        assert any("commit-tree" in c for c in cmd_strs), (
+            "git commit-tree must be called for two-parent commit"
+        )
+        assert any("update-ref HEAD" in c for c in cmd_strs), (
+            "git update-ref HEAD must point to new commit"
+        )
+
+    def test_degenerate_parent2_equals_parent1(self) -> None:
+        """When parent2 == parent1, two-parent is skipped (degenerate)."""
+        merge_result: dict = {}
+
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout -b feat
+            (0, "existingSHA\n", ""),       # rev-parse --verify origin/feat
+            (0, "", ""),                     # git reset --mixed origin/feat
+            (0, "", ""),                     # git add declared.txt
+            (1, "diff\n", ""),               # git diff --cached --exit-code (diffs)
+            # Two-parent attempt: parent1 == parent2
+            (0, "sameSHA\n", ""),            # git rev-parse origin/feat
+            # merge-base --is-ancestor is NOT called (early return)
+            # Falls through to standard commit:
+            (0, "[feat abc123] Merge\n", ""),  # git commit
+            (0, "declared.txt\n", ""),       # git diff-tree HEAD^ HEAD
+        ])
+        result, _ = git_prepare_commit(
+            run, branch="feat", message="Merge",
+            files=["declared.txt"],
+            is_merge=True,
+            merge_parent_sha="sameSHA",
+            merge_result=merge_result,
+        )
+        assert result is None
+        # merge_rebuilt_parents is NOT present (degenerate fallback)
+        assert "merge_rebuilt_parents" not in merge_result
+        assert merge_result.get("merge_degenerate") is True
+
+    def test_degenerate_parent2_ancestor_of_parent1(self) -> None:
+        """When parent2 is an ancestor of parent1, two-parent is skipped."""
+        merge_result: dict = {}
+
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout -b feat
+            (0, "existingSHA\n", ""),       # rev-parse --verify origin/feat
+            (0, "", ""),                     # git reset --mixed origin/feat
+            (0, "", ""),                     # git add declared.txt
+            (1, "diff\n", ""),               # git diff --cached --exit-code (diffs)
+            (0, "p1SHA\n", ""),              # git rev-parse origin/feat (parent1)
+            (0, "", ""),                     # merge-base --is-ancestor (IS ancestor)
+            # Degenerate: fall through to standard commit
+            (0, "[feat abc123] Merge\n", ""),  # git commit
+            (0, "declared.txt\n", ""),       # git diff-tree HEAD^ HEAD
+        ])
+        result, _ = git_prepare_commit(
+            run, branch="feat", message="Merge",
+            files=["declared.txt"],
+            is_merge=True,
+            merge_parent_sha="p2SHA",
+            merge_result=merge_result,
+        )
+        assert result is None
+        assert "merge_rebuilt_parents" not in merge_result
+        assert merge_result.get("merge_degenerate") is True
+
+    def test_empty_result_bypassed_for_merge(self) -> None:
+        """When is_merge=True and all declared paths are byte-identical,
+        empty_result is bypassed (history-only merge must push)."""
+        merge_result: dict = {}
+
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout -b feat
+            (0, "existingSHA\n", ""),       # rev-parse --verify origin/feat
+            (0, "", ""),                     # git reset --mixed origin/feat
+            (0, "", ""),                     # git add declared.txt
+            (0, "", ""),                     # git diff --cached --exit-code (NO diffs!)
+            # empty_result IS bypassed — proceeds to commit
+            (0, "parentSHA\n", ""),          # git rev-parse origin/feat
+            (1, "", ""),                     # merge-base --is-ancestor (not)
+            (0, "treeSHA\n", ""),            # git write-tree
+            (0, "commitSHA\n", ""),          # git commit-tree
+            (0, "", ""),                     # git update-ref HEAD
+            (0, "declared.txt\n", ""),       # git diff-tree HEAD^ HEAD
+        ])
+        result, committed = git_prepare_commit(
+            run, branch="feat", message="History-only merge",
+            files=["declared.txt"],
+            is_merge=True,
+            merge_parent_sha="baseSHA",
+            merge_result=merge_result,
+        )
+        assert result is None, (
+            f"history-only merge should push, got error: {result}"
+        )
+        assert committed == ["declared.txt"]
+        assert "merge_rebuilt_parents" in merge_result
+        assert merge_result.get("history_only_merge") is True
+
+    def test_empty_result_still_fires_for_ordinary_publish(self) -> None:
+        """Without is_merge, byte-identical content still triggers
+        empty_result rejection (no regression)."""
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout -b feat
+            (0, "existingSHA\n", ""),       # rev-parse --verify origin/feat
+            (0, "", ""),                     # git reset --mixed origin/feat
+            (0, "", ""),                     # git add declared.txt
+            (0, "", ""),                     # git diff --cached --exit-code (no diffs)
+        ])
+        result, _ = git_prepare_commit(
+            run, branch="feat", message="No change",
+            files=["declared.txt"],
+        )
+        assert result is not None
+        assert result["status"] == "error"
+        assert result["step"] == "empty_result"
+        assert "byte-identical" in result["error"]
+
+    def test_declared_unchanged_info_in_merge(self) -> None:
+        """When is_merge=True and some declared paths are unchanged,
+        they are reported informationally instead of erroring."""
+        merge_result: dict = {}
+
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout -b feat
+            (0, "existingSHA\n", ""),       # rev-parse --verify origin/feat
+            (0, "", ""),                     # git reset --mixed origin/feat
+            (0, "", ""),                     # git add changed.txt
+            (0, "", ""),                     # git add unchanged.txt
+            (1, "diff\n", ""),               # git diff --cached --exit-code (has diffs)
+            # Two-parent commit:
+            (0, "parentSHA\n", ""),          # git rev-parse origin/feat
+            (1, "", ""),                     # merge-base --is-ancestor (not)
+            (0, "treeSHA\n", ""),            # git write-tree
+            (0, "commitSHA\n", ""),          # git commit-tree
+            (0, "", ""),                     # git update-ref HEAD
+            (0, "changed.txt\n", ""),        # git diff-tree (only changed in commit)
+        ])
+        result, committed = git_prepare_commit(
+            run, branch="feat", message="Merge",
+            files=["changed.txt", "unchanged.txt"],
+            is_merge=True,
+            merge_parent_sha="baseSHA",
+            merge_result=merge_result,
+        )
+        assert result is None, (
+            f"declared_unchanged should not error in merge case, got {result}"
+        )
+        assert committed == ["changed.txt"]
+        assert "declared_unchanged_merge" in merge_result
+        info = merge_result["declared_unchanged_merge"]
+        assert "unchanged.txt" in info["paths"]
+        assert "resolution kept branch side" in info["note"]
+
+    def test_ordinary_declared_unchanged_still_errors(self) -> None:
+        """Without is_merge, declared_unchanged still errors (no regression)."""
+        run = RecordingRun([
+            (0, "none\n", ""),               # MERGE_HEAD check
+            (0, "", ""),                     # checkout -b feat
+            (0, "existingSHA\n", ""),       # rev-parse --verify origin/feat
+            (0, "", ""),                     # git reset --mixed origin/feat
+            (0, "", ""),                     # git add changed.txt
+            (0, "", ""),                     # git add unchanged.txt
+            (1, "diff\n", ""),               # git diff --cached --exit-code (has diffs)
+            (0, "[feat abc123] Msg\n", ""),  # git commit
+            (0, "changed.txt\n", ""),        # git diff-tree (unchanged absent)
+        ])
+        result, _ = git_prepare_commit(
+            run, branch="feat", message="Msg",
+            files=["changed.txt", "unchanged.txt"],
+        )
+        assert result is not None
+        assert result["status"] == "error"
+        assert result["step"] == "declared_unchanged"
+        assert result["declared_unchanged"] == ["unchanged.txt"]

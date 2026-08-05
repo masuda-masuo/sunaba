@@ -611,6 +611,7 @@ def publish(
             baseline_hashes_arg = set()
         baseline_hashes_arg = baseline_hashes_arg | registry_hashes
 
+    merge_info: dict = {}  # populated by git_prepare_commit (merge mode)
     if manifest:
         assert files is not None
         scan_files = [f for f in files if not os.path.isabs(f)]
@@ -659,6 +660,7 @@ def publish(
         merge_touched_paths: set[str] = set()
         auto_include_skipped: list[str] = []
         auto_include_included: dict[str, str | bytes | None] | None = None
+        merge_parent_sha: str | None = None  # P2 for two-parent commit
 
         base_auto_include: dict[str, str | bytes | None] | None = None
         merge_ec, merge_out, _ = _run(
@@ -702,10 +704,43 @@ def publish(
                 auto_include_skipped = auto_result.skipped
                 auto_include_included = auto_result.included
 
+        # Refresh remote-tracking refs so base resolution does not
+        # work from a stale clone (#818).  Fetch failure must not
+        # hard-fail publish (offline test environments).
+        _run("git fetch origin 2>/dev/null || true")
+        merge_is_merge = merge_discarded_sha is not None
+        if merge_is_merge:
+            # Resolve parent2 for the two-parent rebuild (#819) AFTER
+            # the fetch so it never uses a stale origin/<base_branch>
+            # (the exact staleness #818 fixes for parent1).  Parent1
+            # (resolved inside git_prepare_commit) and parent2 must
+            # both come from the same freshly-fetched refs.
+            # Container-side ``git rev-parse`` carries the same trust
+            # as the reset target itself.
+            # base_branch defaults to "" (= the repo default branch,
+            # same as PR creation).  Fall back to origin/HEAD so the
+            # common publish() call without an explicit base_branch
+            # still builds the two-parent commit instead of silently
+            # degrading to a single parent.
+            p2_ref = (
+                f"origin/{shlex.quote(base_branch)}"
+                if base_branch
+                else "origin/HEAD"
+            )
+            _, p2_sha, _ = _run(
+                f"git rev-parse {p2_ref} 2>/dev/null"
+            )
+            if p2_sha.strip():
+                merge_parent_sha = p2_sha.strip()
+            else:
+                merge_info["merge_second_parent_unresolved"] = p2_ref
         commit_err, committed_paths = git_prepare_commit(
             _run, branch=branch, message=message,
             files=files, author_name=author_name, author_email=author_email,
-            base_auto_include=base_auto_include)
+            base_auto_include=base_auto_include,
+            is_merge=merge_is_merge,
+            merge_parent_sha=merge_parent_sha,
+            merge_result=merge_info)
         if commit_err:
             return finish_json(commit_err, verified)
 
@@ -920,6 +955,12 @@ def publish(
         )
         result["auto_include_skipped"] = auto_include_skipped
         result["merge_discarded_undeclared"] = merge_discarded_undeclared
+        # Everything git_prepare_commit recorded about the rebuild
+        # (merge_rebuilt_parents, history_only_merge, merge_degenerate,
+        # declared_unchanged_merge, merge_second_parent_unresolved) --
+        # dropping any of these hides from the caller whether the
+        # two-parent rebuild actually applied.
+        result.update(merge_info)
     if pr_url:
         result["pr_url"] = pr_url
     if not create_pr:

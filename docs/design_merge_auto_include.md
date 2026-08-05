@@ -305,7 +305,10 @@ the security decision depends on, independently of anything in the container.
 
 ### Where the reset happens, and when
 
-The reset (`git reset --mixed <base_ref>`) **always** runs in manifest mode (when
+Before resolving the base ref, manifest mode calls `git fetch origin` to refresh
+remote-tracking refs (#818).  A fetch failure is not fatal — publish continues with
+existing refs (the same behaviour as when a clone is offline).  The reset
+(`git reset --mixed <base_ref>`) **always** runs in manifest mode (when
 `files=[...]` is non-empty). There is no skip-the-reset branch — the entire
 merge-preservation logic that existed in #675/PR#695 was removed by PR#713.
 
@@ -351,11 +354,14 @@ response carries these fields:
 | `auto_include_skipped` | `[string]` | Paths in the base diff that could not be auto-included |
 | `merge_discarded_undeclared` | `[string]` | AC-4 set: merge-touched paths explained by neither manifest nor auto-include |
 | `push_transport` | `"native"` or `"api"` | Which push path succeeded |
+| `merge_rebuilt_parents` | `[string, string]` | Full SHAs (7 chars) of the two parents in the rebuilt merge commit (#819).  Present only when a two-parent commit was actually built (degenerate fallback is not reported). |
 
 These fields are **present only when a merge was detected** — they are absent (not
 present-but-empty) for ordinary pushes. This is deliberate: the merge-specific fields
 carry meaning only in the merge context, and their absence is the signal that nothing
-was discarded.
+was discarded.  `merge_rebuilt_parents` is the exception: it is present only when a
+two-parent commit was built (not for degenerate single-parent fallback), and is also
+absent when no merge was detected.
 
 A non-empty `merge_discarded_undeclared` set is a **warning**, not a failure.
 `status` stays `"pushed"`. This was an explicit, deliberate decision recorded in #711's
@@ -378,6 +384,27 @@ path. When the API fallback is triggered for a merge-detected publish, the pushe
 will have a single parent (the resolved base SHA), and the merge lineage is lost. The
 caller sees `push_transport: "api"` and can understand that the merge commit was not
 preserved as a merge on the remote. This is separately tracked, not fixed here.
+
+### Two-parent merge commit rebuild (#819)
+
+When publish detects `HEAD` is a merge and the merge incorporates the base branch,
+the rebuilt commit is a two-parent merge commit (via `git write-tree` /
+`git commit-tree -p <parent1> -p <parent2>`) instead of a single-parent commit.
+parent1 = the resolved `base_ref` (origin/<branch>), parent2 = the base branch tip
+(resolved container-side after the fetch).  The tree is built exactly as before
+(`reset --mixed`, host-side auto-include, stage declared paths) — only the recorded
+parents change.  #679/#712 leak prevention is unchanged.
+
+Degenerate guard: if parent2 equals parent1, or parent2 is already an ancestor of
+parent1 (`git merge-base --is-ancestor`), the function falls back to today's
+single-parent commit and is not reported as `merge_rebuilt_parents`.
+
+When the two-parent commit is built, `empty_result` and `declared_unchanged` are
+handled differently:
+- **empty_result**: byte-identical declared content is expected (the resolution kept
+  the branch side).  The commit advances history and is pushed.
+- **declared_unchanged**: reported informationally via `merge_result` instead of
+  erroring.
 
 ### Safety fallbacks
 

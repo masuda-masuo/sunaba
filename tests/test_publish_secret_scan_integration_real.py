@@ -222,6 +222,7 @@ class TestPublishSecretScanReal:
             [(0, b"", b""),  # test -f 'declared.txt'
 
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+                (0, b"", b""),  # git fetch origin (#818)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -508,6 +509,7 @@ class TestPublishSecretScanReal:
             [(0, b"", b""),  # test -f 'declared.txt'
 
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+                (0, b"", b""),  # git fetch origin (#818)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -583,6 +585,7 @@ class TestPublishSecretScanReal:
             [(0, b"", b""),  # test -f 'secret.txt'
 
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+                (0, b"", b""),  # git fetch origin (#818)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -642,6 +645,7 @@ class TestPublishSecretScanReal:
             [(0, b"", b""),  # test -f 'declared.txt'
 
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+                (0, b"", b""),  # git fetch origin (#818)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -819,6 +823,7 @@ class TestPublishSecretScanReal:
         container = self._make_baseline_container(
             [
                 (0, b"", b""),  # rev-parse --verify HEAD^2 (empty -> not a merge)
+                (0, b"", b""),  # git fetch origin (#818)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (0, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -950,6 +955,7 @@ class TestPublishSecretScanReal:
         container = self._make_baseline_container(
             [
                 (0, b"", b""),  # rev-parse --verify HEAD^2 (empty -> not a merge)
+                (0, b"", b""),  # git fetch origin (#818)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (0, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -1167,6 +1173,7 @@ class TestPublishHostSideBaseline:
             [(0, b"", b""),  # test -f 'declared.txt'
 
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+                (0, b"", b""),  # git fetch origin (#818)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -1274,6 +1281,7 @@ class TestPublishHostSideBaseline:
             [(0, b"", b""),  # test -f 'declared.txt'
 
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+                (0, b"", b""),  # git fetch origin (#818)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -1458,6 +1466,7 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
             [(0, b"", b""),  # test -f 'declared.txt'
 
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+                (0, b"", b""),  # git fetch origin (#818)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -1550,6 +1559,7 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
             [(0, b"", b""),  # test -f 'declared.txt'
 
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
+                (0, b"", b""),  # git fetch origin (#818)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)

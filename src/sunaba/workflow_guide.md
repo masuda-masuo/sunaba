@@ -148,6 +148,8 @@ publish rebuilds the commit, so anything undeclared is dropped there silently.
 - `worktree_leftover` -- undeclared changes left behind.
 - `merge_discarded_sha` / `merge_discarded_undeclared` -- a merge commit is always discarded
   and rebuilt onto the first parent; files lost in that rebuild are listed here.
+  `merge_rebuilt_parents` reports the two parents when a two-parent merge commit was
+  built (preserving merge lineage so GitHub can recompute the merge-base, #818/#819).
 - Finish with `gh pr view --json mergeable,files` and check the real commit's `parents` and
   `files`. **Do not call it done on the return value alone.**
 

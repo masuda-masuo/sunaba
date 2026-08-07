@@ -910,6 +910,9 @@ class EgressGuard:
 
     def done(self) -> None:  # pragma: no cover - mitmproxy lifecycle hook
         """Stop the control server on proxy shutdown, if one was started."""
+        control = getattr(self, "_control", None)
+        if control is not None:
+            control.stop()
 
     # -- mitmproxy hook --
 

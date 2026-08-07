@@ -1318,3 +1318,30 @@ class TestHttpConnectHostGate:
         guard.http_connect(flow)
         assert flow.response is not None
         assert flow.response.status_code == 403
+
+
+class TestAddonLifecycleShutdown:
+    """``done()`` must actually release the control server.
+
+    It is a ``pragma: no cover`` mitmproxy lifecycle hook whose body is three
+    lines under a docstring -- exactly the shape an editing accident can empty
+    out while leaving something that still imports, type-checks and passes
+    every other test.  This pins the behaviour instead of the shape.
+    """
+
+    def test_done_stops_a_started_control_server(self) -> None:
+        stopped: list[bool] = []
+
+        class _StubControl:
+            def stop(self) -> None:
+                stopped.append(True)
+
+        guard = EgressGuard()
+        guard._control = _StubControl()
+        guard.done()
+        assert stopped == [True]
+
+    def test_done_without_a_control_server_is_a_no_op(self) -> None:
+        # The decision-only configuration (no control port) never sets
+        # ``_control``; shutdown must not raise there.
+        EgressGuard().done()

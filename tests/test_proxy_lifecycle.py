@@ -13,6 +13,7 @@ from sunaba.proxy import (
     CONTROL_HOST_ENV,
     CONTROL_PORT_ENV,
     CONTROL_SECRET_ENV,
+    MITM_HOSTS_ENV,
     PROXY_TOKEN_ENV,
 )
 from sunaba.proxy_client import CONTROL_URL_ENV
@@ -159,6 +160,18 @@ class TestEnsureEgressProxyFresh:
         assert proxy_env[ALLOWED_REPOS_ENV] == "owner/repo"
         assert proxy_env[ALLOWED_EGRESS_HOSTS_ENV] == "proxy.golang.org"
         assert proxy_env[PROXY_TOKEN_ENV] == "tok"
+
+    def test_passes_mitm_hosts_through(self) -> None:
+        # #821: the MITM/passthrough split is sidecar-startup config like the
+        # allowlists, so it has to reach the container and take part in the
+        # drift check below -- otherwise a changed value is silently ignored
+        # until someone removes the sidecar by hand.
+        client, _, _ = _fresh_client()
+        env = {MITM_HOSTS_ENV: "git.internal"}
+        pl.ensure_egress_proxy(client, env=env)
+        proxy_env = client.containers.run.call_args.kwargs["environment"]
+        assert proxy_env[MITM_HOSTS_ENV] == "git.internal"
+        assert MITM_HOSTS_ENV in pl._SIDECAR_CONFIG_ENV_KEYS
 
     def test_image_and_port_overrides(self) -> None:
         client, _, container = _fresh_client()

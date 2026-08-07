@@ -9,12 +9,14 @@ module docstring in ``sunaba.proxy``.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
 
 import pytest
 
+from sunaba import proxy as proxy_module
 from sunaba.proxy import (
     API_WRITE_BLOCK_HINT,
     CONTROL_HOST_ENV,
@@ -25,6 +27,7 @@ from sunaba.proxy import (
     EGRESS_HOST_BLOCK_HINT,
     EGRESS_HOST_WILDCARD,
     FETCH_SERVICE,
+    MITM_REQUIRED_HOSTS,
     PROXY_SOURCE_FINGERPRINT,
     PUSH_BLOCK_HINT,
     PUSH_SERVICE,
@@ -42,6 +45,8 @@ from sunaba.proxy import (
     handle_control_request,
     is_git_data_api_path,
     is_push,
+    mitm_hosts_from_env,
+    passthrough_host_patterns,
     repo_from_path,
 )
 
@@ -1089,3 +1094,254 @@ class TestBlockBodyHint:
         body = block_body(d.reason, hint=API_WRITE_BLOCK_HINT)
         assert b"sandbox_issue_write" in body
         assert b"only allowed via the publish tool" not in body
+
+
+# --------------------------------------------------------------------------
+# TLS passthrough for hosts carrying no HTTP-level policy (#821)
+# --------------------------------------------------------------------------
+
+
+def _mitmproxy_would_ignore(patterns: list[str], host_port: str) -> bool:
+    """Reproduce mitmproxy's ``ignore_hosts`` matching for one ``host:port``.
+
+    mitmproxy's ``NextLayer._ignore_connection`` builds a list of candidate
+    ``host:port`` strings for the connection -- the CONNECT target, the
+    *resolved peer address*, the TLS SNI -- and ignores (raw-tunnels) the
+    connection when **any** of them matches **any** ``ignore_hosts`` pattern
+    under ``re.search`` with ``re.IGNORECASE``.  Tests call this per candidate
+    form; the peer-address form is why a catch-all pattern would be unsafe.
+    """
+    return any(re.search(p, host_port, re.IGNORECASE) for p in patterns)
+
+
+class TestMitmRequiredHosts:
+    """Which hosts keep TLS termination, and which are tunnelled (#821)."""
+
+    def test_github_hosts_stay_decrypted(self) -> None:
+        # These are exactly the hosts whose policy is enforced on the
+        # decrypted request: the git push gate and the api-write gate.
+        guard = EgressGuard()
+        assert guard.should_mitm("github.com") is True
+        assert guard.should_mitm("api.github.com") is True
+        # ...and any other github.com subdomain, by the single dotted entry.
+        assert guard.should_mitm("codeload.github.com") is True
+        assert guard.should_mitm("gist.github.com") is True
+
+    def test_registries_are_passthrough(self) -> None:
+        # No HTTP-level policy exists for these, so decrypting them buys
+        # nothing and breaks clients with a bundled root store.
+        guard = EgressGuard()
+        for host in (
+            "pypi.org",
+            "files.pythonhosted.org",
+            "registry.npmjs.org",
+            "proxy.golang.org",
+            "sum.golang.org",
+            "crates.io",
+            "static.crates.io",
+            "index.crates.io",
+            "static.rust-lang.org",
+        ):
+            assert guard.should_mitm(host) is False, host
+
+    def test_githubusercontent_is_passthrough(self) -> None:
+        # Deliberate: raw/objects.githubusercontent.com carry no gate and no
+        # injected credential, and they are where GitHub release assets are
+        # actually served -- the common case for bundled-root downloaders.
+        guard = EgressGuard()
+        assert guard.should_mitm("raw.githubusercontent.com") is False
+        assert guard.should_mitm("objects.githubusercontent.com") is False
+
+    def test_lookalike_host_is_not_treated_as_github(self) -> None:
+        guard = EgressGuard()
+        assert guard.should_mitm("evilgithub.com") is False
+        assert guard.should_mitm("github.com.attacker.com") is False
+
+    def test_operator_can_extend_but_not_shrink(self) -> None:
+        guard = EgressGuard(
+            allowed_egress_hosts={"git.internal"}, mitm_hosts={"git.internal"}
+        )
+        assert guard.should_mitm("git.internal") is True
+        # Built-ins survive an unrelated operator entry.
+        assert guard.should_mitm("github.com") is True
+
+
+class TestMitmHostsFromEnv:
+    """Parsing SUNABA_PROXY_MITM_HOSTS (built-ins added by the guard)."""
+
+    def test_comma_separated_lowercased(self) -> None:
+        env = {"SUNABA_PROXY_MITM_HOSTS": "Git.Internal, .Corp.Example "}
+        assert mitm_hosts_from_env(env) == {"git.internal", ".corp.example"}
+
+    def test_empty_is_empty_set(self) -> None:
+        assert mitm_hosts_from_env({}) == set()
+        assert mitm_hosts_from_env({"SUNABA_PROXY_MITM_HOSTS": ""}) == set()
+
+    def test_env_wired_into_guard(self) -> None:
+        hosts = mitm_hosts_from_env({"SUNABA_PROXY_MITM_HOSTS": "git.internal"})
+        guard = EgressGuard(allowed_egress_hosts={"git.internal"}, mitm_hosts=hosts)
+        assert guard.should_mitm("git.internal") is True
+        assert guard.should_mitm("pypi.org") is False
+
+    def test_builtin_mitm_hosts_are_the_github_family(self) -> None:
+        assert MITM_REQUIRED_HOSTS == frozenset({".github.com"})
+
+
+class TestPassthroughHostPatterns:
+    """The generated ignore_hosts patterns, checked the way mitmproxy uses them."""
+
+    def test_allowlisted_registry_is_tunnelled(self) -> None:
+        patterns = EgressGuard().passthrough_patterns()
+        assert _mitmproxy_would_ignore(patterns, "pypi.org:443") is True
+        assert _mitmproxy_would_ignore(patterns, "static.crates.io:443") is True
+        assert _mitmproxy_would_ignore(patterns, "raw.githubusercontent.com:443") is True
+
+    def test_mitm_hosts_are_not_tunnelled(self) -> None:
+        patterns = EgressGuard().passthrough_patterns()
+        assert _mitmproxy_would_ignore(patterns, "github.com:443") is False
+        assert _mitmproxy_would_ignore(patterns, "api.github.com:443") is False
+        assert _mitmproxy_would_ignore(patterns, "codeload.github.com:443") is False
+
+    def test_resolved_ip_form_is_never_tunnelled(self) -> None:
+        # mitmproxy also matches the resolved peer address, so a catch-all
+        # pattern would open a raw tunnel to github.com by way of its IP --
+        # silently disabling the push gate.  Only named hosts may match.
+        patterns = EgressGuard(allowed_egress_hosts={EGRESS_HOST_WILDCARD}).passthrough_patterns()
+        assert _mitmproxy_would_ignore(patterns, "140.82.121.4:443") is False
+        assert _mitmproxy_would_ignore(patterns, "192.0.2.10:443") is False
+
+    def test_off_allowlist_host_is_not_tunnelled(self) -> None:
+        # A denied host must keep reaching the guard, which 403s it.
+        patterns = EgressGuard().passthrough_patterns()
+        assert _mitmproxy_would_ignore(patterns, "attacker.com:443") is False
+
+    def test_lookalike_suffix_is_not_tunnelled(self) -> None:
+        patterns = EgressGuard().passthrough_patterns()
+        assert _mitmproxy_would_ignore(patterns, "evilpypi.org:443") is False
+        assert _mitmproxy_would_ignore(patterns, "pypi.org.attacker.com:443") is False
+
+    def test_operator_host_is_tunnelled_when_allowlisted(self) -> None:
+        guard = EgressGuard(allowed_egress_hosts={"lindera.dev"})
+        patterns = guard.passthrough_patterns()
+        # The concrete #821 case: a bundled-root build script can fetch it.
+        assert _mitmproxy_would_ignore(patterns, "lindera.dev:443") is True
+
+    def test_overlapping_wide_entry_cannot_tunnel_past_a_mitm_host(self) -> None:
+        guard = EgressGuard(
+            allowed_egress_hosts={".example.com"}, mitm_hosts={"git.example.com"}
+        )
+        patterns = guard.passthrough_patterns()
+        assert _mitmproxy_would_ignore(patterns, "cdn.example.com:443") is True
+        assert _mitmproxy_would_ignore(patterns, "git.example.com:443") is False
+
+    def test_wildcard_allowlist_tunnels_only_named_hosts(self) -> None:
+        # Containment disabled: there is no enumerable host set, so unnamed
+        # hosts keep today's MITM behaviour rather than being tunnelled.
+        patterns = EgressGuard(allowed_egress_hosts={EGRESS_HOST_WILDCARD}).passthrough_patterns()
+        assert _mitmproxy_would_ignore(patterns, "pypi.org:443") is True
+        assert _mitmproxy_would_ignore(patterns, "anything.example:443") is False
+        assert _mitmproxy_would_ignore(patterns, "github.com:443") is False
+
+    def test_no_candidates_yields_no_patterns(self) -> None:
+        # Nothing to tunnel -> no ignore_hosts is installed at all.
+        assert passthrough_host_patterns({".github.com"}, {".github.com"}) == []
+        assert passthrough_host_patterns(set(), {".github.com"}) == []
+
+    def test_patterns_are_anchored(self) -> None:
+        # mitmproxy uses re.search, so an unanchored pattern would match a
+        # substring of an unrelated hostname.
+        for pattern in EgressGuard().passthrough_patterns():
+            assert pattern.startswith("^")
+            assert pattern.endswith("$")
+
+
+class _FakeRequest:
+    def __init__(self, host: str) -> None:
+        self.pretty_host = host
+
+
+class _FakeFlow:
+    def __init__(self, host: str) -> None:
+        self.request = _FakeRequest(host)
+        self.response: object | None = None
+
+
+class _FakeResponse:
+    def __init__(self, status: int, body: bytes, headers: dict[str, str]) -> None:
+        self.status_code = status
+        self.content = body
+        self.headers = headers
+
+
+class _FakeHttp:
+    """Stand-in for ``mitmproxy.http`` so the hook can run without mitmproxy."""
+
+    class Response:
+        @staticmethod
+        def make(status: int, body: bytes, headers: dict[str, str]) -> _FakeResponse:
+            return _FakeResponse(status, body, headers)
+
+
+class TestHttpConnectHostGate:
+    """CONNECT-level containment -- the only gate a tunnelled host gets (#821)."""
+
+    def test_off_allowlist_connect_is_blocked(self, monkeypatch) -> None:
+        monkeypatch.setattr(proxy_module, "http", _FakeHttp)
+        flow = _FakeFlow("attacker.com")
+        EgressGuard().http_connect(flow)
+        assert flow.response is not None
+        assert flow.response.status_code == 403
+        assert b"BLOCKED by egress proxy" in flow.response.content
+        assert EGRESS_HOST_BLOCK_HINT.encode() in flow.response.content
+
+    def test_passthrough_host_connect_is_allowed(self, monkeypatch) -> None:
+        monkeypatch.setattr(proxy_module, "http", _FakeHttp)
+        flow = _FakeFlow("pypi.org")
+        EgressGuard().http_connect(flow)
+        assert flow.response is None
+
+    def test_mitm_host_connect_is_allowed(self, monkeypatch) -> None:
+        # github.com is still allowed to connect; its *requests* are what the
+        # push gate inspects, after TLS termination.
+        monkeypatch.setattr(proxy_module, "http", _FakeHttp)
+        flow = _FakeFlow("github.com")
+        EgressGuard().http_connect(flow)
+        assert flow.response is None
+
+    def test_containment_still_applies_to_tunnelled_class(self, monkeypatch) -> None:
+        # An off-allowlist host would be *tunnelled* if the passthrough rule
+        # were "not MITM-required"; it is not, and CONNECT denies it.
+        monkeypatch.setattr(proxy_module, "http", _FakeHttp)
+        guard = EgressGuard()
+        assert guard.should_mitm("attacker.com") is False
+        flow = _FakeFlow("attacker.com")
+        guard.http_connect(flow)
+        assert flow.response is not None
+        assert flow.response.status_code == 403
+
+
+class TestAddonLifecycleShutdown:
+    """``done()`` must actually release the control server.
+
+    It is a ``pragma: no cover`` mitmproxy lifecycle hook whose body is three
+    lines under a docstring -- exactly the shape an editing accident can empty
+    out while leaving something that still imports, type-checks and passes
+    every other test.  This pins the behaviour instead of the shape.
+    """
+
+    def test_done_stops_a_started_control_server(self) -> None:
+        stopped: list[bool] = []
+
+        class _StubControl:
+            def stop(self) -> None:
+                stopped.append(True)
+
+        guard = EgressGuard()
+        guard._control = _StubControl()
+        guard.done()
+        assert stopped == [True]
+
+    def test_done_without_a_control_server_is_a_no_op(self) -> None:
+        # The decision-only configuration (no control port) never sets
+        # ``_control``; shutdown must not raise there.
+        EgressGuard().done()

@@ -65,9 +65,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -159,6 +161,42 @@ DEFAULT_EGRESS_HOSTS: frozenset[str] = frozenset({
     "index.crates.io",
     "static.rust-lang.org",
 })
+
+#: Destination hosts the proxy **must** terminate TLS for, because policy is
+#: enforced on the decrypted HTTP request itself and would be unenforceable
+#: over an opaque CONNECT tunnel (#821):
+#:
+#: * ``github.com`` -- the git smart-HTTP push gate (``git-receive-pack`` is
+#:   recognised from the request path) plus push/read token injection.
+#: * ``api.github.com`` -- the write-method gate and bearer-token injection.
+#: * every other ``*.github.com`` subdomain (``codeload``, ``gist``, ...) is
+#:   covered by the same ``.github.com`` entry on purpose: those are the hosts
+#:   where a credential could plausibly be injected or a git push could be
+#:   attempted, so they stay decrypted by default rather than being enumerated
+#:   one by one and forgotten when GitHub adds another.
+#:
+#: Everything *else* on the egress allowlist has no HTTP-level policy at all --
+#: only the destination-host check, which :meth:`EgressGuard.http_connect`
+#: enforces on the CONNECT request without decrypting anything.  Those hosts
+#: are tunnelled untouched so clients that ship their own root store
+#: (rustls + webpki-roots, Go static binaries, tools bundling certifi) work:
+#: such clients never consult the system trust store, so the injected MITM CA
+#: is invisible to them and TLS fails even though the host is allowed.
+#:
+#: Operators can *extend* this set via :data:`MITM_HOSTS_ENV`; they cannot
+#: shrink it, mirroring :data:`DEFAULT_EGRESS_HOSTS`.
+MITM_REQUIRED_HOSTS: frozenset[str] = frozenset({
+    ".github.com",
+})
+
+#: Environment variable holding a comma-separated list of **additional** hosts
+#: to keep MITM-decrypted (#821).  Same matching rules as the egress allowlist
+#: (a leading ``.`` matches the domain and its subdomains).  Set it when an
+#: allowlisted host needs the git-push gate applied to it -- e.g. a
+#: self-hosted GitLab/Gitea the sandbox may reach: over a passthrough tunnel
+#: :meth:`EgressGuard.decide` never sees the request, so its incidental
+#: ``git-receive-pack`` refusal for non-GitHub git hosts does not apply.
+MITM_HOSTS_ENV = "SUNABA_PROXY_MITM_HOSTS"
 
 #: Static fallback push token injected into authorized pushes.  The primary
 #: path is the grant-scoped token ``publish`` hands over on ``/auth/allow``
@@ -311,6 +349,76 @@ def is_git_data_api_path(path: str) -> bool:
     return len(parts) >= 4 and parts[0].lower() == "repos" and parts[3].lower() == "git"
 
 
+def host_matches(host: str, entries: Iterable[str]) -> str | None:
+    """Return the entry of *entries* that *host* matches, or ``None``.
+
+    The single place the host-list matching rule lives, shared by the egress
+    allowlist (:meth:`EgressGuard.decide_host`) and the MITM-required list
+    (:meth:`EgressGuard.should_mitm`) so the two can never drift: an exact
+    match, or an entry beginning with ``.`` matching that domain and any
+    subdomain (``.example.com`` -> ``example.com`` and ``a.example.com``).
+    Case-insensitive; *entries* are assumed already lower-cased.
+    """
+    h = host.lower()
+    for entry in entries:
+        if entry.startswith("."):
+            if h == entry[1:] or h.endswith(entry):
+                return entry
+        elif h == entry:
+            return entry
+    return None
+
+
+def _host_entry_regex(entry: str) -> str:
+    """Regex source matching one host-list *entry*, without the port part."""
+    if entry.startswith("."):
+        return rf"(?:[^:]+\.)?{re.escape(entry[1:])}"
+    return re.escape(entry)
+
+
+def passthrough_host_patterns(
+    allowed_hosts: Iterable[str],
+    mitm_hosts: Iterable[str],
+) -> list[str]:
+    """Build mitmproxy ``ignore_hosts`` patterns for the passthrough hosts (#821).
+
+    mitmproxy matches these against ``host:port`` strings derived from the
+    connection -- the CONNECT target, the resolved peer address, and the TLS
+    SNI -- and tunnels a matching connection as raw TCP instead of
+    terminating its TLS.  The returned pattern therefore:
+
+    * lists the allowlist entries **explicitly** (never a catch-all): the
+      resolved ``IP:port`` form is matched too, so a broad pattern would
+      passthrough an MITM-required host by way of its IP address;
+    * excludes the MITM-required hosts with a negative lookahead, so an
+      overlapping wide entry (allow ``.example.com`` while keeping
+      ``git.example.com`` decrypted) still cannot open a tunnel past them;
+    * is fully anchored, because mitmproxy uses :func:`re.search`.
+
+    :data:`EGRESS_HOST_WILDCARD` contributes nothing: with containment
+    disabled there is no enumerable host set, so only the explicitly named
+    hosts pass through and everything else keeps today's MITM behaviour.
+    Returns ``[]`` when no host qualifies (no ``ignore_hosts`` is then set).
+    """
+    mitm = sorted({h.lower() for h in mitm_hosts})
+    candidates = sorted(
+        {
+            h.lower()
+            for h in allowed_hosts
+            if h != EGRESS_HOST_WILDCARD and host_matches(h.lstrip("."), mitm) is None
+        }
+    )
+    if not candidates:
+        return []
+    allowed_alt = "|".join(_host_entry_regex(e) for e in candidates)
+    if mitm:
+        mitm_alt = "|".join(_host_entry_regex(e) for e in mitm)
+        guard = rf"(?!(?:{mitm_alt}):\d+$)"
+    else:
+        guard = ""
+    return [rf"^{guard}(?:{allowed_alt}):\d+$"]
+
+
 @dataclass(frozen=True)
 class Decision:
     """Outcome of evaluating one request against the egress policy."""
@@ -392,6 +500,7 @@ class EgressGuard:
         allowed_repos: set[str] | None = None,
         token: str | None = None,
         allowed_egress_hosts: set[str] | None = None,
+        mitm_hosts: set[str] | None = None,
     ) -> None:
         """Create a guard.
 
@@ -408,9 +517,20 @@ class EgressGuard:
         set containing :data:`EGRESS_HOST_WILDCARD` disables destination-host
         containment.  This is orthogonal to *allowed_repos*: a host being
         reachable says nothing about whether a push to it is authorized.
+
+        *mitm_hosts* extends :data:`MITM_REQUIRED_HOSTS` -- the hosts whose
+        TLS the proxy terminates so the HTTP-level policy above can be
+        applied (#821).  Every *other* allowlisted host is tunnelled
+        untouched, which is what makes clients with a bundled root store work
+        through the proxy.  Like the egress allowlist, the built-ins can only
+        be extended, never shrunk.
         """
         self._allowed: set[str] = {r.lower() for r in (allowed_repos or ())}
         extra = {h.lower() for h in (allowed_egress_hosts or ())}
+        #: Hosts kept MITM-decrypted (#821): built-ins plus operator additions.
+        self._mitm_hosts: frozenset[str] = MITM_REQUIRED_HOSTS | {
+            h.lower() for h in (mitm_hosts or ())
+        }
         #: Destination-host allowlist (#506): built-ins unioned with operator
         #: additions.  ``EGRESS_HOST_WILDCARD`` anywhere in the set means
         #: "allow any host" (checked in :meth:`decide_host`).
@@ -603,13 +723,29 @@ class EgressGuard:
         h = host.lower()
         if EGRESS_HOST_WILDCARD in self._allowed_hosts:
             return Decision(True, "destination-host containment disabled (*)")
-        for entry in self._allowed_hosts:
+        entry = host_matches(h, self._allowed_hosts)
+        if entry is not None:
             if entry.startswith("."):
-                if h == entry[1:] or h.endswith(entry):
-                    return Decision(True, f"{h} matches allowed domain {entry}")
-            elif h == entry:
-                return Decision(True, f"{h} is in the egress host allowlist")
+                return Decision(True, f"{h} matches allowed domain {entry}")
+            return Decision(True, f"{h} is in the egress host allowlist")
         return Decision(False, f"egress to {h or '(unknown host)'} is not in the allowlist")
+
+    def should_mitm(self, host: str) -> bool:
+        """Return whether *host*'s TLS must be terminated by the proxy (#821).
+
+        ``True`` for the hosts carrying HTTP-level policy
+        (:data:`MITM_REQUIRED_HOSTS` plus :data:`MITM_HOSTS_ENV` additions);
+        ``False`` for every other host, which is tunnelled with its own
+        certificate intact.  Pure, so the split is unit-testable without
+        mitmproxy.  The passthrough decision is *enforced* through
+        :meth:`passthrough_patterns` -- this method is the readable statement
+        of the same rule and the thing tests assert on.
+        """
+        return host_matches(host, self._mitm_hosts) is not None
+
+    def passthrough_patterns(self) -> list[str]:
+        """``ignore_hosts`` patterns for this guard's allowlist (#821)."""
+        return passthrough_host_patterns(self._allowed_hosts, self._mitm_hosts)
 
     def decide(self, path: str, query_service: str | None, now: float) -> Decision:
         """Evaluate a request against the policy; only git push is gated."""
@@ -708,7 +844,10 @@ class EgressGuard:
 
         Reads the port/secret from the environment so the sidecar image (#358)
         can enable it; with no port the proxy stays decision-only (as today).
+        Also installs the TLS-passthrough configuration (#821) before any
+        traffic is served.
         """
+        self._apply_passthrough_option()
         try:
             bind = control_bind_from_env(dict(os.environ))
         except ValueError as e:
@@ -721,6 +860,53 @@ class EgressGuard:
         host, port, secret = bind
         self._control = AuthControlServer(self, host=host, port=port, secret=secret)
         self._control.start()
+
+    def _apply_passthrough_option(self) -> None:  # pragma: no cover - needs mitmdump
+        """Tell mitmproxy which hosts to tunnel without terminating TLS (#821).
+
+        Uses mitmproxy's own ``ignore_hosts`` option rather than a
+        ``next_layer`` hook: the built-in ``NextLayer`` addon runs *before*
+        script addons and refuses to override a layer another addon already
+        set, so a script-side hook would have to forcibly overwrite its
+        decision.  Driving the supported option keeps one owner of that
+        decision.
+        """
+        patterns = self.passthrough_patterns()
+        if not patterns:
+            return
+        try:
+            from mitmproxy import ctx  # pyright: ignore[reportMissingImports]
+        except ImportError:
+            return
+        ctx.options.update(ignore_hosts=patterns)
+        print(
+            f"egress proxy: TLS passthrough enabled for allowlisted non-MITM hosts "
+            f"(MITM kept for {', '.join(sorted(self._mitm_hosts))})",
+            file=sys.stderr,
+        )
+
+    def http_connect(self, flow) -> None:  # pragma: no cover - exercised under mitmdump
+        """Enforce destination-host containment on the ``CONNECT`` itself (#821).
+
+        For an MITM-terminated host this is redundant with :meth:`request`
+        (which sees the decrypted request and denies it there anyway), but for
+        a passthrough host it is the *only* gate: the tunnel is opaque, so no
+        later hook runs.  Denying here also fails earlier and cheaper -- the
+        client never completes a TLS handshake with a host it may not reach.
+        """
+        if http is None:
+            raise RuntimeError(
+                "mitmproxy is required to run the egress proxy addon; "
+                "load it with 'mitmdump -s proxy.py'"
+            )
+        host = (flow.request.pretty_host or "").lower()
+        decision = self.decide_host(host)
+        if not decision.allow:
+            flow.response = http.Response.make(
+                403,
+                block_body(decision.reason, hint=EGRESS_HOST_BLOCK_HINT),
+                {"Content-Type": "text/plain"},
+            )
 
     def done(self) -> None:  # pragma: no cover - mitmproxy lifecycle hook
         """Stop the control server on proxy shutdown, if one was started."""
@@ -993,6 +1179,22 @@ def allowed_egress_hosts_from_env(environ: dict[str, str] | None = None) -> set[
     return {h.strip().lower() for h in raw.split(",") if h.strip()}
 
 
+def mitm_hosts_from_env(environ: dict[str, str] | None = None) -> set[str]:
+    """Parse the extra MITM-required hosts from ``SUNABA_PROXY_MITM_HOSTS`` (#821).
+
+    Returns only the operator-supplied hosts (lower-cased);
+    :data:`MITM_REQUIRED_HOSTS` is added by :class:`EgressGuard`, so an unset
+    or empty value still keeps the GitHub hosts decrypted.  There is no
+    wildcard sentinel here on purpose: "MITM everything" is what the proxy
+    did before this option existed, and re-introducing it as a value would
+    make the passthrough guarantee configuration-dependent in a way nothing
+    else could rely on.
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get(MITM_HOSTS_ENV, "")
+    return {h.strip().lower() for h in raw.split(",") if h.strip()}
+
+
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
@@ -1028,5 +1230,6 @@ addons = [
         allowed_repos_from_env(),
         token=os.environ.get(PROXY_TOKEN_ENV) or None,
         allowed_egress_hosts=allowed_egress_hosts_from_env(),
+        mitm_hosts=mitm_hosts_from_env(),
     )
 ]

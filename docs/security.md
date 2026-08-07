@@ -73,6 +73,24 @@ SUNABA_ALLOWED_EGRESS_HOSTS="mirror.internal, .example.com"
 *   An entry beginning with `.` matches that domain and its subdomains (`.example.com` → both `example.com` and `a.example.com`).
 *   The single value `*` disables destination-host containment entirely (any host passes), restoring the pre-containment passthrough behaviour for operators who need it.
 
+### TLS interception, and which hosts are exempt (`SUNABA_PROXY_MITM_HOSTS`)
+
+The proxy terminates TLS only where it has to. Two of its gates read the *decrypted* HTTP request — the git push gate (`git-receive-pack` is recognised from the request path) and the `api.github.com` write gate — so `github.com` and every `*.github.com` subdomain stay intercepted, and the sandbox trusts the proxy CA for them.
+
+Every other allowlisted host carries no HTTP-level policy at all: only the destination-host check, which is enforced on the `CONNECT` request without decrypting anything. Those hosts are therefore **tunnelled untouched**, and the sandbox sees the origin's real certificate.
+
+That is not only a purity argument. A client that ships its own root store — `rustls` + `webpki-roots` (e.g. `ureq`), a statically linked Go binary, a tool bundling `certifi` — never consults the system trust store, so the injected proxy CA is invisible to it and TLS fails even though the host is allowed. Interception broke that whole class of clients; passthrough fixes it without weakening containment (an off-allowlist host is still refused at `CONNECT`, with the same `403`).
+
+```bash
+# Keep an additional host intercepted (e.g. a self-hosted git server whose
+# pushes should hit the git-push gate). Extends the built-in GitHub set.
+SUNABA_PROXY_MITM_HOSTS="git.internal, .corp.example"
+```
+
+*   The built-in `*.github.com` entry can be extended but not removed.
+*   The single caveat of passthrough: `EgressGuard.decide` never sees a tunnelled request, so its incidental refusal of `git-receive-pack` on *non-GitHub* git hosts no longer applies to them. If you allowlist a git host you also want push-gated, name it here.
+*   With `SUNABA_ALLOWED_EGRESS_HOSTS="*"` (containment disabled) only the explicitly named hosts are tunnelled; anything unnamed keeps being intercepted, because there is no host set to enumerate.
+
 ### Applying changes
 The proxy runs as a long-lived sidecar container (`sunaba-egress-proxy`) that reads these variables once, at its own startup. You do not need to restart or remove it by hand: the next `sandbox_initialize` or `publish` compares the sidecar's baked-in configuration against the current environment and recreates it when they differ. Recreation does not disturb running sandboxes — the proxy CA is persisted in a named volume and stays the same.
 

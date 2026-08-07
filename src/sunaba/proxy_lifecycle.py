@@ -48,6 +48,7 @@ from sunaba.proxy import (
     CONTROL_HOST_ENV,
     CONTROL_PORT_ENV,
     CONTROL_SECRET_ENV,
+    MITM_HOSTS_ENV,
     PROXY_SOURCE_FINGERPRINT,
     PROXY_TOKEN_ENV,
 )
@@ -165,7 +166,16 @@ _FALSY = frozenset({"0", "false", "off", "no"})
 #: :func:`_recreate_reason` looks for (#533): the guard bakes the allowlists
 #: into itself when it boots, so a running sidecar silently keeps enforcing
 #: whatever was configured when it started.
-_SIDECAR_CONFIG_ENV_KEYS = (ALLOWED_REPOS_ENV, ALLOWED_EGRESS_HOSTS_ENV, PROXY_TOKEN_ENV)
+_SIDECAR_CONFIG_ENV_KEYS = (
+    ALLOWED_REPOS_ENV,
+    ALLOWED_EGRESS_HOSTS_ENV,
+    PROXY_TOKEN_ENV,
+    # #821: the MITM/passthrough split is read once at guard startup too, and
+    # mitmproxy's ignore_hosts is applied in ``running()`` -- so a sidecar
+    # started with a different value keeps tunnelling (or decrypting) the old
+    # set until it is recreated.
+    MITM_HOSTS_ENV,
+)
 
 
 class EgressProxyError(RuntimeError):

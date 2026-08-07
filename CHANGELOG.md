@@ -8,6 +8,10 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ## [Unreleased]
 
+### Changed
+
+- **The egress proxy no longer intercepts TLS for hosts that carry no HTTP-level policy** (refs #821): only `github.com` and its subdomains are decrypted — they are where the git-push gate and the `api.github.com` write gate read the request — while every other allowlisted host (the package registries, `*.githubusercontent.com`, operator additions) is tunnelled with its origin certificate intact. Clients that ship their own root store and never consult the system trust store (`rustls` + `webpki-roots` such as `ureq`, static Go binaries, tools bundling `certifi`) therefore work through the proxy instead of failing TLS verification against the injected CA. Destination-host containment is unchanged and now enforced on the `CONNECT` request itself, so an off-allowlist host is still refused with the same `403`. `SUNABA_PROXY_MITM_HOSTS` extends (never shrinks) the intercepted set — name a self-hosted git host there if you want its pushes gated.
+
 ## [0.12.0] - 2026-08-02
 
 ### Added

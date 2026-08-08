@@ -7,9 +7,12 @@ temporarily mutating the definition and running only the patcher tests.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check_patch_sabotage.py"
 
@@ -397,21 +400,78 @@ class TestRestoration:
 # ── Test 8: Real repo --base HEAD ────────────────────────────────────────────
 
 class TestRealRepoBaseHead:
-    """Running against the sunaba repo itself with --base HEAD exits 0."""
+    """Running the checker against a disposable clean checkout of HEAD."""
 
-    def test_base_head_on_real_repo(self) -> None:
-        root = Path(__file__).resolve().parent.parent
-        proc = subprocess.run(
-            [sys.executable, str(_SCRIPT), "--root", str(root),
-             "--base", "HEAD", "--json"],
-            capture_output=True, text=True, cwd=root, timeout=60,
-        )
-        assert proc.returncode == 0, (
-            f"Expected exit 0, got {proc.returncode}\n"
-            f"stderr={proc.stderr}\nstdout={proc.stdout}"
-        )
-        data = json.loads(proc.stdout)
-        assert data["defects"] == 0
+    def test_base_head_on_real_repo(self, tmp_path: Path) -> None:
+        """The checker runs against a disposable checkout of HEAD, never the
+        live working tree.
+
+        The checker writes a sabotage raise into the target's source file
+        while it runs, and a subprocess timeout kill is SIGKILL, which
+        bypasses the script's finally-restore.  Running it against the live
+        tree therefore risks leaving a sabotage raise behind whenever the
+        developer has uncommitted changes.  A disposable checkout of HEAD is
+        clean by construction (empty change set -> deterministic and fast) and
+        is removed afterwards, so the live working tree is never depended on
+        or damaged.
+        """
+        repo_root = Path(__file__).resolve().parent.parent
+        copy = tmp_path / "checkout"
+        if shutil.which("git") is None:
+            # Skip before the try: the cleanup below shells out to git too, and
+            # a FileNotFoundError raised there would replace this skip.
+            pytest.skip("git is not available; cannot create a disposable checkout")
+        try:
+            try:
+                subprocess.run(
+                    ["git", "worktree", "add", "--detach", str(copy), "HEAD"],
+                    capture_output=True, text=True, cwd=repo_root, timeout=60,
+                    check=True,
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError,
+                    subprocess.TimeoutExpired) as exc:
+                pytest.skip(
+                    f"cannot create disposable checkout of HEAD: {exc}"
+                )
+            # Run the copy's own script with --root pointing at the copy:
+            # ensure_src_importable() derives src/ from the script's
+            # __file__, so the copy's script is what makes target definitions
+            # resolve inside the copy rather than in the live tree.
+            script = copy / "scripts" / "check_patch_sabotage.py"
+            if not script.is_file():
+                pytest.skip(
+                    "disposable checkout has no scripts/check_patch_sabotage.py"
+                )
+            proc = subprocess.run(
+                [sys.executable, str(script), "--root", str(copy),
+                 "--base", "HEAD", "--json"],
+                capture_output=True, text=True, cwd=copy, timeout=60,
+            )
+            assert proc.returncode == 0, (
+                f"Expected exit 0, got {proc.returncode}\n"
+                f"stderr={proc.stderr}\nstdout={proc.stdout}"
+            )
+            data = json.loads(proc.stdout)
+            assert data["defects"] == 0, (
+                f"Expected 0 defects, got {data['defects']}\n"
+                f"stderr={proc.stderr}\nstdout={proc.stdout}"
+            )
+            assert data["targets"] == [], (
+                f"Expected an empty change set on a clean HEAD checkout, got "
+                f"{len(data['targets'])} target(s)\n"
+                f"stderr={proc.stderr}\nstdout={proc.stdout}"
+            )
+        finally:
+            # Remove the disposable checkout and any registration it left in
+            # the source repo's .git -- even when the assertions above fail.
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(copy)],
+                capture_output=True, text=True, cwd=repo_root,
+            )
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                capture_output=True, text=True, cwd=repo_root,
+            )
 
 
 # ── Test 9: Module-level (fixture) patches ───────────────────────────────────

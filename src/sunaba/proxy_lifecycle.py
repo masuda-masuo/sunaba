@@ -572,7 +572,7 @@ def _recreate_reason(
     drifted = _config_drift(container, source)
     if drifted:
         return "config changed: " + ", ".join(drifted)
-    return None
+    return _image_drift(container, source)
 
 
 def _config_drift(container: Any, source: MutableMapping[str, str]) -> list[str]:
@@ -598,6 +598,40 @@ def _config_drift(container: Any, source: MutableMapping[str, str]) -> list[str]
     if _published_control_port(container, source) != _control_host_port(source):
         drifted.append(CONTROL_HOST_PORT_ENV)
     return drifted
+
+
+def _image_drift(container: Any, source: MutableMapping[str, str]) -> str | None:
+    """Report a sidecar still running an older image reference (#825).
+
+    ``proxy_pin.json`` moves the sidecar image on every deploy (#432), but
+    ``restart_policy=unless-stopped`` keeps the *existing* sidecar alive across
+    both a server and a Docker daemon restart -- so without this the pin is only
+    consulted when creating a sidecar and a bump never reaches a running one.
+    Measured on 2026-08-08: #822's passthrough support was merged, pinned and
+    deployed while a nine-day-old sidecar kept serving; only a manual
+    ``docker rm -f`` let the new image in.
+
+    The material compared is the image *reference string the container was
+    created with* (``Config.Image``) against :func:`_resolve_proxy_image`,
+    deliberately not ``attrs["Image"]``: that is the local image **ID**, a
+    different sha256 from the registry digest a pin carries, so comparing it
+    would report drift on every single call.  Comparing references also covers
+    the :data:`PROXY_IMAGE_ENV` override, and leaves local ``:latest``
+    development builds alone -- their reference does not change, so a rebuilt
+    local image is not recreated here (that remains :func:`_warn_on_source_drift`'s
+    territory, #405).
+
+    Fails open when the reference is unreadable: "cannot compare" is not
+    "drifted", and recreating on a missing inspect field would churn the
+    sidecar on every call.
+    """
+    running = ((container.attrs.get("Config") or {}).get("Image") or "").strip()
+    if not running:
+        return None
+    wanted = _resolve_proxy_image(source)
+    if running == wanted:
+        return None
+    return f"image changed: {running} -> {wanted}"
 
 
 def _wait_for_ca(

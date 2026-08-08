@@ -225,7 +225,7 @@ class TestRunLintTypeGate:
             tool=tool, status=status, findings=findings or [], exit_code=0
         )
 
-    def _patch_detect(self, monkeypatch, languages={"python"}):
+    def _patch_detect(self, monkeypatch, languages=frozenset({"python"})):
         from src.sunaba.edit_verify import DetectionResult
         monkeypatch.setattr(
             "src.sunaba.edit_verify.gate.detect_languages",

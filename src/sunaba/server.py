@@ -250,7 +250,7 @@ def _positive_int(value: str) -> int:
     try:
         ivalue = int(value)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"invalid integer: {value!r}")
+        raise argparse.ArgumentTypeError(f"invalid integer: {value!r}") from None
     if ivalue < 1:
         raise argparse.ArgumentTypeError(f"must be >= 1, got {ivalue}")
     return ivalue

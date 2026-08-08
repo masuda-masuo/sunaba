@@ -929,7 +929,7 @@ class TestIncrementalAggCache:
         threads = [threading.Thread(target=poller) for _ in range(8)]
         for t in threads:
             t.start()
-        for i in range(40):
+        for _ in range(40):
             self._write(self._ENTRY_EDIT)
             time.sleep(0.001)
         for t in threads:

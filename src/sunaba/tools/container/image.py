@@ -69,7 +69,7 @@ def _resolve_image_ref(image: str) -> str:
     except Exception as e:
         raise ValueError(
             f"Could not resolve digest for image: {image!r}: {e}"
-        )
+        ) from e
 
     for repo_digest in img.attrs.get("RepoDigests") or []:
         if "@sha256:" in repo_digest:

@@ -240,7 +240,7 @@ class TestIncrementalContract:
         assert len(full_run["phases"]) == len(inc_run["phases"])
 
         for i, (fs, is_) in enumerate(
-            zip(full_run["phases"], inc_run["phases"])
+            zip(full_run["phases"], inc_run["phases"], strict=True)
         ):
             assert fs["phase"] == is_["phase"], f"phase mismatch at segment {i}"
             assert fs["op_count"] == is_["op_count"], f"op_count mismatch at segment {i}"

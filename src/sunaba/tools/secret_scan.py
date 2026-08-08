@@ -689,7 +689,7 @@ def _update_baseline(
 
     # Extract hashed_secrets from the fresh scan for the override registry
     new_hashes: set[str] = set()
-    for fname, findings in new_results.items():
+    for _, findings in new_results.items():
         for finding in findings:
             hs = finding.get("hashed_secret", "")
             if hs:

@@ -53,7 +53,7 @@ dev = ["pytest", "ruff", "detect-secrets==1.5.0"]
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "D100", "D101", "D102", "D103", "D104"]
+select = ["E", "F", "W", "I", "B", "D100", "D101", "D102", "D103", "D104"]
 ignore = ["E501"]  # line-too-long: CSS/HTML template strings make this impractical
 
 [tool.ruff.lint.per-file-ignores]

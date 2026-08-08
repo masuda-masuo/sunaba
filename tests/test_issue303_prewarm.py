@@ -52,7 +52,9 @@ class TestMonotonicProgress:
         # Regression guard for the old constant-0 bug.
         assert progresses[0] > 0
         # MCP spec: progress SHOULD increase on every notification.
-        assert all(b > a for a, b in zip(progresses, progresses[1:]))
+        # strict=False: the two slices are intentionally length-offset
+        # (N vs N-1), so strict=True would always raise.
+        assert all(b > a for a, b in zip(progresses, progresses[1:], strict=False))
 
 
 class TestPrewarmDefaultImage:

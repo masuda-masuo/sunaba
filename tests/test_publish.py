@@ -984,7 +984,8 @@ class TestPublishManifest:
         container = _make_publish_container([
             (1, b"", b""),  # test -f 'missing.txt' -> not found
             (1, b"", b""),  # test -d 'missing.txt' -> not a directory either
-            (1, b"", b""),  # git ls-files --error-unmatch 'missing.txt' -> not tracked
+            (1, b"", b""),  # git ls-files -z --error-unmatch ':(literal)missing.txt' -> not tracked in index
+            (0, b"", b""),  # git ls-tree HEAD ':(literal)missing.txt' -> empty, not in HEAD either
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -1001,9 +1002,9 @@ class TestPublishManifest:
         assert result["step"] == "validation"
         assert "missing.txt" in result["error"]
         assert "regular file" in result["error"]
-        # Only the existence checks (test -f + test -d + git ls-files)
-        # happened; nothing else
-        assert container.exec_run.call_count == 3
+        # Only the existence checks (test -f + test -d + git ls-files +
+        # git ls-tree) happened; nothing else
+        assert container.exec_run.call_count == 4
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -1092,7 +1093,58 @@ class TestPublishManifest:
         container = _make_publish_container([
             (1, b"", b""),  # test -f 'deleted.txt' -> not a regular file
             (1, b"", b""),  # test -d 'deleted.txt' -> not a directory either
-            (0, b"", b""),  # git ls-files --error-unmatch 'deleted.txt' -> tracked
+            (0, b"deleted.txt\0", b""),  # git ls-files -z --error-unmatch ':(literal)deleted.txt' -> tracked, first entry is the path itself
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (NOT merge)
+            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b feat/del
+            (1, b"", b""),  # rev-parse --verify origin/feat/del (not on remote)
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD (found)
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'deleted.txt' (stages deletion)
+            (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
+            (0, b"[feat/del abc1234] Delete", b""),  # commit
+            (0, b"deleted.txt\n", b""),  # git diff-tree HEAD^ HEAD
+            (0, b"", b""),  # git status --porcelain (clean)
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        client = _make_client_mock(container)
+        mock_docker.return_value = client
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="feat/del",
+            message="Delete todelete.txt",
+            files=["deleted.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        assert result["staged_files"] == ["deleted.txt"]
+        assert result["worktree_leftover"] == []
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_accepts_staged_deletion_declaration(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """A deletion staged with ``git rm`` (path gone from worktree AND
+        index) is accepted because the path is still tracked in HEAD.
+
+        Mock-layer complement to the real-git test
+        (test_publish_ops_gitrepo.py::TestManifestPathValidation): pins the
+        command order -- test -f, test -d, git ls-files (fails), git
+        ls-tree HEAD (finds it).  Issue #837 regression: the index-only
+        validation never ran this fourth command and rejected the path.
+        """
+        container = _make_publish_container([
+            (1, b"", b""),  # test -f 'deleted.txt' -> not a regular file
+            (1, b"", b""),  # test -d 'deleted.txt' -> not a directory either
+            (1, b"", b""),  # git ls-files -z --error-unmatch ':(literal)deleted.txt' -> NOT in index (git rm staged)
+            (0, b"100644 blob abc1234\tdeleted.txt\n", b""),  # git ls-tree HEAD ':(literal)deleted.txt' -> tracked as a file (blob) in HEAD
             (1, b"", b""),  # rev-parse --verify HEAD^2 (NOT merge)
             (0, b"", b""),   # git fetch origin (#818)
             (0, b"none\n", b""),  # MERGE_HEAD check

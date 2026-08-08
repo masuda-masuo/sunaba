@@ -27,6 +27,7 @@ from sunaba.tools.github_api import (
     _resolve_vcs_token,
 )
 from sunaba.tools.publish_ops import (
+    RunFunc,
     create_pull_request,
     git_prepare_commit,
     git_push_with_fallback,
@@ -400,6 +401,129 @@ def _fetch_base_auto_include(
     return AutoIncludeResult(included=result, skipped=skipped)
 
 
+def _validate_manifest_path(run: RunFunc, f: str) -> dict[str, str] | None:
+    """Validate one declared manifest path (publish's manifest mode).
+
+    A declared path is acceptable when it is a regular file in the working
+    tree, or when it is absent from the working tree but still tracked in
+    the index or in HEAD (the user is declaring a deletion).  Anything else
+    -- absolute or ``..``-traversing paths, directories, and paths that
+    exist nowhere -- is rejected.
+
+    Checks run in this order:
+
+    1. repo-relative (no absolute paths, no ``..`` traversal)
+    2. ``test -f`` -- a regular file in the worktree, accept
+    3. ``test -d`` -- a directory, reject (a directory pathspec matches
+       everything beneath it, so the tracked-path fallback and the later
+       ``git add`` would stage the whole subtree, defeating the manifest)
+    4. tracked as a *file* in the index (an unstaged deletion) or in HEAD (a
+       staged deletion: ``git rm`` drops the entry from the index, so the
+       index alone cannot see it -- issue #837), accept.  A path that
+       matches a directory in the index or in HEAD is rejected as a
+       directory, so a directory deleted from the worktree cannot slip
+       through the fallback.
+
+    ``:(literal)`` pathspecs disable glob interpretation so a declared path
+    like ``*.py`` cannot match tracked files it does not literally name.
+    It does NOT disable directory-prefix matching -- a pathspec naming a
+    directory still matches everything beneath it -- which is why both
+    fallback branches reject directory matches explicitly.
+
+    Returns an error dict (``status``/``step``/``error``) or ``None`` when
+    the path is acceptable.  The caller wraps the dict with ``finish_json``.
+    """
+    if os.path.isabs(f) or ".." in f.split("/"):
+        return {
+            "status": "error",
+            "step": "validation",
+            "error": (
+                f"Invalid path '{f}': paths must be repo-relative"
+                " (no absolute paths or .. traversal)."
+            ),
+        }
+    ec, _, _ = run(f"test -f {shlex.quote(f)}")
+    if ec != 0:
+        # Reject directories before the tracked-path fallback below.
+        # ``git ls-files --error-unmatch`` and ``git ls-tree`` both treat a
+        # directory as a pathspec matching everything beneath it, so
+        # ``docs`` -- and ``.`` -- would pass those checks, and the ``git
+        # add`` that follows would stage the whole subtree including
+        # untracked files.  That defeats the manifest, which exists
+        # precisely to keep undeclared files out of the commit.
+        dir_ec, _, _ = run(f"test -d {shlex.quote(f)}")
+        if dir_ec == 0:
+            return {
+                "status": "error",
+                "step": "validation",
+                "error": (
+                    f"Path '{f}' is a directory. "
+                    "Manifests must list regular files one by one."
+                ),
+            }
+        # Not a regular file -- allow if the path is tracked as a file in
+        # the index (an unstaged deletion) or in HEAD (a staged deletion:
+        # ``git rm`` drops the entry from the index, so the index alone
+        # cannot see it -- issue #837).  :(literal) disables pathspec glob
+        # interpretation so a declared path like '*.py' cannot match
+        # tracked files it does not literally name -- but it does NOT
+        # disable directory-prefix matching, so each branch below also
+        # rejects a path that matches a directory instead of a file.
+        track_ec, track_out, _ = run(
+            "git ls-files -z --error-unmatch -- "
+            + shlex.quote(f":(literal){f}")
+        )
+        # -z gives NUL-delimited raw paths (no C-quoting); a directory
+        # pathspec lists every tracked file beneath it, so only an output
+        # whose first entry is f itself names a tracked file.
+        tracked_in_index = track_ec == 0 and track_out.split("\0")[0] == f
+        if track_ec == 0 and not tracked_in_index:
+            return {
+                "status": "error",
+                "step": "validation",
+                "error": (
+                    f"Path '{f}' is a directory. "
+                    "Manifests must list regular files one by one."
+                ),
+            }
+        in_head = False
+        if not tracked_in_index:
+            # ``git ls-tree`` exits 0 even when nothing matches, so test
+            # the output, not the exit code.  Each matching entry reads
+            # "<mode> <type> <sha>\t<path>": a file matches a ``blob``
+            # entry, a directory matches a ``tree`` entry and is rejected
+            # as a directory.
+            head_ec, head_out, _ = run(
+                "git ls-tree HEAD -- "
+                + shlex.quote(f":(literal){f}")
+            )
+            if head_ec == 0 and head_out.strip():
+                if any(
+                    ln.split()[1] == "tree"
+                    for ln in head_out.splitlines()
+                    if ln.strip()
+                ):
+                    return {
+                        "status": "error",
+                        "step": "validation",
+                        "error": (
+                            f"Path '{f}' is a directory. "
+                            "Manifests must list regular files one by one."
+                        ),
+                    }
+                in_head = True
+        if not tracked_in_index and not in_head:
+            return {
+                "status": "error",
+                "step": "validation",
+                "error": (
+                    f"Path '{f}' does not exist or is not a regular file. "
+                    "Manifests must list regular files one by one."
+                ),
+            }
+    return None
+
+
 # The single exit tool (docs/design.md section 11.1).  Two transports: git
 # push with credential helper, then GitHub Objects API
 # (blob->tree->commit->ref) as automatic fallback.  Host-side token
@@ -498,56 +622,13 @@ def publish(
         assert files is not None  # type-narrowing hint for pyright
         # Validate every declared path:
         # - Must be repo-relative (no absolute, no .. traversal)
-        # - Must exist in the working tree OR be tracked in the index
-        #   (i.e. the file is known to git; deletion declaration).
+        # - Must exist in the working tree OR be tracked in the index or
+        #   in HEAD (i.e. the file is known to git; deletion declaration,
+        #   staged or not).
         for f in files:
-            if os.path.isabs(f) or ".." in f.split("/"):
-                return finish_json({
-                    "status": "error",
-                    "step": "validation",
-                    "error": (
-                        f"Invalid path '{f}': paths must be repo-relative"
-                        " (no absolute paths or .. traversal)."
-                    ),
-                }, verified)
-            ec, _, _ = _run(f"test -f {shlex.quote(f)}")
-            if ec != 0:
-                # Reject directories before the tracked-path fallback
-                # below.  ``git ls-files --error-unmatch`` treats a
-                # directory as a pathspec matching everything beneath it,
-                # so ``docs`` -- and ``.`` -- would pass that check, and
-                # the ``git add`` that follows would stage the whole
-                # subtree including untracked files.  That defeats the
-                # manifest, which exists precisely to keep undeclared
-                # files out of the commit.
-                dir_ec, _, _ = _run(f"test -d {shlex.quote(f)}")
-                if dir_ec == 0:
-                    return finish_json({
-                        "status": "error",
-                        "step": "validation",
-                        "error": (
-                            f"Path '{f}' is a directory. "
-                            "Manifests must list regular files one by one."
-                        ),
-                    }, verified)
-                # Not a regular file -- allow if the path is tracked in
-                # the index (i.e. the user is declaring a deletion).
-                # :(literal) disables pathspec glob interpretation so a
-                # declared path like '*.py' cannot match tracked files it
-                # does not literally name.
-                track_ec, _, _ = _run(
-                    "git ls-files --error-unmatch -- "
-                    + shlex.quote(f":(literal){f}")
-                )
-                if track_ec != 0:
-                    return finish_json({
-                        "status": "error",
-                        "step": "validation",
-                        "error": (
-                            f"Path '{f}' does not exist or is not a regular file. "
-                            "Manifests must list regular files one by one."
-                        ),
-                    }, verified)
+            path_err = _validate_manifest_path(_run, f)
+            if path_err is not None:
+                return finish_json(path_err, verified)
 
     # --- Secret scan (issue #676) ---
     # Scan BEFORE commit in manifest mode: the declared file list is already

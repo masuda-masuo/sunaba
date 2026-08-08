@@ -146,8 +146,8 @@ Dive deeper into specific topics:
 ## Known Limitations
 
 *   **No local export (No host write-back)**: To prevent host contamination, file transfer is strictly one-way (host → container). The only way to export changes from the sandbox is via `publish` to a GitHub repository. Purely local projects that are not hosted on GitHub cannot be round-tripped.
-*   **Job state is in-memory**: Background job results (`sandbox_exec_background`) are lost on server restart. Use `run_container_and_exec` for critical one-shot operations.
-*   **Job list grows unbounded**: Completed job results accumulate in memory (not an issue for typical short-lived sessions).
+*   **Job state lives in the container**: Background job results (`sandbox_exec_background`) are stored as files in the container's `/tmp`, keyed by job ID. They survive server restarts but are lost when the container is destroyed (`sandbox_stop` / reaper) — poll with `sandbox_exec_check` and collect results before stopping the container.
+*   **Job files accumulate in /tmp**: Job result files (`.start`/`.out`/`.err`/`.exit`) are removed once `sandbox_exec_check` observes completion, but jobs that finish and are never checked leave their files behind for the container's lifetime. Nothing accumulates in server memory; the cost is `/tmp` usage proportional to container lifetime.
 
 ---
 

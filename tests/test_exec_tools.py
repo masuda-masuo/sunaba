@@ -6,9 +6,12 @@ import os
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from sunaba.server import (
     sandbox_exec,
     sandbox_exec_background,
+    sandbox_exec_check,
 )
 from sunaba.tools.container import (
     sandbox_initialize,
@@ -519,6 +522,149 @@ class TestSandboxExec:
         assert "cd /tmp/repo/sunaba" in decoded
         assert "echo done" in decoded
 
+
+class TestSandboxExecBackgroundJobs:
+    """Background-job lifecycle: job_id uniqueness and sandbox_exec_check.
+
+    Issues #829/#830: two jobs started in the same second must not
+    collide (the job_id carries a random component), and a malformed
+    job_id must be rejected with a structured error before any Docker
+    call instead of silently corrupting the status parsing.
+    """
+
+    # Two background dispatches consume os.urandom four times:
+    #   job1: urandom(3) for the job_id hex, urandom(4) for the temp script
+    #   job2: same again
+    _URANDOM_SEQUENCE = [
+        b"\xaa\xbb\xcc",  # job1 job_id hex  -> aabbcc
+        b"\x01\x02\x03\x04",  # job1 temp script
+        b"\xdd\xee\xff",  # job2 job_id hex  -> ddeeff
+        b"\x05\x06\x07\x08",  # job2 temp script
+    ]
+
+    @patch("sunaba.tools.exec.journal_record_exec")
+    @patch("sunaba.tools.exec._docker")
+    def test_background_job_ids_unique_in_same_second(
+        self,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        """Two jobs started in the same second get distinct job_ids (#829)."""
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with patch("sunaba.tools.exec.time.time", return_value=1000.0), patch(
+            "sunaba.tools.exec.os.urandom",
+            side_effect=self._URANDOM_SEQUENCE,
+        ):
+            id1 = sandbox_exec_background("abc123def456", ["echo one"])
+            id2 = sandbox_exec_background("abc123def456", ["echo two"])
+
+        assert id1 == "abc123def456-1000-aabbcc"
+        assert id2 == "abc123def456-1000-ddeeff"
+        assert id1 != id2
+
+        # Each dispatch writes its own /tmp files; no shared path.
+        dispatches = [c.args[0][2] for c in mock_container.exec_run.call_args_list]
+        assert len(dispatches) == 2
+        assert f"/tmp/{id1}.start" in dispatches[0]
+        assert f"/tmp/{id2}.start" in dispatches[1]
+        assert f"/tmp/{id2}.start" not in dispatches[0]
+        assert f"/tmp/{id1}.start" not in dispatches[1]
+
+    @patch("sunaba.tools.exec.record_tool_use")
+    @patch("sunaba.tools.exec.journal_record_exec")
+    @patch("sunaba.tools.exec._docker")
+    def test_background_same_second_jobs_independently_readable(
+        self,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+        mock_tool_use: MagicMock,
+    ) -> None:
+        """Both same-second jobs' results are readable via sandbox_exec_check."""
+        mock_container = MagicMock()
+
+        def fake_exec_run(argv: list, **kwargs: object) -> tuple[int, bytes]:
+            script = argv[2]
+            if script.startswith("cat /tmp/"):
+                return (0, b"one\n" if "aabbcc" in script else b"two\n")
+            if script.startswith("rm -f /tmp/"):
+                return (0, b"")
+            if "aabbcc" in script:
+                return (0, b"NOW=1001\nSTART=1000\nOUT_MTIME=1000\nERR_MTIME=0\nEXIT=0\n")
+            return (0, b"NOW=1001\nSTART=1000\nOUT_MTIME=1001\nERR_MTIME=0\nEXIT=0\n")
+
+        mock_container.exec_run.side_effect = fake_exec_run
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with patch("sunaba.tools.exec.time.time", return_value=1000.0), patch(
+            "sunaba.tools.exec.os.urandom",
+            side_effect=self._URANDOM_SEQUENCE,
+        ):
+            id1 = sandbox_exec_background("abc123def456", ["echo one"])
+            id2 = sandbox_exec_background("abc123def456", ["echo two"])
+
+        r1 = json.loads(sandbox_exec_check("abc123def456", id1))
+        r2 = json.loads(sandbox_exec_check("abc123def456", id2))
+
+        assert r1["status"] == "completed"
+        assert r1["output"] == "one\n"
+        assert r2["status"] == "completed"
+        assert r2["output"] == "two\n"
+        assert r1 != r2  # independently readable, not a mixed result
+
+    @pytest.mark.parametrize(
+        "bad_job_id",
+        [
+            "abc;rm -rf /tmp",   # shell metacharacter
+            "abc def",           # whitespace
+            "abc\ndef",          # newline
+            "abc$(id)",          # command substitution
+            "abc-12-g",          # random part not hex
+            "abc-12-",           # empty random part
+            "-1000-aabbcc",      # missing container part
+            "abc--aabbcc",       # empty seconds part
+            "abc-",              # trailing separator
+        ],
+    )
+    @patch("sunaba.tools.exec._docker")
+    def test_exec_check_rejects_malformed_job_id(
+        self,
+        mock_docker: MagicMock,
+        bad_job_id: str,
+    ) -> None:
+        """A malformed job_id is rejected before any Docker call (#830)."""
+        result = json.loads(sandbox_exec_check("abc123def456", bad_job_id))
+
+        assert result["status"] == "error"
+        assert "job_id" in result["error"]
+        mock_docker.assert_not_called()
+
+    @patch("sunaba.tools.exec.record_tool_use")
+    @patch("sunaba.tools.exec._docker")
+    def test_exec_check_accepts_old_format_job_id(
+        self,
+        mock_docker: MagicMock,
+        mock_tool_use: MagicMock,
+    ) -> None:
+        """Pre-#829 job ids ("<container_id>-<seconds>") stay checkable."""
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (
+            0,
+            b"NOW=1000\nSTART=999\nOUT_MTIME=0\nERR_MTIME=0\nEXIT=not_found\n",
+        )
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = json.loads(sandbox_exec_check("abc123def456", "abc123def456-1234567890"))
+
+        assert result["status"] == "running"
+        assert result["elapsed_seconds"] == 1
 
 
 class TestServerArgs:

@@ -45,6 +45,7 @@ def _running_sidecar(
     *,
     host_port: str = "8768",
     baked: dict[str, str] | None = None,
+    image: str = "sunaba/proxy:latest",
 ) -> MagicMock:
     """Mock of an already-running sidecar container.
 
@@ -61,7 +62,14 @@ def _running_sidecar(
     if secret:
         env[CONTROL_SECRET_ENV] = secret
     container.attrs = {
-        "Config": {"Env": [f"{k}={v}" for k, v in env.items()]},
+        "Config": {
+            "Env": [f"{k}={v}" for k, v in env.items()],
+            # The reference the sidecar was created with (#825).  Defaults to
+            # the local tag, which is what ``_resolve_proxy_image`` returns
+            # under the pin-less autouse fixture -- so tests that are not about
+            # image drift still see a clean reuse.
+            "Image": image,
+        },
         "HostConfig": {
             "PortBindings": {"9099/tcp": [{"HostIp": "127.0.0.1", "HostPort": host_port}]}
         },
@@ -400,6 +408,76 @@ class TestSidecarConfigDrift:
         existing.remove.assert_not_called()
         client.containers.run.assert_not_called()
         assert env[CONTROL_SECRET_ENV] == "known-secret"
+
+
+class TestSidecarImageDrift:
+    """#825: a sidecar running a superseded image reference is recreated.
+
+    Deploying a new pin only changed which image a *newly created* sidecar
+    used.  ``unless-stopped`` means the old one outlives the deploy, so a
+    merged-and-pinned proxy change reached nobody until the container was
+    removed by hand.
+    """
+
+    _PIN = "ghcr.io/masuda-masuo/sunaba/proxy@sha256:" + "d6" * 32
+    _OLD_PIN = "ghcr.io/masuda-masuo/sunaba/proxy@sha256:" + "9f" * 32
+
+    def _with_existing(self, image: str) -> tuple[MagicMock, MagicMock]:
+        client, _, _ = _fresh_client()
+        existing = _running_sidecar(secret="known-secret", image=image)
+        client.containers.get.side_effect = None
+        client.containers.get.return_value = existing
+        return client, existing
+
+    def test_pin_bump_recreates_sidecar(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(pl, "load_proxy_pin", lambda: self._PIN)
+        client, existing = self._with_existing(self._OLD_PIN)
+
+        pl.ensure_egress_proxy(client, env={})
+
+        existing.remove.assert_called_once_with(force=True)
+        assert client.containers.run.call_args.args[0] == self._PIN
+
+    def test_matching_pin_reuses_sidecar(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(pl, "load_proxy_pin", lambda: self._PIN)
+        client, existing = self._with_existing(self._PIN)
+
+        pl.ensure_egress_proxy(client, env={})
+
+        existing.remove.assert_not_called()
+        client.containers.run.assert_not_called()
+
+    def test_local_build_tag_is_not_drift(self) -> None:
+        # Development builds resolve to the same ``:latest`` reference every
+        # time (no pin, per the autouse fixture); recreating on that would
+        # churn the sidecar on every ensure call.
+        client, existing = self._with_existing(pl._DEFAULT_PROXY_IMAGE)
+
+        pl.ensure_egress_proxy(client, env={})
+
+        existing.remove.assert_not_called()
+        client.containers.run.assert_not_called()
+
+    def test_env_override_recreates_sidecar(self) -> None:
+        client, existing = self._with_existing(pl._DEFAULT_PROXY_IMAGE)
+
+        pl.ensure_egress_proxy(client, env={pl.PROXY_IMAGE_ENV: "custom/proxy:v1"})
+
+        existing.remove.assert_called_once_with(force=True)
+        assert client.containers.run.call_args.args[0] == "custom/proxy:v1"
+
+    def test_unreadable_image_reference_reuses_sidecar(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fail open: an inspect payload without a usable reference means
+        # "cannot compare", not "drifted".
+        monkeypatch.setattr(pl, "load_proxy_pin", lambda: self._PIN)
+        client, existing = self._with_existing("")
+
+        pl.ensure_egress_proxy(client, env={})
+
+        existing.remove.assert_not_called()
+        client.containers.run.assert_not_called()
 
 
 class TestWaitForCA:

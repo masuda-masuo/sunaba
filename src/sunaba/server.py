@@ -267,7 +267,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--default-image",
         type=str,
         default=None,
-        help="Default Docker image (default: python@sha256:...)",
+        help="Default Docker image (default: the full all-in-one pinned image)",
     )
     parser.add_argument(
         "--transport",

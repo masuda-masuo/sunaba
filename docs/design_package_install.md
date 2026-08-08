@@ -75,6 +75,6 @@ Historically, `sandbox_exec pip install --quiet -e .[dev] 2>&1 | tail -3` was us
 
 ## 7. Out of Scope (What We Won't Do)
 
-*   **Non-python Package Managers**: Package managers like `npm`, `cargo`, or `go get` are not supported by this tool (run them via `sandbox_exec` instead).
+*   **Non-python Package Managers**: npm projects are supported via `package_install(manager="npm")` (`npm ci` when a lockfile is present). Package managers like `cargo` or `go get` are not supported by this tool (run them via `sandbox_exec` instead).
 *   **Virtual Environment Management**: Automated creation/deletion of virtual environments is out of scope (the container *is* the virtual environment).
 *   **Dependency Auditing**: Visualizing dependency trees or audits is not supported.

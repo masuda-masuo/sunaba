@@ -983,6 +983,7 @@ class TestPublishManifest:
         """A declared path that does not exist (or is not a regular file) and is not tracked produces an error and no push."""
         container = _make_publish_container([
             (1, b"", b""),  # test -f 'missing.txt' -> not found
+            (1, b"", b""),  # test -d 'missing.txt' -> not a directory either
             (1, b"", b""),  # git ls-files --error-unmatch 'missing.txt' -> not tracked
         ])
         client = _make_client_mock(container)
@@ -1000,8 +1001,9 @@ class TestPublishManifest:
         assert result["step"] == "validation"
         assert "missing.txt" in result["error"]
         assert "regular file" in result["error"]
-        # Only the existence checks (test -f + git ls-files) happened; nothing else
-        assert container.exec_run.call_count == 2
+        # Only the existence checks (test -f + test -d + git ls-files)
+        # happened; nothing else
+        assert container.exec_run.call_count == 3
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -1010,10 +1012,16 @@ class TestPublishManifest:
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Declaring \".\" as a manifest path is rejected (directory, not regular file, not tracked)."""
+        """Declaring \".\" as a manifest path is rejected for being a directory.
+
+        ``git ls-files --error-unmatch -- :(literal).`` exits 0 in any
+        non-empty repository, so the tracked-path fallback cannot be what
+        rejects this -- only the directory check can.  See
+        test_manifest_rejects_directory_path.
+        """
         container = _make_publish_container([
             (1, b"", b""),  # test -f '.' -> not a regular file
-            (1, b"", b""),  # git ls-files --error-unmatch '.' -> not tracked
+            (0, b"", b""),  # test -d '.' -> IS a directory -> reject
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -1029,7 +1037,7 @@ class TestPublishManifest:
         assert result["status"] == "error"
         assert result["step"] == "validation"
         assert "." in result["error"]
-        assert "regular file" in result["error"]
+        assert "directory" in result["error"]
         # Only the existence checks happened; nothing else
         assert container.exec_run.call_count == 2
 
@@ -1040,10 +1048,18 @@ class TestPublishManifest:
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Declaring an existing directory that is not tracked produces a validation error."""
+        """Declaring an existing directory produces a validation error.
+
+        The directory is *tracked* as far as ``git ls-files
+        --error-unmatch`` is concerned -- a directory is a pathspec that
+        matches everything beneath it, so that check exits 0 for any
+        directory containing tracked files (measured against real git).
+        Mocking it as exit 1 is what previously let this test pass while
+        the shipped code accepted directories.
+        """
         container = _make_publish_container([
             (1, b"", b""),  # test -f 'some_dir' -> not a regular file
-            (1, b"", b""),  # git ls-files --error-unmatch 'some_dir' -> not tracked
+            (0, b"", b""),  # test -d 'some_dir' -> IS a directory -> reject
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -1059,7 +1075,7 @@ class TestPublishManifest:
         assert result["status"] == "error"
         assert result["step"] == "validation"
         assert "some_dir" in result["error"]
-        assert "regular file" in result["error"]
+        assert "directory" in result["error"]
         # Only the existence checks happened; nothing else
         assert container.exec_run.call_count == 2
 
@@ -1075,6 +1091,7 @@ class TestPublishManifest:
         the full publish flow.  Proves acceptance criterion #1 for #684."""
         container = _make_publish_container([
             (1, b"", b""),  # test -f 'deleted.txt' -> not a regular file
+            (1, b"", b""),  # test -d 'deleted.txt' -> not a directory either
             (0, b"", b""),  # git ls-files --error-unmatch 'deleted.txt' -> tracked
             (1, b"", b""),  # rev-parse --verify HEAD^2 (NOT merge)
             (0, b"", b""),   # git fetch origin (#818)

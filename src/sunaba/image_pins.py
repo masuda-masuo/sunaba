@@ -1,6 +1,7 @@
 """Single source of truth for the default sandbox image digest pins (Issue #331).
 
-The default variant images (neutral / python / go) are digest-pinned so that
+The default variant images (neutral / python / go / rust / full / js) are
+digest-pinned so that
 ``sandbox_initialize`` always starts a reproducible image
 (``docs/design-multilang-support.md`` §6).  Historically these pins lived as
 three string constants in ``container.py`` and CI rewrote them with ``sed``.

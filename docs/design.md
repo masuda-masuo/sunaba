@@ -168,11 +168,14 @@ To optimize AI reasoning, test results are parsed into structured JSON format in
 }
 ```
 
-Support is provided for four testing frameworks:
+Support is provided for five testing frameworks:
 *   **Pytest**: Parsed via pytest's built-in JUnit XML (`--junit-xml`); no
     third-party plugin is a prerequisite of verify (Issue #785).
 *   **Jest**: Parsed via `jest --json`.
 *   **Go Test**: Parsed via `go test -json`.
+*   **Rust (cargo test)**: Parsed from its plain-text output by `RustTestAdapter`,
+    because stable cargo has no structured test report (`--format json` is
+    nightly-only, behind `-Z unstable-options`).
 *   **TAP version 13**: Parsed from the runner's own output by `TapAdapter`. This is the
     path taken when `package.json` declares a `scripts.test` that emits TAP, such as
     Node's built-in `node --test`.
@@ -212,8 +215,8 @@ The edit/verify subsystem is designed to **quickly edit code and verify test fai
 *   **`read_file_range`**: Reads files using line ranges with `offset` and `limit`.
 *   **`write_file`**: Creates a file or overwrites one wholesale with the provided content. Never performs a partial update (issue #630 split).
 *   **`edit_file`**: Declarative partial editor for existing files. Requires exactly one edit mode per call: search-and-replace (`old_str` to `new_str`), line ranges, or appending.
-*   **`lint_in_container` / `type_check_in_container`**: Single-file checkers (`ruff`, `pyright`, `eslint`). `lint_in_container` supports `fix=True` to run autofixes on the target file.
-*   **`verify_in_container`**: Runs linter and type check gates before executing the test runner. If either gate fails, testing is aborted and warnings are returned. Automatically selects the runner based on the project language (pytest, jest, go test). Returns structured JSON diffs of modified files (`unstaged` and `staged` additions/deletions).
+*   **`lint_in_container` / `type_check_in_container`**: Single-file checkers (`ruff`, `pyright`, `eslint`, `tsc`). `lint_in_container` supports `fix=True` to run autofixes on the target file. Rust is not among the single-file checkers — a `.rs` path returns `no-linter` / `no-typechecker`. Clippy is Rust's lint layer inside `verify_in_container`'s gate, and that gate's Rust type layer deliberately reports a `skipped` envelope, because clippy already runs the full rustc frontend.
+*   **`verify_in_container`**: Runs linter and type check gates before executing the test runner. If either gate fails, testing is aborted and warnings are returned. Automatically selects the runner based on the project language (pytest, jest, go test, cargo test). Returns structured JSON diffs of modified files (`unstaged` and `staged` additions/deletions).
 
 ### Editing Modalities
 Code modifications are divided into two approaches:
@@ -340,7 +343,7 @@ For in-depth explanations on key-rotation threads, host-to-proxy credential inje
 
 ## 12. Sandbox Docker Images
 
-Sandbox image variants allow language toolchains to be decoupled from a single monolithic parent image. The server dynamically selects the appropriate variant by scanning project markers.
+Sandbox image variants allow language toolchains to be decoupled from a single monolithic parent image. The default is the all-in-one `full` image; `image=` is the only way to select a variant. Language detection runs inside the container at verify time, where it picks the toolchain to run rather than the image to start — see `design_multilang_support.md` §6.1 for the rationale.
 
 For details on the image layer hierarchy, pinned digests, and language detection rules, see the dedicated [Sandbox Images](sandbox_image.md) and [Multi-Language Support Design](design_multilang_support.md) documents.
 

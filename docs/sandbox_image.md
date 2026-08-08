@@ -6,16 +6,19 @@ Sunaba runs AI edits, lints, and test checks inside purpose-built Docker sandbox
 
 ## 1. Sandbox Image Variants
 
-Images are built from `docker/Dockerfile.{base,python,go,js,full}`. The toolchain installs themselves live in `docker/install-python-tools.sh`, `docker/install-go.sh`, and `docker/install-js-tools.sh`, which the variant Dockerfiles all source, so "what the Python/Go/JS toolchain is" is defined in exactly one place each.
+Images are built from `docker/Dockerfile.{base,python,go,js,rust,full}`. The toolchain installs themselves live in `docker/install-python-tools.sh`, `docker/install-go.sh`, `docker/install-js-tools.sh`, and `docker/install-rust.sh`, which the variant Dockerfiles all source, so "what the Python/Go/JS/Rust toolchain is" is defined in exactly one place each.
 
 | Tag | Base Layer | Included Backend Toolchains | Use Case |
 |---|---|---|---|
-| `sandbox:full` | Base | Python (3.12) + Go + JS (eslint/tsc/jest) + Node runtime. Every toolchain `verify` can dispatch to. | **The default.** Used whenever `image=` is omitted. |
+| `sandbox:full` | Base | Python (3.12) + Go + JS (eslint/tsc/jest) + Rust (cargo/clippy) + Node runtime. Every toolchain `verify` can dispatch to. | **The default.** Used whenever `image=` is omitted. |
 | `sandbox:base` | Neutral core | Node runtime + VCS + Search tools. No backend compilers/interpreters or JS dev tools. | `FROM` parent of the variants. Not a runtime default. |
 | `sandbox:python` | Base | Python (3.12) toolchain + Node runtime (for Pyright). | Lean image; explicit `image=python` only. |
 | `sandbox:go` | Base | Go compiler/toolchain. | Lean image; explicit `image=go` only. |
 | `sandbox:js` | Base | eslint, typescript (tsc), jest (Issue #588). | Lean image; explicit `image=js` only. |
+| `sandbox:rust` | Base | rustc, cargo, clippy, rustfmt (via rustup) + the `x86_64-pc-windows-gnu` cross-compile target. | Lean image; explicit `image=rust` only. |
 | `sandbox:minimal` | Minimal | Bare Git + Python + Pytest. | Lightweight or rapid testing. |
+
+Note that the tag is `sandbox:base` — the `image=` alias `neutral` is what resolves to it; `base` itself is not a value `image=` accepts.
 
 **JS tools are the global fallback only, never the silent truth.** A repository's own `node_modules/.bin/{eslint,tsc,jest}` -- when present -- always wins over the image-baked global, so a project pinned to a different major version is never linted or type-checked by the wrong one. `edit_verify` resolves this per invocation (`test -x node_modules/.bin/<tool>` relative to the verify working directory) and stamps the result: `VerifyResult.detail` always states whether `local` (repo `node_modules/.bin`) or `global` (image-baked) ran. This is why `sandbox:js` existing as a separate tag does not, by itself, fix version drift -- the resolution order does.
 
@@ -37,7 +40,9 @@ The default images come pre-installed with the following utilities, which the se
 | File Search | `fd` | Finding file paths |
 | Code Indexing | `universal-ctags` | AST symbol navigation |
 | Linting | `ruff` / `eslint` | Python and JavaScript linting and autofix gates |
+| Linting (Rust) | `clippy` | Rust lint layer inside `verify_in_container`'s gate (`cargo clippy`; no `fix=True` path) |
 | Type Checking | `pyright` / `tsc` | Python and TypeScript static type verification |
+| Build/Test | `cargo` | Rust build/test — `cargo test` in `verify_in_container` |
 | Version Control | `git`, `gh` | Cloning repositories, pushing changes, and managing issues |
 | Package Install | `uv` / `pip` | Fast dependency resolution in `package_install` |
 | JSON Processing | `jq` | Parsing and formatting command outputs |
@@ -46,13 +51,13 @@ The default images come pre-installed with the following utilities, which the se
 
 ## 3. Language Detection & Selection Rules
 
-**Image selection does not involve detection.** `sandbox_initialize` starts `sandbox:full` unless an explicit `image=` says otherwise (the aliases `full` / `neutral` / `python` / `go` / `js` resolve to pinned digests). The host used to probe the GitHub contents API to pick a variant; that was removed in #584 because the guess preceded an irreversible decision and a failed probe silently produced a container missing the toolchain the project needed.
+**Image selection does not involve detection.** `sandbox_initialize` starts `sandbox:full` unless an explicit `image=` says otherwise (the aliases `full` / `neutral` / `python` / `go` / `js` / `rust` resolve to pinned digests). The host used to probe the GitHub contents API to pick a variant; that was removed in #584 because the guess preceded an irreversible decision and a failed probe silently produced a container missing the toolchain the project needed.
 
 **Language detection still happens — inside the container, at verify time**, where it reads the real files and can be re-run. It selects which toolchain to *run*, not which image to start (`edit_verify.detect_languages`):
 
 1.  **Manual Override**: `language=` on `verify_in_container` / `lint_in_container` / `type_check_in_container` skips detection.
-2.  **File Extension** (single-file targets): `.py` → Python, `.go` → Go, `.js` / `.jsx` → JS, `.ts` / `.tsx` → TS (scans upward for `tsconfig.json`).
-3.  **Project Marker Files** (directory targets): `go.mod` → Go; `pyproject.toml` / `setup.py` / `requirements*.txt` / `Pipfile` / `tox.ini` → Python; `package.json` → JS; `tsconfig.json` → TS.
+2.  **File Extension** (single-file targets): `.py` → Python, `.go` → Go, `.js` / `.jsx` / `.mjs` / `.cjs` → JS, `.ts` / `.tsx` → TS (scans upward for `tsconfig.json`), `.rs` → Rust.
+3.  **Project Marker Files** (directory targets): `go.mod` → Go; `pyproject.toml` / `setup.py` / `requirements*.txt` / `Pipfile` / `tox.ini` → Python; `package.json` → JS; `tsconfig.json` → TS; `Cargo.toml` → Rust.
 4.  **Polyglot**: all detected languages run, each scoped to the sub-tree holding its marker. The default image carries every toolchain, so a polyglot repository is verified in full rather than falling back to an image that can run neither.
 5.  **Unknown**: no markers found → verify asks for an explicit `language=` instead of silently guessing.
 

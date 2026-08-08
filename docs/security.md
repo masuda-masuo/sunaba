@@ -69,7 +69,7 @@ If `SUNABA_ALLOWED_REPOS` is unset or does not include the target repository, `p
 SUNABA_ALLOWED_EGRESS_HOSTS="mirror.internal, .example.com"
 ```
 
-*   The built-in defaults — `github.com`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com`, `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org`, `proxy.golang.org`, `sum.golang.org` — are **always** allowed so `git`, `pip`, `go`, and `npm` work out of the box; operator entries only *add* to them.
+*   The built-in defaults — `github.com`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com`, `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org`, `proxy.golang.org`, `sum.golang.org`, `crates.io`, `static.crates.io`, `index.crates.io`, `static.rust-lang.org` — are **always** allowed so `git`, `pip`, `go`, `npm`, and `cargo` work out of the box; operator entries only *add* to them.
 *   An entry beginning with `.` matches that domain and its subdomains (`.example.com` → both `example.com` and `a.example.com`).
 *   The single value `*` disables destination-host containment entirely (any host passes), restoring the pre-containment passthrough behaviour for operators who need it.
 

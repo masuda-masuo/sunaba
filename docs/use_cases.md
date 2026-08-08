@@ -27,6 +27,7 @@
 | **UC-13**| **Non-GitHub VCS platforms** (GitLab, Bitbucket) | — | **×** (Assumes `gh` and GitHub APIs. Out of scope) |
 | **UC-14**| **VCS issue triage & project board management**| Handled by dedicated GitHub MCP servers | **×** (Explicitly out of scope in `docs/design.md` §1) |
 | **UC-15**| **Pull Request code reviews** | `sandbox_initialize(pr=N)` → edit loop → `diff_in_container` → `sandbox_pr_review_write` | **◎** (New tools created) |
+| **UC-16**| **Rust project development** | Edit loop → `verify_in_container` (`cargo clippy` gate → `cargo test`) | **◎** (Resolved in #747/#749/#753) |
 
 **Overall Assessment**: The primary target flow of Sunaba ("issue → fix → verify → publish") (UC-1/2) is fully covered with dedicated, first-class tools. The payload containment, structured outputs, and Git checkpoints are highly mature. Functional gaps reside primarily outside this main flow, such as purely local projects (UC-4), dependency installers for JS/Go (UC-6), or running multi-service setups (UC-10).
 
@@ -36,21 +37,30 @@
 
 Verification of whether first-class tools exist for each phase of the loop:
 
-| Phase | Tool | Python | JS/TS | Go |
-|---|---|---|---|---|
-| **Boot** | `sandbox_initialize` (with auto image selection) | ✅ | ✅ | ✅ |
-| **Ingress** | `issue_view` / `sandbox_initialize(clone_repo=..., pr=N)` | ✅ | ✅ | ✅ |
-| **Search** | `search_in_container` (`ripgrep` / `ast-grep`) | ✅ | ✅ | ✅ |
-| **Read** | `read_file_range` / `list_files` | ✅ | ✅ | ✅ |
-| **Edit (Decl)** | `write_file` / `edit_file` | ✅ | ✅ | ✅ |
-| **Edit (Imp)** | `transform_file` | ✅ | ✅ | ✅ |
-| **Lint** | `lint_in_container` (`ruff` / `eslint` with `fix=True`) | ✅ | ✅ | — (Unimplemented) |
-| **Type Check**| `type_check_in_container` (`pyright` / `tsc`) | ✅ | ✅ | — (`go vet` not wired) |
-| **Test** | `verify_in_container` (structured JSON results) | ✅ pytest | ✅ jest | ✅ go test |
-| **Packages** | `package_install` | ✅ pip/uv | — (via `sandbox_exec`) | — (via `sandbox_exec`) |
-| **Save/Reset**| `checkpoint` / `checkpoint_list` / `checkpoint_restore` | ✅ | ✅ | ✅ |
-| **Egress** | `publish` / `sandbox_issue_write` | ✅ | ✅ | ✅ |
-| **Audit** | `journal` / `trace` / local dashboard | ✅ | ✅ | ✅ |
+| Phase | Tool | Python | JS/TS | Go | Rust |
+|---|---|---|---|---|---|
+| **Boot** | `sandbox_initialize` | ✅ | ✅ | ✅ | ✅ |
+| **Ingress** | `issue_view` / `sandbox_initialize(clone_repo=..., pr=N)` | ✅ | ✅ | ✅ | ✅ |
+| **Search** | `search_in_container` (`ripgrep` / `ast-grep`) | ✅ | ✅ | ✅ | ✅ |
+| **Read** | `read_file_range` / `list_files` | ✅ | ✅ | ✅ | ✅ |
+| **Edit (Decl)** | `write_file` / `edit_file` | ✅ | ✅ | ✅ | ✅ |
+| **Edit (Imp)** | `transform_file` | ✅ | ✅ | ✅ | ✅ |
+| **Lint** | `lint_in_container` (`ruff` / `eslint` with `fix=True`) | ✅ | ✅ | — (Unimplemented) | — (`clippy` runs only inside the `verify_in_container` gate) |
+| **Type Check**| `type_check_in_container` (`pyright` / `tsc`) | ✅ | ✅ | — (`go vet` not wired) | — (no type layer by design; see §2 note) |
+| **Test** | `verify_in_container` (structured JSON results) | ✅ pytest | ✅ jest | ✅ go test | ✅ cargo test |
+| **Packages** | `package_install` | ✅ pip/uv | ✅ npm | — (via `sandbox_exec`) | — (via `sandbox_exec`) |
+| **Save/Reset**| `checkpoint` / `checkpoint_list` / `checkpoint_restore` | ✅ | ✅ | ✅ | ✅ |
+| **Egress** | `publish` / `sandbox_issue_write` | ✅ | ✅ | ✅ | ✅ |
+| **Audit** | `journal` / `trace` / local dashboard | ✅ | ✅ | ✅ | ✅ |
+
+> **Note on the Rust Lint / Type Check cells.** The two rows above name the
+> *single-file* tools, and neither dispatches on `.rs`: `lint_in_container`
+> returns `no-linter` and `type_check_in_container` returns `no-typechecker` for
+> a Rust path. Rust's lint layer is `cargo clippy`, reached only through
+> `verify_in_container`'s gate, and that gate has no separate Rust type layer on
+> purpose — it reports a `skipped` envelope, because clippy already runs the full
+> rustc frontend. So Rust *is* linted and type-checked in the verify gate; it is
+> the standalone tools that do not cover it.
 
 ---
 
@@ -63,8 +73,8 @@ Previously, only pytest results were parsed structurally. JS/Go project test exe
 By design, file transfer is strictly one-way (host → container) to prevent containerized code from writing back and contaminating the host filesystem. The only supported export mechanism is `publish` (pushing to GitHub). As a result, users cannot round-trip changes to purely local files not tracked on GitHub. 
 *   **Resolution**: This constraint is now explicitly documented in the "Known Limitations" section of the `README.md`.
 
-### 3.3 package_install is limited to Python (Pip/Uv)
-`package_install` is Python-only. Package managers like `npm`, `yarn`, `cargo`, or `go get` must be run manually via `sandbox_exec`. For JS/Go projects, verbose dependency installation output can pollute the LLM's context window. Adding structured packaging tools for JS/Go is a future refinement.
+### 3.3 package_install is limited to Python (Pip/Uv) and npm
+`package_install` supports Python (`pip`/`uv`) and npm projects via `manager="npm"` (`npm ci` when a lockfile is present). Package managers like `cargo` or `go get` are not supported and must be run manually via `sandbox_exec`. For Go/Rust projects, verbose dependency installation output can pollute the LLM's context window. Adding structured packaging tools for Go/Rust is a future refinement.
 
 ### 3.4 Reading PR Review Comments
 While we can check out PR branches using `pr=N`, there is no tool to fetch PR review comments (unlike issues, which can be viewed via `issue_view`). To help the AI respond to reviewer feedback and run the "checkout → fix reviews → push" loop, we need a `pr_view` tool that downloads comments into a container file and returns a summary to the LLM.
@@ -105,6 +115,6 @@ The documentation exposed to the AI client models via MCP tool descriptions and 
 |---|---|---|
 | **P3** | Investigate implementing `pr_view` (a tool to fetch and display PR review comments) (§3.4). | Feature |
 | **P3** | Document client-specific configurations, host permission reduction procedures, and environment variables (§4.2). | Documentation |
-| — | Wire Go linters (e.g., `golangci-lint`) and `go vet` into `lint_in_container` / `type_check_in_container` (§3.6). | Feature |
+| — | Wire Go linters (e.g., `golangci-lint`) and `go vet` into `lint_in_container` / `type_check_in_container` (see the §2 Lint / Type Check rows). | Feature |
 | — | Document the limitation on local-only project round-trips in the `README.md` "Known Limitations" section (§3.2). | Documentation |
 | — | Add a step-by-step setup progression guide (from tokenless to full resident setup) (§4.2). | Documentation |

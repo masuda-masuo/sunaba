@@ -424,9 +424,9 @@ def publish(
 ) -> str:
     """Stage, commit, push, and optionally create a PR -- the single exit tool.
 
-    Does NOT verify: call verify_in_container first.  Credentials resolved
-    host-side; no token enters the container.  Falls back to GitHub Objects
-    API on git-push refusal.
+    Does NOT verify: call verify_in_container first.  No token enters the
+    container.  Falls back to GitHub Objects API on push transport
+    failure, never on an egress block.
 
     Args:
         container_id: Container ID prefix.
@@ -443,11 +443,11 @@ def publish(
         author_email: Override commit author email.
         skip_verify_gate: Bypass verify gate.
         files: When non-empty, stage only the declared repo-relative paths
-            (manifest mode).  Each path must be a regular file, not a
-            directory.  Undeclared files stay in the worktree.
-            When None or empty, fall back to the legacy ``git add -A``
-            behaviour, but only if ``include_untracked`` is True or no
-            untracked files exist (see below).
+            (manifest mode).  Each path must be a regular file or tracked;
+            a dir or '.' stages its subtree, untracked included.  Undeclared
+            files stay in the worktree.  No manifest: ``git add -A``,
+            rejected when untracked files exist unless
+            ``include_untracked=True``.
         include_untracked: When True and no manifest is given, stage all
             files including untracked ones (the old default).  When False
             (default) and no manifest is given, the call is rejected if
@@ -512,6 +512,24 @@ def publish(
                 }, verified)
             ec, _, _ = _run(f"test -f {shlex.quote(f)}")
             if ec != 0:
+                # Reject directories before the tracked-path fallback
+                # below.  ``git ls-files --error-unmatch`` treats a
+                # directory as a pathspec matching everything beneath it,
+                # so ``docs`` -- and ``.`` -- would pass that check, and
+                # the ``git add`` that follows would stage the whole
+                # subtree including untracked files.  That defeats the
+                # manifest, which exists precisely to keep undeclared
+                # files out of the commit.
+                dir_ec, _, _ = _run(f"test -d {shlex.quote(f)}")
+                if dir_ec == 0:
+                    return finish_json({
+                        "status": "error",
+                        "step": "validation",
+                        "error": (
+                            f"Path '{f}' is a directory. "
+                            "Manifests must list regular files one by one."
+                        ),
+                    }, verified)
                 # Not a regular file -- allow if the path is tracked in
                 # the index (i.e. the user is declaring a deletion).
                 # :(literal) disables pathspec glob interpretation so a

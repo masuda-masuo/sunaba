@@ -20,6 +20,12 @@ the target is skipped with a reason rather than running the file wholesale —
 running the file would include subject tests, which fail by definition under
 mutation and would produce false-positive defects.
 
+If the process is terminated while an injection is in flight (SIGTERM or
+SIGINT), a signal handler restores the mutated file before the process exits.
+SIGKILL cannot be covered -- the kernel terminates the process without running
+any Python code -- which is exactly why the real-repo test runs against a
+disposable checkout of HEAD rather than the live working tree.
+
 Usage::
 
     # Check targets relevant to the current diff against origin/main:
@@ -44,6 +50,8 @@ import argparse
 import ast
 import inspect
 import json
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -56,6 +64,11 @@ import check_patch_targets as cpt  # noqa: E402
 
 SABOTAGE_MESSAGE = "sabotage-check"
 SABOTAGE_LINE = f"raise AssertionError({SABOTAGE_MESSAGE!r})"
+
+# The currently-injected source file and its pre-injection content, or None
+# when no mutation is in flight.  The SIGTERM/SIGINT handler restores from
+# this so an interrupted run cannot leave a sabotage raise behind.
+_ACTIVE_INJECTION: tuple[Path, str] | None = None
 
 
 # ── Patch-target extraction (extends cpt to also cover monkeypatch.setattr) ──
@@ -198,6 +211,34 @@ def inject_sabotage(
 
     lines.insert(insert_lineno - 1, f"{indent}{SABOTAGE_LINE}\n")
     return "".join(lines)
+
+
+def _handle_termination_signal(signum: int, frame: Any) -> None:
+    """Restore a currently-injected file, then die with the default action.
+
+    Best-effort: the ``finally`` restore in :func:`check_target` is the
+    reliable primary path; this handler only covers the window where the
+    process is killed mid-injection.  SIGKILL cannot be covered -- the kernel
+    terminates the process without running any Python code -- which is exactly
+    why the real-repo test runs against a disposable checkout of HEAD rather
+    than the live working tree.
+    """
+    active = _ACTIVE_INJECTION
+    if active is not None:
+        path, original = active
+        try:
+            path.write_text(original, encoding="utf-8")
+        except Exception as restore_exc:
+            # The main thread is suspended mid-injection, so this write is the
+            # only restore that will happen -- the ``finally`` path in
+            # check_target never runs.  Nothing is left to retry, but a failed
+            # restore leaves the sabotage raise behind and must be loud.
+            print(
+                f"CRITICAL: failed to restore {path} after sabotage: {restore_exc}",
+                file=sys.stderr,
+            )
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
 
 
 # ── Test classification ──────────────────────────────────────────────────────
@@ -489,6 +530,7 @@ def check_target(
     Returns a result dict with keys: target, defect, skipped, skipped_reason,
     patcher_tests, subject_tests, error, module_level.
     """
+    global _ACTIVE_INJECTION
     result: dict = {
         "target": target,
         "defect": False,
@@ -600,6 +642,7 @@ def check_target(
 
         # Inject sabotage
         mutated_source = inject_sabotage(original_source, func_node)
+        _ACTIVE_INJECTION = (def_file, original_source)
         def_file.write_text(mutated_source, encoding="utf-8")
 
         # Run patcher tests
@@ -641,6 +684,8 @@ def check_target(
                 file=sys.stderr,
             )
             raise
+        finally:
+            _ACTIVE_INJECTION = None
 
 
 # ── Reporting ────────────────────────────────────────────────────────────────
@@ -719,6 +764,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Per-target pytest timeout in seconds (default: 300).",
     )
     args = parser.parse_args(argv)
+
+    # An in-flight injection must be restored if the process is terminated by
+    # SIGTERM/SIGINT.  SIGKILL cannot be covered -- the kernel terminates the
+    # process without running any Python code -- which is exactly why the
+    # real-repo test runs against a disposable checkout of HEAD rather than
+    # the live working tree.
+    signal.signal(signal.SIGTERM, _handle_termination_signal)
+    signal.signal(signal.SIGINT, _handle_termination_signal)
 
     root = Path(args.root).resolve()
     _ensure_root_importable(root)

@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from sunaba.tools.publish_ops import git_prepare_commit
+from sunaba.tools.vcs.publishing import _validate_manifest_path
 
 
 def _make_run(working_dir: str):
@@ -283,6 +284,48 @@ class TestManifestDeclaredDeletion:
             "parent commit should have todelete.txt before deletion"
         )
 
+    def test_declared_deletion_staged_with_git_rm(self, repo_setup: dict[str, Any]) -> None:
+        """A deletion staged with ``git rm`` (path gone from the worktree AND
+        the index) must also commit under manifest mode -- the observable
+        result is identical to the unstaged case (issue #837).
+
+        This drives ``git_prepare_commit`` (which does not validate); the
+        validation that makes the staged case reachable is exercised by
+        TestManifestPathValidation.  Together the two prove a declared
+        deletion commits the same either way.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_run(clone)
+
+        _git(clone, "checkout", "-b", "feat/feature-rm")
+        to_delete = Path(clone) / "todelete.txt"
+        to_delete.write_text("will be deleted\n")
+        _git(clone, "add", "todelete.txt")
+        _git(clone, "commit", "-m", "add todelete.txt")
+        _git(clone, "push", "--set-upstream", "origin", "feat/feature-rm")
+
+        # Stage the deletion: worktree AND index no longer know the path
+        rm = _git(clone, "rm", "todelete.txt")
+        assert rm.returncode == 0, f"git rm failed: {rm.stderr}"
+
+        err, _committed = git_prepare_commit(
+            run, branch="feat/feature-rm", message="Delete todelete.txt",
+            files=["todelete.txt"],
+        )
+        assert err is None, f"git_prepare_commit failed: {err}"
+
+        # Same observable result as the unstaged test_declared_deletion:
+        # absent from HEAD's tree, present in the parent.
+        tree = _git(clone, "ls-tree", "--name-only", "HEAD")
+        tree_files = tree.stdout.strip().split("\n")
+        assert "todelete.txt" not in tree_files, (
+            "todelete.txt should be deleted from HEAD tree"
+        )
+        parent_tree = _git(clone, "ls-tree", "--name-only", "HEAD~1")
+        assert "todelete.txt" in parent_tree.stdout, (
+            "parent commit should have todelete.txt before deletion"
+        )
+
 
 # ============================================================================
 # Additional: non-existent untracked path still rejected
@@ -330,6 +373,174 @@ class TestManifestUntrackedPathRejection:
         )
         assert err is not None, "glob pathspec must not stage README.md"
         assert err.get("step") == "git_add", f"unexpected error shape: {err}"
+
+
+# ============================================================================
+# Test: manifest path validation against real git (issue #837)
+# ============================================================================
+
+
+class TestManifestPathValidation:
+    """Drive ``_validate_manifest_path`` (publishing.py) through ``_make_run``
+    so every git command runs against a real clone.
+
+    publish()'s manifest validation used to be reachable only via mocked
+    ``exec_run`` sequences; a canned exit code cannot disagree with real
+    git, so the wrong question (index-only ``git ls-files``) sailed through
+    the suite.  These tests make the validation answer to real git: a
+    ``git rm``-staged deletion is accepted only because the path is still
+    tracked in HEAD.
+    """
+
+    def test_staged_deletion_accepted(self, repo_setup: dict[str, Any]) -> None:
+        """A deletion staged with ``git rm`` is accepted: the path is gone
+        from the worktree and the index, but still tracked in HEAD.
+
+        The #837 regression test -- the unfixed validation asks only the
+        index and rejects this path.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_run(clone)
+
+        to_delete = Path(clone) / "todelete.txt"
+        to_delete.write_text("will be deleted\n")
+        _git(clone, "add", "todelete.txt")
+        _git(clone, "commit", "-m", "add todelete.txt")
+
+        # Stage the deletion: worktree AND index no longer know the path
+        rm = _git(clone, "rm", "todelete.txt")
+        assert rm.returncode == 0, f"git rm failed: {rm.stderr}"
+
+        assert _validate_manifest_path(run, "todelete.txt") is None
+
+    def test_unstaged_deletion_accepted(self, repo_setup: dict[str, Any]) -> None:
+        """A plain ``rm`` (deletion left unstaged) is still accepted via the
+        index check."""
+        clone = repo_setup["clone_dir"]
+        run = _make_run(clone)
+
+        to_delete = Path(clone) / "todelete.txt"
+        to_delete.write_text("will be deleted\n")
+        _git(clone, "add", "todelete.txt")
+        _git(clone, "commit", "-m", "add todelete.txt")
+        to_delete.unlink()
+
+        assert _validate_manifest_path(run, "todelete.txt") is None
+
+    def test_staged_directory_deletion_rejected(self, repo_setup: dict[str, Any]) -> None:
+        """A directory deleted and staged with ``git rm -r`` is rejected as
+        a directory.
+
+        The directory is absent from the worktree (so ``test -d`` cannot
+        see it) and from the index, but the HEAD fallback must not accept
+        the tree entry -- ``git add`` on the pathspec would stage the
+        deletions of every file beneath it, expanding the commit beyond
+        the declared path (issue #837 review finding).
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_run(clone)
+
+        some_dir = Path(clone) / "some_dir"
+        some_dir.mkdir()
+        (some_dir / "a.md").write_text("a\n")
+        (some_dir / "b.md").write_text("b\n")
+        _git(clone, "add", "some_dir")
+        _git(clone, "commit", "-m", "add some_dir")
+
+        # Stage the deletion: worktree AND index no longer know the dir
+        rm = _git(clone, "rm", "-r", "some_dir")
+        assert rm.returncode == 0, f"git rm -r failed: {rm.stderr}"
+
+        err = _validate_manifest_path(run, "some_dir")
+
+        assert err is not None, "staged directory deletion must be rejected"
+        assert err["step"] == "validation"
+        assert "directory" in err["error"]
+
+    def test_unstaged_directory_deletion_rejected(self, repo_setup: dict[str, Any]) -> None:
+        """A directory deleted from the worktree but left in the index
+        (``rm -rf``, unstaged) is rejected as a directory too.
+
+        ``git ls-files`` treats a directory pathspec as matching every
+        tracked file beneath it, so only an output whose first entry is the
+        declared path itself counts as a file deletion (issue #837 review
+        finding).
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_run(clone)
+
+        some_dir = Path(clone) / "some_dir"
+        some_dir.mkdir()
+        (some_dir / "a.md").write_text("a\n")
+        (some_dir / "b.md").write_text("b\n")
+        _git(clone, "add", "some_dir")
+        _git(clone, "commit", "-m", "add some_dir")
+
+        # Delete from the worktree only; the index still tracks the files
+        for f in some_dir.iterdir():
+            f.unlink()
+        some_dir.rmdir()
+
+        err = _validate_manifest_path(run, "some_dir")
+
+        assert err is not None, "unstaged directory deletion must be rejected"
+        assert err["step"] == "validation"
+        assert "directory" in err["error"]
+
+    def test_nonexistent_path_rejected(self, repo_setup: dict[str, Any]) -> None:
+        """A path that exists nowhere -- worktree, index, or HEAD -- is
+        rejected with the unchanged error text."""
+        clone = repo_setup["clone_dir"]
+        run = _make_run(clone)
+
+        err = _validate_manifest_path(run, "nosuchfile.txt")
+
+        assert err is not None, "expected a validation error"
+        assert err["step"] == "validation"
+        assert "nosuchfile.txt" in err["error"]
+        assert "regular file" in err["error"]
+
+    def test_directory_rejected_as_directory(self, repo_setup: dict[str, Any]) -> None:
+        """A declared directory is rejected *as a directory*, before the
+        tracked-path fallback.
+
+        ``git ls-files --error-unmatch`` and ``git ls-tree`` both treat a
+        directory pathspec as matching everything beneath it, so if the
+        directory check ever moved after the fallback this would be
+        accepted and #836 would regress.  The error text pins that the
+        rejection is the directory one.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_run(clone)
+
+        some_dir = Path(clone) / "some_dir"
+        some_dir.mkdir()
+        (some_dir / "inner.txt").write_text("x\n")
+        _git(clone, "add", "some_dir/inner.txt")
+        _git(clone, "commit", "-m", "add some_dir")
+
+        err = _validate_manifest_path(run, "some_dir")
+
+        assert err is not None, "expected a validation error"
+        assert err["step"] == "validation"
+        assert "directory" in err["error"]
+
+    def test_glob_pathspec_rejected_by_head_check(self, repo_setup: dict[str, Any]) -> None:
+        """A declared path containing glob characters must not pass the HEAD
+        fallback by matching files it does not literally name.
+
+        ``:(literal)`` is applied to the ``git ls-tree`` check too: without
+        it, ``*.md`` would glob-match the tracked README.md in HEAD and be
+        accepted by validation.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_run(clone)
+
+        err = _validate_manifest_path(run, "*.md")
+
+        assert err is not None, "glob pathspec must not pass validation"
+        assert err["step"] == "validation"
+        assert "regular file" in err["error"]
 
 
 # ============================================================================

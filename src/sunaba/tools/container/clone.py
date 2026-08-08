@@ -662,8 +662,10 @@ def _setup_pr_branch(
 
         try:
             pr_info = json.loads(stdout_text)
-        except json.JSONDecodeError:
-            raise RuntimeError(f"Failed to parse PR info JSON: {stdout_text[:200]}")
+        except json.JSONDecodeError as e:
+            # Keep the decode error: its position points at where gh's output
+            # diverged from the expected JSON shape.
+            raise RuntimeError(f"Failed to parse PR info JSON: {stdout_text[:200]}") from e
 
         head_ref = pr_info.get("headRefName", "")
         base_ref = pr_info.get("baseRefName", "")

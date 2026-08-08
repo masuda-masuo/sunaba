@@ -121,7 +121,9 @@ def write_file(container: Any, container_id_short: str, file_path: str, content:
     try:
         ok = container.put_archive(parent_dir, tar_stream.getvalue())
     except Exception as e:
-        raise ValueError(f"Failed to write {file_path}: {e}")
+        # Chain the docker failure: its type (connection vs API error) is
+        # what distinguishes a transient failure from a real one.
+        raise ValueError(f"Failed to write {file_path}: {e}") from e
     if not ok:
         raise ValueError(f"Failed to write {file_path}: put_archive returned False")
 

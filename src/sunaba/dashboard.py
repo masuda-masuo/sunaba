@@ -958,6 +958,27 @@ def _render_bar(n: int, max_val: int, label: str, color: str = "#58a6ff") -> str
     )
 
 
+def _render_cd_rate_row(usage: dict[str, Any]) -> str:
+    """Render the cd-rate metric row, split by redundant cds (Issue #845).
+
+    ``cd_rate_pct`` still counts every leading cd, so the number stays
+    comparable with history; the redundant share -- cds to the default
+    working directory, which are no-ops -- is the actionable half.  A
+    usage dict predating #845 carries neither redundant key, so both
+    default to 0 rather than raising.
+    """
+    redundant_count = usage.get("cd_redundant_count", 0)
+    redundant_pct = usage.get("cd_redundant_rate_pct", 0)
+    return (
+        f'<div class="metric-row">'
+        f'<span class="metric-label">cd rate:</span> '
+        f'<span class="metric-val" style="color:#ffa657">{usage["cd_rate_pct"]}%</span> '
+        f'<span class="metric-note">({usage["cd_count"]} / {usage["exec_entry_count"]} exec entries'
+        f'; of which redundant &rarr;/workspace: {redundant_pct}%, {redundant_count})</span>'
+        f'</div>'
+    )
+
+
 def _render_tool_usage_panel(
     from_date: str | None,
     to_date: str | None,
@@ -993,13 +1014,7 @@ def _render_tool_usage_panel(
     )
 
     # CD rate
-    cd_html = (
-        f'<div class="metric-row">'
-        f'<span class="metric-label">cd rate:</span> '
-        f'<span class="metric-val" style="color:#ffa657">{usage["cd_rate_pct"]}%</span> '
-        f'<span class="metric-note">({usage["cd_count"]} / {usage["exec_entry_count"]} exec entries)</span>'
-        f'</div>'
-    )
+    cd_html = _render_cd_rate_row(usage)
 
     # Bypass rate
     bypass_total = usage["bypass_count"]

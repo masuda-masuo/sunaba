@@ -46,6 +46,26 @@ class TestToolDescriptionBudget:
         assert not missing, f"tools without a description: {missing}"
 
 
+class TestExecStartingDirectory:
+    """The exec tools say where commands start (Issue #845).
+
+    Nothing at exec-call time told the caller the default working
+    directory, so a no-op ``cd /workspace`` opened the majority of exec
+    calls.  ``t.description`` is the body *before* ``Args:`` -- asserting
+    on it proves the sentence survives FastMCP's split.
+    """
+
+    def test_exec_tools_state_the_default_cwd_and_working_dir(self) -> None:
+        descriptions = {t.name: (t.description or "") for t in _tools(server)}
+        for name in ("sandbox_exec", "sandbox_exec_background"):
+            assert "/workspace" in descriptions[name], (
+                f"{name} does not say where commands start"
+            )
+            assert "working_dir" in descriptions[name], (
+                f"{name} does not point at working_dir as the alternative"
+            )
+
+
 class TestServerInstructions:
     """The workflow map is defined, wired into FastMCP, and within budget."""
 
@@ -107,7 +127,13 @@ class TestServerInstructions:
 #   dropped the now-wrong "Python" wording, net +69 B); the schema gained the
 #   manager= parameter (+42 B, exactly its description).  Both are the
 #   measured cost of the new surface, per this file's protocol.
-TOTAL_DESCRIPTION_BYTE_LIMIT = 11844
+# - descriptions 11844 -> 12068: #845 told sandbox_exec and
+#   sandbox_exec_background where commands start (the repo root) and that
+#   working_dir= moves them -- the fact whose absence made a ritual
+#   `cd /workspace` the first command of 47% of all execs.  One two-line
+#   sentence per tool, +112 B each, measured; no parameter surface added
+#   (param limit unchanged).
+TOTAL_DESCRIPTION_BYTE_LIMIT = 12068
 TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10562
 
 

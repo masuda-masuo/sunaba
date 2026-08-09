@@ -1069,6 +1069,25 @@ _SHELL_TO_TOOL: dict[str, str] = {
 }
 
 
+# The container's default working directory (= the clone destination,
+# see docs/design_filesystem_layout.md).  A ``cd`` here is a no-op, which
+# is what separates the ``cd-redundant`` bucket from a real relocation
+# (issue #845).  Compared literally: the journal records no per-container
+# clone_dest, and plumbing container state into the report for the rare
+# non-default case is not worth it -- the approximation over-counts
+# ``cd`` (real) at worst, never ``cd-redundant``.
+_DEFAULT_CWD = "/workspace"
+
+
+def _is_default_cwd(target: str) -> bool:
+    """True when *target* names the default working directory.
+
+    Tolerates a trailing slash and surrounding quotes, both of which the
+    shell strips before ``cd`` sees the path.
+    """
+    return target.strip().strip("\"'").rstrip("/") == _DEFAULT_CWD
+
+
 def classify_exec_command(cmd: str) -> str:
     """Classify a single shell command string into a bucket category.
 
@@ -1076,6 +1095,9 @@ def classify_exec_command(cmd: str) -> str:
     bucket.  Special-case detection for piped / chained commands is
     handled by checking for ``&&`` and ``;`` separators — in that case
     only the first sub-command is used for classification.
+
+    ``cd`` splits in two: ``cd-redundant`` when the target is the default
+    working directory (a no-op), plain ``cd`` for a real relocation.
     """
     cmd = cmd.strip()
     if not cmd:
@@ -1157,6 +1179,8 @@ def classify_exec_command(cmd: str) -> str:
 
     # cd
     if first == "cd":
+        if len(tokens) == 2 and _is_default_cwd(tokens[1]):
+            return "cd-redundant"
         return "cd"
 
     # File operations
@@ -1204,7 +1228,11 @@ def get_tool_usage(
         - ``non_exec_ops`` — count of non-exec tool operations
         - ``command_buckets`` — ``{bucket: count}`` for exec commands
         - ``cd_count`` — count of exec entries whose first command is ``cd``
+          (every cd, redundant or not — unchanged since the metric shipped)
         - ``cd_rate_pct`` — cd entries as % of exec entries
+        - ``cd_redundant_count`` — the subset of ``cd_count`` that cd's to the
+          default working directory (``/workspace``), i.e. a no-op
+        - ``cd_redundant_rate_pct`` — redundant cds as % of exec entries
         - ``structured_ops`` — count of each structured tool operation
         - ``bypass_count`` — exec commands that could have used a dedicated tool
         - ``bypass_rate_pct`` — bypass as % of (dedicated + bypass)
@@ -1232,6 +1260,7 @@ def get_tool_usage(
     exec_entry_count = 0
     command_buckets: dict[str, int] = {}
     cd_count = 0
+    cd_redundant_count = 0
     structured_ops: dict[str, int] = {}
     bypass_count = 0
     bypass_detail: dict[str, int] = {}
@@ -1266,8 +1295,13 @@ def get_tool_usage(
                 bucket = classify_exec_command(first_cmd)
                 command_buckets[bucket] = command_buckets.get(bucket, 0) + 1
 
-                if bucket == "cd":
+                # cd_count stays "every leading cd" so the historical
+                # rate remains comparable; the redundant share is the
+                # new signal (issue #845).
+                if bucket in ("cd", "cd-redundant"):
                     cd_count += 1
+                    if bucket == "cd-redundant":
+                        cd_redundant_count += 1
 
                 # Bypass detection: does a structured tool exist for this command?
                 first_word = first_cmd.strip().split()[0] if first_cmd.strip() else ""
@@ -1300,6 +1334,9 @@ def get_tool_usage(
 
     exec_share_pct = round(exec_ops / total_ops * 100, 1) if total_ops else 0.0
     cd_rate_pct = round(cd_count / exec_entry_count * 100, 1) if exec_entry_count else 0.0
+    cd_redundant_rate_pct = (
+        round(cd_redundant_count / exec_entry_count * 100, 1) if exec_entry_count else 0.0
+    )
 
     # Bypass rate: bypass_count / (bypass_count + dedicated_usage)
     dedicated_usage = struct_tool_ops_from_journal(structured_ops)
@@ -1315,6 +1352,8 @@ def get_tool_usage(
         "command_buckets": dict(sorted(command_buckets.items(), key=lambda x: -x[1])),
         "cd_count": cd_count,
         "cd_rate_pct": cd_rate_pct,
+        "cd_redundant_count": cd_redundant_count,
+        "cd_redundant_rate_pct": cd_redundant_rate_pct,
         "structured_ops": dict(sorted(structured_ops.items(), key=lambda x: -x[1])),
         "bypass_count": bypass_count,
         "bypass_rate_pct": bypass_rate_pct,

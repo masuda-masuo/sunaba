@@ -59,6 +59,9 @@ def sandbox_exec(
 ) -> str:
     """Execute commands inside a running sandbox container.
 
+    Commands start in the repo root (``/workspace``) -- no leading ``cd``;
+    pass ``working_dir=`` to run elsewhere.
+
     Commands are chained with '&&' in one exec instance (cwd and env
     persist between them).  A raw newline inside a command string
     breaks the JSON-RPC request before it reaches the server: use
@@ -262,6 +265,9 @@ def sandbox_exec(
 
 def sandbox_exec_background(container_id: str, commands: Annotated[list[str], BeforeValidator(_coerce_list_arg)], working_dir: str = "") -> str:
     """Execute commands in the background inside a running sandbox container.
+
+    Commands start in the repo root (``/workspace``) -- no leading ``cd``;
+    pass ``working_dir=`` to run elsewhere.
 
     The command is started with ``nohup`` so it continues running even
     if the MCP connection drops.  Returns a job ID that can be used

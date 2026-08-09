@@ -9,6 +9,7 @@ from typing import Iterator
 from unittest.mock import patch
 
 from sunaba.journal import (
+    classify_exec_command,
     generate_run_id,
     get_journal_path,
     get_last_activity_per_container,
@@ -985,3 +986,59 @@ class TestJournalMasking:
             text = log_path.read_text(encoding="utf-8")
         assert "pytest -q" in text
         assert "ruff check ." in text
+
+
+class TestCdRedundantSplit:
+    """The cd metric splits no-op cds from real relocations (Issue #845).
+
+    A leading ``cd /workspace`` goes to the container's default working
+    directory, so it does nothing; only a cd elsewhere expresses a real
+    need the ``working_dir=`` argument could serve.
+    """
+
+    def _usage_for_fixture(self, tmp_path: Path) -> dict:
+        """One exec entry per cd flavour, plus a no-cd entry."""
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
+            for cmd in (
+                "cd /workspace && ls -la",          # redundant: the default cwd
+                "cd /workspace/sub && ls -la",      # real: substitutable by working_dir=
+                "cd /tmp/y && ls -la",              # real: outside the repo
+                "ls -la",                           # no cd at all
+            ):
+                record_exec("abc123", [cmd], exit_code=0)
+            return get_tool_usage()
+
+    def test_usage_report_exposes_redundant_cd_keys(self, tmp_path: Path) -> None:
+        usage = self._usage_for_fixture(tmp_path)
+
+        assert usage["exec_entry_count"] == 4
+        assert usage["cd_redundant_count"] == 1
+        assert usage["cd_redundant_rate_pct"] == 25.0
+        assert usage["command_buckets"]["cd-redundant"] == 1
+        assert usage["command_buckets"]["cd"] == 2
+
+    def test_cd_count_and_rate_still_cover_every_cd(self, tmp_path: Path) -> None:
+        """Backward compatibility: the shipped keys keep their meaning.
+
+        ``cd_count`` / ``cd_rate_pct`` count redundant and real cds alike,
+        so the number stays comparable with historical snapshots.
+        """
+        usage = self._usage_for_fixture(tmp_path)
+
+        assert usage["cd_count"] == 3
+        assert usage["cd_rate_pct"] == 75.0
+        assert usage["cd_redundant_count"] < usage["cd_count"]
+
+    def test_classify_recognises_default_cwd_spellings(self) -> None:
+        assert classify_exec_command("cd /workspace") == "cd-redundant"
+        assert classify_exec_command("cd /workspace/ && pytest -q") == "cd-redundant"
+        assert classify_exec_command('cd "/workspace"') == "cd-redundant"
+        # Real relocations, and a bare ``cd`` (goes to $HOME, not /workspace).
+        assert classify_exec_command("cd /workspace/src && pytest -q") == "cd"
+        assert classify_exec_command("cd /tmp/y") == "cd"
+        assert classify_exec_command("cd") == "cd"

@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from sunaba.dashboard import (
+    _render_cd_rate_row,
     _render_health_badge,
     get_dashboard_url,
     start_dashboard,
@@ -942,3 +943,32 @@ class TestIncrementalAggCache:
         # Chunk 1 had no edit; all 40 concurrent-phase writes were applied
         # exactly once each.
         assert state["run-1"]["op_calls"]["tool:edit_file"] == 40
+
+
+class TestCdRateRow:
+    """The cd-rate row shows the redundant share (Issue #845)."""
+
+    def test_row_shows_redundant_split(self) -> None:
+        html = _render_cd_rate_row({
+            "cd_rate_pct": 52.5,
+            "cd_count": 1789,
+            "exec_entry_count": 3404,
+            "cd_redundant_count": 1590,
+            "cd_redundant_rate_pct": 46.7,
+        })
+
+        assert "52.5%" in html          # unchanged overall rate
+        assert "46.7%" in html          # the new signal
+        assert "1590" in html
+        assert "redundant" in html
+
+    def test_row_tolerates_a_snapshot_without_the_new_keys(self) -> None:
+        """An old usage dict (pre-#845) must render, not KeyError."""
+        html = _render_cd_rate_row({
+            "cd_rate_pct": 52.5,
+            "cd_count": 1789,
+            "exec_entry_count": 3404,
+        })
+
+        assert "52.5%" in html
+        assert "0%" in html             # defensive default for the missing keys

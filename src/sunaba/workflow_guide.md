@@ -38,6 +38,9 @@ and cheaper.
 | ls / find | `list_files` |
 | run one Python snippet | `run_python` |
 
+- **Exec commands start in the repository root -- /workspace by default.** A leading
+  cd to it is a no-op; pass `working_dir=` to run somewhere else.
+
 ## phase: edit
 
 The editing tools are split by intent; picking the wrong one is what makes edits stick.

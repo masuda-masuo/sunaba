@@ -133,8 +133,16 @@ class TestServerInstructions:
 #   `cd /workspace` the first command of 47% of all execs.  One two-line
 #   sentence per tool, +112 B each, measured; no parameter surface added
 #   (param limit unchanged).
-TOTAL_DESCRIPTION_BYTE_LIMIT = 12068
-TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10562
+# - descriptions 12068 -> 12140, param descriptions 10562 -> 10581
+#   (2026-08-09): #847 added tail_lines=N to read_file_range, so a file's
+#   last N lines no longer need the line count first (two calls) -- the gap
+#   that kept shell `tail -n N` cheaper than the tool.  The description
+#   body gained the tail sentence (+72 B); the schema gained the
+#   tail_lines= parameter (+24 B for its description, using up the 5 B of
+#   headroom under the old cap).  Both are the measured cost of the new
+#   surface, per this file's protocol.
+TOTAL_DESCRIPTION_BYTE_LIMIT = 12140
+TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10581
 
 
 def _param_desc_bytes(tool) -> int:

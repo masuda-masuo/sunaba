@@ -35,6 +35,8 @@ and cheaper.
 |---|---|
 | grep | `search_in_container` |
 | cat / head | `read_file_range` |
+| tail -n N (last N lines) | `read_file_range` with `tail_lines=N` |
+| sed -n 'A,Bp' (reading a range) | `read_file_range` (in-place sed is an edit, see below) |
 | ls / find | `list_files` |
 | run one Python snippet | `run_python` |
 

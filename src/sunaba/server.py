@@ -96,15 +96,15 @@ logger: logging.Logger = logging.getLogger(__name__)
 # anything duplicated here is a fixed cost.
 SERVER_INSTRUCTIONS = """\
 sunaba: Docker-sandboxed dev workflow. All tools take the container_id returned by sandbox_initialize. Typical flow:
-1. INIT: sandbox_initialize(clone_repo="owner/repo") clones + installs deps in one call; pr=N checks out a PR branch instead. run_container_and_exec wraps init/exec/stop for one-shot runs; sandbox_attach reconnects to a running container; sandbox_stop cleans up.
-2. EXPLORE: search_in_container (grep), read_file_range (cat/head), list_files (ls/find).
+1. INIT: sandbox_initialize(clone_repo="owner/repo") clones + installs deps in one call; pr=N checks out a PR branch instead. run_container_and_exec wraps init/exec/stop; sandbox_attach reconnects to a running container; sandbox_stop cleans up.
+2. EXPLORE: search_in_container, read_file_range, list_files (ls/find).
 3. EDIT: write_file creates or wholly overwrites a file; edit_file changes part of an existing one; transform_file runs a Python transform for bulk/computed edits; undo_file_edit restores the pre-edit snapshot. checkpoint / checkpoint_restore are local savepoints.
 4. VERIFY: verify_in_container is the pre-publish gate (tests + lint + type in one call). lint_in_container / type_check_in_container are single-file checks. diff_in_container reviews pending changes before pushing.
 5. PUBLISH: publish(files=[...], create_pr=True) stages the declared paths, commits, pushes, opens the PR. Verify first; publish is the only network exit.
 Issue/PR ops: issue_view (read), sandbox_issue_write (create/comment), sandbox_pr_review_write (formal reviews).
-Prefer dedicated tools over raw sandbox_exec: grep->search_in_container, cat->read_file_range, sed->edit_file/transform_file, pip->package_install, pytest/ruff/pyright->verify/lint/type_check_in_container, git push/gh pr->publish.
+Prefer dedicated tools over sandbox_exec: grep->search_in_container, cat/head->read_file_range, tail -n N->read_file_range(tail_lines=N), sed -n 'A,Bp' (range read)->read_file_range, sed -i->edit_file/transform_file, pip->package_install, pytest/ruff/pyright->verify/lint/type_check_in_container, git push/gh pr->publish.
 File transfer is one-way (host->container; egress-proxy boundary). To move work between containers: checkpoint + publish from the original, or start fresh with sandbox_initialize(clone_repo=...).
-Concurrency: docker-bound tools return a JSON error with "busy": true when the docker caps are reached (24 in flight, 6 per container) instead of hanging; wait and retry, and note it is JSON, not tool output. sandbox_stop / sandbox_list_containers run on a separate recovery pool (4 slots) and stay callable; sandbox_stop (force=False) refuses when it cannot verify unpushed checkpoints.
+Concurrency: docker-bound tools return a JSON error with "busy": true when the docker caps are reached instead of hanging; wait and retry, and note it is JSON, not tool output. sandbox_stop / sandbox_list_containers run on a separate recovery pool and stay callable; sandbox_stop (force=False) refuses when it cannot verify unpushed checkpoints.
 """
 
 mcp = FastMCP("sunaba", instructions=SERVER_INSTRUCTIONS)

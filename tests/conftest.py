@@ -14,6 +14,32 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# ---------------------------------------------------------------------------
+# gitleaks fakes (issue #842)
+# ---------------------------------------------------------------------------
+
+#: What ``gitleaks version`` prints (bare version string, exit 0).
+GITLEAKS_VERSION_OUTPUT = b"8.30.1\n"
+
+#: What a clean ``gitleaks dir --report-format json --report-path -`` writes.
+#: NOT empty: an empty report means the scan never produced one, which
+#: ``run_secret_scan`` treats as an error (#704).
+GITLEAKS_CLEAN_REPORT = b"[]"
+
+
+def gitleaks_exit_for(report: bytes) -> int:
+    """Return the exit code real gitleaks gives for *report*.
+
+    Mirrors ``--exit-code 99``: 99 when the report carries findings, 0 when
+    it is empty.  Keeping the fake's two channels consistent is what stops a
+    test from passing on a combination the binary can never produce.
+    """
+    try:
+        entries = json.loads(report.decode("utf-8") or "[]")
+    except (ValueError, UnicodeDecodeError):
+        return 0
+    return 99 if isinstance(entries, list) and entries else 0
+
 
 @pytest.fixture(autouse=True)
 def _mock_resolve_git_root() -> None:
@@ -207,7 +233,7 @@ def _make_docker_compliant_container(
 
 def _make_publish_container(
     exec_returns: list[tuple[int, bytes, bytes]],
-    detect_secrets_scan_output: bytes | None = None,
+    gitleaks_scan_output: bytes | None = None,
     git_diff_tree_output: bytes | None = None,
 ):
     """Build a mock container for publish tests that transparently handles
@@ -227,10 +253,12 @@ def _make_publish_container(
 
     Known secret-scan commands that are dispatched:
 
-    * ``detect-secrets --version`` → available (exit 0, version string)
-    * ``detect-secrets scan …``   → uses *detect_secrets_scan_output*
-      (default clean JSON with empty results; pass ``b"..."`` with a
-      finding to produce a blocking result).
+    * ``gitleaks version`` → available (exit 0, version string)
+    * ``gitleaks dir …``   → uses *gitleaks_scan_output*
+      (default clean report ``[]``; pass ``b"[...]"`` with a finding
+      entry to produce a blocking result).  The exit code follows the
+      real binary: 99 when the canned report carries findings, 0 when
+      it is empty.
     * ``cat …/.secrets.baseline …`` → baseline absent (exit 1)
     * ``git diff-tree …``          → uses *git_diff_tree_output*
       (default ``b""`` so ``run_secret_scan`` receives no files and
@@ -241,10 +269,10 @@ def _make_publish_container(
     exec_returns:
         Same format as ``_make_container_mock`` — one ``(ec, stdout, stderr)``
         entry per publish ``_run`` call, in order.
-    detect_secrets_scan_output:
-        Bytes that the ``detect-secrets scan`` ``exec_in_container`` call
-        returns on stdout.  Default ``None`` = clean scan (empty results),
-        preserving the existing behaviour.
+    gitleaks_scan_output:
+        Bytes that the ``gitleaks dir`` ``exec_in_container`` call
+        returns on stdout (a gitleaks JSON report array).  Default
+        ``None`` = clean scan (``[]``).
     git_diff_tree_output:
         Bytes that the ``git diff-tree …`` ``exec_in_container`` call returns
         on stdout.  Default ``None`` = ``b""`` (empty), which makes
@@ -262,14 +290,11 @@ def _make_publish_container(
 
     # Resolve defaults once at construction time
     _scan_out: bytes = (
-        detect_secrets_scan_output
-        if detect_secrets_scan_output is not None
-        else (
-            b'{"results": {},'
-            b' "generated_at": "2026-01-01T00:00:00Z",'
-            b' "plugins_used": []}'
-        )
+        gitleaks_scan_output
+        if gitleaks_scan_output is not None
+        else GITLEAKS_CLEAN_REPORT
     )
+    _scan_ec: int = gitleaks_exit_for(_scan_out)
     _diff_out: bytes = git_diff_tree_output if git_diff_tree_output is not None else b""
 
     def _side_effect(*args: object, **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
@@ -279,13 +304,13 @@ def _make_publish_container(
             cmd = []
         cmd_str = " ".join(str(c) for c in cmd)
 
-        # --- Secret scan: detect-secrets --version ---
-        if cmd == ["detect-secrets", "--version"]:
-            return (0, (b"1.5.0\n", b""))
+        # --- Secret scan: gitleaks version ---
+        if cmd == ["gitleaks", "version"]:
+            return (0, (GITLEAKS_VERSION_OUTPUT, b""))
 
-        # --- Secret scan: detect-secrets scan ---
-        if "detect-secrets scan" in cmd_str:
-            return (0, (_scan_out, b""))
+        # --- Secret scan: gitleaks dir ---
+        if "gitleaks dir" in cmd_str:
+            return (_scan_ec, (_scan_out, b""))
 
         # --- Secret scan: cat .secrets.baseline ---
         if ".secrets.baseline" in cmd_str:
@@ -316,26 +341,30 @@ def _make_publish_container(
 def _make_publish_container_for_scan_test(
     exec_returns: list[tuple[int, bytes, bytes]],
     *,
-    detect_secrets_available: bool = True,
-    scan_exit_code: int = 0,
-    detect_secrets_scan_output: bytes | None = None,
+    gitleaks_available: bool = True,
+    scan_exit_code: int | None = None,
+    gitleaks_scan_output: bytes | None = None,
     git_diff_tree_output: bytes | None = None,
 ):
     """Like ``_make_publish_container`` but gives full control over the
-    detect-secrets scan responses so tests can exercise every error branch
+    gitleaks scan responses so tests can exercise every error branch
     of ``run_secret_scan``.
 
     Parameters
     ----------
     exec_returns:
         Same as ``_make_publish_container``.
-    detect_secrets_available:
-        When False, the ``detect-secrets --version`` probe returns exit code 1
+    gitleaks_available:
+        When False, the ``gitleaks version`` probe returns exit code 1
         (scanner absent).  Default True.
     scan_exit_code:
-        Exit code for the ``detect-secrets scan`` command.  Default 0.
-    detect_secrets_scan_output:
-        Stdout for the scan.  Default ``None`` = clean JSON.
+        Exit code for the ``gitleaks dir`` command.  Default ``None`` =
+        whatever the real binary would return for *gitleaks_scan_output*
+        (0 clean / 99 findings); pass an explicit code to simulate a
+        scan failure.
+    gitleaks_scan_output:
+        Stdout for the scan (a gitleaks JSON report array).  Default
+        ``None`` = clean report ``[]``.
     git_diff_tree_output:
         Same as ``_make_publish_container``.  Default ``None`` = empty.
     """
@@ -346,17 +375,17 @@ def _make_publish_container_for_scan_test(
     pos = [0]
 
     _scan_out: bytes = (
-        detect_secrets_scan_output
-        if detect_secrets_scan_output is not None
-        else (
-            b'{"results": {},'
-            b' "generated_at": "2026-01-01T00:00:00Z",'
-            b' "plugins_used": []}'
-        )
+        gitleaks_scan_output
+        if gitleaks_scan_output is not None
+        else GITLEAKS_CLEAN_REPORT
+    )
+    _scan_ec: int = (
+        scan_exit_code if scan_exit_code is not None
+        else gitleaks_exit_for(_scan_out)
     )
     _diff_out: bytes = git_diff_tree_output if git_diff_tree_output is not None else b""
-    _ds_version_ec: int = 0 if detect_secrets_available else 1
-    _ds_version_out: bytes = b"1.5.0\n" if detect_secrets_available else b""
+    _gl_version_ec: int = 0 if gitleaks_available else 1
+    _gl_version_out: bytes = GITLEAKS_VERSION_OUTPUT if gitleaks_available else b""
 
     def _side_effect(*args: object, **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
         nonlocal pos
@@ -365,13 +394,13 @@ def _make_publish_container_for_scan_test(
             cmd = []
         cmd_str = " ".join(str(c) for c in cmd)
 
-        # --- Secret scan: detect-secrets --version ---
-        if cmd == ["detect-secrets", "--version"]:
-            return (_ds_version_ec, (_ds_version_out, b""))
+        # --- Secret scan: gitleaks version ---
+        if cmd == ["gitleaks", "version"]:
+            return (_gl_version_ec, (_gl_version_out, b""))
 
-        # --- Secret scan: detect-secrets scan ---
-        if "detect-secrets scan" in cmd_str:
-            return (scan_exit_code, (_scan_out, b""))
+        # --- Secret scan: gitleaks dir ---
+        if "gitleaks dir" in cmd_str:
+            return (_scan_ec, (_scan_out, b""))
 
         # --- Secret scan: cat .secrets.baseline ---
         if ".secrets.baseline" in cmd_str:

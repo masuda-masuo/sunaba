@@ -169,8 +169,8 @@ Both of these caused real damage on 2026-07-22 (tracked as issue #727).
 
 ### When the secret scan blocks you
 
-detect-secrets runs before publish. A false positive can be pushed through with
-`secret_scan_override`.
+gitleaks runs before publish, over the manifest files only. A false positive can be
+pushed through with `secret_scan_override`.
 
 - That approval step is designed for a human driving sunaba directly. Under an
   orchestrator/worker setup the orchestrator decides and presses it, rather than stopping to
@@ -178,9 +178,9 @@ detect-secrets runs before publish. A false positive can be pushed through with
 - **What is delegated is the approval, not the judgment.** Check each finding against the
   real content -- a value, a variable name, or a test fixture. A genuine secret is never
   pushed. Record the reasoning in the PR body or the issue.
-- The scan runs with `--no-verify`. Verification used to fail inside the sandbox and discard
-  findings silently, letting credential pairs through. The offline judgment is the correct
-  one.
+- The scan is fully offline by design: gitleaks has no network verification feature, so a
+  finding is a pattern/entropy judgment, never "this credential is live". Judge each finding
+  against the real content; do not expect the scanner to have checked it for you.
 
 ## phase: issue
 

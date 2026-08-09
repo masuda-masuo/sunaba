@@ -1,8 +1,8 @@
-"""Secret scan via detect-secrets and override tool (issue #676).
+"""Secret scan via gitleaks and override tool (issue #676, #842).
 
 Public symbols
 --------------
-- ``run_secret_scan(container, files, working_dir)`` — run detect-secrets
+- ``run_secret_scan(container, files, working_dir)`` — run gitleaks
   on files via ``container.exec_run``.
 - ``secret_scan_override(container_id, ...)`` — MCP tool to bypass findings.
 - ``check_override(container_id)`` — check/consume one-time override flag.
@@ -14,8 +14,10 @@ that document carries the reasoning, the threat model, the known gaps and the
 alternatives already considered and rejected.  If the two disagree, the
 document is right and this file has drifted.
 
-The scanner is Yelp's ``detect-secrets`` (Apache-2.0), baked into the base
-image.  It is never vendored so sunaba stays MIT.
+The scanner is ``gitleaks`` (MIT), a static Go binary baked into the base
+image.  It is never vendored so sunaba stays MIT.  It replaced the
+previous scanner in #842: gitleaks makes no network calls at all, so the
+verification fail-open of #701 cannot exist in it.
 
 Scan scope is the *manifest diff* / *commit* files only — never the whole
 tree.  This keeps the scan cheap and avoids resurfacing approved secrets.
@@ -26,6 +28,10 @@ unrecognised or absent state blocks (#704).
 
 Missing scanner → ``skipped``, and publish proceeds.  A deliberate, named
 exception, not an accident; see the known gap in the design document.
+
+Finding identity is ``sha1(secret)`` — the same hash the previous scanner
+wrote as ``hashed_secret``, so ``.secrets.baseline`` files and
+override-registry entries survive the scanner swap unchanged.
 
 Suppressions have two separate authorities (#708):
 
@@ -42,11 +48,13 @@ bypass of the permission gate (#708).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import shlex
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 from docker.errors import NotFound
@@ -64,15 +72,22 @@ logger = logging.getLogger(__name__)
 #: Controls whether a repo-local ``.secrets.baseline`` file is used to
 #: suppress known/approved findings (default: enabled).
 #:
-#: The baseline is applied by us, not by detect-secrets: we scan plainly and
+#: The baseline is applied by us, not by the scanner: we scan plainly and
 #: subtract findings whose ``hashed_secret`` the baseline already records.
-#: Passing ``--baseline`` instead would make detect-secrets rewrite the
-#: baseline file and print nothing, and an empty stdout parsed as "no
-#: findings" would turn the whole guard into a silent pass.
+#: Handing the suppression list to the scanner instead (gitleaks
+#: ``--baseline-path`` / ``.gitleaksignore``) would move the decision inside
+#: the container, where the agent can write it — the #708 bypass.
 SUNABA_SECRETS_BASELINE_ENV = "SUNABA_SECRETS_BASELINE"
 
 
 _BASELINE_FILENAME = ".secrets.baseline"
+
+#: Exit code gitleaks is told to use for "leaks found" (``--exit-code``).
+#: Its default is ``1``, which it also returns for fatal errors (missing
+#: file, bad config) — an ambiguity that would let a broken scan read as an
+#: ordinary findings result.  99 is unused by gitleaks otherwise, so
+#: 0 / 99 / anything-else map cleanly to clean / findings / error.
+_GITLEAKS_FINDINGS_EXIT = 99
 
 
 def _exclude_baseline(files: list[str]) -> list[str]:
@@ -251,8 +266,8 @@ def _extract_baseline_hashes(baseline_data: dict) -> set[str]:
     Parameters
     ----------
     baseline_data:
-        A parsed ``.secrets.baseline`` JSON dict (same shape as
-        detect-secrets output).
+        A parsed ``.secrets.baseline`` JSON dict (the historical baseline
+        shape, kept unchanged across the #842 scanner swap).
 
     Returns
     -------
@@ -349,18 +364,122 @@ def exec_in_container(
     return (exit_code, stdout_text, stderr_text)
 
 
-def _check_detect_secrets(container: Any) -> bool:
-    """Return True when ``detect-secrets`` is available in the container.
+def _check_gitleaks(container: Any) -> bool:
+    """Return True when ``gitleaks`` is available in the container.
 
-    ``detect-secrets --version`` prints a bare version string like ``1.5.0``
-    to stdout with exit code 0.  A non-zero exit or empty stdout means the
+    ``gitleaks version`` prints a bare version string like ``8.30.1`` to
+    stdout with exit code 0.  A non-zero exit or empty stdout means the
     tool is absent or broken.
     """
     ec, out, _ = exec_in_container(
         container,
-        cmd=["detect-secrets", "--version"],
+        cmd=["gitleaks", "version"],
     )
     return ec == 0 and bool(out.strip())
+
+
+def _hash_secret(secret: str) -> str:
+    """Return the baseline identity of *secret*: its SHA-1 hex digest.
+
+    This is exactly what the previous scanner stored as ``hashed_secret``, so
+    baselines and override-registry entries written before the gitleaks
+    swap (#842) keep matching the same secret strings afterwards.  It is an
+    identity, not a password hash — SHA-1's collision weakness buys an
+    attacker nothing here, and the alternative is invalidating every
+    committed ``.secrets.baseline``.
+    """
+    return hashlib.sha1(  # noqa: S324 - identity, matches the baseline format
+        secret.encode("utf-8"), usedforsecurity=False,
+    ).hexdigest()
+
+
+def _gitleaks_scan_command(files: list[str], working_dir: str) -> str:
+    """Build the shell command that scans *files* with gitleaks.
+
+    One ``gitleaks dir`` invocation per file, from *working_dir*, so each
+    report's ``File`` field is the repo-relative path we passed in and a
+    failure on one file cannot be mistaken for a clean result on another.
+    Each invocation writes its JSON report to stdout (``--report-path -``);
+    the aggregated stdout is therefore a sequence of JSON arrays.
+
+    gitleaks-native suppression is denied, not adopted (#842 [high]):
+    everything an agent can write inside the container must be unable to
+    shrink the finding set, or the #708 bypass returns in new clothes.
+
+    * ``--ignore-gitleaks-allow`` — an inline ``gitleaks:allow`` comment on
+      the secret's own line would otherwise return ``clean`` with no human
+      gate (verified against the real 8.30.1 binary).
+    * ``--gitleaks-ignore-path`` pointed at a scanner-owned empty temp dir —
+      the flag's default is ``.``, i.e. the repo root, where an uncommitted
+      agent-written ``.gitleaksignore`` listing the finding's fingerprint
+      suppresses it (also verified).  The temp dir is created fresh per
+      scan and removed afterwards, so it can never contain an ignore file.
+
+    A repo-root ``.gitleaks.toml`` is NOT honoured by ``gitleaks dir`` in
+    this invocation shape (measured; the config lookup is flag/env only),
+    so no ``--config`` pin is needed.
+
+    The exit code is aggregated, not summed:
+
+    * ``0``   — every file scanned, nothing found.
+    * ``99``  — at least one finding (``--exit-code 99``; the default
+      ``1`` cannot be told apart from a fatal error such as a missing
+      file, which is how a broken scan would read as "just findings").
+    * other   — a scan failed; the loop stops there and reports that code.
+    """
+    safe_wd = shlex.quote(working_dir)
+    escaped_files = " ".join(shlex.quote(f) for f in files)
+    return (
+        f"cd {safe_wd} && ig=$(mktemp -d) || exit 1; rc=0; "
+        f"for f in {escaped_files}; do "
+        f"gitleaks dir --no-banner --exit-code {_GITLEAKS_FINDINGS_EXIT} "
+        f'--ignore-gitleaks-allow --gitleaks-ignore-path "$ig" '
+        f'--report-format json --report-path - "$f"; s=$?; '
+        f"if [ $s -eq {_GITLEAKS_FINDINGS_EXIT} ]; then "
+        f"rc={_GITLEAKS_FINDINGS_EXIT}; "
+        f"elif [ $s -ne 0 ]; then rc=$s; break; fi; "
+        f'done; rmdir "$ig" 2>/dev/null; exit $rc'
+    )
+
+
+def _parse_gitleaks_reports(stdout: str) -> list[dict[str, Any]] | None:
+    """Parse concatenated gitleaks JSON reports into a list of raw entries.
+
+    One ``gitleaks dir`` run emits one JSON array (``[]`` when clean), and
+    the per-file loop concatenates them, so the stdout is decoded array by
+    array rather than with a single ``json.loads``.
+
+    Returns ``None`` when the output is not a sequence of JSON arrays —
+    the caller must treat that as ``error``, never as "clean".
+    """
+    decoder = json.JSONDecoder()
+    entries: list[dict[str, Any]] = []
+    idx = 0
+    length = len(stdout)
+    while idx < length:
+        while idx < length and stdout[idx].isspace():
+            idx += 1
+        if idx >= length:
+            break
+        try:
+            obj, idx = decoder.raw_decode(stdout, idx)
+        except ValueError:
+            return None
+        if not isinstance(obj, list):
+            return None
+        entries.extend(e for e in obj if isinstance(e, dict))
+    return entries
+
+
+def _finding_from_report(entry: dict[str, Any]) -> dict[str, Any]:
+    """Map one gitleaks report entry to sunaba's finding shape."""
+    secret = entry.get("Secret") or ""
+    return {
+        "file": entry.get("File", ""),
+        "line": entry.get("StartLine", 0),
+        "type": entry.get("RuleID", "unknown"),
+        "hashed_secret": _hash_secret(secret) if secret else "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +494,7 @@ def run_secret_scan(
     *,
     baseline_hashes: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Run detect-secrets over *files* and return a structured result.
+    """Run gitleaks over *files* and return a structured result.
 
     Parameters
     ----------
@@ -398,7 +517,7 @@ def run_secret_scan(
       ``scan_summary``
           One-line human-readable summary.
 
-    Never raises.  When ``detect-secrets`` is absent the result says so
+    Never raises.  When ``gitleaks`` is absent the result says so
     prominently and the caller (publish) proceeds.
     """
     if not files:
@@ -411,7 +530,7 @@ def run_secret_scan(
 
     # Exclude the baseline path from scanning: the baseline stores hashed
     # secrets by design, and scanning them produces false-positive findings
-    # (HexHighEntropyString / KeywordDetector on every hashed_secret value).
+    # (generic entropy / hex rules fire on every hashed_secret value).
     # An exact-path match is used so that lookalike files in subdirectories
     # (e.g. sub/dir/.secrets.baseline) are still scanned normally.
     files = _exclude_baseline(files)
@@ -423,10 +542,10 @@ def run_secret_scan(
             "scan_summary": "No files to scan (baseline excluded).",
         }
 
-    available = _check_detect_secrets(container)
+    available = _check_gitleaks(container)
     if not available:
         msg = (
-            "SKIPPED (detect-secrets unavailable in this image). "
+            "SKIPPED (gitleaks unavailable in this image). "
             "Install it or use the base/full sandbox image."
         )
         return {
@@ -436,35 +555,34 @@ def run_secret_scan(
             "scan_summary": msg,
         }
 
-    # Run scan via shell (detect-secrets needs shell for file globbing/quoting)
+    # Run the scan via shell: one gitleaks invocation per file, with the
+    # exit codes aggregated (see _gitleaks_scan_command).
     #
     # Two invocation decisions here look wrong at a glance and are not.  The
     # reasoning lives in docs/design_secret_scan.md (Part 1) -- read it before
     # changing either, and do not re-derive it from these comments.
     #
-    # No --baseline: with it, the scan ADDS newly found secrets to the baseline
-    # and prints nothing.  Running the scan would be the act of suppressing, so
-    # a blocked publish would pass on retry (#703, and the threat model).
+    # No gitleaks-side suppression (--baseline-path, .gitleaksignore): the
+    # suppression list would then live inside the container, where the agent
+    # can write it, and running the scan would become the act of suppressing
+    # -- a blocked publish would pass on retry (#703/#708, threat model).
     #
-    # --no-verify, never probed for: AWSKeyDetector reads HTTP 403 as "not a
-    # secret", and the egress proxy answers blocked hosts with 403, so a real
-    # key pair comes back clean (#701, upstream Yelp/detect-secrets#976).
-    # Falling back to a scan without the flag would restore that fail-open.
-    safe_wd = shlex.quote(working_dir)
-    escaped_files = " ".join(shlex.quote(f) for f in files)
-    shell_cmd = (
-        f"cd {safe_wd} && detect-secrets scan --no-verify {escaped_files}"
-    )
+    # --exit-code 99: gitleaks' default findings exit is 1, which is also
+    # what a fatal error returns.  Sharing one code means a scan that never
+    # ran would be reported as an ordinary findings result -- and, worse, a
+    # future "if ec == 1: findings" reading would turn errors into a state
+    # the override tool can wave through.
+    shell_cmd = _gitleaks_scan_command(files, working_dir)
     ec, stdout, _ = exec_in_container(
         container,
         cmd=["/bin/sh", "-c", shell_cmd],
         workdir=working_dir,
     )
 
-    if ec != 0:
-        logger.warning("detect-secrets scan failed (ec=%d)", ec)
+    if ec not in (0, _GITLEAKS_FINDINGS_EXIT):
+        logger.warning("gitleaks scan failed (ec=%d)", ec)
         msg = (
-            f"WARNING: detect-secrets scan failed (exit {ec}). "
+            f"WARNING: gitleaks scan failed (exit {ec}). "
             "Scan did not complete; publish blocked."
         )
         return {
@@ -474,12 +592,13 @@ def run_secret_scan(
             "scan_summary": msg,
         }
 
-    # Parse JSON output
+    # Parse JSON output.  A clean gitleaks run still writes ``[]``, so empty
+    # stdout means the report never arrived -- not "nothing found" (#704).
     if not stdout.strip():
-        logger.warning("detect-secrets produced empty output")
+        logger.warning("gitleaks produced empty output")
         return {
             "secret_scan": (
-                "ERROR: detect-secrets scan produced empty output. "
+                "ERROR: gitleaks scan produced empty output. "
                 "Scan did not complete; publish blocked."
             ),
             "secret_scan_state": "error",
@@ -489,13 +608,12 @@ def run_secret_scan(
             ),
         }
 
-    try:
-        scan_data = json.loads(stdout)
-    except json.JSONDecodeError:
-        logger.warning("detect-secrets output is not valid JSON")
+    report_entries = _parse_gitleaks_reports(stdout)
+    if report_entries is None:
+        logger.warning("gitleaks output is not valid JSON")
         return {
             "secret_scan": (
-                "ERROR: detect-secrets scan produced unparseable output. "
+                "ERROR: gitleaks scan produced unparseable output. "
                 "Scan did not complete; publish blocked."
             ),
             "secret_scan_state": "error",
@@ -503,18 +621,30 @@ def run_secret_scan(
             "scan_summary": "Scan produced unparseable output; treated as error.",
         }
 
-    # Collect all findings (every entry in results is a finding;
-    # detect-secrets does NOT emit an ``is_secret`` key).
-    results: dict[str, list[dict]] = scan_data.get("results", {})
-    raw_findings: list[dict[str, Any]] = []
-    for filename, file_findings in results.items():
-        for finding in file_findings:
-            raw_findings.append({
-                "file": finding.get("filename", filename),
-                "line": finding.get("line_number", 0),
-                "type": finding.get("type", "unknown"),
-                "hashed_secret": finding.get("hashed_secret", ""),
-            })
+    # Every entry in a gitleaks report is a finding; there is no
+    # "reviewed"/"verified" flag to filter on.
+    raw_findings: list[dict[str, Any]] = [
+        _finding_from_report(entry) for entry in report_entries
+    ]
+
+    # gitleaks signalled findings but the report carries none: the two
+    # channels disagree, so the scan result is not trustworthy.  "Not
+    # literally the findings case" is never success (#704).
+    if ec == _GITLEAKS_FINDINGS_EXIT and not raw_findings:
+        logger.warning("gitleaks signalled findings but reported none")
+        return {
+            "secret_scan": (
+                "ERROR: gitleaks signalled findings "
+                f"(exit {_GITLEAKS_FINDINGS_EXIT}) but reported none. "
+                "Scan result inconsistent; publish blocked."
+            ),
+            "secret_scan_state": "error",
+            "files_scanned": files,
+            "scan_summary": (
+                "Scan signalled findings with an empty report; "
+                "treated as error."
+            ),
+        }
 
     # Subtract baseline-known findings
     if baseline_hashes is not None:
@@ -646,7 +776,6 @@ def _update_baseline(
         return None, set()
 
     safe_wd = shlex.quote(working_dir)
-    escaped_files = " ".join(shlex.quote(f) for f in files)
     baseline_path = os.path.join(working_dir, _BASELINE_FILENAME)
 
     # Read existing baseline if present
@@ -662,42 +791,51 @@ def _update_baseline(
         except json.JSONDecodeError:
             pass
 
-    # Run fresh scan (no baseline, so we capture all findings)
-    # --no-verify: verification blocked by sandbox egress proxy (issue #701)
-    shell_cmd = (
-        f"cd {safe_wd} && detect-secrets scan --no-verify {escaped_files}"
-    )
+    # Run a fresh scan.  Same invocation as the publish path: the scanner
+    # is never handed the suppression list, so scanning is not itself an
+    # act of suppression (#703).
+    shell_cmd = _gitleaks_scan_command(files, working_dir)
     ec, stdout, _ = exec_in_container(
         container,
         cmd=["/bin/sh", "-c", shell_cmd],
         workdir=working_dir,
     )
-    if ec != 0:
-        return f"detect-secrets scan failed (exit {ec})", set()
+    if ec not in (0, _GITLEAKS_FINDINGS_EXIT):
+        return f"gitleaks scan failed (exit {ec})", set()
 
-    try:
-        scan_data = json.loads(stdout)
-    except json.JSONDecodeError:
-        return "detect-secrets output is not valid JSON", set()
+    report_entries = _parse_gitleaks_reports(stdout)
+    if report_entries is None:
+        return "gitleaks output is not valid JSON", set()
+
+    # Build baseline entries in the historical baseline-file shape,
+    # grouped by filename: the file format is a sunaba contract, not the
+    # scanner's output format (#842).
+    new_results: dict[str, list[dict[str, Any]]] = {}
+    new_hashes: set[str] = set()
+    for entry in report_entries:
+        finding = _finding_from_report(entry)
+        fname = finding["file"]
+        new_results.setdefault(fname, []).append({
+            "type": finding["type"],
+            "filename": fname,
+            "line_number": finding["line"],
+            "hashed_secret": finding["hashed_secret"],
+            "is_verified": False,
+        })
+        if finding["hashed_secret"]:
+            new_hashes.add(finding["hashed_secret"])
 
     # Merge: for files in the new scan, replace; keep the rest.
-    new_results: dict = scan_data.get("results", {})
     old_results: dict = old_baseline.get("results", {})
     merged_results = dict(old_results)
     for fname, findings in new_results.items():
         merged_results[fname] = findings
 
-    # Extract hashed_secrets from the fresh scan for the override registry
-    new_hashes: set[str] = set()
-    for _, findings in new_results.items():
-        for finding in findings:
-            hs = finding.get("hashed_secret", "")
-            if hs:
-                new_hashes.add(hs)
-
     merged: dict[str, Any] = {
-        "generated_at": scan_data.get("generated_at", ""),
-        "plugins_used": scan_data.get("plugins_used", []),
+        "generated_at": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        ),
+        "plugins_used": old_baseline.get("plugins_used", []),
         "results": merged_results,
     }
 
@@ -778,13 +916,13 @@ def secret_scan_override(
         else:
             files = []
 
-    available = _check_detect_secrets(container)
+    available = _check_gitleaks(container)
     if not available:
         return json.dumps({
             "status": "error",
             "error": (
-                "detect-secrets is not available in this container. "
-                "The override tool requires detect-secrets. "
+                "gitleaks is not available in this container. "
+                "The override tool requires gitleaks. "
                 "Use the base/full sandbox image."
             ),
         })

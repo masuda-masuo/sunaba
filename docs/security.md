@@ -98,7 +98,7 @@ The proxy runs as a long-lived sidecar container (`sunaba-egress-proxy`) that re
 
 ## 4. Secret Scan (Issue #676)
 
-`publish` automatically scans manifest-declared files for potential secrets using Yelp's `detect-secrets` before pushing. The scanner is baked into the base Docker image and runs inside the container.
+`publish` automatically scans manifest-declared files for potential secrets using `gitleaks` before pushing (it was Yelp's `detect-secrets` until #842). The scanner is baked into the base Docker image and runs inside the container; the suppression decision is made host-side.
 
 **Configuration:**
 
@@ -107,4 +107,4 @@ The proxy runs as a long-lived sidecar container (`sunaba-egress-proxy`) that re
 
 `publish` proceeds only on an affirmative `clean` or `skipped` scan state; anything else — including a state it does not recognise — blocks.
 
-> **See [`design_secret_scan.md`](design_secret_scan.md) for the design.** It is authoritative and carries the reasoning: the threat model, why `--baseline` is not passed and `--no-verify` is, why the suppression list is resolved host-side rather than read from the container, the known gaps, and the alternatives that were considered and rejected. Do not change the scan's behaviour without reading it — several of its decisions look wrong at a glance and are not.
+> **See [`design_secret_scan.md`](design_secret_scan.md) for the design.** It is authoritative and carries the reasoning: the threat model, why no gitleaks-native baseline or ignore file is used, why the suppression list is resolved host-side rather than read from the container, the known gaps, and the alternatives that were considered and rejected. Do not change the scan's behaviour without reading it — several of its decisions look wrong at a glance and are not.

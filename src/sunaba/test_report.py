@@ -49,9 +49,14 @@ def build_pytest_cmd(
     faster verification (Issue #590) -- but only when pytest-xdist is
     importable in the *target* environment (probed inside the command,
     so the server never decides for the container); without xdist the
-    run falls back to plain serial pytest.  The sandbox image's
-    ``pids.max`` is high enough that Python xdist workers do not exhaust
-    it.
+    run falls back to plain serial pytest.  The probe imports
+    ``xdist.plugin``, not the bare ``xdist`` package: uninstalling
+    pytest-xdist can leave residue (``__pycache__/``, ``scheduler/``)
+    in ``site-packages/xdist/``, which stays importable as an implicit
+    namespace package, so a bare ``import xdist`` would succeed and
+    ``-n auto`` would then be injected into an environment where pytest
+    rejects the option (Issue #840).  The sandbox image's ``pids.max``
+    is high enough that Python xdist workers do not exhaust it.
 
     The report is requested with ``-o junit_family=xunit1`` because the
     default xunit2 family strips the per-testcase ``file=``/``line=``
@@ -67,7 +72,7 @@ def build_pytest_cmd(
     else:
         quoted_path = shlex.quote(path)
     return (
-        f"{sandbox_env}python3 -c 'import xdist' >/dev/null 2>&1 "
+        f"{sandbox_env}python3 -c 'import xdist.plugin' >/dev/null 2>&1 "
         f"&& _np='-n auto' || _np=''; "
         f"{sandbox_env}python3 -m pytest --junit-xml={junit_file} "
         f"-o junit_family=xunit1 "

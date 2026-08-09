@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1273,6 +1274,67 @@ class TestBuildPytestCmd:
         """
         pytest.importorskip("xdist")
         ec, stdout, log = self._run(tmp_path, xdist_available=True)
+
+    @staticmethod
+    def _probe_expr() -> str:
+        """The ``python3 -c '...'`` availability probe from the built command."""
+        cmd = build_pytest_cmd("/tmp/r.xml", "/tmp/raw.txt", "", "tests/")
+        match = re.search(r"python3 -c '([^']*)'", cmd)
+        assert match is not None, cmd
+        return match.group(1)
+
+    @staticmethod
+    def _run_probe(code: str, ghost_dir: Path, cwd: Path) -> int:
+        """Exit code of *code* run with only stdlib + *ghost_dir* importable."""
+        env = dict(os.environ, PYTHONPATH=str(ghost_dir))
+        env.pop("PYTHONSTARTUP", None)
+        # -S keeps site-packages out, so a real pytest-xdist install in this
+        # test environment cannot shadow the simulated leftovers.
+        proc = subprocess.run(
+            [sys.executable, "-S", "-c", code],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode
+
+    def test_probe_rejects_uninstall_residue_namespace_ghost(self, tmp_path: Path) -> None:
+        """Leftover ``site-packages/xdist/`` must not be read as xdist (#840).
+
+        ``pip uninstall pytest-xdist`` leaves unowned residue behind
+        (``__pycache__/``, ``scheduler/``); the directory then still
+        imports as an implicit namespace package, so the old bare
+        ``import xdist`` probe exits 0 and ``-n auto`` gets injected into
+        an environment whose pytest rejects the option -- a false red for
+        the whole suite.  The probe must import the plugin module.
+        """
+        ghost = tmp_path / "site"
+        (ghost / "xdist" / "__pycache__").mkdir(parents=True)
+        (ghost / "xdist" / "scheduler").mkdir()
+        workdir = tmp_path / "cwd"
+        workdir.mkdir()
+
+        probe = self._probe_expr()
+        assert "xdist.plugin" in probe
+
+        # The old probe cannot tell the ghost from a real install ...
+        assert self._run_probe("import xdist", ghost, workdir) == 0
+        # ... the shipped one does.
+        assert self._run_probe(probe, ghost, workdir) != 0
+
+    def test_probe_accepts_real_xdist_install(self, tmp_path: Path) -> None:
+        """The stricter probe still says yes to a genuine pytest-xdist."""
+        pytest.importorskip("xdist.plugin")
+        workdir = tmp_path / "cwd"
+        workdir.mkdir()
+        proc = subprocess.run(
+            [sys.executable, "-c", self._probe_expr()],
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
 
     def test_real_bare_failure_locates_via_xunit1_file_attr(self, tmp_path: Path) -> None:
         """Real default-config pytest, failure body without a location line.

@@ -1069,6 +1069,28 @@ _SHELL_TO_TOOL: dict[str, str] = {
 }
 
 
+#: Shell operators that make a command *compound* rather than simple.
+#  A dedicated tool can only stand in for a single program invocation;
+#  once a command pipes, chains, substitutes or redirects it is an exec
+#  mini-program with no structured equivalent (issue #846).
+_COMPOUND_SHELL_OPERATORS: tuple[str, ...] = (
+    "|", ";", "&&", "||", "$(", "`", ">", ">>", "<",
+)
+
+
+def _is_simple_command(cmd: str) -> bool:
+    """True when *cmd* carries none of the compound shell operators.
+
+    A substring test, deliberately not a shell parse: an operator hidden
+    inside quotes (``grep 'a|b' f``) reads as compound and so drops out
+    of the bypass count.  The metric wants precision over recall -- a
+    missed bypass costs less than a legitimate mini-program counted as
+    one -- and even a trailing ``| head -20`` is enough to make the
+    command something no single tool call replaces.
+    """
+    return not any(op in cmd for op in _COMPOUND_SHELL_OPERATORS)
+
+
 # The container's default working directory (= the clone destination,
 # see docs/design_filesystem_layout.md).  A ``cd`` here is a no-op, which
 # is what separates the ``cd-redundant`` bucket from a real relocation
@@ -1234,9 +1256,16 @@ def get_tool_usage(
           default working directory (``/workspace``), i.e. a no-op
         - ``cd_redundant_rate_pct`` — redundant cds as % of exec entries
         - ``structured_ops`` — count of each structured tool operation
-        - ``bypass_count`` — exec commands that could have used a dedicated tool
+        - ``bypass_count`` — exec commands that could have used a dedicated
+          tool: the first word maps to one that already existed, *and* the
+          command is simple (issue #846).  Simple means it contains none of
+          ``|  ;  &&  ||  $(  `  >  >>  <`` — a trailing ``| head -20`` is
+          not tolerated, since no single tool call replaces a pipeline.
         - ``bypass_rate_pct`` — bypass as % of (dedicated + bypass)
         - ``bypass_detail`` — ``{shell_command: count}`` breakdown of bypassed commands
+        - ``compound_shell_count`` — first commands that map to a dedicated
+          tool but are compound: the legitimate-exec baseline.  Counted here
+          *instead of* in ``bypass_count`` / ``bypass_detail``, never both.
         - ``exec_entry_count`` — total number of exec *entries* (not sub-commands)
         - ``_tool_intro_dates`` — ``{tool: intro_date}`` mapping for bias correction
     """
@@ -1264,6 +1293,7 @@ def get_tool_usage(
     structured_ops: dict[str, int] = {}
     bypass_count = 0
     bypass_detail: dict[str, int] = {}
+    compound_shell_count = 0
 
     for entry in entries:
 
@@ -1311,8 +1341,15 @@ def get_tool_usage(
                     tool_intro = _TOOL_INTRO_DATES.get(tool, "")
                     # Only count as bypass if the tool existed at the time
                     if tool_intro and entry.get("ts", "")[:10] >= tool_intro:
-                        bypass_count += 1
-                        bypass_detail[first_word] = bypass_detail.get(first_word, 0) + 1
+                        # ...and only when the tool could actually have
+                        # stood in for the command.  A pipeline or chain
+                        # is an exec mini-program, so it lands in the
+                        # legitimate-exec baseline instead (issue #846).
+                        if _is_simple_command(first_cmd):
+                            bypass_count += 1
+                            bypass_detail[first_word] = bypass_detail.get(first_word, 0) + 1
+                        else:
+                            compound_shell_count += 1
 
         elif op == "tool_use":
             tool_name = entry.get("tool_name", "")
@@ -1358,6 +1395,7 @@ def get_tool_usage(
         "bypass_count": bypass_count,
         "bypass_rate_pct": bypass_rate_pct,
         "bypass_detail": dict(sorted(bypass_detail.items(), key=lambda x: -x[1])),
+        "compound_shell_count": compound_shell_count,
         "exec_entry_count": exec_entry_count,
         "_tool_intro_dates": _TOOL_INTRO_DATES,
     }

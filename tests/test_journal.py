@@ -1042,3 +1042,125 @@ class TestCdRedundantSplit:
         assert classify_exec_command("cd /workspace/src && pytest -q") == "cd"
         assert classify_exec_command("cd /tmp/y") == "cd"
         assert classify_exec_command("cd") == "cd"
+
+
+class TestBypassCountsOnlySimpleCommands:
+    """Bypass counts only substitutable commands (Issue #846).
+
+    ``grep -n 'def x' src/f.py`` is a habit one ``search_in_container``
+    call replaces.  ``grep foo f | tail -3`` is an exec mini-program with
+    no structured equivalent -- counting it as a bypass buries the real
+    signal under legitimate exec use, so it goes to its own baseline.
+    """
+
+    #: (command, is_bypass) -- one exec entry each.
+    _FIXTURE_COMMANDS = (
+        ("grep -n 'def x' src/f.py", True),   # simple
+        ("grep foo f | tail -3", False),      # pipeline
+        ("ls /tmp && echo ok", False),        # chain
+        ("cat a.txt > b.txt", False),         # redirection
+        ("sed -n '1,5p' f", True),            # simple
+    )
+
+    def _usage_for_fixture(self, tmp_path: Path) -> dict:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
+            for cmd, _ in self._FIXTURE_COMMANDS:
+                record_exec("abc123", [cmd], exit_code=0)
+            return get_tool_usage()
+
+    def _usage_for_dated_entries(self, tmp_path: Path, entries: list[dict]) -> dict:
+        """Report over hand-stamped entries, so ``ts`` can predate a tool."""
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+        log_path.write_text(
+            "".join(json.dumps(entry) + "\n" for entry in entries),
+            encoding="utf-8",
+        )
+
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
+            return get_tool_usage(from_date="2026-05-01", to_date="2026-06-30")
+
+    def test_only_simple_commands_count_as_bypass(self, tmp_path: Path) -> None:
+        usage = self._usage_for_fixture(tmp_path)
+
+        assert usage["bypass_count"] == 2
+        assert usage["bypass_detail"] == {"grep": 1, "sed": 1}
+        assert usage["compound_shell_count"] == 3
+
+    def test_compound_commands_stay_out_of_bypass_detail(self, tmp_path: Path) -> None:
+        """The compound bucket is exclusive -- never double-counted.
+
+        ``tail`` and ``ls`` map to tools too, but they appear only inside
+        compound commands here, so they must not surface as bypass rows.
+        """
+        usage = self._usage_for_fixture(tmp_path)
+
+        assert "ls" not in usage["bypass_detail"]
+        assert "cat" not in usage["bypass_detail"]
+        assert sum(usage["bypass_detail"].values()) == usage["bypass_count"]
+
+    def test_existing_keys_keep_their_meaning(self, tmp_path: Path) -> None:
+        """Only the bypass classification narrows; the buckets are untouched."""
+        usage = self._usage_for_fixture(tmp_path)
+
+        assert usage["exec_entry_count"] == 5
+        assert usage["command_buckets"] == {
+            "search": 2, "list": 1, "read": 1, "edit": 1,
+        }
+        # No structured ops in the fixture, so the denominator is the
+        # (narrowed) bypass count alone -- the formula itself is unchanged.
+        assert usage["bypass_rate_pct"] == 100.0
+
+    def test_intro_date_gate_applies_to_both_buckets(self, tmp_path: Path) -> None:
+        """A command predating its tool counts in neither bucket.
+
+        ``search_in_container`` arrived 2026-06-07; a ``grep`` before then
+        had no alternative, simple or compound.
+        """
+        def exec_entry(ts: str, cmd: str) -> dict:
+            return {
+                "ts": ts,
+                "run_id": "run-846",
+                "container_id": "abc123",
+                "operation": "exec",
+                "commands": [cmd],
+                "exit_code": 0,
+            }
+
+        usage = self._usage_for_dated_entries(tmp_path, [
+            exec_entry("2026-06-01T00:00:00+00:00", "grep -n x f.py"),
+            exec_entry("2026-06-01T00:00:01+00:00", "grep x f.py | tail -3"),
+            exec_entry("2026-06-10T00:00:00+00:00", "grep -n x f.py"),
+            exec_entry("2026-06-10T00:00:01+00:00", "grep x f.py | tail -3"),
+        ])
+
+        assert usage["exec_entry_count"] == 4
+        assert usage["bypass_count"] == 1
+        assert usage["bypass_detail"] == {"grep": 1}
+        assert usage["compound_shell_count"] == 1
+
+    def test_is_simple_command_rejects_every_operator(self) -> None:
+        from sunaba.journal import _is_simple_command
+
+        assert _is_simple_command("grep -n 'def x' src/f.py")
+        assert _is_simple_command("sed -n '1,5p' f")
+        for compound in (
+            "cat f | head -5",
+            "grep foo f. | tail -12; echo done",
+            "ls; pwd",
+            "ls && pwd",
+            "ls /tmp || echo none",
+            "cat $(ls -1 | head -1)",
+            "cat `ls -1`",
+            "cat a > b",
+            "cat a >> b",
+            "wc -l < a",
+        ):
+            assert not _is_simple_command(compound), compound

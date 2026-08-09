@@ -866,16 +866,23 @@ def copy_file(
 # read_file_range
 # ---------------------------------------------------------------------------
 
+# The default page size, named so tail_lines can tell "caller left limit
+# alone" apart from "caller asked for a window".
+_DEFAULT_READ_LIMIT = 50
+
 
 def read_file_range(
     container_id: str,
     file_path: str,
     offset: int = 0,
-    limit: int = 50,
+    limit: int = _DEFAULT_READ_LIMIT,
     start_line: int | None = None,
     end_line: int | None = None,
+    tail_lines: int | None = None,
 ) -> str:
     """Read lines from *file_path* inside the container.
+
+    ``tail_lines=N`` returns the last N lines -- no shell ``tail`` needed.
 
     Args:
         container_id: Container ID prefix.
@@ -885,9 +892,12 @@ def read_file_range(
         start_line: 1-indexed inclusive start. start_line/end_line and
             offset/limit are mutually exclusive pairs.
         end_line: 1-indexed inclusive end; default end of file.
+        tail_lines: Last N lines; use alone.
 
     Returns:
         JSON: content, total_lines, shown, has_more, next_offset.
+        A tail read ends at the last line, so has_more is false and
+        next_offset null; page backwards using total_lines.
     """
     client = _docker()
     try:
@@ -896,6 +906,29 @@ def read_file_range(
         return container_not_found_error(container_id)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
+
+    if tail_lines is not None:
+        conflicting = [
+            name
+            for name, in_use in (
+                ("offset", offset != 0),
+                ("limit", limit != _DEFAULT_READ_LIMIT),
+                ("start_line", start_line is not None),
+                ("end_line", end_line is not None),
+            )
+            if in_use
+        ]
+        if conflicting:
+            return json.dumps({
+                "status": "error",
+                "error": f"tail_lines and {'/'.join(conflicting)} are mutually "
+                "exclusive. tail_lines=N reads the last N lines; pass it alone."
+            })
+        if tail_lines < 1:
+            return json.dumps({
+                "status": "error",
+                "error": "tail_lines must be >= 1 (number of trailing lines)",
+            })
 
     if start_line is not None and offset != 0:
         return json.dumps({
@@ -920,6 +953,23 @@ def read_file_range(
         "read_file_range",
         {"file_path": file_path},
     )
+    if tail_lines is not None:
+        result = read_file_lines(_, file_path, offset=0, limit=-1)
+        if result.get("error"):
+            return json.dumps(result)
+        lines = result["content"].split("\n")
+        # A trailing newline splits into a phantom empty last element, which
+        # ``tail`` does not count -- the window has to end before it.
+        end = len(lines) - 1 if lines and lines[-1] == "" else len(lines)
+        start = max(0, end - tail_lines)
+        window = lines[start:end]
+        result["content"] = "\n".join(window)
+        result["shown"] = len(window)
+        # The window always ends at the last line, so nothing follows it;
+        # earlier lines are reached by offset, computed from total_lines.
+        result["has_more"] = False
+        result["next_offset"] = None
+        return json.dumps(result)
     result = read_file_lines(
         _, file_path, offset=resolved_offset, limit=resolved_limit
     )

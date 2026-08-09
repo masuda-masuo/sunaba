@@ -39,15 +39,15 @@ include = ["sunaba*"]
 sunaba = ["image_pins.json", "proxy_pin.json", "workflow_guide.md", "broker_checksums.txt"]
 
 [project.optional-dependencies]
-# detect-secrets is a *test* dependency here, not a runtime one: the server
-# never imports it, it shells out to the binary that Dockerfile.base bakes
-# into the sandbox images.  But the tests in tests/test_secret_scan.py that
-# assert against real scanner output need the real binary, and CI installs
-# only these extras -- without it those tests fail with FileNotFoundError.
-# Pinned to match the version baked into the image so a format change shows
-# up as a deliberate bump rather than a surprise CI failure.
-test = ["pytest", "pytest-xdist", "detect-secrets==1.5.0"]
-dev = ["pytest", "pytest-xdist", "ruff", "detect-secrets==1.5.0"]
+# The secret scanner (gitleaks, #842) is NOT listed here: it is a Go binary,
+# not a Python package, so pip cannot install it.  Dockerfile.base bakes the
+# pinned release into the sandbox images and .github/workflows/ci-tests.yml
+# installs the same pinned release as a workflow step.  The tests that drive
+# the real binary (tests/test_secret_scan.py::TestRealGitleaks) skip when it
+# is absent, so a bare `pip install -e .[dev]` checkout still runs green --
+# keep those skips visible rather than "fixing" them by deleting the tests.
+test = ["pytest", "pytest-xdist"]
+dev = ["pytest", "pytest-xdist", "ruff"]
 
 [tool.ruff]
 line-length = 120

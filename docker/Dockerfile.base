@@ -131,13 +131,26 @@ ENV VIRTUAL_ENV="/home/sandbox/.venv" \
 ENV NPM_CONFIG_PREFIX="/home/sandbox/.npm-global" \
     PATH="/home/sandbox/.npm-global/bin:${PATH}"
 
-# pip install detect-secrets (issue #676)
-RUN uv pip install detect-secrets==1.5.0
+# ── シークレットスキャナ gitleaks (issue #676 / #842) ─────────────────────
+# Go の静的バイナリなので pip では入らない。リリース tarball を取得し、
+# sha256 を照合してから展開する（tarball 直下に gitleaks バイナリがある）。
+# チェックサムはピン留めしたバージョンの実測値: 差し替えが起きたらここで
+# ビルドが落ちる（黙って別物が入るより、落ちる方が安全）。
+ARG GITLEAKS_VERSION=8.30.1
+ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+RUN set -eux; \
+    curl -fsSL -o /tmp/gitleaks.tar.gz \
+      "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"; \
+    echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks; \
+    install -D -m 0755 /tmp/gitleaks /home/sandbox/.local/bin/gitleaks; \
+    rm -f /tmp/gitleaks.tar.gz /tmp/gitleaks; \
+    gitleaks version
 
 # ── ヘルスチェック (base が保有するツールのみ) ────────────────────
 # pip --version は venv の健全性を兼ねて確認する（壊れたツールを隠さない）
-# detect-secrets --version はシークレットスキャンツールがイメージに含まれていることを確認 (issue #676)
+# gitleaks version はシークレットスキャンツールがイメージに含まれていることを確認 (issue #676 / #842)
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD rg --version && sg --version && node --version && npm --version && pip --version && detect-secrets --version || exit 1
+  CMD rg --version && sg --version && node --version && npm --version && pip --version && gitleaks version || exit 1
 
 CMD ["bash"]

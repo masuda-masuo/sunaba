@@ -3,7 +3,7 @@
 These tests deliberately do NOT patch ``run_secret_scan`` or
 ``exec_in_container`` -- mocking them is what let #696 ship broken.  Instead
 they use the extended ``_make_publish_container`` from conftest to inject
-(detected-secrets scan / git diff-tree) output at the ``exec_run`` level,
+(gitleaks report / git diff-tree) output at the ``exec_run`` level,
 while the real ``run_secret_scan`` parses and decides.
 
 Pre-existing tests in ``test_publish.py`` (which patch the scan away) are
@@ -32,42 +32,57 @@ from tests.conftest import (
 # ============================================================================
 
 
+def _sha1(secret: str) -> str:
+    """Return the baseline identity of *secret* (what the scan path hashes)."""
+    return hashlib.sha1(secret.encode(), usedforsecurity=False).hexdigest()
+
+
+def _fake_secret(seed: str) -> str:
+    """Build a distinct fake secret string at runtime (never a literal)."""
+    return "".join(chr(ord(c) + 1) for c in seed)
+
+
 def _make_clean_scan_json() -> str:
-    """Return JSON with no findings (empty results dict)."""
-    return json.dumps({
-        "generated_at": "2026-07-20T00:00:00Z",
-        "plugins_used": [],
-        "results": {},
-    })
+    """Return the report a clean gitleaks run writes: an empty array.
+
+    NOT an empty string: an empty report means the scan never produced one,
+    which is an error state, not a clean one (#704).
+    """
+    return "[]"
+
+
+def _make_report(entries: list[tuple[str, int, str, str]]) -> str:
+    """Build a gitleaks JSON report from ``(file, line, rule_id, secret)``."""
+    return json.dumps([
+        {
+            "RuleID": rule_id,
+            "Description": f"test finding for {rule_id}",
+            "StartLine": line,
+            "EndLine": line,
+            "StartColumn": 1,
+            "EndColumn": 1 + len(secret),
+            "Match": secret,
+            "Secret": secret,
+            "File": filename,
+            "SymlinkFile": "",
+            "Commit": "",
+            "Entropy": 4.2,
+            "Author": "",
+            "Email": "",
+            "Date": "",
+            "Message": "",
+            "Tags": [],
+            "Fingerprint": f"{filename}:{rule_id}:{line}",
+        }
+        for filename, line, rule_id, secret in entries
+    ])
 
 
 def _make_finding_json(filename: str, line: int, secret_type: str) -> str:
-    """Build detect-secrets JSON output with one finding.
-
-    Matches the REAL output shape from detect-secrets: no ``is_secret``
-    key (detect-secrets does not emit that).
-    The ``hashed_secret`` is a synthetic SHA-256 hex string built at
-    runtime so the committed file contains no actual secret hash.
-    """
-    fake_secret = "".join(
-        chr(ord(c) + 1) for c in "no-real-secret-here"
-    )
-    hashed = hashlib.sha256(fake_secret.encode()).hexdigest()
-    return json.dumps({
-        "generated_at": "2026-07-20T00:00:00Z",
-        "plugins_used": [{"name": "AWSKeyDetector"}],
-        "results": {
-            filename: [
-                {
-                    "type": secret_type,
-                    "filename": filename,
-                    "line_number": line,
-                    "hashed_secret": hashed,
-                    "is_verified": False,
-                }
-            ]
-        },
-    })
+    """Build a gitleaks report with exactly one finding in *filename*."""
+    return _make_report([
+        (filename, line, secret_type, _fake_secret(f"no-real-secret-{filename}")),
+    ])
 
 
 # ============================================================================
@@ -104,7 +119,7 @@ class TestPublishSecretScanReal:
 
         container = _make_publish_container(
             [(0, b"", b"")],  # test -f 'declared.txt'
-            detect_secrets_scan_output=finding_bytes,
+            gitleaks_scan_output=finding_bytes,
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -137,7 +152,7 @@ class TestPublishSecretScanReal:
         assert "git push" not in issued
 
         # Criterion 4: verify the scan command actually ran with the file.
-        assert "detect-secrets scan" in issued
+        assert "gitleaks dir" in issued
         assert "declared.txt" in issued
 
     # -- Criterion 2: legacy mode, finding blocks push --------------------
@@ -166,7 +181,7 @@ class TestPublishSecretScanReal:
                 (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
                 (0, b"file1.py\n", b""),  # git diff-tree HEAD^ HEAD
             ],
-            detect_secrets_scan_output=finding_bytes,
+            gitleaks_scan_output=finding_bytes,
             git_diff_tree_output=b"secret.txt\n",
         )
         mock_docker.return_value = _make_client_mock(container)
@@ -201,7 +216,7 @@ class TestPublishSecretScanReal:
         assert "git push" not in issued
 
         # Criterion 4: verify the scan command ran with the diff-tree file.
-        assert "detect-secrets scan" in issued
+        assert "gitleaks dir" in issued
         assert "secret.txt" in issued
 
     # -- Criterion 3: clean scan reaches push -----------------------------
@@ -237,7 +252,7 @@ class TestPublishSecretScanReal:
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
             ],
-            detect_secrets_scan_output=clean_bytes,
+            gitleaks_scan_output=clean_bytes,
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -266,7 +281,7 @@ class TestPublishSecretScanReal:
         issued = " ".join(
             str(_exec_cmd(c)) for c in container.exec_run.call_args_list
         )
-        assert "detect-secrets scan" in issued
+        assert "gitleaks dir" in issued
         assert "declared.txt" in issued
 
 
@@ -279,13 +294,13 @@ class TestPublishSecretScanReal:
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Manifest mode: detect-secrets exits non-zero --> publish blocked
-        with secret_scan_state='error' and no commit/push.
+        """Manifest mode: gitleaks exits with a code that is neither 0 nor 99
+        --> publish blocked with secret_scan_state='error' and no commit/push.
         """
         container = _make_publish_container_for_scan_test(
             [(0, b"", b"")],  # test -f 'declared.txt'
             scan_exit_code=1,
-            detect_secrets_scan_output=b"",
+            gitleaks_scan_output=b"",
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -315,7 +330,7 @@ class TestPublishSecretScanReal:
         assert "git push" not in issued
 
         # Verify the scan command actually ran.
-        assert "detect-secrets scan" in issued
+        assert "gitleaks dir" in issued
         assert "failed" in result["secret_scan"]
 
     # -- Criterion 2: empty stdout blocks push ----------------------------
@@ -327,12 +342,16 @@ class TestPublishSecretScanReal:
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Manifest mode: detect-secrets produces empty stdout --> blocked."""
+        """Manifest mode: gitleaks produces empty stdout --> blocked.
+
+        A clean run still writes ``[]``, so empty output means the report
+        never arrived.
+        """
         # Empty scan output with exit 0: run_secret_scan returns state error.
         container = _make_publish_container_for_scan_test(
             [(0, b"", b"")],  # test -f 'declared.txt'
             scan_exit_code=0,
-            detect_secrets_scan_output=b"",
+            gitleaks_scan_output=b"",
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -372,11 +391,11 @@ class TestPublishSecretScanReal:
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Manifest mode: detect-secrets produces non-JSON stdout --> blocked."""
+        """Manifest mode: gitleaks produces non-JSON stdout --> blocked."""
         container = _make_publish_container_for_scan_test(
             [(0, b"", b"")],  # test -f 'declared.txt'
             scan_exit_code=0,
-            detect_secrets_scan_output=b"this is not valid json\n",
+            gitleaks_scan_output=b"this is not valid json\n",
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -423,7 +442,7 @@ class TestPublishSecretScanReal:
         # ec != 0
         r1 = real_run(
             _make_publish_container_for_scan_test(
-                [], scan_exit_code=1, detect_secrets_scan_output=b"",
+                [], scan_exit_code=1, gitleaks_scan_output=b"",
             ),
             ["f.py"], "/tmp",
         )
@@ -432,7 +451,7 @@ class TestPublishSecretScanReal:
         # empty stdout
         r2 = real_run(
             _make_publish_container_for_scan_test(
-                [], scan_exit_code=0, detect_secrets_scan_output=b"",
+                [], scan_exit_code=0, gitleaks_scan_output=b"",
             ),
             ["f.py"], "/tmp",
         )
@@ -441,7 +460,7 @@ class TestPublishSecretScanReal:
         # unparseable JSON
         r3 = real_run(
             _make_publish_container_for_scan_test(
-                [], scan_exit_code=0, detect_secrets_scan_output=b"garbage",
+                [], scan_exit_code=0, gitleaks_scan_output=b"garbage",
             ),
             ["f.py"], "/tmp",
         )
@@ -468,7 +487,7 @@ class TestPublishSecretScanReal:
 
         container = _make_publish_container(
             [(0, b"", b"")],  # test -f
-            detect_secrets_scan_output=finding_bytes,
+            gitleaks_scan_output=finding_bytes,
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -525,7 +544,7 @@ class TestPublishSecretScanReal:
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
             ],
             scan_exit_code=1,  # scan fails
-            detect_secrets_scan_output=b"",
+            gitleaks_scan_output=b"",
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -561,7 +580,7 @@ class TestPublishSecretScanReal:
         # ``"git push"`` as a literal does not appear.  Check for the
         # word ``push`` in the issued commands instead.
         assert " push " in f" {issued} "
-        assert "detect-secrets scan" in issued
+        assert "gitleaks dir" in issued
 
     # -- Criterion 8: override bypasses findings block too ----------------
 
@@ -600,8 +619,9 @@ class TestPublishSecretScanReal:
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
             ],
-            scan_exit_code=0,
-            detect_secrets_scan_output=finding_bytes,
+            # exit code derived from the report (99 = findings), as the
+            # real binary would return it
+            gitleaks_scan_output=finding_bytes,
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -631,7 +651,7 @@ class TestPublishSecretScanReal:
         )
         assert " push " in f" {issued} "
 
-    # -- Criterion 7: skipped (no detect-secrets) still publishes ---------
+    # -- Criterion 7: skipped (no gitleaks) still publishes ---------------
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -640,7 +660,7 @@ class TestPublishSecretScanReal:
         mock_record: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
-        """Container without detect-secrets: scan is skipped, publish proceeds."""
+        """Container without gitleaks: scan is skipped, publish proceeds."""
         container = _make_publish_container_for_scan_test(
             [(0, b"", b""),  # test -f 'declared.txt'
 
@@ -660,9 +680,9 @@ class TestPublishSecretScanReal:
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
             ],
-            detect_secrets_available=False,  # no detect-secrets in image
+            gitleaks_available=False,  # no gitleaks in image
             scan_exit_code=0,
-            detect_secrets_scan_output=b"",
+            gitleaks_scan_output=b"",
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -781,7 +801,7 @@ class TestPublishSecretScanReal:
         """
         base = _make_publish_container(
             exec_returns,
-            detect_secrets_scan_output=scan_output,
+            gitleaks_scan_output=scan_output,
         )
         original_side_effect = base.exec_run.side_effect
 
@@ -868,7 +888,7 @@ class TestPublishSecretScanReal:
         issued = " ".join(
             str(_exec_cmd(c)) for c in container.exec_run.call_args_list
         )
-        assert "detect-secrets scan" not in issued, (
+        assert "gitleaks dir" not in issued, (
             "Baseline should be excluded from scan; no scan expected"
         )
         assert " push " in f" {issued} "
@@ -921,18 +941,18 @@ class TestPublishSecretScanReal:
         issued = " ".join(
             str(_exec_cmd(c)) for c in container.exec_run.call_args_list
         )
-        assert "detect-secrets scan" in issued
+        assert "gitleaks dir" in issued
         assert "secret.txt" in issued
         # The baseline path is still present in "cat .secrets.baseline" (the
         # suppression check inside run_secret_scan).  What matters is that
         # the *scan command* never mentions it.
         scan_calls = [
             str(_exec_cmd(c)) for c in container.exec_run.call_args_list
-            if "detect-secrets scan" in str(_exec_cmd(c))
+            if "gitleaks dir" in str(_exec_cmd(c))
         ]
         assert len(scan_calls) >= 1
         assert ".secrets.baseline" not in " ".join(scan_calls), (
-            "Baseline path must not appear in the detect-secrets scan command"
+            "Baseline path must not appear in the gitleaks scan command"
         )
 
     @patch("sunaba.tools.vcs.publishing._docker")
@@ -943,10 +963,10 @@ class TestPublishSecretScanReal:
         mock_docker: MagicMock,
     ) -> None:
         """Criterion 5 edge case: publish whose manifest is only
-        ``.secrets.baseline`` — even if detect-secrets would have failed,
+        ``.secrets.baseline`` — even if gitleaks would have failed,
         the baseline is excluded so no scan runs and the publish proceeds.
         """
-        # Even if detect-secrets scan would crash, it is never called
+        # Even if the gitleaks scan would crash, it is never called
         # because baseline is excluded.
         # Commands mentioning '.secrets.baseline' (test -f, git ls-files,
         # git add, git diff --cached) are answered by the interceptors in
@@ -982,7 +1002,7 @@ class TestPublishSecretScanReal:
                 return_value=True,
             ),
             patch.object(
-                ss_mod, "_check_detect_secrets", return_value=False,
+                ss_mod, "_check_gitleaks", return_value=False,
             ),
         ):
             result = _decode(publish(
@@ -994,7 +1014,7 @@ class TestPublishSecretScanReal:
                 working_dir="/root/repo",
             ))
 
-        # Even if detect-secrets is "unavailable", the baseline is excluded
+        # Even if gitleaks is "unavailable", the baseline is excluded
         # so no scan is attempted.
         assert result["status"] == "pushed", (
             f"Expected pushed, got {result.get('status')}: {result.get('error', '')}"
@@ -1006,7 +1026,7 @@ class TestPublishSecretScanReal:
         issued = " ".join(
             str(_exec_cmd(c)) for c in container.exec_run.call_args_list
         )
-        assert "detect-secrets scan" not in issued
+        assert "gitleaks dir" not in issued
 
     # NOTE: the no-scan default in ``publish`` is deliberately not covered by
     # a test.  The manifest / not-manifest branches are exhaustive, so the
@@ -1054,37 +1074,21 @@ class TestPublishHostSideBaseline:
         the remote base branch) provides an empty hash set, so the
         tampered container baseline is never consulted.
         """
-        import hashlib
-
         # Build a finding hash (at runtime, no literal secrets)
-        fake_secret = "".join(
-            chr(ord(c) + 1) for c in "probe-bypass-value"
-        )
-        tampered_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+        tampered_secret = _fake_secret("probe-bypass-value")
+        tampered_hash = _sha1(tampered_secret)
 
         # Scan output: one finding
-        finding_bytes = json.dumps({
-            "generated_at": "2026-07-20T00:00:00Z",
-            "plugins_used": [{"name": "AWSKeyDetector"}],
-            "results": {
-                "declared.txt": [
-                    {
-                        "type": "AWS Access Key",
-                        "filename": "declared.txt",
-                        "line_number": 3,
-                        "hashed_secret": tampered_hash,
-                        "is_verified": False,
-                    }
-                ]
-            },
-        }).encode("utf-8")
+        finding_bytes = _make_report([
+            ("declared.txt", 3, "aws-access-token", tampered_secret),
+        ]).encode("utf-8")
 
         # The mock container has a .secrets.baseline file that includes
         # the finding hash (agent tampered with it).  With the old code
         # this would suppress the finding; with the fix it should not.
         container = _make_publish_container(
             [(0, b"", b"")],  # test -f 'declared.txt'
-            detect_secrets_scan_output=finding_bytes,
+            gitleaks_scan_output=finding_bytes,
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -1125,7 +1129,7 @@ class TestPublishHostSideBaseline:
         issued = " ".join(
             str(_exec_cmd(c)) for c in container.exec_run.call_args_list
         )
-        assert "detect-secrets scan" in issued
+        assert "gitleaks dir" in issued
         assert "git commit" not in issued
         assert "git push" not in issued
 
@@ -1143,29 +1147,13 @@ class TestPublishHostSideBaseline:
         """A hash present in the baseline on the remote base branch IS
         suppressed, even when the container's .secrets.baseline is absent.
         """
-        import hashlib
-
-        fake_secret = "".join(
-            chr(ord(c) + 1) for c in "approved-secret"
-        )
-        known_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+        approved_secret = _fake_secret("approved-secret")
+        known_hash = _sha1(approved_secret)
 
         # Scan output: one finding
-        finding_bytes = json.dumps({
-            "generated_at": "2026-07-20T00:00:00Z",
-            "plugins_used": [],
-            "results": {
-                "approved.txt": [
-                    {
-                        "type": "Secret Keyword",
-                        "filename": "approved.txt",
-                        "line_number": 3,
-                        "hashed_secret": known_hash,
-                        "is_verified": False,
-                    }
-                ]
-            },
-        }).encode("utf-8")
+        finding_bytes = _make_report([
+            ("approved.txt", 3, "generic-api-key", approved_secret),
+        ]).encode("utf-8")
 
         # The mock container's scan output contains the finding, but
         # the host-side baseline set should suppress it.
@@ -1188,7 +1176,7 @@ class TestPublishHostSideBaseline:
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
             ],
-            detect_secrets_scan_output=finding_bytes,
+            gitleaks_scan_output=finding_bytes,
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -1253,29 +1241,12 @@ class TestPublishHostSideBaseline:
         """secret_scan_override (in-memory flag) still lets a publish through
         a findings block even with the host-side baseline fetch.
         """
-        import hashlib
-
         from sunaba.tools.secret_scan import _OVERRIDE_MAP
-        fake_secret = "".join(
-            chr(ord(c) + 1) for c in "override-test-secret"
-        )
-        finding_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
 
-        finding_bytes = json.dumps({
-            "generated_at": "2026-07-20T00:00:00Z",
-            "plugins_used": [],
-            "results": {
-                "declared.txt": [
-                    {
-                        "type": "Secret Keyword",
-                        "filename": "declared.txt",
-                        "line_number": 3,
-                        "hashed_secret": finding_hash,
-                        "is_verified": False,
-                    }
-                ]
-            },
-        }).encode("utf-8")
+        finding_bytes = _make_report([
+            ("declared.txt", 3, "generic-api-key",
+             _fake_secret("override-test-secret")),
+        ]).encode("utf-8")
 
         container = _make_publish_container_for_scan_test(
             [(0, b"", b""),  # test -f 'declared.txt'
@@ -1296,8 +1267,9 @@ class TestPublishHostSideBaseline:
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
             ],
-            scan_exit_code=0,
-            detect_secrets_scan_output=finding_bytes,
+            # exit code derived from the report (99 = findings), as the
+            # real binary would return it
+            gitleaks_scan_output=finding_bytes,
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -1352,31 +1324,16 @@ class TestPublishHostSideBaseline:
         empty set is used (no suppressions).  The container's copy is
         NOT consulted.
         """
-        import hashlib
-        fake_secret = "".join(
-            chr(ord(c) + 1) for c in "fetch-failure-secret"
-        )
-        finding_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+        fetch_failure_secret = _fake_secret("fetch-failure-secret")
+        finding_hash = _sha1(fetch_failure_secret)
 
-        finding_bytes = json.dumps({
-            "generated_at": "2026-07-20T00:00:00Z",
-            "plugins_used": [],
-            "results": {
-                "declared.txt": [
-                    {
-                        "type": "Secret Keyword",
-                        "filename": "declared.txt",
-                        "line_number": 3,
-                        "hashed_secret": finding_hash,
-                        "is_verified": False,
-                    }
-                ]
-            },
-        }).encode("utf-8")
+        finding_bytes = _make_report([
+            ("declared.txt", 3, "generic-api-key", fetch_failure_secret),
+        ]).encode("utf-8")
 
         container = _make_publish_container(
             [(0, b"", b"")],  # test -f 'declared.txt'
-            detect_secrets_scan_output=finding_bytes,
+            gitleaks_scan_output=finding_bytes,
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -1439,28 +1396,14 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
         baseline returns ``suppressed_count`` > 0 and a ``scan_summary``
         that names the suppression.
         """
-        import hashlib
-
         # Build a finding hash at runtime (no literal secrets)
-        fake_secret = "".join(
-            chr(ord(c) + 1) for c in "suppressed-secret-count"
-        )
-        known_hash = hashlib.sha256(fake_secret.encode()).hexdigest()
+        counted_secret = _fake_secret("suppressed-secret-count")
+        known_hash = _sha1(counted_secret)
 
         # Scan output: one finding whose hash IS in the baseline
-        finding_bytes = json.dumps({
-            "generated_at": "2026-07-20T00:00:00Z",
-            "plugins_used": [],
-            "results": {
-                "declared.txt": [{
-                    "type": "Secret Keyword",
-                    "filename": "declared.txt",
-                    "line_number": 3,
-                    "hashed_secret": known_hash,
-                    "is_verified": False,
-                }],
-            },
-        }).encode("utf-8")
+        finding_bytes = _make_report([
+            ("declared.txt", 3, "generic-api-key", counted_secret),
+        ]).encode("utf-8")
 
         container = _make_publish_container(
             [(0, b"", b""),  # test -f 'declared.txt'
@@ -1480,7 +1423,7 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
             ],
-            detect_secrets_scan_output=finding_bytes,
+            gitleaks_scan_output=finding_bytes,
         )
         mock_docker.return_value = _make_client_mock(container)
 
@@ -1573,7 +1516,7 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
                 (0, b"pushed", b""),  # git push
                 (0, b"abc1234def5678", b""),  # rev-parse HEAD
             ],
-            detect_secrets_scan_output=clean_bytes,
+            gitleaks_scan_output=clean_bytes,
         )
         mock_docker.return_value = _make_client_mock(container)
 

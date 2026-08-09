@@ -46,8 +46,8 @@ sunaba = ["image_pins.json", "proxy_pin.json", "workflow_guide.md", "broker_chec
 # only these extras -- without it those tests fail with FileNotFoundError.
 # Pinned to match the version baked into the image so a format change shows
 # up as a deliberate bump rather than a surprise CI failure.
-test = ["pytest", "detect-secrets==1.5.0"]
-dev = ["pytest", "ruff", "detect-secrets==1.5.0"]
+test = ["pytest", "pytest-xdist", "detect-secrets==1.5.0"]
+dev = ["pytest", "pytest-xdist", "ruff", "detect-secrets==1.5.0"]
 
 [tool.ruff]
 line-length = 120

@@ -10,6 +10,7 @@ from src.sunaba.search import (
     _search_lexical,
     search_files,
 )
+from sunaba.tools.verify import search_in_container
 
 
 class TestBuildRgArgs:
@@ -119,6 +120,25 @@ class TestSearchLexicalDispatch:
         assert result["status"] == "error"
         assert "grep" in result["error"]
 
+    def test_rg_not_found_with_hidden_errors_instead_of_fallback(self) -> None:
+        # The grep fallback cannot express --hidden/--no-ignore; falling back
+        # silently would return results under a different exclusion contract
+        # (the silent-miss class issue #851 exists to fix).
+        container = MagicMock()
+        container.exec_run.return_value = (127, (b"", b"rg: not found"))
+        result = _search_lexical(container, "pattern", "/path", 50, hidden=True)
+        assert result["status"] == "error"
+        assert "hidden=True" in result["error"]
+        assert container.exec_run.call_count == 1  # no grep attempt
+
+    def test_rg_not_found_with_no_ignore_errors_instead_of_fallback(self) -> None:
+        container = MagicMock()
+        container.exec_run.return_value = (127, (b"", b"rg: not found"))
+        result = _search_lexical(container, "pattern", "/path", 50, no_ignore=True)
+        assert result["status"] == "error"
+        assert "no_ignore=True" in result["error"]
+        assert container.exec_run.call_count == 1
+
     def test_rg_error_includes_stderr(self) -> None:
         container = MagicMock()
         container.exec_run.return_value = (2, (b"", b"error: --count-matches cannot be used with --json"))
@@ -185,3 +205,169 @@ class TestSearchFilesPipeline:
         assert "error" not in result
         assert len(result["matches"]) == 2
         assert result["matches"][0]["file"] == "a.txt"
+
+
+class TestBuildRgArgsHiddenNoIgnore:
+    """hidden/no_ignore argument building (Issue #851)."""
+
+    def test_hidden_adds_flag_and_keeps_git_excluded(self) -> None:
+        args = _build_rg_args("pattern", "/path", 50, hidden=True)
+        assert "--hidden" in args
+        # --hidden alone would also search .git/ (verified against rg 13),
+        # so a basename exclusion glob keeps it out in effect.
+        idx = args.index("-g")
+        assert args[idx + 1] == "!.git"
+
+    def test_no_ignore_adds_flag(self) -> None:
+        args = _build_rg_args("pattern", "/path", 50, no_ignore=True)
+        assert "--no-ignore" in args
+
+    def test_both_flags(self) -> None:
+        args = _build_rg_args(
+            "pattern", "/path", 50, hidden=True, no_ignore=True,
+        )
+        assert "--hidden" in args
+        assert "--no-ignore" in args
+        assert ["-g", "!.git"] in [
+            args[i:i + 2] for i in range(len(args) - 1)
+        ]
+
+    def test_defaults_are_byte_identical_to_today(self) -> None:
+        # With both flags left False the built argv must be exactly the
+        # pre-#851 argv: no --hidden, no --no-ignore, no .git glob.
+        args = _build_rg_args(
+            "pattern", "/path", 50, output_mode="content",
+            hidden=False, no_ignore=False,
+        )
+        assert args == ["rg", "-n", "--json", "-m", "51", "pattern", "/path"]
+
+    def test_defaults_across_output_modes(self) -> None:
+        for mode in ("content", "count", "files_with_matches"):
+            args = _build_rg_args(
+                "pattern", "/path", 50, output_mode=mode,
+                hidden=False, no_ignore=False,
+            )
+            assert "--hidden" not in args
+            assert "--no-ignore" not in args
+            assert "-g" not in args
+
+
+class TestSearchLexicalForwardsFlags:
+    """hidden/no_ignore must reach the executed rg argv (Issue #851)."""
+
+    def test_flags_in_executed_argv(self) -> None:
+        container = MagicMock()
+        container.exec_run.return_value = (0, (b"", b""))
+        _search_lexical(
+            container, "pattern", "/path", 50,
+            hidden=True, no_ignore=True,
+        )
+        argv = container.exec_run.call_args[0][0]
+        assert "--hidden" in argv
+        assert "--no-ignore" in argv
+        assert ["-g", "!.git"] in [
+            argv[i:i + 2] for i in range(len(argv) - 1)
+        ]
+
+    def test_default_flags_absent_from_argv(self) -> None:
+        container = MagicMock()
+        container.exec_run.return_value = (0, (b"", b""))
+        _search_lexical(container, "pattern", "/path", 50)
+        argv = container.exec_run.call_args[0][0]
+        assert "--hidden" not in argv
+        assert "--no-ignore" not in argv
+
+
+class TestSearchFilesStructuralFlagErrors:
+    """Structural mode has no hidden/ignore equivalent: flags must fail loudly."""
+
+    def _client(self) -> MagicMock:
+        client = MagicMock()
+        client.containers.get.return_value = MagicMock()
+        return client
+
+    def test_hidden_with_structural_names_flag(self) -> None:
+        result = search_files(
+            self._client(), "abc123", "pattern", path="/tmp",
+            mode="structural", hidden=True,
+        )
+        assert result["status"] == "error"
+        assert "hidden=True" in result["error"]
+
+    def test_no_ignore_with_structural_names_flag(self) -> None:
+        result = search_files(
+            self._client(), "abc123", "pattern", path="/tmp",
+            mode="structural", no_ignore=True,
+        )
+        assert result["status"] == "error"
+        assert "no_ignore=True" in result["error"]
+
+    def test_both_flags_with_structural_name_both(self) -> None:
+        result = search_files(
+            self._client(), "abc123", "pattern", path="/tmp",
+            mode="structural", hidden=True, no_ignore=True,
+        )
+        assert result["status"] == "error"
+        assert "hidden=True" in result["error"]
+        assert "no_ignore=True" in result["error"]
+
+    def test_structural_without_flags_still_dispatches(self) -> None:
+        container = MagicMock()
+        container.exec_run.return_value = (127, (b"", b"sg: not found"))
+        client = MagicMock()
+        client.containers.get.return_value = container
+        result = search_files(
+            client, "abc123", "pattern", path="/tmp", mode="structural",
+        )
+        # Reached ast-grep (proving the flags-only guard did not hijack the
+        # normal structural path).
+        assert result["status"] == "error"
+        assert "ast-grep" in result["error"]
+
+
+class TestSearchInContainerThreading:
+    """search_in_container forwards hidden/no_ignore to search_files (Issue #851)."""
+
+    @patch("sunaba.tools.verify._docker")
+    @patch("sunaba.tools.verify.search_files")
+    def test_flags_forwarded_when_set(
+        self, mock_impl: MagicMock, mock_docker: MagicMock,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_impl.return_value = {
+            "matches": [], "shown": 0, "total": 0, "truncated": False,
+        }
+
+        search_in_container(
+            container_id="abc123", pattern="foo", path="/repo",
+            hidden=True, no_ignore=True,
+        )
+        mock_impl.assert_called_once_with(
+            mock_client, "abc123", "foo", path="/repo", mode="lexical",
+            max_results=50, glob=None, ignore_case=False, context=0,
+            output_mode="content", offset=0,
+            hidden=True, no_ignore=True,
+        )
+
+    @patch("sunaba.tools.verify._docker")
+    @patch("sunaba.tools.verify.search_files")
+    def test_defaults_omit_new_kwargs(
+        self, mock_impl: MagicMock, mock_docker: MagicMock,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_impl.return_value = {
+            "matches": [], "shown": 0, "total": 0, "truncated": False,
+        }
+
+        search_in_container(container_id="abc123", pattern="foo", path="/repo")
+        mock_impl.assert_called_once_with(
+            mock_client, "abc123", "foo", path="/repo", mode="lexical",
+            max_results=50, glob=None, ignore_case=False, context=0,
+            output_mode="content", offset=0,
+        )

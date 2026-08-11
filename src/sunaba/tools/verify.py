@@ -206,22 +206,28 @@ def search_in_container(
     context: int = 0,
     output_mode: str = "content",
     offset: int = 0,
+    hidden: bool = False,
+    no_ignore: bool = False,
 ) -> str:
     """Search in the container with ripgrep (lexical) or ast-grep (structural).
 
+    Dotfiles and ``.gitignore``d paths are excluded by default -- a pattern
+    only in such files returns no matches, with no warning.  ``hidden=True``
+    / ``no_ignore=True`` (lexical only) include them; ``.git/`` stays excluded.
+
     Args:
         container_id: Container ID prefix.
-        pattern: Regex (lexical) or AST pattern (structural).
-        path: Directory or file to search; default auto-detects the
-            repo root.
-        mode: 'lexical' (rg, grep fallback) or 'structural' (ast-grep,
-            whitespace-insensitive).
+        pattern: Regex or AST pattern.
+        path: File/dir to search; default auto-detects repo root.
+        mode: 'lexical' (rg, grep fallback) or 'structural' (ast-grep).
         max_results: Result cap.
         glob: File filter (e.g. '*.py').
-        ignore_case: Case-insensitive search.
-        context: Context lines around each match.
+        ignore_case: Case-insensitive.
+        context: Context lines per match.
         output_mode: 'content', 'files_with_matches', or 'count'.
         offset: Pagination offset.
+        hidden: Search dotfiles; ``.git/`` stays excluded.
+        no_ignore: Ignore ``.gitignore`` rules.
 
     Returns:
         JSON: matches, shown, total, truncated, next_offset.
@@ -259,6 +265,10 @@ def search_in_container(
         client, container_id, pattern, path=resolved_path, mode=mode,
         max_results=max_results, glob=glob, ignore_case=ignore_case,
         context=context, output_mode=output_mode, offset=offset,
+        # Forwarded only when set: search_files' defaults are the same, and
+        # delegation tests assert the exact kwarg set for default calls.
+        **({"hidden": hidden} if hidden else {}),
+        **({"no_ignore": no_ignore} if no_ignore else {}),
     )
     return json.dumps(results)
 

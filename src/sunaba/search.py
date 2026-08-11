@@ -61,8 +61,23 @@ def search_files(
     context: int = 0,
     output_mode: str = "content",
     offset: int = 0,
+    hidden: bool = False,
+    no_ignore: bool = False,
 ) -> dict[str, Any]:
     """Search for *pattern* inside the container.
+
+    By default hidden files/directories (dotfiles) and paths matched by
+    ``.gitignore`` are excluded from results: a pattern that only occurs
+    in such files returns no matches without any warning.  Pass
+    ``hidden=True`` to include dotfiles (``.git/`` itself stays excluded
+    from tree walks; a ``path`` pointing explicitly inside ``.git`` is
+    still searched, as with plain rg)
+    and ``no_ignore=True`` to ignore ``.gitignore`` rules.  Both flags
+    apply to lexical mode only -- with ``mode='structural'`` either flag
+    is an explicit error (ast-grep has no equivalent).  The exclusion
+    contract above is ripgrep's; the grep fallback (used only when ``rg``
+    is missing from the image) does not implement it, and either flag set
+    is an explicit error there instead of a silently different result.
 
     Args:
         client: Docker client.
@@ -79,6 +94,10 @@ def search_files(
         output_mode: ``"content"`` (default), ``"files_with_matches"``,
             or ``"count"``.
         offset: Line offset for pagination (default 0).
+        hidden: Search hidden files/directories (dotfiles); ``.git/``
+            stays excluded (default False).
+        no_ignore: Ignore ``.gitignore`` (and other ignore-file) rules
+            (default False).
 
     Returns:
         Dict with ``matches`` (list), ``shown``, ``total``, ``truncated``,
@@ -100,11 +119,26 @@ def search_files(
         }
 
     if mode == "structural":
+        if hidden or no_ignore:
+            flags = [
+                name
+                for name, enabled in (("hidden", hidden), ("no_ignore", no_ignore))
+                if enabled
+            ]
+            return {
+                "status": "error",
+                "error": (
+                    f"{' and '.join(name + '=True' for name in flags)} not supported "
+                    f"with mode='structural': ast-grep has no equivalent of ripgrep's "
+                    f"--hidden/--no-ignore. Use mode='lexical' instead."
+                ),
+            }
         return _search_structural(container, pattern, path, max_results)
     return _search_lexical(
         container, pattern, path, max_results,
         glob=glob, ignore_case=ignore_case, context=context,
         output_mode=output_mode, offset=offset,
+        hidden=hidden, no_ignore=no_ignore,
     )
 
 
@@ -122,9 +156,23 @@ def _build_rg_args(
     context: int = 0,
     output_mode: str = "content",
     offset: int = 0,
+    hidden: bool = False,
+    no_ignore: bool = False,
 ) -> list[str]:
-    """Build ripgrep argument list."""
+    """Build ripgrep argument list.
+
+    ``hidden`` adds ``--hidden`` (search dotfiles); ``.git/`` is kept out
+    with a basename glob because ``--hidden`` alone would also search it
+    (a slash glob like ``!.git/**`` is anchored to ripgrep's working
+    directory, which is not under our control, so a basename glob is the
+    only CWD-independent form).  ``no_ignore`` adds ``--no-ignore``.
+    """
     args = ["rg", "-n"]
+    if hidden:
+        args.append("--hidden")
+        args.extend(["-g", "!.git"])
+    if no_ignore:
+        args.append("--no-ignore")
     if output_mode == "content":
         args.append("--json")
     elif output_mode == "count":
@@ -184,12 +232,15 @@ def _search_lexical(
     context: int = 0,
     output_mode: str = "content",
     offset: int = 0,
+    hidden: bool = False,
+    no_ignore: bool = False,
 ) -> dict[str, Any]:
     """Lexical search: ripgrep first, grep fallback."""
     args = _build_rg_args(
         pattern, path, max_results,
         glob=glob, ignore_case=ignore_case,
         context=context, output_mode=output_mode, offset=offset,
+        hidden=hidden, no_ignore=no_ignore,
     )
     exit_code, output = container.exec_run(
         args,
@@ -197,6 +248,23 @@ def _search_lexical(
         stderr=True,
     )
     if exit_code == 127:
+        # The grep fallback cannot express --hidden / --no-ignore, so a
+        # request that named either flag must fail loudly rather than
+        # silently return results with a different exclusion contract.
+        if hidden or no_ignore:
+            flags = [
+                name
+                for name, enabled in (("hidden", hidden), ("no_ignore", no_ignore))
+                if enabled
+            ]
+            return {
+                "status": "error",
+                "error": (
+                    f"{' and '.join(name + '=True' for name in flags)} not supported: "
+                    "ripgrep (rg) is missing from this container and the grep "
+                    "fallback cannot honor these flags. Install rg or drop the flag."
+                ),
+            }
         return _grep_fallback(
             container, pattern, path, max_results,
             ignore_case=ignore_case, context=context,

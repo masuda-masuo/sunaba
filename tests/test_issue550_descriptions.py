@@ -141,7 +141,14 @@ class TestServerInstructions:
 #   tail_lines= parameter (+24 B for its description, using up the 5 B of
 #   headroom under the old cap).  Both are the measured cost of the new
 #   surface, per this file's protocol.
-TOTAL_DESCRIPTION_BYTE_LIMIT = 12140
+# - descriptions 12140 -> 12362, param descriptions 10581 -> 10576
+#   (2026-08-11): #851 added hidden= / no_ignore= to search_in_container,
+#   whose silent default (dotfiles and .gitignored paths excluded, no
+#   warning) previously pushed census-type searches out to raw `rg` via
+#   sandbox_exec.  The description gained the exclusion contract and the
+#   two flags (+222 B, measured); the two new schema parameters fit inside
+#   the Args rewrite (net -5 B).  Both per this file's protocol.
+TOTAL_DESCRIPTION_BYTE_LIMIT = 12362
 TOTAL_PARAM_DESCRIPTION_BYTE_LIMIT = 10581
 
 
@@ -190,6 +197,23 @@ class TestUnderscoreParams:
                 if pname.startswith("_"):
                     hidden.append(f"{t.name}.{pname}")
         assert not hidden, f"internal parameters exposed in schema: {hidden}"
+
+
+class TestSearchExclusionContract:
+    """The silent-miss exclusion contract stays in the visible description.
+
+    The aggregate-budget tests only measure size, so the #851 exclusion
+    paragraph could be dropped from search_in_container's docstring and
+    every budget test would still pass (the total would merely shrink);
+    pin the content the way TestWorkflowGuidePhases pins phase names.
+    """
+
+    def test_exclusion_contract_in_description(self) -> None:
+        tools = {t.name: t for t in _tools(server)}
+        desc: str = tools["search_in_container"].description or ""
+        assert "excluded by default" in desc
+        assert "hidden=True" in desc
+        assert "no_ignore=True" in desc
 
 
 class TestWorkflowGuidePhases:

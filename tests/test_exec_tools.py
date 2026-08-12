@@ -1062,3 +1062,263 @@ class TestPackageInstallJournalRecording:
         assert "uv pip install requests" in args[1][2]
         assert "else exec pip install requests" in args[1][2]
         assert args[2] == 0
+
+
+class TestSandboxExecEnvelope:
+    """The result envelope must describe the page it actually returns.
+
+    ``meta`` used to describe the summary truncation applied to the
+    display while ``page`` described the paging applied afterwards, and
+    the envelope mixed the two: ``shown`` was the display's line count
+    rather than the page's, and ``truncated`` came from ``meta``, which
+    ``verbose="full"`` sets to False however much paging cut off.
+    """
+
+    @staticmethod
+    def _run(output: str, **kwargs: object) -> dict:
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (output.encode(), b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        with patch("sunaba.tools.exec._docker", return_value=mock_client):
+            return json.loads(sandbox_exec(
+                container_id="abc123def456",
+                commands=["echo lines"],
+                **kwargs,
+            ))
+
+    def test_shown_is_the_line_count_of_the_returned_output(self) -> None:
+        result = self._run("\n".join(str(i) for i in range(1, 101)), limit=10)
+        assert result["shown"] == 10
+        assert len(result["output"].split("\n")) == 10
+
+    def test_verbose_full_with_paging_reports_incomplete(self) -> None:
+        result = self._run(
+            "\n".join(str(i) for i in range(1, 61)), verbose="full", limit=25,
+        )
+        assert result["shown"] == 25
+        assert result["truncated"] is True
+
+    def test_whole_output_on_one_page_is_not_truncated(self) -> None:
+        result = self._run("line1\nline2\nline3", limit=50)
+        assert result["truncated"] is False
+        assert result["has_more"] is False
+        assert result["shown"] == 3
+
+    def test_later_page_reports_incomplete(self) -> None:
+        """offset skips the earlier lines, so the page is not the output."""
+        result = self._run(
+            "\n".join(str(i) for i in range(1, 61)),
+            verbose="full",
+            offset=50,
+            limit=50,
+        )
+        assert result["has_more"] is False
+        assert result["truncated"] is True
+
+    def test_total_lines_is_a_line_count_under_a_token_budget(self) -> None:
+        body = "\n".join(f"line {i}" for i in range(200))
+        result = self._run(body, max_output_tokens=10)
+        assert result["total_lines"] == 200
+        # The token figure keeps its own key rather than overloading
+        # total_lines with a different unit.
+        assert result["estimated_tokens"] > 200
+        assert result["truncated"] is True
+
+    def test_estimated_tokens_absent_without_a_token_budget(self) -> None:
+        result = self._run("line1\nline2")
+        assert "estimated_tokens" not in result
+
+    def test_summary_truncation_still_reports_incomplete(self) -> None:
+        result = self._run("\n".join(str(i) for i in range(300)), max_lines=10)
+        assert result["truncated"] is True
+        assert result["shown"] == len(result["output"].split("\n"))
+
+
+class TestSandboxExecTokenBudgetEnvelope:
+    """The resource pointer must not corrupt the counts it sits next to.
+
+    It used to be appended to *display* after ``total_lines`` had been
+    counted, so ``shown`` counted a line ``total_lines`` did not, and
+    the extra line took a slot of the page -- output that fit in one
+    page could still be reported as having more.
+    """
+
+    @staticmethod
+    def _run(output: str, **kwargs: object) -> dict:
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (output.encode(), b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        with patch("sunaba.tools.exec._docker", return_value=mock_client):
+            return json.loads(sandbox_exec(
+                container_id="abc123def456",
+                commands=["echo lines"],
+                **kwargs,
+            ))
+
+    def test_shown_never_exceeds_total_lines(self) -> None:
+        body = "\n".join(f"line {i}" for i in range(200))
+        result = self._run(body, max_output_tokens=10, limit=500)
+        assert result["shown"] == len(result["output"].split("\n"))
+        assert result["shown"] <= result["total_lines"]
+        assert result["total_lines"] == 200
+
+    def test_shown_and_total_lines_count_the_same_content(self) -> None:
+        """Output well inside the budget: both counts see three lines."""
+        result = self._run("a\nb\nc", max_output_tokens=10_000, limit=500)
+        assert result["shown"] == 3
+        assert result["total_lines"] == 3
+        assert result["output"] == "a\nb\nc"
+
+    def test_output_that_fits_budget_and_page_is_not_truncated(self) -> None:
+        """Exactly `limit` lines: the resource pointer must not spill a page."""
+        body = "\n".join(f"line{i}" for i in range(10))
+        result = self._run(body, max_output_tokens=10_000, limit=10)
+        assert result["truncated"] is False
+        assert result["has_more"] is False
+        assert result["next_offset"] is None
+        assert result["shown"] == 10
+        assert result["total_lines"] == 10
+        assert result["output"] == body
+
+    def test_resource_pointer_is_reported_beside_the_output(self) -> None:
+        body = "\n".join(f"line{i}" for i in range(10))
+        result = self._run(body, max_output_tokens=10_000, limit=10)
+        assert "sandbox_read_journal" in result["resource"]
+        assert "resource" not in result["output"]
+
+    def test_no_resource_key_without_a_token_budget(self) -> None:
+        assert "resource" not in self._run("line1\nline2")
+
+
+class TestRunContainerAndExecEnvelope:
+    """run_container_and_exec carried sandbox_exec's envelope verbatim.
+
+    Including ``total_lines=original_tokens`` (a token count in a line
+    count's field) and ``truncated`` taken from the truncation layer
+    alone, so paging could cut the output while the envelope said it
+    had not.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
+
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+
+    _IMAGE = "python@sha256:" + "0" * 64
+
+    @staticmethod
+    def _run(output: str, **kwargs: object) -> dict:
+        from sunaba.tools.container import run_container_and_exec
+
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_container.exec_run.return_value = (0, (output.encode(), b""))
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        with (
+            patch("sunaba.tools.container._docker", return_value=mock_client),
+            patch("sunaba.tools.container.lifecycle.validate_image_ref"),
+        ):
+            return json.loads(run_container_and_exec(
+                image=TestRunContainerAndExecEnvelope._IMAGE,
+                commands=["echo lines"],
+                **kwargs,
+            ))
+
+    def test_paging_alone_reports_the_output_as_cut(self) -> None:
+        result = self._run(
+            "\n".join(str(i) for i in range(1, 61)), verbose="full", limit=25,
+        )
+        assert result["shown"] == 25
+        assert result["has_more"] is True
+        assert result["truncated"] is True
+        assert result["total_lines"] == 60
+
+    def test_whole_output_on_one_page_is_not_truncated(self) -> None:
+        result = self._run("line1\nline2\nline3", limit=50)
+        assert result["truncated"] is False
+        assert result["has_more"] is False
+        assert result["shown"] == 3
+
+    def test_later_page_reports_the_output_as_cut(self) -> None:
+        result = self._run(
+            "\n".join(str(i) for i in range(1, 61)),
+            verbose="full",
+            offset=50,
+            limit=50,
+        )
+        assert result["has_more"] is False
+        assert result["truncated"] is True
+
+    def test_total_lines_is_a_line_count_under_a_token_budget(self) -> None:
+        body = "\n".join(f"line {i}" for i in range(200))
+        result = self._run(body, max_output_tokens=10, limit=500)
+        assert result["total_lines"] == 200
+        assert result["estimated_tokens"] > 200
+        assert result["shown"] == len(result["output"].split("\n"))
+        assert result["shown"] <= result["total_lines"]
+        assert result["truncated"] is True
+        assert "sandbox_read_journal" in result["resource"]
+
+    def test_summary_truncation_reports_the_output_as_cut(self) -> None:
+        result = self._run("\n".join(str(i) for i in range(300)), max_lines=10)
+        assert result["truncated"] is True
+        assert result["shown"] == len(result["output"].split("\n"))
+
+
+class TestTransformFileEnvelope:
+    """transform_file's diff carried the same envelope, with the same lie."""
+
+    @staticmethod
+    def _run(diff: str, **kwargs: object) -> dict:
+        from sunaba.tools.file import transform_file
+
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = MagicMock()
+        with (
+            patch("sunaba.tools.file._docker", return_value=mock_client),
+            patch("sunaba.tools.file.record_tool_use"),
+            patch(
+                "sunaba.tools.file.transform_file_in_container",
+                return_value={
+                    "status": "ok", "changed": True, "diff": diff,
+                    "new_size": 10, "new_lines": 2,
+                },
+            ),
+            patch("sunaba.tools.file.undo.save_version"),
+        ):
+            return json.loads(transform_file(
+                container_id="abc123def456",
+                file_path="/workspace/f.py",
+                code="def transform(text): return text",
+                **kwargs,
+            ))
+
+    def test_paging_alone_reports_the_diff_as_cut(self) -> None:
+        """The case the old envelope got wrong: page 1 of 3, truncated False."""
+        diff = "\n".join(f"+line{i}" for i in range(12))
+        result = self._run(diff, offset=0, limit=4)
+        assert result["diff"] == "+line0\n+line1\n+line2\n+line3"
+        assert result["shown"] == 4
+        assert result["total_lines"] == 12
+        assert result["truncated"] is True
+        assert result["has_more"] is True
+        assert result["next_offset"] == 4
+
+    def test_whole_diff_on_one_page_is_not_truncated(self) -> None:
+        diff = "\n".join(f"+line{i}" for i in range(3))
+        result = self._run(diff, offset=0, limit=50)
+        assert result["truncated"] is False
+        assert result["has_more"] is False
+        assert result["shown"] == 3
+        assert result["total_lines"] == 3
+
+    def test_later_page_reports_the_diff_as_cut(self) -> None:
+        diff = "\n".join(f"+line{i}" for i in range(12))
+        result = self._run(diff, offset=8, limit=50)
+        assert result["has_more"] is False
+        assert result["truncated"] is True
+        assert result["shown"] == 4

@@ -28,10 +28,11 @@ from sunaba.edit_verify import (
     write_file as write_file_in_container,
 )
 from sunaba.journal import record_copy, record_tool_use
-from sunaba.output_control import paginate_output, truncate_output
+from sunaba.output_control import build_output_envelope, truncate_output
 from sunaba.tools.common import WORKSPACE, _docker, container_not_found_error
 from sunaba.tools.edit_engine import (
     _ALREADY_APPLIED_MIN_CHARS,
+    _body_loss_error,
     _build_near_miss_echo,
     _build_success_echo,
     _extract_symbol_from_old_str,
@@ -174,6 +175,15 @@ def edit_file(
 
     Returns:
         Success or error message.
+
+        An AST edit whose file_contents is a definition with nothing
+        but a docstring for a body is refused rather than applied,
+        because AST resolution replaces the whole definition and the
+        old body would be deleted silently; the error says to pass the
+        full body or ast=False.  (Under ``Returns:`` deliberately:
+        FastMCP drops everything after ``Args:`` from the
+        client-visible description -- see
+        tests/test_issue550_descriptions.py.)
     """
     client = _docker()
     try:
@@ -261,6 +271,17 @@ def edit_file(
                     "line, optionally preceded by decorators/comments)."
                 )
             if symbol is not None:
+                # Pre-flight, before anything is written: AST resolution
+                # replaces the WHOLE definition, so a file_contents with
+                # no body of its own deletes the old body and still
+                # leaves a file that parses and verifies (#822).  The
+                # guard below reads the old and new definitions, not the
+                # shape of old_str.
+                body_loss = _body_loss_error(
+                    existing, symbol, file_contents, dest_path, line,
+                )
+                if body_loss is not None:
+                    return body_loss
                 ast_result = edit_symbol_in_container(
                     client, container_id, dest_path, symbol, file_contents, line, preserve or "decorators+docstring",
                 )
@@ -794,6 +815,67 @@ def copy_project(
         os.unlink(tmp.name)
 
 
+def _probe_paths(container, paths: list[str]) -> list[str] | None:
+    """Ask the container what each of *paths* is.
+
+    Returns one verdict per input path -- ``"dir"``, ``"file"`` or
+    ``"none"`` -- or ``None`` when the container could not be asked, so
+    the caller can fall back to inspecting the path string.  A string
+    cannot tell a directory from a file: ``/workspace/out`` is a
+    directory if one exists there, trailing slash or not.
+    """
+    script = "; ".join(
+        f"if [ -d {shlex.quote(p)} ]; then echo dir; "
+        f"elif [ -e {shlex.quote(p)} ]; then echo file; "
+        f"else echo none; fi"
+        for p in paths
+    )
+    try:
+        exit_code, out = container.exec_run(["/bin/sh", "-c", script])
+        if exit_code != 0:
+            return None
+        verdicts = out.decode("utf-8").split()
+    except Exception:
+        return None
+    if len(verdicts) != len(paths):
+        return None
+    return verdicts
+
+
+def _probe_written(container, path: str, expected_size: int | None = None) -> str | None:
+    """Return an error message unless *path* is a file in the container.
+
+    ``put_archive`` returns normally when it writes nothing (a tar
+    entry with an empty name is accepted and dropped), so the only
+    honest evidence that a copy happened is reading the destination
+    back.  When *expected_size* is given the byte count must match too.
+    """
+    quoted = shlex.quote(path)
+    try:
+        exit_code, out = container.exec_run(
+            ["/bin/sh", "-c", f"[ -f {quoted} ] && wc -c < {quoted}"],
+        )
+    except Exception as e:
+        return f"Error: could not verify that {path} was written: {e}"
+    if exit_code != 0:
+        return (
+            f"Error: nothing was written to {path}: the copy reported no "
+            "error but no file is there."
+        )
+    if expected_size is None:
+        return None
+    try:
+        written = int(out.decode("utf-8").strip())
+    except Exception:
+        return None  # unreadable size: presence is verified, that is enough
+    if written != expected_size:
+        return (
+            f"Error: {path} holds {written} bytes, expected "
+            f"{expected_size} -- the copy did not land intact."
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # copy_file
 # ---------------------------------------------------------------------------
@@ -817,6 +899,20 @@ def copy_file(
 
     Returns:
         Success or error message.
+
+        *dest_path* is classified by asking the container, not by the
+        shape of the string: an existing directory receives the file
+        under the source's own name (with or without a trailing
+        slash), and anything else is the full destination path, so the
+        basename may differ from the source and the file is renamed on
+        the way in.  A destination directory that does not exist is an
+        error naming it, never a silent no-op, and the destination is
+        read back before success is reported.
+
+        (This paragraph sits under ``Returns:`` deliberately: FastMCP
+        drops everything after ``Args:`` from the client-visible tool
+        description, so the note costs no client context -- see
+        tests/test_issue550_descriptions.py.)
     """
     client = _docker()
     try:
@@ -832,12 +928,61 @@ def copy_file(
     if not src.is_file():
         return f"Error: {local_src_file} is not a file"
 
-    dest = dest_path
-    if not dest.endswith("/") and not dest.endswith(src.name):
-        dest = posixpath.join(dest_path, src.name)
+    # Where the file lands is decided by what the container reports,
+    # never by the shape of the string.  The old string test had two
+    # silent failure modes: a trailing slash made basename("") the tar
+    # entry name, so put_archive wrote nothing and still returned
+    # normally, and a dest whose basename differed from the source was
+    # assumed to be a directory, so the copy 404'd on a path that does
+    # not exist instead of renaming the file.
+    trailing_slash = dest_path.endswith("/")
+    requested = dest_path.rstrip("/") or "/"
+    requested_parent = posixpath.dirname(requested) or "/"
+    verdicts = _probe_paths(container, [requested, requested_parent])
+    if verdicts is None:
+        # The container could not be asked, so fall back to the only
+        # thing the string does say: a trailing slash names a directory,
+        # anything else is the full destination path.  Guessing
+        # "directory" from a differing basename is the original defect
+        # (a rename target got the source's name appended); a bare name
+        # that is really a directory is the case a string genuinely
+        # cannot call, and that one is caught by the read-back below
+        # rather than reported as a success.
+        dest_kind = "dir" if trailing_slash else "file"
+        parent_kind = "unknown"
+    else:
+        dest_kind, parent_kind = verdicts[0], verdicts[1]
 
-    parent_dir = posixpath.dirname(dest)
-    base_name = posixpath.basename(dest)
+    if dest_kind == "dir":
+        # An existing directory takes the file under its own name.
+        target = posixpath.join(requested, src.name)
+    elif trailing_slash:
+        return (
+            f"Error: destination directory {requested} does not exist in "
+            f"container {container_id[:12]}; create it first, or pass a "
+            "full file path."
+        )
+    else:
+        # A file path -- copied verbatim, so the basename may differ
+        # from the source (rename during copy).
+        target = requested
+        if parent_kind == "none":
+            return (
+                f"Error: destination directory {requested_parent} does "
+                f"not exist in container {container_id[:12]}; create it "
+                "first."
+            )
+        if parent_kind == "file":
+            return (
+                f"Error: {requested_parent} is a file, not a directory, "
+                f"in container {container_id[:12]}; {target} cannot be "
+                "written under it."
+            )
+
+    parent_dir = posixpath.dirname(target) or "/"
+    base_name = posixpath.basename(target)
+    if not base_name:
+        return f"Error: {dest_path} does not name a file to write to"
 
     with open(src, "rb") as f:
         data = f.read()
@@ -852,14 +997,33 @@ def copy_file(
     try:
         container.put_archive(parent_dir, tar_stream.getvalue())
     except APIError as e:
-        return f"Error: {e}"
+        if "404" in str(e):
+            hint = f" (is {parent_dir} missing?)"
+        elif verdicts is None and not trailing_slash:
+            # Unprobed, so the destination was read as a file path per the
+            # documented contract.  Name the one thing the caller can say
+            # that a string does carry.
+            hint = (
+                f" (the container could not be probed, so {requested} was "
+                "taken as a file path -- pass it with a trailing slash if "
+                "it is a directory)"
+            )
+        else:
+            hint = ""
+        return f"Error: failed to write {target}{hint}: {e}"
 
-    own_err = _normalize_ownership(container, dest)
+    own_err = _normalize_ownership(container, target)
     if own_err is not None:
         return own_err
 
-    record_copy(container_id[:12], "copy_file", local_src_file, dest)
-    return f"Copied {local_src_file} to {dest} in container {container_id[:12]}"
+    # Only now is success reportable: put_archive returning normally is
+    # not evidence that a file exists at *target*.
+    check = _probe_written(container, target, len(data))
+    if check is not None:
+        return check
+
+    record_copy(container_id[:12], "copy_file", local_src_file, target)
+    return f"Copied {local_src_file} to {target} in container {container_id[:12]}"
 
 
 # ---------------------------------------------------------------------------
@@ -1100,6 +1264,13 @@ def transform_file(
     Returns:
         JSON: status, changed, diff (paginated, with paging metadata);
         on failure error, and traceback when your code raised.
+
+        The paging metadata means what sandbox_exec's does: ``shown`` is
+        the number of lines in the returned ``diff``, ``total_lines``
+        the line count of the whole diff, and ``truncated`` "the diff
+        you are holding is not the whole diff" -- true whenever
+        anything was withheld, paging and ``offset`` > 0 included.
+        ``has_more`` still means only "more pages follow this one".
     """
     client = _docker()
     try:
@@ -1131,16 +1302,26 @@ def transform_file(
             max_lines=max_lines,
             verbose="full",
         )
-        page = paginate_output(display, offset=offset, limit=limit)
+        # Same envelope meanings as sandbox_exec, from the same helper:
+        # meta describes the truncation, the page describes the paging,
+        # and reporting meta.truncated alone told a caller holding page
+        # 1 of 4 that the diff was complete.
+        envelope = build_output_envelope(
+            display,
+            total_lines=meta.total_lines,
+            content_withheld=meta.truncated or meta.shown < meta.total_lines,
+            offset=offset,
+            limit=limit,
+        )
         return json.dumps({
             "status": "ok",
             "changed": True,
-            "diff": page.content,
-            "shown": meta.shown,
-            "total_lines": meta.total_lines,
-            "truncated": meta.truncated,
-            "next_offset": page.next_offset,
-            "has_more": page.has_more,
+            "diff": envelope.output,
+            "shown": envelope.shown,
+            "total_lines": envelope.total_lines,
+            "truncated": envelope.truncated,
+            "next_offset": envelope.next_offset,
+            "has_more": envelope.has_more,
             "file_size": _file_size_from_counts(
                 int(result.get("new_size", 0)), int(result.get("new_lines", 0))
             ),

@@ -144,14 +144,20 @@ class TestTransformFile:
     @patch("sunaba.tools.file._docker")
     @patch("sunaba.tools.file.transform_file_in_container")
     @patch("sunaba.tools.file.truncate_output")
-    @patch("sunaba.tools.file.paginate_output")
     def test_delegates_with_changes_and_paginates(
         self,
-        mock_paginate: MagicMock,
         mock_truncate: MagicMock,
         mock_impl: MagicMock,
         mock_docker: MagicMock,
     ) -> None:
+        """The diff is paginated and the page is described truthfully.
+
+        Paging is no longer mocked out: it is what decides ``shown``
+        and ``truncated`` now, so mocking it would test nothing.  This
+        test used to assert ``truncated is False`` while ``has_more``
+        was True -- a caller holding page 1 of 3 was told the diff was
+        complete.
+        """
         mock_container = MagicMock()
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
@@ -159,18 +165,13 @@ class TestTransformFile:
         mock_impl.return_value = {"status": "ok", "changed": True, "diff": "some diff"}
 
         class MockMeta:
-            shown = 5
+            shown = 10
             total_lines = 10
             truncated = False
 
-        mock_truncate.return_value = ("paginated diff", MockMeta())
-
-        class MockPage:
-            content = "page 1"
-            next_offset = 50
-            has_more = True
-
-        mock_paginate.return_value = MockPage()
+        mock_truncate.return_value = (
+            "\n".join(f"line{i}" for i in range(10)), MockMeta(),
+        )
 
         result = json.loads(
             transform_file(
@@ -179,20 +180,19 @@ class TestTransformFile:
                 code="def transform(text): return text",
                 max_lines=200,
                 offset=0,
-                limit=100,
+                limit=4,
             )
         )
         assert result["status"] == "ok"
         assert result["changed"] is True
-        assert result["diff"] == "page 1"
-        assert result["shown"] == 5
+        assert result["diff"] == "line0\nline1\nline2\nline3"
+        assert result["shown"] == 4
         assert result["total_lines"] == 10
-        assert result["truncated"] is False
-        assert result["next_offset"] == 50
+        assert result["truncated"] is True
+        assert result["next_offset"] == 4
         assert result["has_more"] is True
 
         mock_truncate.assert_called_once_with("some diff", max_lines=200, verbose="full")
-        mock_paginate.assert_called_once_with("paginated diff", offset=0, limit=100)
 
 
 # ===================================================================

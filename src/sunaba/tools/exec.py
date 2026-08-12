@@ -17,10 +17,10 @@ from sunaba.journal import record_exec as journal_record_exec
 from sunaba.journal import record_exec_start as journal_record_exec_start
 from sunaba.journal import record_tool_use
 from sunaba.output_control import (
-    OutputMetadata,
+    build_output_envelope,
     compress_failures,
     compress_repeated_lines,
-    paginate_output,
+    count_lines,
     sanitize_output,
     truncate_by_tokens,
     truncate_output,
@@ -88,6 +88,22 @@ def sandbox_exec(
     Returns:
         JSON: status, output, paging metadata; exit_code and stderr on
         failure.
+
+        ``shown`` is the number of lines in the returned ``output``.
+        ``total_lines`` is the line count of the whole output, in every
+        mode.  ``truncated`` means "``output`` is not the whole output":
+        it is true when content was withheld by summary truncation, by
+        ``max_output_tokens``, by ``error_only`` hiding a successful
+        run's output, or by paging -- including when ``offset`` > 0
+        skipped earlier lines.  ``has_more`` still means only "more
+        pages follow this one", so ``truncated`` is the single field to
+        test for completeness.  ``estimated_tokens`` appears only with
+        ``max_output_tokens`` and carries the token estimate of the
+        untruncated output, alongside ``resource``, which names where
+        the untruncated output can still be read.  Neither is a line of
+        ``output``: the resource pointer used to be appended to the
+        text, where it inflated ``shown`` past ``total_lines`` and cost
+        a line of every page.
     """
     if timeout < 0:
         return json.dumps({"status": "error", "error": "timeout must be >= 0"})
@@ -196,15 +212,24 @@ def sandbox_exec(
         if exit_code != 0:
             compressed = compress_failures(compressed)
 
-        # Token-budget truncation (takes precedence over line-based)
+        # Token-budget truncation (takes precedence over line-based).
+        # ``total_lines`` stays a line count in both branches -- it used to
+        # carry the token estimate here, which made the same key mean two
+        # different units depending on max_output_tokens.  The token figure
+        # keeps its own key instead.
+        estimated_tokens: int | None = None
+        resource_note: str | None = None
         if max_output_tokens > 0:
             display, original_tokens = truncate_by_tokens(compressed, max_output_tokens)
-            meta = OutputMetadata(
-                shown=len(display.split("\n")),
-                total_lines=original_tokens,
-                truncated=original_tokens > max_output_tokens,
-            )
-            display += "\n[resource: run output available via sandbox_read_journal]"
+            total_lines = count_lines(compressed)
+            estimated_tokens = original_tokens
+            content_withheld = original_tokens > max_output_tokens
+            # The pointer to the full output is an annotation about the
+            # result, not a line of it.  Appending it to *display* made
+            # shown count a line total_lines did not, and spent one slot
+            # of the page, so output that fit in a single page could
+            # still be reported as having more.
+            resource_note = "full output retrievable via sandbox_read_journal"
         else:
             display, meta = truncate_output(
                 compressed,
@@ -213,8 +238,19 @@ def sandbox_exec(
                 exit_code=exit_code,
                 stderr=stderr_text,
             )
+            total_lines = meta.total_lines
+            # meta.truncated alone misses error_only's suppression of a
+            # successful run's output, which withholds every line while
+            # reporting no truncation.
+            content_withheld = meta.truncated or meta.shown < meta.total_lines
 
-        page = paginate_output(display, offset=offset, limit=limit)
+        envelope = build_output_envelope(
+            display,
+            total_lines=total_lines,
+            content_withheld=content_withheld,
+            offset=offset,
+            limit=limit,
+        )
 
         if exit_code == 0:
             status = "ok"
@@ -225,13 +261,17 @@ def sandbox_exec(
 
         result: dict[str, Any] = {
             "status": status,
-            "output": page.content,
-            "shown": meta.shown,
-            "total_lines": meta.total_lines,
-            "truncated": meta.truncated,
-            "next_offset": page.next_offset,
-            "has_more": page.has_more,
+            "output": envelope.output,
+            "shown": envelope.shown,
+            "total_lines": envelope.total_lines,
+            "truncated": envelope.truncated,
+            "next_offset": envelope.next_offset,
+            "has_more": envelope.has_more,
         }
+        if estimated_tokens is not None:
+            result["estimated_tokens"] = estimated_tokens
+        if resource_note is not None:
+            result["resource"] = resource_note
         if exit_code != 0:
             result["exit_code"] = exit_code
         if stderr_text and verbose != "error_only":

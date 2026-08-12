@@ -1222,3 +1222,510 @@ class TestWriteFileSymbolIntegration:
         )
         assert "Error" not in result, result
         assert "replaced" in result
+
+
+# ===================================================================
+# Body-loss guard on the AST path (sunaba PR #822)
+# ===================================================================
+
+
+class _WritingFakeContainer(_FakeContainerWithIO):
+    """A fake whose ``put_archive`` really writes the file.
+
+    ``_FakeContainerWithIO`` stubs ``put_archive`` out, which is fine
+    for the AST path (the driver edits the file directly) but hides
+    what a string-replace edit produced -- and "what landed on disk"
+    is exactly what these tests are about.
+    """
+
+    def put_archive(self, path, data):  # noqa: ANN001, ANN201
+        import io
+        import posixpath
+        import tarfile
+
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            for member in tar.getmembers():
+                dest = posixpath.join(path, member.name)
+                real_path = self.path_map.get(dest, dest)
+                extracted = tar.extractfile(member)
+                if extracted is None:
+                    continue
+                with open(real_path, "wb") as fh:
+                    fh.write(extracted.read())
+        return True
+
+
+class TestBodyLossGuard:
+    """An AST edit must never silently drop a definition's body.
+
+    In PR #822 an ``edit_file`` call meant to update a docstring
+    removed the body of ``done()``, including its ``_control.stop()``
+    call: ``old_str`` carried the ``def`` line, so the edit resolved
+    through AST, which replaces the whole definition -- and a
+    docstring-only replacement is a legal body, so the file still
+    parsed and the gate stayed green.
+    """
+
+    SRC = (
+        "class Runner:\n"
+        "    def done(self):\n"
+        '        """Old doc."""\n'
+        "        for item in self.items:\n"
+        "            if item.failed:\n"
+        "                raise RuntimeError(item)\n"
+        "        self._control.stop()\n"
+        "        return True\n"
+    )
+
+    def _docker(self, tmp_path, monkeypatch):  # noqa: ANN001, ANN202
+        f = tmp_path / "mod.py"
+        f.write_text(self.SRC, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _FakeClient(_WritingFakeContainer({POSIX: str(f)})),
+        )
+        return f
+
+    def test_docstring_only_replacement_is_refused(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        f = self._docker(tmp_path, monkeypatch)
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents='    def done(self):\n        """New doc."""\n',
+            old_str='    def done(self):\n        """Old doc."""\n',
+        )
+        assert "Error" in result, result
+        assert "'done'" in result
+        assert "delete" in result and "body" in result
+        assert "ast=False" in result
+        # The file is untouched -- the guard runs before any write.
+        assert f.read_text(encoding="utf-8") == self.SRC
+
+    def test_refusal_names_the_statements_at_risk(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        self._docker(tmp_path, monkeypatch)
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents='    def done(self):\n        """New doc."""\n',
+            old_str='    def done(self):\n        """Old doc."""\n',
+        )
+        # for / self._control.stop() / return -- the three statements the
+        # #822 edit deleted.
+        assert "3 statements" in result
+
+    def test_ast_false_performs_a_literal_replacement(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """The escape hatch the refusal points at must actually work."""
+        f = self._docker(tmp_path, monkeypatch)
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents='    def done(self):\n        """New doc."""\n',
+            old_str='    def done(self):\n        """Old doc."""\n',
+            ast=False,
+        )
+        assert "Error" not in result, result
+        text = f.read_text(encoding="utf-8")
+        assert '"""New doc."""' in text
+        assert '"""Old doc."""' not in text
+        # The body survives a literal replacement.
+        assert "self._control.stop()" in text
+        assert "raise RuntimeError(item)" in text
+        assert "return True" in text
+
+    def test_genuinely_shorter_body_still_replaces(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A real new body goes through, however much smaller."""
+        f = self._docker(tmp_path, monkeypatch)
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents=(
+                "    def done(self):\n"
+                '        """New doc."""\n'
+                "        return False\n"
+            ),
+            old_str="    def done(self):\n",
+        )
+        assert "Error" not in result, result
+        text = f.read_text(encoding="utf-8")
+        assert "return False" in text
+        assert "self._control.stop()" not in text
+
+    def test_module_level_function_is_guarded_too(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        f = tmp_path / "mod.py"
+        src = 'def run():\n    """Doc."""\n    return compute()\n'
+        f.write_text(src, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents='def run():\n    """Better doc."""\n',
+            old_str="def run():",
+        )
+        assert "Error" in result, result
+        assert "'run'" in result
+        assert f.read_text(encoding="utf-8") == src
+
+    def test_docstring_only_old_definition_is_not_blocked(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Nothing to lose: the old body is a docstring too."""
+        f = tmp_path / "mod.py"
+        f.write_text('def run():\n    """Doc."""\n', encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents='def run():\n    """Better doc."""\n',
+            old_str="def run():",
+        )
+        assert "Error" not in result, result
+        assert "Better doc." in f.read_text(encoding="utf-8")
+
+    def test_ast_true_is_guarded_as_well(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        f = self._docker(tmp_path, monkeypatch)
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents='    def done(self):\n        """New doc."""\n',
+            old_str="    def done(self):",
+            ast=True,
+        )
+        assert "Error" in result, result
+        assert "'done'" in result
+        assert f.read_text(encoding="utf-8") == self.SRC
+
+    def test_guard_reads_content_not_the_shape_of_old_str(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A def line in old_str is not by itself an error."""
+        f = self._docker(tmp_path, monkeypatch)
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents=(
+                "    def done(self):\n"
+                '        """Old doc."""\n'
+                "        self._control.stop()\n"
+                "        return True\n"
+            ),
+            old_str="    def done(self):",
+        )
+        assert "Error" not in result, result
+        assert "self._control.stop()" in f.read_text(encoding="utf-8")
+
+
+class TestBodyLossHelpers:
+    """Unit tests for the pure-string half of the guard."""
+
+    def test_docstring_only_body_is_body_free(self) -> None:
+        from sunaba.tools.edit_engine import _is_body_free, _sole_definition
+
+        node = _sole_definition('def f():\n    """Doc."""\n')
+        assert node is not None
+        assert _is_body_free(node) is True
+
+    def test_stub_bodies_are_not_body_free(self) -> None:
+        """``pass`` / ``...`` are bodies the caller wrote deliberately."""
+        from sunaba.tools.edit_engine import _is_body_free, _sole_definition
+
+        for text in ("def f():\n    pass\n", "def f(): ...\n"):
+            node = _sole_definition(text)
+            assert node is not None
+            assert _is_body_free(node) is False, text
+
+    def test_two_definitions_are_not_a_sole_definition(self) -> None:
+        from sunaba.tools.edit_engine import _sole_definition
+
+        assert _sole_definition("def a():\n    pass\n\n\ndef b():\n    pass\n") is None
+        assert _sole_definition("x = 1") is None
+
+    def test_no_error_when_symbol_is_absent(self) -> None:
+        from sunaba.tools.edit_engine import _body_loss_error
+
+        assert _body_loss_error(
+            "def other():\n    return 1\n",
+            "missing",
+            'def missing():\n    """Doc."""\n',
+            "/sandbox/mod.py",
+        ) is None
+
+    def test_line_narrows_the_candidates(self) -> None:
+        from sunaba.tools.edit_engine import _body_loss_error
+
+        src = (
+            'def f():\n    """Doc."""\n\n\n'
+            "class C:\n    def f(self):\n        return 1\n"
+        )
+        new = 'def f():\n    """New."""\n'
+        # Line 1 selects the module-level stub: nothing to lose.
+        assert _body_loss_error(src, "f", new, "/sandbox/mod.py", line=1) is None
+        # Line 6 selects the method, which has a real body.
+        blocked = _body_loss_error(src, "f", new, "/sandbox/mod.py", line=6)
+        assert blocked is not None
+        assert "'f'" in blocked
+
+
+# ===================================================================
+# The guard must resolve what the driver resolves
+# ===================================================================
+
+
+DECORATED_SRC = (
+    "class Foo:\n"            # 1
+    "    @property\n"         # 2
+    "    def bar(self):\n"    # 3
+    '        """Doc."""\n'    # 4
+    "        return self._bar\n"  # 5
+)
+
+NESTED_SRC = (
+    "def helper():\n"          # 1
+    "    def helper():\n"      # 2
+    '        """stub"""\n'     # 3
+    "    return helper\n"      # 4
+)
+
+
+class TestGuardResolvesLikeTheDriver:
+    """The pre-flight has to judge the definition the driver replaces.
+
+    ``ast.FunctionDef.lineno`` is the ``def`` line, so a decorator sits
+    outside it -- while the driver's span starts at the first decorator
+    and its own ambiguity error tells callers to "retry with
+    line=<start line>", i.e. the decorator's line.  On that line the
+    guard used to filter the real target out and pass.
+    """
+
+    def test_line_on_the_decorator_still_refuses(self) -> None:
+        """The measured false pass: line=2 is the @property line."""
+        from sunaba.tools.edit_engine import _body_loss_error
+
+        new = '    @property\n    def bar(self):\n        """New."""\n'
+        for line in (2, 3, None):
+            blocked = _body_loss_error(
+                DECORATED_SRC, "bar", new, "/sandbox/mod.py", line,
+            )
+            assert blocked is not None, f"line={line} passed"
+            assert "'bar'" in blocked
+            assert "Foo.bar" in blocked
+
+    def test_edit_file_refuses_on_the_decorator_line(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text(DECORATED_SRC, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents='    @property\n    def bar(self):\n        """New."""\n',
+            old_str="    def bar(self):",
+            line=2,
+        )
+        assert "Error" in result, result
+        assert "return self._bar" in f.read_text(encoding="utf-8")
+
+    def test_nested_same_name_stub_is_not_blocked(self) -> None:
+        """The measured false refusal: the driver targets the inner stub."""
+        from sunaba.tools.edit_engine import _body_loss_error
+
+        new = 'def helper():\n    """new stub"""\n'
+        for line in (2, None):
+            assert _body_loss_error(
+                NESTED_SRC, "helper", new, "/sandbox/mod.py", line,
+            ) is None, f"line={line} refused"
+
+    def test_edit_file_allows_the_nested_stub_edit(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        f = tmp_path / "mod.py"
+        f.write_text(NESTED_SRC, encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _write_fake_docker({POSIX: str(f)}),
+        )
+        result = edit_file(
+            container_id="abc123",
+            file_name=POSIX,
+            file_contents='    def helper():\n        """new stub"""\n',
+            old_str="    def helper():",
+            line=2,
+        )
+        assert "Error" not in result, result
+        text = f.read_text(encoding="utf-8")
+        assert "new stub" in text
+        assert "return helper" in text
+
+    def test_outer_definition_is_still_guarded(self) -> None:
+        """line=1 contains only the outer helper, which has a real body."""
+        from sunaba.tools.edit_engine import _body_loss_error
+
+        blocked = _body_loss_error(
+            NESTED_SRC,
+            "helper",
+            'def helper():\n    """new stub"""\n',
+            "/sandbox/mod.py",
+            line=1,
+        )
+        assert blocked is not None
+        assert "lines 1-4" in blocked
+
+    def test_unresolvable_symbol_is_not_a_refusal(self) -> None:
+        """The driver edits nothing there, so there is nothing to guard."""
+        from sunaba.tools.edit_engine import _body_loss_error
+
+        new = 'def missing():\n    """Doc."""\n'
+        assert _body_loss_error(
+            "def other():\n    return 1\n", "missing", new, "/sandbox/mod.py",
+        ) is None
+        # line outside every match
+        assert _body_loss_error(
+            "def missing():\n    return 1\n", "missing", new,
+            "/sandbox/mod.py", line=99,
+        ) is None
+        # unparseable source: the driver fails on it too
+        assert _body_loss_error(
+            "def missing(:\n    return 1\n", "missing", new, "/sandbox/mod.py",
+        ) is None
+
+    def test_resolution_failure_refuses_rather_than_passes(
+        self, monkeypatch,
+    ) -> None:
+        """An unexpected resolver failure must not read as "safe"."""
+        from sunaba.tools import edit_engine
+
+        def boom(*_a, **_k):
+            raise RuntimeError("resolver exploded")
+
+        monkeypatch.setattr(edit_engine, "_resolve_symbol", boom)
+        blocked = edit_engine._body_loss_error(
+            DECORATED_SRC,
+            "bar",
+            '    def bar(self):\n        """New."""\n',
+            "/sandbox/mod.py",
+        )
+        assert blocked is not None
+        assert "resolver exploded" in blocked
+        assert "ast=False" in blocked
+
+
+# -- Differential: host-side resolver vs the real in-container driver --
+
+#: (label, source, symbol, line).  Each case is resolved twice -- once by
+#: _resolve_symbol on the host, once by the real _EDIT_SYMBOL_DRIVER
+#: source executed by the fake container -- and the two must agree.
+_RESOLUTION_CASES = [
+    ("decorated: line on the decorator", DECORATED_SRC, "bar", 2),
+    ("decorated: line on the def", DECORATED_SRC, "bar", 3),
+    ("decorated: line in the body", DECORATED_SRC, "bar", 5),
+    ("decorated: no line", DECORATED_SRC, "bar", None),
+    ("decorated: the class itself", DECORATED_SRC, "Foo", None),
+    ("nested: inner def line", NESTED_SRC, "helper", 2),
+    ("nested: outer only", NESTED_SRC, "helper", 1),
+    ("nested: ambiguous without line", NESTED_SRC, "helper", None),
+    ("nested: qualified inner", NESTED_SRC, "helper.helper", None),
+    ("ambiguous module fn vs method", AMBIG_SRC, "process", None),
+    ("ambiguous resolved by line", AMBIG_SRC, "process", 6),
+    ("overload stub by line", OVERLOAD_SRC, "process", 6),
+    ("overload: decorator line", OVERLOAD_SRC, "process", 4),
+    ("symbol not found", MODULE_SRC, "nope", None),
+    ("line outside every match", MODULE_SRC, "foo", 99),
+    (
+        "multi-line decorator, line on its first row",
+        "@deco(\n    arg,\n)\ndef wrapped():\n    return 1\n",
+        "wrapped",
+        1,
+    ),
+    (
+        "async def with decorator",
+        "@deco\nasync def fetch():\n    return await x()\n",
+        "fetch",
+        1,
+    ),
+    (
+        "definition inside an if block",
+        "if True:\n    def conditional():\n        return 1\n",
+        "conditional",
+        None,
+    ),
+    (
+        "method of a nested class",
+        "class Outer:\n    class Inner:\n        def m(self):\n            return 1\n",
+        "Inner.m",
+        None,
+    ),
+]
+
+
+class TestResolutionMatchesTheDriver:
+    """Pin the host-side pre-flight against the driver it mirrors.
+
+    They are two implementations of one rule: the driver is a
+    standalone script executed by a bare ``python3`` inside the
+    container, with no access to this package, so it cannot import the
+    host-side resolver.  This test is what keeps them from drifting --
+    it runs the real ``_EDIT_SYMBOL_DRIVER`` source (via the fake
+    container that execs it) and the host resolver over the same
+    inputs, and fails if either changes without the other.
+    """
+
+    @staticmethod
+    def _driver_resolution(tmp_path, source, symbol, line):  # noqa: ANN001, ANN205
+        """Resolve via the real driver; returns its ``resolved`` dict or None."""
+        f = tmp_path / "mod.py"
+        f.write_text(source, encoding="utf-8")
+        client = _FakeClient(_FakeContainer({POSIX: str(f)}))
+        out = edit_symbol_in_container(
+            client, "abc123", POSIX, symbol,
+            "def _probe_replacement():\n    return 1\n", line,
+        )
+        if out.get("status") != "ok":
+            return None
+        return out["resolved"]
+
+    @pytest.mark.parametrize(
+        ("label", "source", "symbol", "line"),
+        _RESOLUTION_CASES,
+        ids=[c[0] for c in _RESOLUTION_CASES],
+    )
+    def test_same_definition_as_the_driver(
+        self, tmp_path, label, source, symbol, line,
+    ) -> None:
+        from sunaba.tools.edit_engine import _resolve_symbol
+
+        driver = self._driver_resolution(tmp_path, source, symbol, line)
+        host = _resolve_symbol(source, symbol, line)
+
+        if driver is None:
+            assert host is None, (
+                f"{label}: the driver resolves nothing, the guard resolved "
+                f"{host.qualname if host else None}"
+            )
+            return
+
+        assert host is not None, f"{label}: the driver resolved {driver}, the guard did not"
+        assert host.qualname == driver["qualname"], label
+        assert host.kind == driver["kind"], label
+        assert host.start == driver["start_line"], label
+        assert host.end == driver["end_line"], label

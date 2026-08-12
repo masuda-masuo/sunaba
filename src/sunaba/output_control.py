@@ -4,6 +4,8 @@ Provides:
 - Verbosity levels (``error_only``, ``summary``, ``full``)
 - Truncation with metadata (``shown``, ``total_lines``, ``truncated``)
 - Paging (``offset``, ``limit``, ``next_offset``, ``has_more``)
+- Envelope building (``build_output_envelope``): joins the truncation and
+  paging layers into one honest ``shown`` / ``truncated`` pair
 - ANSI escape code stripping
 - ``\\r`` progress bar collapsing
 - Same-line consecutive output compression (``[\u00d7N] content``)
@@ -399,6 +401,86 @@ def paginate_output(
         has_more=has_more,
     )
 
+
+
+# ---------------------------------------------------------------------------
+# Envelope: describing one page of output truthfully
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OutputEnvelope:
+    """One page of output plus an honest description of what it holds.
+
+    :func:`truncate_output` and :func:`paginate_output` each describe
+    their own layer only: the first knows whether it summarized, the
+    second whether more pages follow.  A caller holding the page needs
+    one answer to "is this the whole output?", so this dataclass joins
+    the layers -- ``shown`` counts the lines of *this page* (not of the
+    pre-paging display), and ``truncated`` is true whenever any content
+    was withheld by any layer, paging included.
+    """
+
+    #: The page content, exactly as handed to the caller.
+    output: str = ""
+
+    #: Number of lines present in :attr:`output`.
+    shown: int = 0
+
+    #: Total lines of the output before truncation and paging.
+    total_lines: int = 0
+
+    #: True when :attr:`output` is not the whole output.
+    truncated: bool = False
+
+    #: Offset for the next page, or ``None`` if this is the last page.
+    next_offset: int | None = None
+
+    #: Whether there are more pages after this one.
+    has_more: bool = False
+
+
+def count_lines(text: str) -> int:
+    """Return the number of lines in *text* (empty text has none)."""
+    if not text:
+        return 0
+    return text.count("\n") + 1
+
+
+def build_output_envelope(
+    display: str,
+    *,
+    total_lines: int,
+    content_withheld: bool = False,
+    offset: int = 0,
+    limit: int = 50,
+) -> OutputEnvelope:
+    """Page *display* and describe the resulting page truthfully.
+
+    Args:
+        display: The (possibly already truncated) text to page.
+        total_lines: Line count of the output *before* any truncation.
+        content_withheld: Whether truncation before paging dropped
+            content (summary truncation, token budget, ``error_only``
+            suppression).
+        offset: Line offset requested by the caller.
+        limit: Page size requested by the caller.
+
+    Returns:
+        An :class:`OutputEnvelope` whose ``shown`` counts the returned
+        page and whose ``truncated`` is true when anything at all is
+        missing from that page -- earlier lines skipped by *offset*
+        included, so a caller never has to OR two fields together.
+    """
+    page = paginate_output(display, offset=offset, limit=limit)
+    return OutputEnvelope(
+        output=page.content,
+        shown=count_lines(page.content),
+        total_lines=total_lines,
+        truncated=bool(content_withheld or offset > 0 or page.has_more),
+        next_offset=page.next_offset,
+        has_more=page.has_more,
+    )
 
 
 # ---------------------------------------------------------------------------

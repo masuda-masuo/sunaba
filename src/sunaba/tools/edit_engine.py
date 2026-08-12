@@ -12,6 +12,7 @@ import ast
 import difflib
 import re
 import textwrap
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # Regex helpers
@@ -116,6 +117,222 @@ def _is_bare_signature(old_str: str) -> bool:
             continue
         return False
     return seen_def
+
+
+# ---------------------------------------------------------------------------
+# Body-loss guard
+# ---------------------------------------------------------------------------
+
+#: The AST node types ``old_str`` AST resolution can target.
+_DefNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+_DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _sole_definition(text: str) -> _DefNode | None:
+    """Return the single def/class node *text* consists of, else ``None``.
+
+    Text that carries anything besides one definition (two defs, a def
+    plus a module-level assignment, a bare expression) is not a
+    candidate for the body-loss guard: it is plainly a real
+    replacement.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(text))
+    except SyntaxError:
+        return None
+    if len(tree.body) != 1:
+        return None
+    node = tree.body[0]
+    return node if isinstance(node, _DEF_NODES) else None
+
+
+def _body_statements(node: _DefNode) -> list[ast.stmt]:
+    """Return *node*'s body with a leading docstring removed."""
+    body = list(node.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    return body
+
+
+def _is_body_free(node: _DefNode) -> bool:
+    """True when *node*'s body is a docstring and nothing else.
+
+    A docstring is a legal body, so a ``def`` line plus a docstring
+    parses and re-verifies like any other definition -- which is
+    exactly why losing the real body that way is silent.
+
+    ``pass`` and ``...`` are NOT body-free here.  They are bodies the
+    caller wrote on purpose: replacing a definition with an overload
+    stub is a real edit, pinned by
+    ``test_one_liner_stub_old_str_keeps_string_fallback``, and blocking
+    it would trade a silent loss for a false refusal.
+    """
+    return not _body_statements(node)
+
+
+@dataclass
+class _ResolvedDefinition:
+    """One definition as the in-container driver sees it."""
+
+    #: The AST node, for inspecting the body.
+    node: _DefNode
+
+    #: Dotted name built from the enclosing definitions, driver-style.
+    qualname: str
+
+    #: ``"class"`` or ``"function"``.
+    kind: str
+
+    #: First line of the definition, **decorators included**.
+    start: int
+
+    #: Last line of the definition.
+    end: int
+
+
+def _collect_definitions(tree: ast.AST) -> list[_ResolvedDefinition]:
+    """Collect every definition in *tree* the way the driver's collect() does.
+
+    Scope is the chain of *enclosing definitions* only -- other blocks
+    (``if``, ``try``, ``with``) are walked through without extending the
+    qualname -- and a definition's span starts at its first decorator,
+    not at its ``def`` line.
+    """
+    found: list[_ResolvedDefinition] = []
+
+    def collect(node: ast.AST, scope: list[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, _DEF_NODES):
+                starts = [child.lineno, *(d.lineno for d in child.decorator_list)]
+                found.append(_ResolvedDefinition(
+                    node=child,
+                    qualname=".".join([*scope, child.name]),
+                    kind="class" if isinstance(child, ast.ClassDef) else "function",
+                    start=min(starts),
+                    end=child.end_lineno or child.lineno,
+                ))
+                collect(child, [*scope, child.name])
+            else:
+                collect(child, scope)
+
+    collect(tree, [])
+    return found
+
+
+def _resolve_symbol(
+    source: str,
+    symbol: str,
+    line: int | None = None,
+) -> _ResolvedDefinition | None:
+    """Resolve *symbol* exactly as ``_EDIT_SYMBOL_DRIVER`` resolves it.
+
+    This is a mirror of the driver's resolution, and it has to stay one:
+    a pre-flight that resolves a different definition than the driver
+    guards the wrong code.  Matching is on the qualname (exact, or a
+    ``.``-suffix), the *line* window spans decorators too -- which is
+    what the driver's own ambiguity error tells callers to pass -- and
+    several definitions containing that line are broken apart by
+    smallest span, then latest start, as the driver does.
+
+    Returns ``None`` when the driver would resolve nothing (symbol not
+    found, *line* outside every match, or an ambiguous symbol with no
+    *line*).  In each of those branches the driver fails before editing
+    anything, so there is no AST edit for the caller's guard to make a
+    judgement about.  ``tests/test_edit_symbol.py`` pins this function
+    and the driver against a shared table of inputs so the two cannot
+    drift apart unnoticed.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        # The driver parses the same text and fails the same way; it
+        # writes nothing, so nothing needs guarding.
+        return None
+
+    matches = [
+        c for c in _collect_definitions(tree)
+        if c.qualname == symbol or c.qualname.endswith("." + symbol)
+    ]
+    if not matches:
+        return None
+
+    if line is not None:
+        containing = [c for c in matches if c.start <= line <= c.end]
+        if not containing:
+            return None
+        containing.sort(key=lambda c: (c.end - c.start, -c.start))
+        return containing[0]
+
+    if len(matches) > 1:
+        return None
+    return matches[0]
+
+
+def _body_loss_error(
+    existing: str,
+    symbol: str,
+    file_contents: str,
+    dest_path: str,
+    line: int | None = None,
+) -> str | None:
+    """Return an error when the AST edit would silently delete a body.
+
+    AST resolution replaces the *whole* definition with *file_contents*
+    under ``preserve="decorators+docstring"``.  When *file_contents* is
+    a signature plus a docstring and nothing else, the decorators and
+    the docstring survive, the body does not, and the result re-parses
+    cleanly -- so nothing downstream objects (sunaba PR #822: an
+    ``edit_file`` meant to update a docstring deleted ``done()``'s body,
+    including its ``_control.stop()`` call, and the gate stayed green
+    because the code was behind ``pragma: no cover``).
+
+    The judgement is on the observable content of the old and new
+    definitions, never on the shape of ``old_str``: an ``old_str`` that
+    happens to include a ``def`` line is not by itself a problem, and a
+    genuinely shorter new body is not either.  The definition judged is
+    the one :func:`_resolve_symbol` picks, which is the one the driver
+    will replace.
+
+    Returns ``None`` when the edit is safe.
+    """
+    new_def = _sole_definition(file_contents)
+    if new_def is None or not _is_body_free(new_def):
+        return None
+
+    try:
+        target = _resolve_symbol(existing, symbol, line)
+    except Exception as e:  # pragma: no cover - defensive
+        # Unable to say which definition the driver will replace, so
+        # unable to say the edit is safe.  Refusing costs the caller one
+        # ast=False retry; passing costs them their code.
+        return (
+            f"Error: refusing to replace '{symbol}' in {dest_path}: "
+            f"file_contents has no body beyond its docstring, and the "
+            f"definition this edit would replace could not be resolved "
+            f"here ({e}), so the body cannot be shown to survive. Put "
+            "the full body in file_contents, or pass ast=False for a "
+            "literal string replacement of old_str."
+        )
+
+    if target is None or _is_body_free(target.node):
+        return None
+
+    dropped = len(_body_statements(target.node))
+    plural = "" if dropped == 1 else "s"
+    return (
+        f"Error: refusing to replace {target.kind} '{symbol}' in "
+        f"{dest_path} (resolved to '{target.qualname}', lines "
+        f"{target.start}-{target.end}): file_contents has no body beyond "
+        f"its docstring, so the AST edit would silently delete the "
+        f"{dropped} statement{plural} in the current body. Put the full "
+        "body in file_contents, or pass ast=False for a literal string "
+        "replacement of old_str."
+    )
 
 
 # ---------------------------------------------------------------------------

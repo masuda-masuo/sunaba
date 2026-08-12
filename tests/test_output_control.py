@@ -15,7 +15,9 @@ from __future__ import annotations
 import pytest
 
 from sunaba.output_control import (
+    build_output_envelope,
     compress_repeated_lines,
+    count_lines,
     mask_tokens,
     paginate_output,
     sanitize_output,
@@ -399,3 +401,85 @@ class TestPaginateOutput:
         assert page.content == "first"
         assert page.next_offset == 1
         assert page.has_more is True
+
+
+# =======================================================================
+# count_lines / build_output_envelope
+# =======================================================================
+
+
+class TestCountLines:
+    """Tests for the line counter behind ``shown``."""
+
+    def test_empty_text_has_no_lines(self) -> None:
+        assert count_lines("") == 0
+
+    def test_single_line(self) -> None:
+        assert count_lines("only") == 1
+
+    def test_counts_every_line(self) -> None:
+        assert count_lines("a\nb\nc") == 3
+
+    def test_trailing_newline_counts_the_empty_last_line(self) -> None:
+        assert count_lines("a\n") == 2
+
+
+class TestBuildOutputEnvelope:
+    """Tests for joining the truncation and paging layers.
+
+    ``shown`` must describe the page the caller is holding, and
+    ``truncated`` must be true whenever that page is not the whole
+    output -- whichever layer withheld the rest.
+    """
+
+    def test_shown_counts_the_returned_page_not_the_display(self) -> None:
+        display = "\n".join(f"line{i}" for i in range(100))
+        env = build_output_envelope(
+            display, total_lines=100, content_withheld=False, offset=0, limit=10,
+        )
+        assert env.shown == 10
+        assert count_lines(env.output) == 10
+        assert env.total_lines == 100
+
+    def test_paging_alone_marks_the_output_incomplete(self) -> None:
+        """Nothing was truncated, but 25 of 60 lines is not the output."""
+        display = "\n".join(f"line{i}" for i in range(60))
+        env = build_output_envelope(
+            display, total_lines=60, content_withheld=False, offset=0, limit=25,
+        )
+        assert env.truncated is True
+        assert env.has_more is True
+        assert env.next_offset == 25
+
+    def test_complete_single_page_is_not_truncated(self) -> None:
+        env = build_output_envelope(
+            "a\nb\nc", total_lines=3, content_withheld=False, offset=0, limit=50,
+        )
+        assert env.truncated is False
+        assert env.has_more is False
+        assert env.next_offset is None
+        assert env.shown == 3
+
+    def test_offset_marks_the_output_incomplete(self) -> None:
+        """The last page is still missing every line before *offset*."""
+        display = "\n".join(f"line{i}" for i in range(10))
+        env = build_output_envelope(
+            display, total_lines=10, content_withheld=False, offset=8, limit=50,
+        )
+        assert env.has_more is False
+        assert env.truncated is True
+        assert env.shown == 2
+
+    def test_withheld_content_marks_the_output_incomplete(self) -> None:
+        env = build_output_envelope(
+            "a\nb", total_lines=99, content_withheld=True, offset=0, limit=50,
+        )
+        assert env.truncated is True
+        assert env.has_more is False
+
+    def test_empty_output_shows_no_lines(self) -> None:
+        env = build_output_envelope(
+            "", total_lines=0, content_withheld=False, offset=0, limit=50,
+        )
+        assert env.shown == 0
+        assert env.truncated is False

@@ -34,10 +34,10 @@ from sunaba.journal import (
     record_exec as journal_record_exec,
 )
 from sunaba.output_control import (
-    OutputMetadata,
+    build_output_envelope,
     compress_failures,
     compress_repeated_lines,
-    paginate_output,
+    count_lines,
     sanitize_output,
     truncate_by_tokens,
     truncate_output,
@@ -1063,6 +1063,17 @@ def run_container_and_exec(
     Returns:
         JSON: status, output (or error), shown, total_lines, truncated,
         next_offset, has_more.
+
+        These carry the same meanings as sandbox_exec's: ``shown`` is
+        the number of lines in the returned ``output``, ``total_lines``
+        is the line count of the whole output in every mode, and
+        ``truncated`` means "``output`` is not the whole output" --
+        true when content was withheld by summary truncation, by
+        ``max_output_tokens``, by ``error_only`` hiding a successful
+        run's output, or by paging, ``offset`` > 0 included.
+        ``has_more`` still means only "more pages follow this one".
+        ``estimated_tokens`` and ``resource`` appear only with
+        ``max_output_tokens``.
     """
     import json
 
@@ -1333,15 +1344,22 @@ def run_container_and_exec(
     if exit_code != 0:
         compressed = compress_failures(compressed)
 
-    # Token-budget truncation (takes precedence over line-based)
+    # Token-budget truncation (takes precedence over line-based).
+    # This envelope carries the same meanings as sandbox_exec's, and is
+    # built by the same helper rather than restated here: total_lines is
+    # a line count on every branch (it used to hold the token estimate
+    # under max_output_tokens), the token figure keeps its own key, and
+    # the pointer to the full output is an annotation rather than a line
+    # of *display* -- appended there it inflated shown past total_lines
+    # and cost a slot of the page.
+    estimated_tokens: int | None = None
+    resource_note: str | None = None
     if max_output_tokens > 0:
         display, original_tokens = truncate_by_tokens(compressed, max_output_tokens)
-        meta = OutputMetadata(
-            shown=len(display.split("\n")),
-            total_lines=original_tokens,
-            truncated=original_tokens > max_output_tokens,
-        )
-        display += "\n[resource: run output available via sandbox_read_journal]"
+        total_lines = count_lines(compressed)
+        estimated_tokens = original_tokens
+        content_withheld = original_tokens > max_output_tokens
+        resource_note = "full output retrievable via sandbox_read_journal"
     else:
         # Truncate based on verbosity
         display, meta = truncate_output(
@@ -1351,20 +1369,35 @@ def run_container_and_exec(
             exit_code=exit_code,
             stderr=stderr_text,
         )
+        total_lines = meta.total_lines
+        # meta.truncated alone misses error_only's suppression of a
+        # successful run's output, which withholds every line while
+        # reporting no truncation.
+        content_withheld = meta.truncated or meta.shown < meta.total_lines
 
-    # Paginate
-    page = paginate_output(display, offset=offset, limit=limit)
+    # Paginate and describe the page truthfully
+    envelope = build_output_envelope(
+        display,
+        total_lines=total_lines,
+        content_withheld=content_withheld,
+        offset=offset,
+        limit=limit,
+    )
 
     # Build result
     result: dict[str, Any] = {
         "status": "ok" if exit_code == 0 else ("timeout" if timeout > 0 and exit_code == 124 else "error"),
-        "output": page.content,
-        "shown": meta.shown,
-        "total_lines": meta.total_lines,
-        "truncated": meta.truncated,
-        "next_offset": page.next_offset,
-        "has_more": page.has_more,
+        "output": envelope.output,
+        "shown": envelope.shown,
+        "total_lines": envelope.total_lines,
+        "truncated": envelope.truncated,
+        "next_offset": envelope.next_offset,
+        "has_more": envelope.has_more,
     }
+    if estimated_tokens is not None:
+        result["estimated_tokens"] = estimated_tokens
+    if resource_note is not None:
+        result["resource"] = resource_note
 
     if exit_code != 0:
         result["exit_code"] = exit_code

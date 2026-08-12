@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import io
+import posixpath
+import shlex
+import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from docker.errors import APIError
 
 from sunaba.tools.file import copy_file, copy_project
 
@@ -313,9 +318,11 @@ class TestCopyProject:
         mock_container = MagicMock()
         mock_container.put_archive.return_value = True
         mock_container.exec_run.side_effect = [
-            (0, b"999\n"),  # id -u
-            (0, b"999\n"),  # id -g
-            (0, b""),       # chown
+            (0, b"dir\ndir\n"),  # probe: dest and its parent
+            (0, b"999\n"),      # id -u
+            (0, b"999\n"),      # id -g
+            (0, b""),           # chown
+            (0, b"5\n"),        # read-back: the file is there, 5 bytes
         ]
         mock_client = MagicMock()
         mock_client.containers.get.return_value = mock_container
@@ -328,7 +335,8 @@ class TestCopyProject:
 
         assert "Error" not in result
         assert "/workspace" in result
-        assert mock_container.exec_run.call_count == 3
+        # probe + id -u + id -g + chown + read-back
+        assert mock_container.exec_run.call_count == 5
 
     # ------------------------------------------------------------------
     # New tests for #678: tracked-only copy, ownership fix, submodules, etc.
@@ -663,3 +671,342 @@ class TestCopyProject:
             names = tar.getnames()
         assert any("project.py" in n for n in names)
         assert any("data.json" in n for n in names)
+
+
+# ======================================================================
+# copy_file destination resolution
+# ======================================================================
+
+
+class _FakeCopyContainer:
+    """A container fake with a real (in-memory) filesystem.
+
+    ``copy_file`` asks the container what the destination is and reads
+    the destination back afterwards, so a bare ``MagicMock`` cannot
+    stand in: the fake has to know which directories exist and where
+    ``put_archive`` actually wrote.  It also models docker's silent
+    drop of a tar entry with an empty name -- the mechanism behind a
+    "Copied ..." message for a file that was never written.
+    """
+
+    def __init__(self, dirs: set[str], files: dict[str, bytes] | None = None) -> None:
+        self.dirs = set(dirs)
+        self.files: dict[str, bytes] = dict(files or {})
+        self.put_archive_calls: list[str] = []
+
+    def _kind(self, path: str) -> str:
+        if path in self.dirs:
+            return "dir"
+        if path in self.files:
+            return "file"
+        return "none"
+
+    def exec_run(self, cmd, **kwargs):  # noqa: ANN001, ANN201
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "id":
+            return (0, b"999\n")
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "chown":
+            return (0, b"")
+        script = cmd[-1] if isinstance(cmd, (list, tuple)) else cmd
+        tokens = shlex.split(script)
+        if "-d" in tokens:  # the dir/file/none probe
+            verdicts = [
+                self._kind(tokens[i + 1])
+                for i, tok in enumerate(tokens)
+                if tok == "-d"
+            ]
+            return (0, ("\n".join(verdicts) + "\n").encode())
+        if "-f" in tokens:  # the post-copy read-back
+            path = tokens[tokens.index("-f") + 1]
+            # `[ -f dir ]` is false: a directory is not a regular file.
+            if path in self.dirs or path not in self.files:
+                return (1, b"")
+            return (0, f"{len(self.files[path])}\n".encode())
+        return (0, b"")
+
+    def put_archive(self, path: str, data: bytes) -> bool:
+        self.put_archive_calls.append(path)
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            for member in tar.getmembers():
+                if not member.name:
+                    # docker accepts the entry and writes nothing.
+                    continue
+                dest = posixpath.join(path, member.name)
+                if dest in self.dirs:
+                    # Untarring a regular file over an existing directory
+                    # is refused by the daemon, not silently applied.
+                    raise APIError(f"cannot overwrite directory {dest} with file")
+                extracted = tar.extractfile(member)
+                self.files[dest] = (
+                    extracted.read() if extracted is not None else b""
+                )
+        return True
+
+
+class _SilentlyLosingContainer(_FakeCopyContainer):
+    """A container whose ``put_archive`` writes nothing but succeeds."""
+
+    def put_archive(self, path: str, data: bytes) -> bool:
+        self.put_archive_calls.append(path)
+        return True
+
+
+def _fake_client(container: _FakeCopyContainer) -> MagicMock:
+    client = MagicMock()
+    client.containers.get.return_value = container
+    return client
+
+
+class TestCopyFileDestination:
+    """Where copy_file says it put the file is where the file is.
+
+    Measured 2026-08-09: a dest ending in ``/`` reported success while
+    no file existed anywhere in the container, and a dest whose
+    basename differed from the source failed with a bare 404.
+    """
+
+    @staticmethod
+    def _src(tmp_path: Path) -> Path:
+        src = tmp_path / "brief-xxx.md"
+        src.write_text("brief body")
+        return src
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_trailing_slash_directory_takes_the_source_name(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        src = self._src(tmp_path)
+        container = _FakeCopyContainer({"/workspace", "/workspace/chain-id"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/chain-id/")
+
+        assert "Error" not in result, result
+        assert "/workspace/chain-id/brief-xxx.md" in result
+        assert container.files["/workspace/chain-id/brief-xxx.md"] == b"brief body"
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_existing_directory_without_slash_is_still_a_directory(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        src = self._src(tmp_path)
+        container = _FakeCopyContainer({"/workspace", "/workspace/chain-id"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/chain-id")
+
+        assert "Error" not in result, result
+        assert container.files["/workspace/chain-id/brief-xxx.md"] == b"brief body"
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_file_path_with_a_different_basename_renames(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        src = self._src(tmp_path)
+        container = _FakeCopyContainer({"/workspace", "/workspace/chain-id"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/chain-id/brief.md")
+
+        assert "Error" not in result, result
+        assert "/workspace/chain-id/brief.md" in result
+        assert container.files["/workspace/chain-id/brief.md"] == b"brief body"
+        assert "/workspace/chain-id/brief-xxx.md" not in container.files
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_missing_parent_directory_is_named_in_the_error(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        src = self._src(tmp_path)
+        container = _FakeCopyContainer({"/workspace"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/absent/brief.md")
+
+        assert "Error" in result, result
+        assert "/workspace/absent" in result
+        assert "Copied" not in result
+        assert container.files == {}
+        assert container.put_archive_calls == []
+        mock_record.assert_not_called()
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_missing_directory_with_trailing_slash_is_named_in_the_error(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        src = self._src(tmp_path)
+        container = _FakeCopyContainer({"/workspace"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/absent/")
+
+        assert "Error" in result, result
+        assert "/workspace/absent" in result
+        assert "Copied" not in result
+        assert container.files == {}
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_existing_file_destination_is_overwritten_in_place(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        src = self._src(tmp_path)
+        container = _FakeCopyContainer(
+            {"/workspace"}, {"/workspace/brief.md": b"stale"},
+        )
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/brief.md")
+
+        assert "Error" not in result, result
+        assert container.files["/workspace/brief.md"] == b"brief body"
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_a_write_that_lands_nowhere_is_not_reported_as_success(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        """The read-back is what makes the success message trustworthy."""
+        src = self._src(tmp_path)
+        container = _SilentlyLosingContainer({"/workspace", "/workspace/chain-id"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/chain-id/")
+
+        assert "Error" in result, result
+        assert "nothing was written" in result
+        assert "Copied" not in result
+        mock_record.assert_not_called()
+
+
+class _UnprobableContainer(_FakeCopyContainer):
+    """A container that cannot answer the dir/file probe.
+
+    ``_probe_paths`` swallows the failure and returns ``None``, which is
+    the fallback path -- the one branch of ``copy_file`` no test used to
+    reach.
+    """
+
+    def exec_run(self, cmd, **kwargs):  # noqa: ANN001, ANN201
+        script = cmd[-1] if isinstance(cmd, (list, tuple)) else cmd
+        if isinstance(script, str) and "-d" in shlex.split(script):
+            raise RuntimeError("docker exec unavailable")
+        return super().exec_run(cmd, **kwargs)
+
+
+class _UnprobableLosingContainer(_UnprobableContainer):
+    """Cannot be probed, and its put_archive writes nothing but succeeds."""
+
+    def put_archive(self, path: str, data: bytes) -> bool:
+        self.put_archive_calls.append(path)
+        return True
+
+
+class TestCopyFileProbeFallback:
+    """What copy_file does when the container cannot be asked.
+
+    The fallback used to re-derive the very defect the probe fixes: a
+    destination with a differing basename and no trailing slash was
+    classified as a directory, so a rename landed under the wrong path.
+    """
+
+    @staticmethod
+    def _src(tmp_path: Path) -> Path:
+        src = tmp_path / "brief-xxx.md"
+        src.write_text("brief body")
+        return src
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_fallback_treats_a_differing_basename_as_a_rename(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        src = self._src(tmp_path)
+        container = _UnprobableContainer({"/workspace", "/workspace/chain-id"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/chain-id/brief.md")
+
+        assert "Error" not in result, result
+        assert "/workspace/chain-id/brief.md" in result
+        assert container.files["/workspace/chain-id/brief.md"] == b"brief body"
+        assert "/workspace/chain-id/brief.md/brief-xxx.md" not in container.files
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_fallback_trailing_slash_still_takes_the_source_name(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        """A trailing slash is the one thing the string does say."""
+        src = self._src(tmp_path)
+        container = _UnprobableContainer({"/workspace", "/workspace/chain-id"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/chain-id/")
+
+        assert "Error" not in result, result
+        assert container.files["/workspace/chain-id/brief-xxx.md"] == b"brief body"
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_fallback_guessing_wrong_is_reported_not_claimed(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        """A bare name that is really a directory: the guess fails loudly."""
+        src = self._src(tmp_path)
+        container = _UnprobableContainer({"/workspace", "/workspace/chain-id"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/chain-id")
+
+        assert "Error" in result, result
+        assert "Copied" not in result
+        assert "/workspace/chain-id" in result
+        # The message has to say what the caller can do about it.
+        assert "trailing slash" in result
+        assert container.files == {}
+        mock_record.assert_not_called()
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_fallback_still_reaches_the_read_back(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        """No probe, no evidence -- so the read-back has to run anyway."""
+        src = self._src(tmp_path)
+        container = _UnprobableLosingContainer({"/workspace"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/brief.md")
+
+        assert "Error" in result, result
+        assert "nothing was written" in result
+        assert "Copied" not in result
+        mock_record.assert_not_called()
+
+    @patch("sunaba.tools.file.record_copy")
+    @patch("sunaba.tools.file._docker")
+    def test_probe_exit_code_failure_also_falls_back(
+        self, mock_docker: MagicMock, mock_record: MagicMock, tmp_path: Path,
+    ) -> None:
+        """_probe_paths returns None on a non-zero exit, not just on raise."""
+        src = self._src(tmp_path)
+
+        class _ProbeExitsNonZero(_FakeCopyContainer):
+            def exec_run(self, cmd, **kwargs):  # noqa: ANN001, ANN202
+                script = cmd[-1] if isinstance(cmd, (list, tuple)) else cmd
+                if isinstance(script, str) and "-d" in shlex.split(script):
+                    return (127, b"")
+                return super().exec_run(cmd, **kwargs)
+
+        container = _ProbeExitsNonZero({"/workspace", "/workspace/chain-id"})
+        mock_docker.return_value = _fake_client(container)
+
+        result = copy_file("abc123", str(src), "/workspace/chain-id/brief.md")
+
+        assert "Error" not in result, result
+        assert container.files["/workspace/chain-id/brief.md"] == b"brief body"

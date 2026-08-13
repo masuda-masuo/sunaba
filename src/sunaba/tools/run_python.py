@@ -12,6 +12,7 @@ from docker.errors import NotFound
 
 from sunaba.journal import record_tool_use
 from sunaba.output_control import (
+    content_withheld,
     sanitize_output,
     truncate_output,
 )
@@ -196,6 +197,12 @@ def run_python(
         verbose="full" if verbose == "full" else "summary",
     )
 
+    # ``*_truncated`` answers "is this the whole stream?", so it has to
+    # account for every way a line can go missing.  ``meta.truncated``
+    # covers summary truncation only; error_only's suppression of a
+    # successful run withholds all of stdout with that flag still false.
+    # No paging happens here -- the displays above are what the caller
+    # gets -- so metadata alone settles the question.
     return json.dumps({
         "status": result.get("status", "ok"),
         "stdout": stdout_display,
@@ -203,8 +210,8 @@ def run_python(
         "exit_code": runner_exit_code,
         "stdout_shown": stdout_meta.shown,
         "stdout_total_lines": stdout_meta.total_lines,
-        "stdout_truncated": stdout_meta.truncated,
+        "stdout_truncated": content_withheld(stdout_meta),
         "stderr_shown": stderr_meta.shown,
         "stderr_total_lines": stderr_meta.total_lines,
-        "stderr_truncated": stderr_meta.truncated,
+        "stderr_truncated": content_withheld(stderr_meta),
     })

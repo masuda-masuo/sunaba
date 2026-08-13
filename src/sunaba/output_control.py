@@ -364,6 +364,29 @@ def _truncate_tail(
     return "\n".join(tail_lines), metadata
 
 
+def content_withheld(meta: OutputMetadata) -> bool:
+    """Return whether *meta* describes output the caller is not holding.
+
+    :attr:`OutputMetadata.truncated` answers a narrower question than
+    callers ask of it: it records that :func:`truncate_output` dropped
+    lines while building a display, not that the display is incomplete.
+    ``error_only`` suppression of a successful run is the gap between the
+    two -- it withholds every line and leaves ``truncated`` false, so a
+    tool reporting that field alone tells its caller nothing is missing
+    at the moment nothing is present.
+
+    Args:
+        meta: Metadata returned alongside a truncated display.
+
+    Returns:
+        True when the display is not the whole output.  False only when
+        the caller holds every line -- including when there were no lines
+        to hold (``shown == total_lines == 0``, e.g. whitespace-only
+        output).
+    """
+    return meta.truncated or meta.shown < meta.total_lines
+
+
 # ---------------------------------------------------------------------------
 # Paging
 # ---------------------------------------------------------------------------

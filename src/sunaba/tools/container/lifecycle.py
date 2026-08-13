@@ -37,6 +37,7 @@ from sunaba.output_control import (
     build_output_envelope,
     compress_failures,
     compress_repeated_lines,
+    content_withheld,
     count_lines,
     sanitize_output,
     truncate_by_tokens,
@@ -1358,7 +1359,7 @@ def run_container_and_exec(
         display, original_tokens = truncate_by_tokens(compressed, max_output_tokens)
         total_lines = count_lines(compressed)
         estimated_tokens = original_tokens
-        content_withheld = original_tokens > max_output_tokens
+        withheld = original_tokens > max_output_tokens
         resource_note = "full output retrievable via sandbox_read_journal"
     else:
         # Truncate based on verbosity
@@ -1373,13 +1374,13 @@ def run_container_and_exec(
         # meta.truncated alone misses error_only's suppression of a
         # successful run's output, which withholds every line while
         # reporting no truncation.
-        content_withheld = meta.truncated or meta.shown < meta.total_lines
+        withheld = content_withheld(meta)
 
     # Paginate and describe the page truthfully
     envelope = build_output_envelope(
         display,
         total_lines=total_lines,
-        content_withheld=content_withheld,
+        content_withheld=withheld,
         offset=offset,
         limit=limit,
     )

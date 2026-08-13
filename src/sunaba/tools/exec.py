@@ -20,6 +20,7 @@ from sunaba.output_control import (
     build_output_envelope,
     compress_failures,
     compress_repeated_lines,
+    content_withheld,
     count_lines,
     sanitize_output,
     truncate_by_tokens,
@@ -223,7 +224,7 @@ def sandbox_exec(
             display, original_tokens = truncate_by_tokens(compressed, max_output_tokens)
             total_lines = count_lines(compressed)
             estimated_tokens = original_tokens
-            content_withheld = original_tokens > max_output_tokens
+            withheld = original_tokens > max_output_tokens
             # The pointer to the full output is an annotation about the
             # result, not a line of it.  Appending it to *display* made
             # shown count a line total_lines did not, and spent one slot
@@ -242,12 +243,12 @@ def sandbox_exec(
             # meta.truncated alone misses error_only's suppression of a
             # successful run's output, which withholds every line while
             # reporting no truncation.
-            content_withheld = meta.truncated or meta.shown < meta.total_lines
+            withheld = content_withheld(meta)
 
         envelope = build_output_envelope(
             display,
             total_lines=total_lines,
-            content_withheld=content_withheld,
+            content_withheld=withheld,
             offset=offset,
             limit=limit,
         )

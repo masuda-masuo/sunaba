@@ -28,7 +28,11 @@ from sunaba.edit_verify import (
     write_file as write_file_in_container,
 )
 from sunaba.journal import record_copy, record_tool_use
-from sunaba.output_control import build_output_envelope, truncate_output
+from sunaba.output_control import (
+    build_output_envelope,
+    content_withheld,
+    truncate_output,
+)
 from sunaba.tools.common import WORKSPACE, _docker, container_not_found_error
 from sunaba.tools.edit_engine import (
     _ALREADY_APPLIED_MIN_CHARS,
@@ -1309,7 +1313,7 @@ def transform_file(
         envelope = build_output_envelope(
             display,
             total_lines=meta.total_lines,
-            content_withheld=meta.truncated or meta.shown < meta.total_lines,
+            content_withheld=content_withheld(meta),
             offset=offset,
             limit=limit,
         )

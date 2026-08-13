@@ -15,8 +15,10 @@ from __future__ import annotations
 import pytest
 
 from sunaba.output_control import (
+    OutputMetadata,
     build_output_envelope,
     compress_repeated_lines,
+    content_withheld,
     count_lines,
     mask_tokens,
     paginate_output,
@@ -483,3 +485,55 @@ class TestBuildOutputEnvelope:
         )
         assert env.shown == 0
         assert env.truncated is False
+
+
+# =======================================================================
+# content_withheld
+# =======================================================================
+
+
+class TestContentWithheld:
+    """Tests for the shared "is anything missing?" predicate."""
+
+    def test_summary_truncation_is_withheld(self) -> None:
+        _display, meta = truncate_output(
+            "\n".join(f"line{i}" for i in range(100)),
+            max_lines=10,
+            verbose="summary",
+        )
+        assert meta.truncated is True
+        assert content_withheld(meta) is True
+
+    def test_complete_output_is_not_withheld(self) -> None:
+        _display, meta = truncate_output("line1\nline2", max_lines=100)
+        assert content_withheld(meta) is False
+
+    def test_error_only_suppression_is_withheld(self) -> None:
+        """The case meta.truncated alone gets wrong: shown 0 of many."""
+        _display, meta = truncate_output(
+            "line1\nline2\nline3", verbose="error_only", exit_code=0, stderr="",
+        )
+        assert meta.truncated is False
+        assert content_withheld(meta) is True
+
+    def test_no_output_at_all_is_not_withheld(self) -> None:
+        """Nothing printed is not something missing."""
+        _display, meta = truncate_output("   \n  ", verbose="error_only")
+        assert meta.shown == meta.total_lines == 0
+        assert content_withheld(meta) is False
+
+    def test_full_mode_is_not_withheld(self) -> None:
+        _display, meta = truncate_output(
+            "\n".join(f"line{i}" for i in range(100)),
+            max_lines=10,
+            verbose="full",
+        )
+        assert content_withheld(meta) is False
+
+    def test_reads_metadata_only(self) -> None:
+        assert content_withheld(OutputMetadata(shown=3, total_lines=3)) is False
+        assert content_withheld(OutputMetadata(shown=1, total_lines=3)) is True
+        assert (
+            content_withheld(OutputMetadata(shown=3, total_lines=3, truncated=True))
+            is True
+        )

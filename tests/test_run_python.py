@@ -308,3 +308,99 @@ class TestRunPython:
         raw = json.loads(run_python("nonexistent", "print(1)"))
         assert raw["status"] == "error"
         assert "not found" in raw["error"]
+
+    # ------------------------------------------------------------------
+    # "truncated" must mean "content is missing"
+    # ------------------------------------------------------------------
+    # ``truncate_output``'s error_only branch withholds every line of a
+    # successful, silent-stderr run while reporting ``truncated=False``.
+    # These tests pin the meaning of the reported flag to the question the
+    # caller is actually asking: "is this the whole stream?"
+
+    def test_error_only_success_flags_withheld_stdout(self, monkeypatch) -> None:
+        """error_only suppression of a success is reported as withheld."""
+        code = "for i in range(5): print(i)"
+        result = self._run(code, monkeypatch, verbose="error_only")
+        assert result["status"] == "ok"
+        assert result["exit_code"] == 0
+        assert result["stdout"] == ""
+        assert result["stdout_shown"] == 0
+        assert result["stdout_total_lines"] == 6  # 5 lines + trailing empty
+        assert result["stdout_truncated"] is True
+
+    def test_error_only_silent_success_not_flagged(self, monkeypatch) -> None:
+        """Nothing printed is not something withheld."""
+        result = self._run("x = 42", monkeypatch, verbose="error_only")
+        assert result["stdout"] == ""
+        assert result["stdout_shown"] == 0
+        assert result["stdout_total_lines"] == 0
+        assert result["stdout_truncated"] is False
+        assert result["stderr_shown"] == 0
+        assert result["stderr_total_lines"] == 0
+        assert result["stderr_truncated"] is False
+
+    def test_error_only_failure_returns_tail_unchanged(self, monkeypatch) -> None:
+        """A failing run under error_only keeps today's tail and flag."""
+        code = (
+            "import sys\n"
+            "for i in range(3): print(i)\n"
+            "print('bad', file=sys.stderr)\n"
+            "sys.exit(2)\n"
+        )
+        result = self._run(code, monkeypatch, verbose="error_only")
+        assert result["exit_code"] == 2
+        assert result["stdout"] == "0\n1\n2\n"
+        assert result["stdout_shown"] == 4
+        assert result["stdout_total_lines"] == 4
+        assert result["stdout_truncated"] is False
+
+    def test_error_only_failure_tail_truncated(self, monkeypatch) -> None:
+        """A failing run whose tail drops lines still reports truncation."""
+        code = (
+            "import sys\n"
+            "for i in range(50): print(i)\n"
+            "print('bad', file=sys.stderr)\n"
+            "sys.exit(2)\n"
+        )
+        result = self._run(code, monkeypatch, max_lines=10, verbose="error_only")
+        assert result["stdout_shown"] == 10
+        assert result["stdout_total_lines"] == 51
+        assert result["stdout_truncated"] is True
+
+    def test_summary_short_success_not_flagged(self, monkeypatch) -> None:
+        """summary mode on a short success is unchanged: nothing withheld."""
+        result = self._run("print('hi')", monkeypatch, verbose="summary")
+        assert result["stdout"] == "hi\n"
+        assert result["stdout_shown"] == 2
+        assert result["stdout_total_lines"] == 2
+        assert result["stdout_truncated"] is False
+
+    def test_full_success_not_flagged(self, monkeypatch) -> None:
+        """full mode on a success is unchanged: nothing withheld."""
+        code = "for i in range(30): print(i)"
+        result = self._run(code, monkeypatch, max_lines=10, verbose="full")
+        assert result["stdout_shown"] == result["stdout_total_lines"] == 31
+        assert result["stdout_truncated"] is False
+
+    def test_error_only_stderr_complete_not_flagged(self, monkeypatch) -> None:
+        """The stderr trio answers the same question: complete = not flagged."""
+        code = (
+            "import sys\n"
+            "print('boom', file=sys.stderr)\n"
+            "sys.exit(1)\n"
+        )
+        result = self._run(code, monkeypatch, verbose="error_only")
+        assert "boom" in result["stderr"]
+        assert result["stderr_shown"] == result["stderr_total_lines"]
+        assert result["stderr_truncated"] is False
+
+    def test_error_only_stderr_incomplete_flagged(self, monkeypatch) -> None:
+        """A stderr stream missing lines is flagged, whatever dropped them."""
+        code = (
+            "import sys\n"
+            "for i in range(200): print(i, file=sys.stderr)\n"
+            "sys.exit(1)\n"
+        )
+        result = self._run(code, monkeypatch, max_lines=10, verbose="error_only")
+        assert result["stderr_shown"] < result["stderr_total_lines"]
+        assert result["stderr_truncated"] is True

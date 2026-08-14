@@ -1592,6 +1592,56 @@ class TestVerifyDispatch:
         assert "not installed" in result["gate_fail_reasons"][0]
 
     @patch("sunaba.tools.verify._docker")
+    def test_dispatch_failure_without_counts(self, mock_docker: MagicMock) -> None:
+        """A failed suite with no count does not report "0 failure(s)".
+
+        A runner whose output carries no parseable counts (non-TAP
+        ``npm test``) returns the failure as a raw string, so the gate
+        has no ``failed`` number.  Printing one anyway said the gate went
+        red on zero failures (Issue #857).
+        """
+        from sunaba.edit_verify import DetectionResult, VerifyResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.exec_run.return_value = (0, (b"", b""))
+
+        mock_runner = MagicMock(return_value=VerifyResult(
+            tool="npm test", status="findings",
+            detail="  not ok - reports ENOENT for a missing path\n3 tests, 1 failure",
+            exit_code=1,
+        ))
+
+        with patch(
+            "sunaba.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"js"}, scope={"js": "."}, reason=None,
+            ),
+        ), patch(
+            "sunaba.edit_verify.run_lint_type_gate",
+            return_value={
+                "gate_passed": True, "incomplete": False,
+                "lint": [], "types": [], "gate_fail_reasons": [],
+            },
+        ), patch(
+            "sunaba.edit_verify._DISPATCH",
+            {"js": {"test": mock_runner, "lint": None, "type": None}},
+        ):
+            result = json.loads(verify_in_container(
+                container_id="abc123", path="tests/",
+                skip_lint_gate=True, skip_type_gate=True, skip_patch_targets_gate=True,
+            ))
+
+        assert result["gate_passed"] is False
+        reason = result["gate_fail_reasons"][0]
+        assert "0 failure(s)" not in reason
+        assert "failure count unavailable" in reason
+        # The runner's own output is what makes the red gate diagnosable.
+        assert "3 tests, 1 failure" in reason
+
+    @patch("sunaba.tools.verify._docker")
     def test_multi_language_results(self, mock_docker: MagicMock) -> None:
         """Multiple languages (non-python) produce per-language test results via dispatch."""
         from sunaba.edit_verify import DetectionResult, VerifyResult
@@ -1872,11 +1922,26 @@ class TestRunNpmTestVerify:
         assert result.tool == "npm test"
 
     def test_npm_test_not_available_missing_script(self) -> None:
+        """Missing script stays not_available.
+
+        Fixture updated for Issue #857: the old one was a bare
+        ``Missing script: "test"`` line, which is text a test body could
+        print just as easily as npm.  Real npm prefixes every line of its
+        own diagnostics with ``npm error`` (``npm ERR!`` before npm 10),
+        and that prefix is now what the classifier keys off.  The
+        assertion is unchanged -- this is still a runner-absent run.
+        """
         from sunaba.edit_verify import _run_npm_test_verify
 
         container = self._make_container([
             (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
-            (1, (b"Missing script: \\\"test\\\"\\n", b"")),
+            (1, (
+                b'npm error Missing script: "test"\n'
+                b"npm error\n"
+                b"npm error To see a list of scripts, run:\n"
+                b"npm error   npm run\n",
+                b"",
+            )),
         ])
         result = _run_npm_test_verify(container, "tests/", workdir="/repo")
         assert result.status == "not_available"
@@ -1909,6 +1974,267 @@ class TestRunNpmTestVerify:
         assert result.status == "findings"
         assert result.tool == "npm test"
         assert result.exit_code == 1
+
+    # --- (f2) ran-and-failed suites that print runner vocabulary ----------
+    #
+    # Issue #857: ``npm test --silent 2>&1`` merges the suite's own
+    # stdout into the stream the classifier reads.  A suite that ran and
+    # failed while printing "ENOENT" (or any other npm/shell phrase) was
+    # reported as ``not_available`` -- "the runner is not installed" --
+    # instead of "tests failed".
+
+    def _ran_and_failed(self, planted: str) -> bytes:
+        """Non-TAP output of a suite that ran 3 tests and failed 1.
+
+        *planted* is written by a **test**, not by npm: it appears inside
+        a test name and an assertion message, never at the start of a
+        line as an npm diagnostic.
+        """
+        return (
+            "> test-project@1.0.0 test\n"
+            "> node run-tests.js\n"
+            "\n"
+            "  ok - reads the config\n"
+            "  ok - writes the config\n"
+            f"  not ok - reports {planted} for a missing path\n"
+            f"    AssertionError: expected message to contain '{planted}'\n"
+            "\n"
+            "3 tests, 1 failure\n"
+        ).encode()
+
+    def _assert_ran_and_failed(self, planted: str) -> None:
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (self._ran_and_failed(planted), b"")),  # npm test
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "findings", (
+            f"suite output containing {planted!r} was classified "
+            f"{result.status!r} (detail: {result.detail!r})"
+        )
+        assert result.tool == "npm test"
+        assert result.exit_code == 1
+
+    def test_npm_test_ran_and_failed_printing_enoent(self) -> None:
+        self._assert_ran_and_failed("ENOENT")
+
+    def test_npm_test_ran_and_failed_printing_command_not_found(self) -> None:
+        self._assert_ran_and_failed("command not found")
+
+    def test_npm_test_ran_and_failed_printing_colon_not_found(self) -> None:
+        self._assert_ran_and_failed("sh: 1: helper: not found")
+
+    def test_npm_test_ran_and_failed_printing_missing_script(self) -> None:
+        self._assert_ran_and_failed('Missing script: "test"')
+
+    def test_npm_test_ran_and_failed_printing_npm_error(self) -> None:
+        self._assert_ran_and_failed("npm error")
+
+    def test_npm_test_ran_and_failed_printing_every_runner_phrase(self) -> None:
+        """One failing suite printing the whole runner vocabulary at once."""
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        combined = (
+            "> test-project@1.0.0 test\n"
+            "> node run-tests.js\n"
+            "\n"
+            "  ok - reads the config\n"
+            "  not ok - reports ENOENT for a missing path\n"
+            "    AssertionError: expected 'ENOENT: no such file or directory'\n"
+            "  not ok - explains a command not found failure\n"
+            "    AssertionError: got 'sh: 1: helper: not found'\n"
+            "  not ok - explains Missing script: \"build\"\n"
+            "    AssertionError: expected the npm error text to be quoted\n"
+            "\n"
+            "4 tests, 3 failures\n"
+        ).encode()
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (combined, b"")),                      # npm test
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "findings"
+        assert result.exit_code == 1
+        assert "4 tests, 3 failures" in result.detail
+
+    def test_npm_test_exit_127_with_lifecycle_is_a_failure(self) -> None:
+        """Exit 127 alone does not prove the runner is missing.
+
+        The test script itself exited 127 and npm said so with
+        ELIFECYCLE, so this is a test failure.  ELIFECYCLE is npm <= 9
+        output: npm 10.9.8 (this image) was measured printing no error
+        block at all on a lifecycle failure, which is why
+        ``test_npm_test_exit_127_with_not_found_in_assertion`` below
+        covers the shape the real npm here produces.
+        """
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (127, (
+                b"  not ok - shells out to a helper\n"
+                b"    sh: 1: helper: not found\n"
+                b"npm error Lifecycle script `test` failed with error:\n"
+                b"npm error code ELIFECYCLE\n",
+                b"",
+            )),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "findings"
+        assert result.exit_code == 127
+
+    def test_npm_test_exit_127_with_not_found_in_assertion(self) -> None:
+        """A suite that ran, failed with 127, and quoted a not-found message.
+
+        This is the shape npm 10.9.8 actually produces in this image: a
+        lifecycle script's exit code propagates verbatim and npm prints
+        no error block, so exit 127 plus a ``: not found`` string is all
+        the classifier sees.  Both also occur when a *test* shells out
+        and asserts on the failure -- so 127 + the token cannot mean
+        "npm is not installed" (Issue #857 round-2 finding).
+        """
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (127, (
+                b"  ok - one\n"
+                b"  not ok - helper missing\n"
+                b"    AssertionError: got stderr: sh: 1: helper: not found\n"
+                b"3 tests, 1 failure\n",
+                b"",
+            )),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "findings", (
+            f"ran-and-failed suite classified {result.status!r} "
+            f"(detail: {result.detail!r})"
+        )
+        assert result.tool == "npm test"
+        assert result.exit_code == 127
+
+    def test_npm_test_ran_and_failed_echoing_npm_error_block(self) -> None:
+        """A test that echoes captured npm stderr at line start.
+
+        A wrapper CLI's own tests print npm's diagnostics verbatim.  The
+        ``npm error`` prefix is therefore not proof by itself -- the rest
+        of the stream (test names, assertion lines, a count line) says a
+        suite ran (Issue #857 round-2 finding).
+        """
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (
+                b"  ok - reads the config\n"
+                b"  not ok - re-raises what npm printed\n"
+                b"    AssertionError: expected the wrapper to re-raise:\n"
+                b"npm error code ENOENT\n"
+                b"npm error syscall open\n"
+                b"npm error enoent spawn vitest ENOENT\n"
+                b"2 tests, 1 failure\n",
+                b"",
+            )),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "findings", (
+            f"ran-and-failed suite classified {result.status!r} "
+            f"(detail: {result.detail!r})"
+        )
+        assert result.exit_code == 1
+
+    def test_npm_test_partial_output_then_missing_binary_is_a_failure(self) -> None:
+        """A suite that printed, then hit a missing binary, is a failure.
+
+        Measured in this image: ``npm test --silent`` with a script that
+        prints and then runs a missing tool gives
+        ``  ok - one\\nsh: 1: vitest: not found\\n`` and exit 127.  The
+        stream is ambiguous -- a test could have printed that same line
+        -- so the default of doubt applies: the suite ran, the gate goes
+        red as a test failure rather than as a missing runner.
+        """
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (127, (b"  ok - one\nsh: 1: vitest: not found\n", b"")),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "findings"
+        assert result.exit_code == 127
+
+    def test_npm_test_not_available_shell_not_found_alone(self) -> None:
+        """npm absent: the shell's diagnostic is the whole stream.
+
+        Measured in this image with npm off PATH: ``npm test --silent``
+        gives exactly ``/bin/sh: 1: npm: not found`` and exit 127.
+        """
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (127, (b"/bin/sh: 1: npm: not found\n", b"")),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "not_available"
+        assert result.tool == "npm test"
+
+    def test_npm_test_not_available_missing_test_binary(self) -> None:
+        """The test tool is not installed: nothing else reaches the stream.
+
+        Measured in this image with ``scripts.test = "vitest run"`` and
+        no vitest installed: ``sh: 1: vitest: not found`` and exit 127.
+        """
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (127, (b"sh: 1: vitest: not found\n", b"")),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "not_available"
+        assert result.tool == "npm test"
+
+    def test_npm_test_not_available_npm_error_enoent(self) -> None:
+        """ENOENT still means not_available when npm itself reports it.
+
+        npm's own ENOENT block is line-prefixed and carries no
+        ELIFECYCLE, so the script never ran.
+        """
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (
+                b"npm error code ENOENT\n"
+                b"npm error syscall open\n"
+                b"npm error path /workspace/node_modules/.bin/vitest\n"
+                b"npm error enoent spawn vitest ENOENT\n",
+                b"",
+            )),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "not_available"
+        assert result.tool == "npm test"
+
+    def test_npm_test_not_available_npm_err_bang_prefix(self) -> None:
+        """npm <= 9 spells its diagnostics ``npm ERR!``."""
+        from sunaba.edit_verify import _run_npm_test_verify
+
+        container = self._make_container([
+            (0, (self.PKG_WITH_TEST.encode(), b"")),   # cat package.json
+            (1, (
+                b'npm ERR! Missing script: "test"\n'
+                b"npm ERR! \n"
+                b"npm ERR! To see a list of scripts, run:\n",
+                b"",
+            )),
+        ])
+        result = _run_npm_test_verify(container, "tests/", workdir="/repo")
+        assert result.status == "not_available"
+        assert result.tool == "npm test"
 
     # --- (d) fallback when scripts.test is absent --------------------------
 

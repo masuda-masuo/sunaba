@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
+from dataclasses import dataclass
 from typing import Any
 
 from .jstools import _annotate_resolution, _detect_js_test_runner, _resolve_js_tool
@@ -159,6 +161,144 @@ def _run_jest_verify(
         return _annotate_resolution(_envelope_error("jest", detail, ec), source, cmd)
 
 
+@dataclass(frozen=True)
+class _RunnerFailureRule:
+    """One way to prove ``npm test`` never got as far as running the suite.
+
+    *pattern* is matched against a single output **line**, never against
+    the whole stream: ``npm test --silent 2>&1`` merges the suite's own
+    printouts into the same buffer, so a blob-wide substring match reads
+    a test's own assertion text as a runner diagnostic (Issue #857).
+
+    *exit_codes* is the companion evidence.  A nonzero exit proves
+    nothing on its own -- a suite that ran and failed exits nonzero too
+    -- so a rule fires only on the conjunction of both, and only when
+    the diagnostics dominate the stream (see _diagnostic_share): a line
+    a suite printed among its own output is a quote, not a diagnostic.
+    """
+
+    name: str
+    exit_codes: tuple[int, ...]
+    pattern: re.Pattern[str]
+
+
+# npm's own diagnostics are line-prefixed: ``npm error`` (npm >= 10) or
+# ``npm ERR!`` (npm <= 9).  A test body can write those same bytes, so
+# the prefix alone is not proof -- see _diagnostic_share below.
+_NPM_DIAG_LINE = r"^\s*npm (?:error\b|ERR!)"
+
+# A shell's exec diagnostic: "<who>: ... not found".  Matches
+# "/bin/sh: 1: npm: not found" and "bash: npm: command not found", and
+# also an assertion line that quotes one -- again, dominance decides.
+_SHELL_NOT_FOUND = re.compile(r"^\s*\S+: .*\bnot found\b")
+
+# Lines a genuine runner-absent stream may carry besides the diagnostic
+# itself: npm's script banner (``> pkg@1.0.0 test``), which --silent
+# suppresses, and blank lines.  Neither is evidence, neither dilutes it.
+_NPM_BANNER_LINE = re.compile(r"^\s*>\s")
+
+# Every line attributable to npm or the shell, at any log level.  Used
+# to measure how much of the merged stream is diagnostic: a rule fires
+# only when diagnostics *dominate*, not merely appear (Issue #857).
+_NPM_DIAGNOSTIC_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*npm (?:error\b|ERR!|warn\b|WARN|notice\b)"),
+    _SHELL_NOT_FOUND,
+)
+
+# Share of non-blank, non-banner lines that must be diagnostics.
+_DIAGNOSTIC_DOMINANCE = 0.9
+
+_NPM_RUNNER_FAILURE_RULES: tuple[_RunnerFailureRule, ...] = (
+    # The shell could not exec npm, or npm could not exec the test tool.
+    # 127 is the shell's own "not found" status and the message is the
+    # shell's, not npm's.  Verified in this image (npm 10.9.8) under the
+    # command this module runs: a missing npm gives
+    # "/bin/sh: 1: npm: not found" and a missing test binary gives
+    # "sh: 1: vitest: not found" -- in both cases the whole stream.
+    _RunnerFailureRule(
+        name="npm not found",
+        exit_codes=(127,),
+        pattern=_SHELL_NOT_FOUND,
+    ),
+    # npm ran, but package.json declares no such script.
+    _RunnerFailureRule(
+        name="npm script missing",
+        exit_codes=(1,),
+        pattern=re.compile(_NPM_DIAG_LINE + r".*Missing script:"),
+    ),
+    # npm itself failed around the script -- a missing binary or path
+    # (``npm error code ENOENT``), registry or cache trouble, and so on.
+    # Any npm-prefixed diagnostic qualifies.  Note --silent, which this
+    # module passes, suppresses this block on npm 10.9.8 here, so under
+    # sunaba's own command these lines usually arrive only from npm <= 9
+    # or from a test echoing them -- hence the dominance requirement.
+    _RunnerFailureRule(
+        name="npm error",
+        exit_codes=(1,),
+        pattern=re.compile(_NPM_DIAG_LINE),
+    ),
+)
+
+
+def _diagnostic_share(lines: list[str]) -> float:
+    """Fraction of the stream that reads as an npm/shell diagnostic.
+
+    Blank lines and npm's script banner are ignored: a genuine
+    runner-absent run may contain them and they are not test output.
+    Everything else counts, so a single diagnostic-looking line among a
+    suite's own printouts scores low and cannot carry a rule.
+    """
+    considered = [
+        line for line in lines
+        if line.strip() and not _NPM_BANNER_LINE.match(line)
+    ]
+    if not considered:
+        return 0.0
+    hits = sum(
+        1 for line in considered
+        if any(p.search(line) for p in _NPM_DIAGNOSTIC_LINE_PATTERNS)
+    )
+    return hits / len(considered)
+
+
+def _classify_npm_runner_failure(
+    ec: int, combined: str
+) -> tuple[str, str] | None:
+    """Return ``(rule name, evidence line)`` when the runner never ran.
+
+    Returns ``None`` when the evidence does not prove that -- including
+    the case where the suite plainly ran and failed.  The default of
+    doubt is "the suite ran": a misread there still leaves the gate red,
+    while the reverse blames a missing runner for a real test failure.
+    """
+    lines = combined.splitlines()
+
+    # ELIFECYCLE, when present, means npm reached the script and the
+    # script itself exited nonzero -- so the suite ran.  Only npm <= 9
+    # printed it: npm 10.9.8, the version in this image, was measured
+    # here printing no error block at all on a lifecycle failure (an
+    # exiting-127 test script leaves the merged stream empty and
+    # propagates 127).  Kept for older npm output; nothing below relies
+    # on it, which is why the dominance check exists.
+    if any("ELIFECYCLE" in line for line in lines):
+        return None
+
+    # The suite writes into the same merged stream as npm, so a
+    # diagnostic that shares the stream with test names and assertion
+    # lines is most likely quoted *by* a test.  A genuine runner-absent
+    # run has nothing else to print (Issue #857).
+    if _diagnostic_share(lines) < _DIAGNOSTIC_DOMINANCE:
+        return None
+
+    for rule in _NPM_RUNNER_FAILURE_RULES:
+        if ec not in rule.exit_codes:
+            continue
+        for line in lines:
+            if rule.pattern.search(line):
+                return rule.name, line.strip()
+    return None
+
+
 def _run_npm_test_verify(
     container: Any, path: str, workdir: str | None = None
 ) -> VerifyResult:
@@ -248,20 +388,19 @@ def _run_npm_test_verify(
             exit_code=ec,
         )
 
-    # 6. Non-zero, unparseable: discriminate not_available vs findings
-    #    Conservative matching: only known "runner missing" strings
-    #    produce not_available; everything else is a test failure.
-    npm_error_no_lifecycle = (
-        "npm error" in combined and "ELIFECYCLE" not in combined
-    )
-    if (
-        "command not found" in combined
-        or ": not found" in combined
-        or "Missing script" in combined
-        or "ENOENT" in combined
-        or npm_error_no_lifecycle
-    ):
-        return _envelope_not_available("npm test", output_tail)
+    # 6. Non-zero, unparseable: discriminate not_available vs findings.
+    #    The evidence has to be a runner diagnostic *line* plus a
+    #    matching exit code -- see _classify_npm_runner_failure.  A
+    #    substring of the merged blob is not evidence: the suite writes
+    #    into that same stream, so a test printing "ENOENT" used to be
+    #    reported as a missing runner (Issue #857).
+    runner_failure = _classify_npm_runner_failure(ec, combined)
+    if runner_failure is not None:
+        rule_name, evidence = runner_failure
+        detail = f"npm test did not run ({rule_name}): {evidence}"
+        if output_tail:
+            detail += f"\n--- raw output tail ---\n{output_tail}"
+        return _envelope_not_available("npm test", detail)
 
     return VerifyResult(
         tool="npm test",

@@ -161,6 +161,27 @@ def _empty_test_selection() -> dict:
     }
 
 
+def _test_failure_reason(test_result: dict, label: str = "tests") -> str:
+    """Gate reason for a suite that ran and failed.
+
+    A runner that cannot report counts -- ``npm test`` whose output is
+    not TAP, for one -- returns the failure without a ``failed`` key.
+    Defaulting that to 0 prints ``tests: 0 failure(s)`` as the reason the
+    gate went red, which reads as "nothing failed" (Issue #857).  Say the
+    count is unknown instead, and carry the runner's raw output so the
+    failure is still diagnosable.
+    """
+    failed = test_result.get("failed")
+    if isinstance(failed, int) and not isinstance(failed, bool):
+        return f"{label}: {failed} failure(s)"
+
+    msg = f"{label} ran and failed (failure count unavailable)"
+    raw = test_result.get("raw_output") or test_result.get("error") or ""
+    if raw:
+        msg += f"\n{raw}"
+    return msg
+
+
 def apply_patch(container_id: str, file_path: str, diff_content: str) -> str:
     """Apply a unified diff to a file inside the sandbox container.
 
@@ -940,7 +961,7 @@ def verify_in_container(
                 ]
             elif status != "ok":
                 result["gate_fail_reasons"] = [
-                    f"affected tests: {affected_result.get('failed', 0)} failure(s)"
+                    _test_failure_reason(affected_result, "affected tests")
                 ]
             _record_verify_outcome(container_id, result)
             return json.dumps(result)
@@ -1040,9 +1061,7 @@ def verify_in_container(
                 f"test execution error: {full_result.get('error', 'unknown')}"
             ]
         else:
-            result["gate_fail_reasons"] = [
-                f"tests: {full_result.get('failed', 0)} failure(s)"
-            ]
+            result["gate_fail_reasons"] = [_test_failure_reason(full_result)]
     else:
         if overall_ok:
             result["gate_passed"] = True
@@ -1061,7 +1080,7 @@ def verify_in_container(
                 elif s == "error":
                     reasons.append(f"{lang}: test error ({lr.get('error', 'unknown')})")
                 elif s == "failed":
-                    reasons.append(f"{lang}: {lr.get('failed', 0)} failure(s)")
+                    reasons.append(_test_failure_reason(lr, lang))
                 elif s == "no_tests":
                     if has_filter:
                         reasons.append(f"{lang}: no tests found (explicit filter)")

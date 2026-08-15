@@ -160,8 +160,10 @@ def _tool_bindings() -> dict[str, str]:
 # Tools that neither modify container state nor run caller-supplied code.
 # The verify gates are here because they run the repository's own checks --
 # no caller code, no writes -- which is why #782 keeps them in the review
-# profile.  Anything not listed counts as write/exec for the review test, so
-# a newly added tool has to be classified deliberately.
+# profile.  sandbox_attach is here because attaching binds the session to
+# the container id the brief hands it without creating or modifying a
+# container (#860).  Anything not listed counts as write/exec for the review
+# test, so a newly added tool has to be classified deliberately.
 READ_ONLY_TOOLS = frozenset(
     {
         "get_workflow_guide",
@@ -174,9 +176,20 @@ READ_ONLY_TOOLS = frozenset(
         "type_check_in_container",
         "verify_in_container",
         "issue_view",
+        "sandbox_attach",
         "sandbox_list_containers",
     }
 )
+
+# The one deliberate exception to the read-only classification (#860): the
+# kusabi review-phase allowlist (REVIEW_ALLOWED_TOOLS in
+# plugins/kusabi/scripts/claude-dispatch.mjs) grants sandbox_exec to
+# reviewers, so the review profile carries it even though it runs
+# caller-supplied commands.  Read-only-ness is a client-side capability
+# statement; profiles are a context-size measure, not a security control
+# (module docstring of tool_profiles.py) -- the client allowlist keeps the
+# capability.
+GRANTED_EXEC_TOOLS = frozenset({"sandbox_exec"})
 
 PROFILE_NAMES = sorted(TOOL_PROFILES)
 
@@ -370,9 +383,11 @@ class TestProfileContents:
             "run_python",
             "diff_in_container",
             "publish",
+            "sandbox_attach",
+            "issue_view",
         } <= tools
 
-    def test_review_has_no_write_or_exec_tools(self) -> None:
+    def test_review_has_no_write_tools_beyond_the_granted_exec(self) -> None:
         tools = TOOL_PROFILES["review"].tools
         forbidden = {
             "write_file",
@@ -384,15 +399,31 @@ class TestProfileContents:
             "checkpoint_restore",
             "publish",
             "package_install",
-            "sandbox_exec",
             "sandbox_exec_background",
             "run_python",
         }
         assert not tools & forbidden
         # sandbox_pr_review_write is the reviewer's one write channel, and it
-        # writes to GitHub, not to the container.
+        # writes to GitHub, not to the container.  sandbox_exec is the one
+        # exec exception: the kusabi review allowlist grants it (#860).
         assert "sandbox_pr_review_write" in tools
-        assert tools <= READ_ONLY_TOOLS | {"sandbox_pr_review_write"}
+        assert tools <= (
+            READ_ONLY_TOOLS | GRANTED_EXEC_TOOLS | {"sandbox_pr_review_write"}
+        )
+
+    def test_profiles_are_supersets_of_the_kusabi_phase_allowlists(self) -> None:
+        # Consumer contract: the kusabi phase allowlists
+        # (plugins/kusabi/scripts/claude-dispatch.mjs, IMPLEMENT_ALLOWED_TOOLS
+        # / REVIEW_ALLOWED_TOOLS) grant implement workers sandbox_attach +
+        # issue_view and review workers sandbox_attach + issue_view +
+        # sandbox_exec.  Each profile must stay a superset of its consumer's
+        # allowlist so an accidental removal fails here instead of surfacing
+        # as a mystery missing tool in a worker session (kusabi#860).
+        assert {"sandbox_attach", "issue_view"} <= TOOL_PROFILES["implement"].tools
+        assert (
+            {"sandbox_attach", "issue_view", "sandbox_exec"}
+            <= TOOL_PROFILES["review"].tools
+        )
 
     def test_issue_is_exactly_the_minimal_issue_surface(self) -> None:
         tools = TOOL_PROFILES["issue"].tools

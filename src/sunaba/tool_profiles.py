@@ -147,6 +147,11 @@ _IMPLEMENT = ToolProfile(
             "type_check_in_container",
             "package_install",
             "diff_in_container",
+            # session entry + issue surface (kusabi#860): the worker binds to
+            # the container id its brief hands it, and reads the issue under
+            # work
+            "sandbox_attach",
+            "issue_view",
             # publish
             "publish",
             "secret_scan_override",
@@ -160,12 +165,13 @@ _IMPLEMENT = ToolProfile(
         "package_install": "installing a missing dependency is part of the edit/verify loop",
         "diff_in_container": "documented under a prose subheading in the verify section, not backticked",
         "publish": "the publish section shows the call in a code block, which carries no backticks",
+        "sandbox_attach": "how a worker binds to the container id its brief hands it; the session's first call",
+        "issue_view": "reading the issue under work is part of the implement loop for its consumers (kusabi#860)",
     },
     excluded={
         # Container lifecycle is the orchestrator's, by kusabi convention: a
         # worker attaches to the container named in its brief.
         "sandbox_initialize": "orchestrator-only: the worker is handed a container",
-        "sandbox_attach": "orchestrator-only: the worker is handed a container id",
         "sandbox_stop": "orchestrator-only: teardown belongs to the cleanup phase",
         "sandbox_list_containers": "orchestrator-only: cleanup-phase discovery",
         "run_container_and_exec": "one-shot lifecycle wrapper; same reason as sandbox_initialize",
@@ -176,8 +182,7 @@ _IMPLEMENT = ToolProfile(
         "merge_base": "integration is orchestrator work",
         "merge_complete": "integration is orchestrator work",
         "merge_abort": "integration is orchestrator work",
-        # Issue/PR surfaces have their own profiles.
-        "issue_view": "issue surface: see the issue profile",
+        # Issue/PR write surfaces have their own profiles.
         "sandbox_issue_write": "issue surface: see the issue profile",
         "sandbox_pr_review_write": "review surface: see the review profile",
     },
@@ -189,10 +194,17 @@ _REVIEW = ToolProfile(
     tools=frozenset(
         {
             "get_workflow_guide",
-            # explore (read/search only -- the exec tools are excluded below)
+            # explore (read/search; the exec member below is the
+            # consumer-granted exception)
             "search_in_container",
             "read_file_range",
             "list_files",
+            # exec: the kusabi review allowlist grants the foreground member;
+            # the background half and run_python stay excluded
+            "sandbox_exec",
+            # session entry + issue surface (kusabi#860)
+            "sandbox_attach",
+            "issue_view",
             # verify
             "verify_in_container",
             "lint_in_container",
@@ -207,15 +219,18 @@ _REVIEW = ToolProfile(
         "type_check_in_container": "the verify section calls it 'the type gate' in prose, not by tool name",
         "diff_in_container": "documented under a prose subheading in the verify section, not backticked",
         "sandbox_pr_review_write": "the review verdict itself; named in the guide's issue phase",
+        "sandbox_attach": "how a worker binds to the container id its brief hands it; the session's first call",
+        "issue_view": "reading the issue under work is part of the review loop for its consumers (kusabi#860)",
     },
     excluded={
         # Named in a covered guide phase (explore) and deliberately dropped:
-        # both run caller-supplied code inside the container, which a review
-        # session has no reason to do.
-        "sandbox_exec": "runs caller-supplied commands: not read-only",
-        "run_python": "runs caller-supplied code: not read-only",
-        "sandbox_exec_background": "same as sandbox_exec",
-        "sandbox_exec_check": "reads back a job this profile cannot start",
+        # they run caller-supplied code inside the container, which a review
+        # session has no reason to do.  sandbox_exec itself is carried -- the
+        # kusabi review allowlist grants it -- but the background half and
+        # run_python stay out.
+        "run_python": "arbitrary Python execution; kusabi's review allowlist does not grant it",
+        "sandbox_exec_background": "background half of the exec family; kusabi's review allowlist does not grant it",
+        "sandbox_exec_check": "reads back a job only sandbox_exec_background can start, which stays excluded",
         # The write surface #782 acceptance 7 pins as absent.
         "write_file": "review does not modify the tree",
         "edit_file": "review does not modify the tree",

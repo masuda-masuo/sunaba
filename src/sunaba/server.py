@@ -20,6 +20,7 @@ from sunaba.security import (
     validate_image_ref,
 )
 
+from .tool_profiles import ToolProfileMiddleware
 from .tools.common import docker_bound, recovery_bound
 from .tools.container import (
     run_container_and_exec,
@@ -238,6 +239,17 @@ if observability_tools_enabled():
     sandbox_list_runs = mcp.tool()(sandbox_list_runs)
     sandbox_journal_path = mcp.tool()(sandbox_journal_path)
     sandbox_trace_dir = mcp.tool()(sandbox_trace_dir)
+
+
+# Phase-based tool profiles (Issue #782).  A client configured with
+# ``.../mcp?profile=implement`` gets only that phase's tools; without the
+# parameter the list is unchanged.  The filter is a middleware rather than a
+# profile-aware registration loop for two reasons: registration is import-time
+# while the profile is per-request, and the registration block above is parsed
+# statically by tests/test_tools_doc.py, so its shape must not change.
+# Filtering the list is a context-size measure, not a security control --
+# tools/call is untouched.
+mcp.add_middleware(ToolProfileMiddleware())
 
 
 # ---------------------------------------------------------------------------

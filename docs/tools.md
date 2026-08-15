@@ -95,3 +95,48 @@ Available only when the environment variable `SUNABA_OBSERVABILITY_TOOLS=1` is s
 | `sandbox_list_runs` | — | Lists all run IDs recorded in the on-disk journal. |
 | `sandbox_journal_path` | — | Returns the absolute path to `journal.log`. |
 | `sandbox_trace_dir` | — | Returns the absolute path to the directory hosting trace files. |
+
+---
+
+## 7. Phase Tool Profiles (`?profile=`)
+
+A session pays for every tool definition on the list, whether or not its phase
+calls them. A client may therefore select a **tool profile** in its MCP server
+URL, and the server filters `tools/list` accordingly (#782):
+
+```
+http://127.0.0.1:8750/mcp?profile=implement
+http://127.0.0.1:8750/mcp?profile=review
+http://127.0.0.1:8750/mcp?profile=issue
+```
+
+MCP clients POST every request to the configured URL, so the parameter rides
+along on the `tools/list` call itself; nothing else in the client
+configuration changes.
+
+| profile | contents |
+|---|---|
+| implement | explore / edit / verify / publish tooling: search + read, the file editors, exec, checkpoints, verify + lint + type, `package_install`, `run_python`, `diff_in_container`, `publish`, `secret_scan_override` |
+| review | read-only inspection plus the review verdict: search + read, verify + lint + type, `diff_in_container`, `sandbox_pr_review_write`. No file writes, no exec, no checkpoints, no publish, no package installs |
+| issue | the minimal GitHub issue surface: `issue_view`, `sandbox_issue_write`, `sandbox_pr_review_write`, plus `read_file_range` for the issue body `issue_view` saves into the container. No editing, no exec, no verify, no publish — but a container is still required, as it is for every sunaba tool |
+
+Every profile also carries `get_workflow_guide`, so a filtered session can
+still recover the contract of the tools it does have.
+
+- **No parameter means no filtering.** A client that does not set `profile`
+  sees exactly the list it saw before profiles existed.
+- **An unknown value is an error, not a fallback.** `?profile=implment`
+  fails the request with a message naming the valid profiles, so a typo
+  surfaces instead of silently restoring the full list. A present-but-empty
+  `?profile=` is treated the same way — it is an unexpanded template, not a
+  request for everything.
+- **This is a context-size measure, not a security control.** Profiles filter
+  the *list*; they do not block `tools/call`. Capability limits stay where
+  they are: the client-side allowlists and the server's own checks.
+
+Profile membership lives in `src/sunaba/tool_profiles.py` and ships in the
+same wheel as the server, like the workflow guide (#728). Each profile
+declares which guide phases it covers, and `tests/test_tool_profiles.py`
+fails if a tool named in one of those phases is neither listed nor
+explicitly excluded with a reason — so the profiles cannot drift away from
+`workflow_guide.md`.

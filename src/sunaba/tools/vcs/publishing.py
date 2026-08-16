@@ -401,6 +401,222 @@ def _fetch_base_auto_include(
     return AutoIncludeResult(included=result, skipped=skipped)
 
 
+# ---------------------------------------------------------------------------
+# Upstream-overwrite guard (issue #863)
+# ---------------------------------------------------------------------------
+
+#: Opens the guard probe's machine-readable block.  The probe shares one
+#: exec with the ``git fetch origin`` refresh, whose own chatter lands on the
+#: same combined stream, so the parser keys off this marker instead of
+#: trusting the whole output.
+_UPSTREAM_GUARD_MARK = "__sunaba_upstream_guard__"
+
+#: Opens each per-path section of the follow-up ``git log`` probe.
+_UPSTREAM_COMMITS_MARK = "__sunaba_upstream_commits__"
+
+#: Carries the declared paths into both probes, one per line, so neither
+#: command text depends on the manifest.
+_UPSTREAM_GUARD_PATHS_ENV = "SUNABA_UPSTREAM_GUARD_PATHS"
+
+#: How many upstream one-liners are reported per conflicting path.
+_UPSTREAM_COMMITS_LIMIT = 20
+
+
+class UpstreamGuardReport(NamedTuple):
+    """What the container's git says about the manifest against the base tip.
+
+    Attributes
+    ----------
+    merge_base:
+        Where the container's ``HEAD`` last met ``origin/<base_branch>`` --
+        the newest upstream state this container has ever seen.
+    conflicts:
+        Declared paths whose blob at the ``origin/<base_branch>`` tip differs
+        from their blob at *merge_base*.  These are the paths whose upstream
+        changes a manifest publish would overwrite without ever having seen
+        them (issue #863).
+    """
+
+    merge_base: str
+    conflicts: list[str]
+
+
+def _upstream_guard_probe(
+    base_ref: str, paths: list[str],
+) -> tuple[str, dict[str, str]]:
+    """Build the combined refresh + guard-probe exec and its environment.
+
+    The ``git fetch origin`` refresh (#818) leads, so the probe reads the
+    freshest *base_ref* the clone can have.  Its failure stays best-effort
+    (``|| true``): the guard then compares against whatever ``base_ref`` the
+    clone already carried, because no better information exists (#863 spec 4).
+
+    One exec, not one per path: everything the decision needs is printed
+    under :data:`_UPSTREAM_GUARD_MARK` as ``blob <index> <merge_base_blob>
+    <tip_blob>``, with ``-`` standing for "path absent at that ref".
+
+    The declared paths travel in the environment, never in the command text.
+    A manifest path is arbitrary caller input; keeping it out means the
+    command this exec runs is a fixed string that says "refresh and read two
+    refs", instead of a different string per publish that quotes user data
+    into a shell loop.  Paths are reported back by index, so one containing
+    whitespace cannot be misread as several fields.
+    """
+    fetch = "git fetch origin 2>/dev/null || true"
+    if not paths:
+        return fetch, {}
+    command = (
+        f"{fetch}; "
+        f"_sb={shlex.quote(base_ref)}; "
+        '_sm=$(git merge-base HEAD "$_sb" 2>/dev/null) || _sm=; '
+        f"echo {shlex.quote(_UPSTREAM_GUARD_MARK)}; "
+        'printf "base %s\\n" "$_sm"; '
+        # No sync point (no such remote ref in this clone) means nothing to
+        # compare: report the empty base and let the caller proceed.
+        '[ -n "$_sm" ] || exit 0; '
+        "_si=0; "
+        f'printf "%s\\n" "${_UPSTREAM_GUARD_PATHS_ENV}" | '
+        "while IFS= read -r _sp; do "
+        '_sa=$(git rev-parse --quiet --verify "$_sm:$_sp" 2>/dev/null) || _sa=-; '
+        '_st=$(git rev-parse --quiet --verify "$_sb:$_sp" 2>/dev/null) || _st=-; '
+        'printf "blob %s %s %s\\n" "$_si" "${_sa:--}" "${_st:--}"; '
+        "_si=$((_si+1)); "
+        "done"
+    )
+    return command, {_UPSTREAM_GUARD_PATHS_ENV: "\n".join(paths)}
+
+
+def _read_upstream_guard(
+    output: str, paths: list[str],
+) -> UpstreamGuardReport | None:
+    """Decide the guard from the probe's output -- pure, and stateless.
+
+    Both refs are recomputed by every probe, so nothing here is remembered
+    between publishes.  A path absent at both refs (``-`` twice) counts as
+    identical; upstream-added (absent at the merge-base, present at the tip)
+    and upstream-deleted (the reverse) both count as differing, because both
+    mean the manifest's snapshot would replace an upstream change.
+
+    Returns ``None`` when the probe answered nothing usable -- no marker, no
+    merge-base, or a line per declared path missing.  The caller then
+    proceeds unguarded: an undetermined comparison is exactly the state a
+    failed fetch leaves behind, and #818's contract says that must not block
+    publish.
+    """
+    if _UPSTREAM_GUARD_MARK not in output:
+        return None
+
+    merge_base = ""
+    blobs: dict[int, tuple[str, str]] = {}
+    for line in output.split(_UPSTREAM_GUARD_MARK, 1)[1].splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0] == "base":
+            merge_base = fields[1]
+        elif len(fields) == 4 and fields[0] == "blob":
+            try:
+                index = int(fields[1])
+            except ValueError:
+                continue
+            blobs[index] = (fields[2], fields[3])
+
+    if not merge_base or set(blobs) != set(range(len(paths))):
+        return None
+
+    return UpstreamGuardReport(
+        merge_base=merge_base,
+        conflicts=[
+            path for index, path in enumerate(paths)
+            if blobs[index][0] != blobs[index][1]
+        ],
+    )
+
+
+def _upstream_conflict_commits(
+    run: RunFunc, merge_base: str, base_ref: str, paths: list[str],
+) -> dict[str, list[str]]:
+    """List the upstream commits behind each conflicting path (one exec).
+
+    Local git only -- the guard never calls the GitHub API (#863 non-goals).
+    The paths travel in the environment for the same reason as in
+    :func:`_upstream_guard_probe`.  A path whose log could not be read maps
+    to an empty list rather than disappearing from the report.
+    """
+    if not paths:
+        return {}
+    command = (
+        f"_sm={shlex.quote(merge_base)}; "
+        f"_sb={shlex.quote(base_ref)}; "
+        "_si=0; "
+        f'printf "%s\\n" "${_UPSTREAM_GUARD_PATHS_ENV}" | '
+        "while IFS= read -r _sp; do "
+        f'printf "{_UPSTREAM_COMMITS_MARK} %s\\n" "$_si"; '
+        f"git log --oneline --no-decorate -{_UPSTREAM_COMMITS_LIMIT} "
+        '"$_sm".."$_sb" -- ":(literal)$_sp" 2>/dev/null || true; '
+        "_si=$((_si+1)); "
+        "done"
+    )
+    _, out, _ = run(
+        command, {_UPSTREAM_GUARD_PATHS_ENV: "\n".join(paths)},
+    )
+
+    commits: dict[str, list[str]] = {path: [] for path in paths}
+    current: int | None = None
+    for line in out.splitlines():
+        if line.startswith(_UPSTREAM_COMMITS_MARK):
+            tail = line[len(_UPSTREAM_COMMITS_MARK):].strip()
+            current = int(tail) if tail.isdigit() else None
+            continue
+        if current is not None and current < len(paths) and line.strip():
+            commits[paths[current]].append(line.strip())
+    return commits
+
+
+def _upstream_overwrite_error(
+    base_ref: str,
+    merge_base: str,
+    conflicts: list[str],
+    commits: dict[str, list[str]],
+) -> dict[str, Any]:
+    """Build publish's refusal payload for the upstream-overwrite guard.
+
+    ``step`` is the machine-distinguishable part -- callers branch on
+    ``"upstream_overwrite"`` rather than on the prose, exactly as they do for
+    the other refusals publish reports.
+    """
+    listed = "\n".join(
+        f"  {path}\n"
+        + (
+            "\n".join(f"    {line}" for line in commits.get(path, []))
+            or "    (upstream commits could not be listed)"
+        )
+        for path in conflicts
+    )
+    return {
+        "status": "error",
+        "step": "upstream_overwrite",
+        "error": (
+            f"publish refused: {len(conflicts)} declared path(s) changed on "
+            f"{base_ref} since this container last saw it (merge-base "
+            f"{merge_base[:7]}).  A manifest publish stages each declared "
+            "path as a whole snapshot of the container's copy, so pushing "
+            "now would revert those upstream changes silently.\n"
+            f"{listed}"
+        ),
+        "conflicting_paths": list(conflicts),
+        "upstream_commits": {
+            path: commits.get(path, []) for path in conflicts
+        },
+        "merge_base": merge_base,
+        "base_ref": base_ref,
+        "hint": (
+            "Re-clone from the current base and re-apply the change (the "
+            "container's copy of these paths predates the upstream commits "
+            "above), or pass allow_upstream_overwrite=True to publish the "
+            "container's version over the upstream one deliberately."
+        ),
+    }
+
+
 def _validate_manifest_path(run: RunFunc, f: str) -> dict[str, str] | None:
     """Validate one declared manifest path (publish's manifest mode).
 
@@ -545,6 +761,7 @@ def publish(
     skip_verify_gate: bool = False,
     files: list[str] | None = None,
     include_untracked: bool = False,
+    allow_upstream_overwrite: bool = False,
 ) -> str:
     """Stage, commit, push, and optionally create a PR -- the single exit tool.
 
@@ -566,16 +783,17 @@ def publish(
         author_name: Override commit author name.
         author_email: Override commit author email.
         skip_verify_gate: Bypass verify gate.
-        files: When non-empty, stage only the declared repo-relative paths
-            (manifest mode).  Each path must be a regular file or tracked;
-            a dir or '.' stages its subtree, untracked included.  Undeclared
-            files stay in the worktree.  No manifest: ``git add -A``,
-            rejected when untracked files exist unless
-            ``include_untracked=True``.
-        include_untracked: When True and no manifest is given, stage all
-            files including untracked ones (the old default).  When False
-            (default) and no manifest is given, the call is rejected if
-            untracked files exist.
+        files: When non-empty, stage only these repo-relative paths
+            (manifest mode); each must be a regular file, or tracked so a
+            deletion can be declared -- never a directory.  Undeclared
+            changes stay in the worktree.
+        include_untracked: With no manifest, True stages untracked files
+            too (the old git add -A); False (default) rejects the call when
+            any exist.
+        allow_upstream_overwrite: Manifest mode: publish declared paths
+            whose upstream copy changed since this container's merge-base
+            with the base branch.  Default False refuses
+            (step: upstream_overwrite).
 
     Returns:
         JSON with the operation result.
@@ -711,6 +929,11 @@ def publish(
         baseline_hashes_arg = baseline_hashes_arg | registry_hashes
 
     merge_info: dict = {}  # populated by git_prepare_commit (merge mode)
+    # Upstream-overwrite guard state (#863).  Manifest mode only -- the
+    # guard compares declared paths, so a stage-all publish has nothing to
+    # declare; the defaults keep the result-building code below branch-free.
+    upstream_overwritten: list[str] = []
+    upstream_guard_undetermined = False
     if manifest:
         assert files is not None
         scan_files = [f for f in files if not os.path.isabs(f)]
@@ -806,7 +1029,48 @@ def publish(
         # Refresh remote-tracking refs so base resolution does not
         # work from a stale clone (#818).  Fetch failure must not
         # hard-fail publish (offline test environments).
-        _run("git fetch origin 2>/dev/null || true")
+        #
+        # The same exec reads the upstream-overwrite guard's two refs
+        # (#863): the manifest declares which files the worker changed,
+        # but staging them as whole snapshots also replaces whatever the
+        # base branch has now -- including commits that landed after this
+        # container was cloned, which is how a publish reverted a
+        # just-merged PR without a conflict or a warning.  Both refs are
+        # read here, after the refresh and before anything is committed.
+        guard_base_ref = (
+            f"origin/{base_branch}" if base_branch else "origin/HEAD"
+        )
+        guard_cmd, guard_env = _upstream_guard_probe(guard_base_ref, files)
+        _, guard_out, _ = _run(guard_cmd, guard_env)
+        guard_report = _read_upstream_guard(guard_out, files)
+        if guard_report is None:
+            # No sync point to compare against (no such remote ref in this
+            # clone, or the probe answered nothing usable).  #818's
+            # contract stands: publish proceeds -- but says so, rather
+            # than letting the caller read silence as "checked, clean".
+            upstream_guard_undetermined = True
+        elif guard_report.conflicts:
+            if not allow_upstream_overwrite:
+                record_boundary_crossing(
+                    cid, "publish",
+                    "upstream_overwrite refused paths="
+                    f"{guard_report.conflicts}",
+                    approved=False,
+                )
+                return finish_json(
+                    _upstream_overwrite_error(
+                        guard_base_ref,
+                        guard_report.merge_base,
+                        guard_report.conflicts,
+                        _upstream_conflict_commits(
+                            _run, guard_report.merge_base,
+                            guard_base_ref, guard_report.conflicts,
+                        ),
+                    ),
+                    verified,
+                )
+            upstream_overwritten = list(guard_report.conflicts)
+
         merge_is_merge = merge_discarded_sha is not None
         if merge_is_merge:
             # Resolve parent2 for the two-parent rebuild (#819) AFTER
@@ -1042,6 +1306,14 @@ def publish(
     result["staged_files"] = committed_paths
     if manifest:
         result["worktree_leftover"] = worktree_leftover
+    if upstream_overwritten:
+        # The guard found upstream changes on these declared paths and
+        # allow_upstream_overwrite waved them through: the push carries the
+        # container's copy over the base branch's (#863).
+        result["upstream_overwrite_override"] = True
+        result["upstream_overwrite_paths"] = upstream_overwritten
+    if upstream_guard_undetermined:
+        result["upstream_guard_undetermined"] = True
     if merge_discarded_sha:
         # Merge report fields (issue #711): present only when a merge
         # commit was detected at HEAD before git_prepare_commit reset it.

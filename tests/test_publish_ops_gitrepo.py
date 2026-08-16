@@ -7,15 +7,84 @@ a real repository.  No Docker, no network, no special pytest markers.
 
 from __future__ import annotations
 
+import json
+import os
 import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
 from sunaba.tools.publish_ops import git_prepare_commit
-from sunaba.tools.vcs.publishing import _validate_manifest_path
+from sunaba.tools.vcs.publishing import (
+    _read_upstream_guard,
+    _upstream_conflict_commits,
+    _upstream_guard_probe,
+    _validate_manifest_path,
+    publish,
+)
+from tests.conftest import _FakeClient
+
+
+class _RealGitContainer:
+    """A docker-py-shaped container whose execs run for real in a clone.
+
+    ``publish`` reaches git only through ``container.exec_run``, so pointing
+    that at a real working clone is what lets these tests drive the whole
+    tool -- guard, commit, push to the bare origin -- instead of a canned
+    exec script.  Two things are answered without running:
+
+    * ``gitleaks version`` reports the scanner as absent, so the secret scan
+      returns ``skipped`` deterministically (whether or not the binary
+      happens to be installed on the machine running the tests);
+    * nothing else -- every other command is a real ``/bin/sh -c``.
+    """
+
+    def __init__(self, working_dir: str) -> None:
+        self.working_dir = working_dir
+        self.labels: dict[str, str] = {}
+        self.commands: list[str] = []
+
+    def exec_run(
+        self,
+        cmd: list[str] | None = None,
+        stdout: bool = True,
+        stderr: bool = True,
+        environment: dict[str, str] | None = None,
+        demux: bool = False,
+        workdir: str | None = None,
+        **_kwargs: Any,
+    ):
+        argv = list(cmd or [])
+        if argv[:2] == ["gitleaks", "version"]:
+            return self._reply(1, b"", b"", demux)
+
+        if len(argv) > 2 and argv[0] in ("/bin/sh", "sh"):
+            shell_cmd = argv[2]
+        else:
+            shell_cmd = " ".join(argv)
+        self.commands.append(shell_cmd)
+
+        env = None if environment is None else {**os.environ, **environment}
+        proc = subprocess.run(
+            ["/bin/sh", "-c", shell_cmd],
+            cwd=workdir or self.working_dir,
+            capture_output=True,
+            env=env,
+        )
+        return self._reply(proc.returncode, proc.stdout, proc.stderr, demux)
+
+    @staticmethod
+    def _reply(ec: int, out: bytes, err: bytes, demux: bool):
+        # docker-py splits the streams only when the caller asked for it
+        # (issue #742); without demux they arrive multiplexed, which is the
+        # form publish's own _run() reads.
+        if demux:
+            return ec, (out or None, err or None)
+        return ec, out + err
 
 
 def _make_run(working_dir: str):
@@ -1134,4 +1203,420 @@ class TestAutoIncludeBaseBinary:
             f"binary content mismatch: got {len(actual)} bytes, "
 
             f"expected {len(binary_content)} bytes"
+        )
+
+
+# ============================================================================
+# Test f: upstream-overwrite guard (issue #863)
+# ============================================================================
+
+
+def _advance_upstream(
+    origin_dir: str,
+    changes: dict[str, str | None],
+    message: str = "upstream advance",
+    clone_name: str = "upstream_clone",
+) -> str:
+    """Land *changes* on origin/main from a second clone.
+
+    This is upstream moving on while the container works: a PR merging into
+    main after the container was cloned.  *changes* maps a repo-relative
+    path to its new text, or to ``None`` to delete it.  Returns the new
+    main tip SHA.
+    """
+    other = Path(origin_dir).parent / clone_name
+    if not other.exists():
+        _git(str(Path(origin_dir).parent), "clone", origin_dir, str(other))
+        _git(str(other), "config", "user.email", "upstream@example.com")
+        _git(str(other), "config", "user.name", "upstream")
+
+    for path, text in changes.items():
+        if text is None:
+            removed = _git(str(other), "rm", "-q", path)
+            assert removed.returncode == 0, f"upstream rm failed: {removed.stderr}"
+            continue
+        target = other / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        _git(str(other), "add", path)
+
+    commit = _git(str(other), "commit", "-m", message)
+    assert commit.returncode == 0, f"upstream commit failed: {commit.stderr}"
+    push = _git(str(other), "push", "origin", "main")
+    assert push.returncode == 0, f"upstream push failed: {push.stderr}"
+    return _git(str(other), "rev-parse", "HEAD").stdout.strip()
+
+
+def _make_exec_run(working_dir: str):
+    """``_make_run`` with docker's env semantics.
+
+    ``exec_run(environment=...)`` adds variables to the container's own
+    environment; a bare ``subprocess`` env would replace it (and lose PATH),
+    so the guard probes -- which pass only their own variable -- need the
+    merge to behave as they do in a container.
+    """
+    inner = _make_run(working_dir)
+
+    def run(cmd: str, env: dict[str, str] | None = None):
+        return inner(cmd, None if env is None else {**os.environ, **env})
+
+    return run
+
+
+def _probe(run, base_ref: str, paths: list[str]):
+    """Run the guard's probe against the real clone and return its report."""
+    command, env = _upstream_guard_probe(base_ref, paths)
+    # The declared paths reach the probe through the environment, so the
+    # command text stays independent of the manifest.
+    assert not any(path in command for path in paths), (
+        "declared paths must not appear in the probe command"
+    )
+    _, out, _ = run(command, env)
+    return _read_upstream_guard(out, paths)
+
+
+class TestUpstreamGuardDecision:
+    """The guard's read of a real clone whose base moved under it (#863).
+
+    The container is cloned, upstream advances, and the container still
+    holds the pre-advance copy of the files it declares.  Publishing that
+    manifest would stage each declared path as a whole snapshot on top of
+    the fresh base -- the silent revert kusabi#294 shipped.
+    """
+
+    def test_upstream_modified_declared_path_conflicts(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        clone = repo_setup["clone_dir"]
+        run = _make_exec_run(clone)
+
+        (Path(clone) / "shared.py").write_text("base\n")
+        _git(clone, "add", "shared.py")
+        _git(clone, "commit", "-m", "add shared.py")
+        assert _git(clone, "push", "origin", "main").returncode == 0
+        _git(clone, "fetch", "origin")
+
+        # Upstream extends shared.py after this container's sync point.
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"shared.py": "base\nupstream feature\n"},
+            message="upstream PR: extend shared.py",
+        )
+
+        # The container edits its (now stale) copy on a feature branch.
+        _git(clone, "checkout", "-b", "feat/x")
+        (Path(clone) / "shared.py").write_text("base\ncontainer edit\n")
+
+        report = _probe(run, "origin/main", ["shared.py"])
+        assert report is not None, "guard could not resolve the sync point"
+        assert report.conflicts == ["shared.py"]
+
+        # The refusal names the upstream commits behind the conflict, read
+        # from local git only -- no GitHub API call.
+        commits = _upstream_conflict_commits(
+            run, report.merge_base, "origin/main", report.conflicts,
+        )
+        assert commits["shared.py"], "no upstream commits reported"
+        assert any(
+            "extend shared.py" in line for line in commits["shared.py"]
+        ), commits
+
+    def test_untouched_upstream_paths_are_identical(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """A base that advanced elsewhere leaves the declared path alone."""
+        clone = repo_setup["clone_dir"]
+        run = _make_exec_run(clone)
+
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"unrelated.py": "upstream only\n"},
+            message="upstream PR: unrelated file",
+        )
+
+        _git(clone, "checkout", "-b", "feat/y")
+        (Path(clone) / "mine.py").write_text("mine\n")
+
+        report = _probe(run, "origin/main", ["mine.py"])
+        assert report is not None
+        # mine.py is absent at both refs ("both absent" = identical) and the
+        # upstream file is not declared, so nothing is at risk.
+        assert report.conflicts == []
+
+    def test_upstream_added_and_deleted_paths_conflict(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """Added-upstream and deleted-upstream both count as differing.
+
+        Declaring either path means the manifest would put the container's
+        answer (a missing file, or a file upstream deleted) over the base's.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_exec_run(clone)
+
+        (Path(clone) / "doomed.py").write_text("doomed\n")
+        _git(clone, "add", "doomed.py")
+        _git(clone, "commit", "-m", "add doomed.py")
+        assert _git(clone, "push", "origin", "main").returncode == 0
+        _git(clone, "fetch", "origin")
+
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"added.py": "new upstream file\n", "doomed.py": None},
+            message="upstream PR: add one file, delete another",
+        )
+
+        _git(clone, "checkout", "-b", "feat/z")
+        (Path(clone) / "added.py").write_text("container's own version\n")
+        (Path(clone) / "doomed.py").write_text("container still has it\n")
+
+        report = _probe(run, "origin/main", ["added.py", "doomed.py"])
+        assert report is not None
+        assert report.conflicts == ["added.py", "doomed.py"]
+
+    def test_unresolvable_sync_point_is_undetermined(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """No such remote ref -> no comparison, and the guard says so.
+
+        ``None`` is the "cannot tell" answer, not "clean": publish proceeds
+        (a failed fetch must never block it, #818) but reports that the
+        comparison never happened.
+        """
+        run = _make_exec_run(repo_setup["clone_dir"])
+        (Path(repo_setup["clone_dir"]) / "mine.py").write_text("mine\n")
+
+        assert _probe(run, "origin/no-such-branch", ["mine.py"]) is None
+        # Same answer for output that carries no marker at all.
+        assert _read_upstream_guard("", ["mine.py"]) is None
+
+
+class TestPublishUpstreamOverwriteGuard:
+    """publish() itself against a real clone + bare origin (#863).
+
+    Everything below the tool is real: the guard's git, the commit, and the
+    push to the bare origin.  Only the container boundary (``exec_run``),
+    the host-side token/proxy lookups, and the host-side auto-include fetch
+    are stood in for.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _publish_env(self, monkeypatch: pytest.MonkeyPatch):
+        """Keep publish host-side: no proxy, no token, no GitHub call."""
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing.proxy_configured",
+                return_value=False,
+            ),
+            patch("sunaba.tools.vcs.publishing.record_boundary_crossing"),
+            # The #712 auto-include is a GitHub REST read; this guard is
+            # local-git only, so the merge-shaped test must not reach out.
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+                return_value=None,
+            ),
+            # The baseline is a REST read too (#708); off keeps the test
+            # hermetic without changing what the guard sees.
+            patch(
+                "sunaba.tools.secret_scan._baseline_enabled",
+                return_value=False,
+            ),
+        ):
+            yield
+
+    @staticmethod
+    def _publish(clone: str, **kwargs: Any) -> tuple[dict[str, Any], MagicMock]:
+        """Call publish() against the real *clone*; return (result, pr_mock)."""
+        container = _RealGitContainer(clone)
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._docker",
+                return_value=_FakeClient(container),
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._create_pr_via_api",
+            ) as pr_mock,
+        ):
+            raw = publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                working_dir=clone,
+                **kwargs,
+            )
+        return json.loads(raw), pr_mock
+
+    @staticmethod
+    def _stale_container(repo_setup: dict[str, Any]) -> None:
+        """Set up the incident shape: upstream advanced past this clone.
+
+        ``shared.py`` is on main, the container branches off it, upstream
+        then extends it, and the container edits its own pre-advance copy.
+        """
+        clone = repo_setup["clone_dir"]
+        (Path(clone) / "shared.py").write_text("base\n")
+        _git(clone, "add", "shared.py")
+        _git(clone, "commit", "-m", "add shared.py")
+        assert _git(clone, "push", "origin", "main").returncode == 0
+        _git(clone, "fetch", "origin")
+
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"shared.py": "base\nupstream feature\n"},
+            message="upstream PR: extend shared.py",
+        )
+
+        _git(clone, "checkout", "-b", "feat/x")
+        (Path(clone) / "shared.py").write_text("base\ncontainer edit\n")
+
+    def test_refuses_without_committing_pushing_or_opening_a_pr(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        clone = repo_setup["clone_dir"]
+        self._stale_container(repo_setup)
+        head_before = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+        result, pr_mock = self._publish(
+            clone,
+            branch="feat/x",
+            message="Manifest publish over a moved base",
+            files=["shared.py"],
+            base_branch="main",
+            create_pr=True,
+            pr_title="Feature",
+            pr_body="Body",
+        )
+
+        # Machine-distinguishable: callers branch on step, not on prose.
+        assert result["status"] == "error"
+        assert result["step"] == "upstream_overwrite"
+        assert result["conflicting_paths"] == ["shared.py"]
+        assert result["base_ref"] == "origin/main"
+        assert any(
+            "extend shared.py" in line
+            for line in result["upstream_commits"]["shared.py"]
+        ), result["upstream_commits"]
+        assert "allow_upstream_overwrite=True" in result["hint"]
+
+        # Nothing happened: no commit, no branch on the remote, no PR.
+        assert _git(clone, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(
+            repo_setup["origin_dir"], "rev-parse", "--verify", "refs/heads/feat/x",
+        ).returncode != 0, "the refused publish still pushed a branch"
+        pr_mock.assert_not_called()
+
+    def test_declared_paths_untouched_upstream_publish_as_before(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """The base moved, but not under any declared path -> unchanged."""
+        clone = repo_setup["clone_dir"]
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"unrelated.py": "upstream only\n"},
+            message="upstream PR: unrelated file",
+        )
+        _git(clone, "checkout", "-b", "feat/safe")
+        (Path(clone) / "mine.py").write_text("mine\n")
+
+        result, _pr = self._publish(
+            clone,
+            branch="feat/safe",
+            message="Manifest publish",
+            files=["mine.py"],
+            base_branch="main",
+        )
+
+        assert result["status"] == "pushed", result
+        assert result["staged_files"] == ["mine.py"]
+        # Nothing to report: the guard ran and found every declared path
+        # identical at both refs.
+        assert "upstream_overwrite_override" not in result
+        assert "upstream_guard_undetermined" not in result
+
+        pushed = _git(
+            repo_setup["origin_dir"], "ls-tree", "--name-only", "refs/heads/feat/safe",
+        ).stdout.split()
+        assert "mine.py" in pushed
+
+    def test_override_publishes_and_records_the_paths(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        clone = repo_setup["clone_dir"]
+        self._stale_container(repo_setup)
+
+        result, _pr = self._publish(
+            clone,
+            branch="feat/x",
+            message="Deliberately overwrite the upstream copy",
+            files=["shared.py"],
+            base_branch="main",
+            allow_upstream_overwrite=True,
+        )
+
+        assert result["status"] == "pushed", result
+        # The override is not silent: the result names what it waved through.
+        assert result["upstream_overwrite_override"] is True
+        assert result["upstream_overwrite_paths"] == ["shared.py"]
+
+        pushed = _git(
+            repo_setup["origin_dir"], "show", "refs/heads/feat/x:shared.py",
+        ).stdout
+        assert pushed == "base\ncontainer edit\n"
+
+    def test_completed_base_merge_publishes_without_override(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """The #675 shape stays green: merging the base moves the sync point.
+
+        After an in-container merge of origin/main, the merge-base IS the
+        base tip, so every declared path's two blobs agree and the guard has
+        nothing to refuse.
+        """
+        clone = repo_setup["clone_dir"]
+        (Path(clone) / "shared.py").write_text("base\n")
+        _git(clone, "add", "shared.py")
+        _git(clone, "commit", "-m", "add shared.py")
+        assert _git(clone, "push", "origin", "main").returncode == 0
+        _git(clone, "fetch", "origin")
+
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"shared.py": "base\nupstream feature\n"},
+            message="upstream PR: extend shared.py",
+        )
+
+        # The container does its own work, then brings the base in exactly
+        # as merge_base / merge_complete would.
+        _git(clone, "checkout", "-b", "feat/x")
+        (Path(clone) / "mine.py").write_text("mine\n")
+        _git(clone, "add", "mine.py")
+        _git(clone, "commit", "-m", "container work")
+        _git(clone, "fetch", "origin")
+        merge = _git(clone, "merge", "origin/main", "--no-edit")
+        assert merge.returncode == 0, f"fixture merge failed: {merge.stderr}"
+
+        # Now it edits the very path upstream changed -- on top of the
+        # merged-in version, so the manifest reverts nothing.
+        (Path(clone) / "shared.py").write_text(
+            "base\nupstream feature\ncontainer edit\n"
+        )
+        result, _pr = self._publish(
+            clone,
+            branch="feat/x",
+            message="Manifest publish after base merge",
+            files=["shared.py"],
+            base_branch="main",
+        )
+
+        assert result["status"] == "pushed", result
+        assert "upstream_overwrite_override" not in result
+        pushed = _git(
+            repo_setup["origin_dir"], "show", "refs/heads/feat/x:shared.py",
+        ).stdout
+        assert pushed == "base\nupstream feature\ncontainer edit\n", (
+            "the merged-in upstream line must survive the manifest publish"
         )

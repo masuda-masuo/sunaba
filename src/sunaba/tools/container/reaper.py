@@ -9,6 +9,7 @@ from typing import Any
 
 from docker.errors import APIError, NotFound
 
+from sunaba import capture_health
 from sunaba.journal import (
     get_last_activity_per_container,
     read_container_states,
@@ -126,6 +127,7 @@ def _reap_orphaned_init_containers(client: Any = None) -> list[str]:
             logger.warning("orphan reap: failed to remove %s: %s", cid, e)
             continue
         record_stop(cid)
+        capture_health.prune(cid)  # dead container: drop its guard state (#852)
         reaped.append(cid)
         logger.info("Reaped orphaned init container %s (age=%.0fs)", cid, age)
     return reaped
@@ -213,6 +215,7 @@ def _reap_idle_containers() -> list[str]:
             logger.warning("idle reap: failed to remove %s: %s", cid, e)
             continue
         record_stop(cid)
+        capture_health.prune(cid)  # dead container: drop its guard state (#852)
         reaped.append(cid)
     return reaped
 

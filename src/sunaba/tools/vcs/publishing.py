@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 from typing import Any, NamedTuple
+from urllib.parse import quote
 
 from docker.errors import NotFound
 
@@ -402,8 +403,26 @@ def _fetch_base_auto_include(
 
 
 # ---------------------------------------------------------------------------
-# Upstream-overwrite guard (issue #863)
+# Upstream-overwrite guard (issue #863), split across the credential
+# boundary (issue #866)
 # ---------------------------------------------------------------------------
+#
+# The guard answers one question: would staging the declared paths as whole
+# snapshots revert something the base branch has and this container never
+# saw?  Answering it needs two refs, and they live on opposite sides of the
+# credential boundary:
+#
+# * the *merge-base* and its blobs are in the container's own object store,
+#   readable with no credential at all;
+# * the base branch's *current tip* is only knowable from the host, which
+#   holds the VCS token.  The container cannot fetch it -- tokens never
+#   enter the sandbox, so ``git fetch origin`` against a private repo dies
+#   with "could not read Username" every single time.  #864 read the tip
+#   in-container behind ``|| true``, which meant it compared the clone-point
+#   refs against themselves and reported clean for every private-repo
+#   publish (#866).
+#
+# So: merge-base from the container, tip from the host, comparison pure.
 
 #: Opens the guard probe's machine-readable block.  The probe shares one
 #: exec with the ``git fetch origin`` refresh, whose own chatter lands on the
@@ -421,46 +440,110 @@ _UPSTREAM_GUARD_PATHS_ENV = "SUNABA_UPSTREAM_GUARD_PATHS"
 #: How many upstream one-liners are reported per conflicting path.
 _UPSTREAM_COMMITS_LIMIT = 20
 
+#: A declared path that does not exist at the ref being read.  Both halves
+#: spell absence the same way, so "absent at both refs" falls out of plain
+#: equality instead of needing its own case.  ``-`` cannot collide with a
+#: blob id.
+_BLOB_ABSENT = "-"
 
-class UpstreamGuardReport(NamedTuple):
-    """What the container's git says about the manifest against the base tip.
+#: A declared path whose blob id at the base tip could not be read at all.
+#: Such a path is reported as undetermined rather than compared: a clean
+#: verdict from a comparison that never happened is exactly the #866 defect.
+_BLOB_UNREADABLE = "?"
+
+
+class UpstreamMergeBaseBlobs(NamedTuple):
+    """The container-side half: what this clone last saw of the base branch.
+
+    Both fields come from the container's own object store, so they are
+    available whether or not the container can reach the remote -- which,
+    by design, it cannot.
 
     Attributes
     ----------
     merge_base:
         Where the container's ``HEAD`` last met ``origin/<base_branch>`` --
         the newest upstream state this container has ever seen.
+    blobs:
+        ``path -> blob id at *merge_base*``, or :data:`_BLOB_ABSENT` when
+        the path does not exist there.
+    """
+
+    merge_base: str
+    blobs: dict[str, str]
+
+
+class UpstreamTipRead(NamedTuple):
+    """The host-side half: what the base branch holds *now*.
+
+    Read through the GitHub REST API from the host process with the VCS
+    token -- the same access class :func:`_fetch_base_auto_include` uses,
+    and the only side of the boundary that can answer for a private repo.
+
+    Attributes
+    ----------
+    base_sha:
+        The base branch's tip commit, or ``""`` when it could not be read.
+    blobs:
+        ``path -> blob id at *base_sha*``, :data:`_BLOB_ABSENT`, or
+        :data:`_BLOB_UNREADABLE`.
+    error:
+        Empty on success.  Non-empty means no read happened at all (no tip,
+        no blobs) and says why.
+    """
+
+    base_sha: str
+    blobs: dict[str, str]
+    error: str
+
+
+class UpstreamGuardReport(NamedTuple):
+    """The guard's verdict on a manifest, from both halves together.
+
+    Attributes
+    ----------
+    merge_base:
+        The container-side sync point the comparison used (``""`` when
+        there was none).
     conflicts:
-        Declared paths whose blob at the ``origin/<base_branch>`` tip differs
-        from their blob at *merge_base*.  These are the paths whose upstream
-        changes a manifest publish would overwrite without ever having seen
-        them (issue #863).
+        Declared paths whose blob at the base branch's real tip differs
+        from their blob at *merge_base*.  These are the paths whose
+        upstream changes a manifest publish would overwrite without ever
+        having seen them (issue #863).
+    undetermined:
+        Empty when every declared path was actually compared.  Otherwise a
+        short reason why the guard could not obtain a usable comparison --
+        the honest form of ``upstream_guard_undetermined`` (#865 finding 1,
+        #866).  #818's contract stands: undetermined never blocks publish.
     """
 
     merge_base: str
     conflicts: list[str]
+    undetermined: str
 
 
 def _upstream_guard_probe(
     base_ref: str, paths: list[str],
 ) -> tuple[str, dict[str, str]]:
-    """Build the combined refresh + guard-probe exec and its environment.
+    """Build the combined refresh + merge-base probe and its environment.
 
-    The ``git fetch origin`` refresh (#818) leads, so the probe reads the
-    freshest *base_ref* the clone can have.  Its failure stays best-effort
-    (``|| true``): the guard then compares against whatever ``base_ref`` the
-    clone already carried, because no better information exists (#863 spec 4).
+    The ``git fetch origin`` refresh (#818) still leads, because base *ref
+    resolution* for the commit's parents wants the freshest ref the clone
+    can have.  Nothing the guard decides depends on it any more: the probe
+    reads only the merge-base and its blobs, which are in the clone whether
+    the fetch worked, failed, or was never possible (#866).
 
-    One exec, not one per path: everything the decision needs is printed
-    under :data:`_UPSTREAM_GUARD_MARK` as ``blob <index> <merge_base_blob>
-    <tip_blob>``, with ``-`` standing for "path absent at that ref".
+    One exec, not one per path: everything the container side owes the
+    decision is printed under :data:`_UPSTREAM_GUARD_MARK` as ``blob
+    <index> <merge_base_blob>``, with :data:`_BLOB_ABSENT` standing for
+    "path absent at the merge-base".
 
-    The declared paths travel in the environment, never in the command text.
-    A manifest path is arbitrary caller input; keeping it out means the
-    command this exec runs is a fixed string that says "refresh and read two
-    refs", instead of a different string per publish that quotes user data
-    into a shell loop.  Paths are reported back by index, so one containing
-    whitespace cannot be misread as several fields.
+    The declared paths travel in the environment, never in the command
+    text.  A manifest path is arbitrary caller input; keeping it out means
+    the command this exec runs is a fixed string that says "refresh and
+    read one ref", instead of a different string per publish that quotes
+    user data into a shell loop.  Paths are reported back by index, so one
+    containing whitespace cannot be misread as several fields.
     """
     fetch = "git fetch origin 2>/dev/null || true"
     if not paths:
@@ -478,56 +561,184 @@ def _upstream_guard_probe(
         f'printf "%s\\n" "${_UPSTREAM_GUARD_PATHS_ENV}" | '
         "while IFS= read -r _sp; do "
         '_sa=$(git rev-parse --quiet --verify "$_sm:$_sp" 2>/dev/null) || _sa=-; '
-        '_st=$(git rev-parse --quiet --verify "$_sb:$_sp" 2>/dev/null) || _st=-; '
-        'printf "blob %s %s %s\\n" "$_si" "${_sa:--}" "${_st:--}"; '
+        f'printf "blob %s %s\\n" "$_si" "${{_sa:-{_BLOB_ABSENT}}}"; '
         "_si=$((_si+1)); "
         "done"
     )
     return command, {_UPSTREAM_GUARD_PATHS_ENV: "\n".join(paths)}
 
 
-def _read_upstream_guard(
+def _read_merge_base_blobs(
     output: str, paths: list[str],
-) -> UpstreamGuardReport | None:
-    """Decide the guard from the probe's output -- pure, and stateless.
+) -> UpstreamMergeBaseBlobs | None:
+    """Parse the container-side probe's output -- pure, and stateless.
 
-    Both refs are recomputed by every probe, so nothing here is remembered
-    between publishes.  A path absent at both refs (``-`` twice) counts as
-    identical; upstream-added (absent at the merge-base, present at the tip)
-    and upstream-deleted (the reverse) both count as differing, because both
-    mean the manifest's snapshot would replace an upstream change.
-
-    Returns ``None`` when the probe answered nothing usable -- no marker, no
-    merge-base, or a line per declared path missing.  The caller then
-    proceeds unguarded: an undetermined comparison is exactly the state a
-    failed fetch leaves behind, and #818's contract says that must not block
-    publish.
+    Returns ``None`` when the probe answered nothing usable: no marker, no
+    merge-base, or a line per declared path missing.  The caller turns that
+    into an undetermined verdict, never into a clean one.
     """
     if _UPSTREAM_GUARD_MARK not in output:
         return None
 
     merge_base = ""
-    blobs: dict[int, tuple[str, str]] = {}
+    indexed: dict[int, str] = {}
     for line in output.split(_UPSTREAM_GUARD_MARK, 1)[1].splitlines():
         fields = line.split()
         if len(fields) == 2 and fields[0] == "base":
             merge_base = fields[1]
-        elif len(fields) == 4 and fields[0] == "blob":
+        elif len(fields) == 3 and fields[0] == "blob":
             try:
                 index = int(fields[1])
             except ValueError:
                 continue
-            blobs[index] = (fields[2], fields[3])
+            indexed[index] = fields[2]
 
-    if not merge_base or set(blobs) != set(range(len(paths))):
+    if not merge_base or set(indexed) != set(range(len(paths))):
         return None
 
-    return UpstreamGuardReport(
+    return UpstreamMergeBaseBlobs(
         merge_base=merge_base,
-        conflicts=[
-            path for index, path in enumerate(paths)
-            if blobs[index][0] != blobs[index][1]
-        ],
+        blobs={path: indexed[index] for index, path in enumerate(paths)},
+    )
+
+
+def _fetch_base_tip_blobs(
+    repo: str,
+    token: str,
+    base_branch: str,
+    paths: list[str],
+) -> UpstreamTipRead:
+    """Read the declared paths' blob ids at the base branch tip, host-side.
+
+    Mirrors :func:`_fetch_base_auto_include`'s access pattern -- same token,
+    same REST endpoints, same host process -- because that is the only side
+    of the boundary holding a credential.  Bounded by the manifest: one ref
+    read plus one Contents read per declared path.
+
+    The Contents API's ``sha`` field *is* the git blob id of the file, so
+    nothing here has to be base64-decoded or re-hashed, and the two halves
+    already compare on a common footing with what ``git rev-parse
+    <merge_base>:<path>`` prints in the container.  It is also the field
+    that survives the API's size limit: for a file too large to inline,
+    ``content`` comes back empty but ``sha`` is still the blob id.
+
+    Never raises.  Every failure becomes a recorded reason instead, because
+    the caller has to be able to tell "read, and identical" apart from
+    "could not read" (#866).
+    """
+    from sunaba.tools.github_api import _github_api_request
+
+    if not paths:
+        return UpstreamTipRead(base_sha="", blobs={}, error="")
+
+    # Resolve the base branch (default branch if not given), exactly as the
+    # auto-include path does.
+    if not base_branch:
+        try:
+            repo_info = _github_api_request(f"/repos/{repo}", token)
+            base_branch = str(repo_info.get("default_branch") or "")
+        except Exception as exc:
+            return UpstreamTipRead(
+                "", {},
+                f"could not resolve the default branch of {repo}: {exc}",
+            )
+    if not base_branch:
+        return UpstreamTipRead("", {}, f"{repo} reports no default branch")
+
+    try:
+        ref_info = _github_api_request(
+            f"/repos/{repo}/git/refs/heads/{base_branch}", token,
+        )
+        base_sha = str(ref_info.get("object", {}).get("sha") or "")
+    except Exception as exc:
+        return UpstreamTipRead(
+            "", {}, f"could not read the tip of {repo}@{base_branch}: {exc}",
+        )
+    if not base_sha:
+        return UpstreamTipRead(
+            "", {}, f"{repo}@{base_branch} reports no tip commit",
+        )
+
+    # Every path is read at the same pinned commit, so a base branch that
+    # advances mid-publish cannot produce a half-old comparison.
+    blobs: dict[str, str] = {}
+    for path in paths:
+        try:
+            entry: Any = _github_api_request(
+                f"/repos/{repo}/contents/{quote(path)}?ref={base_sha}", token,
+            )
+        except Exception as exc:
+            if "HTTP 404" in str(exc):
+                # An answer, not a failure: the tip does not carry this path.
+                blobs[path] = _BLOB_ABSENT
+            else:
+                logger.warning(
+                    "Upstream guard: could not read %s@%s:%s: %s",
+                    repo, base_sha, path, exc,
+                )
+                blobs[path] = _BLOB_UNREADABLE
+            continue
+        # A directory answers with a JSON list, and a malformed entry with
+        # no ``sha`` leaves nothing comparable.  Either way we did not get a
+        # blob id, and saying so beats guessing at one.
+        sha = entry.get("sha") if isinstance(entry, dict) else None
+        blobs[path] = str(sha) if sha else _BLOB_UNREADABLE
+
+    return UpstreamTipRead(base_sha=base_sha, blobs=blobs, error="")
+
+
+def _read_upstream_guard(
+    local: UpstreamMergeBaseBlobs | None,
+    tip: UpstreamTipRead,
+    paths: list[str],
+) -> UpstreamGuardReport:
+    """Compare the two halves -- pure, stateless, and never optimistic.
+
+    Both halves are recomputed by every publish, so nothing here is
+    remembered between them.  A path absent at both refs counts as
+    identical; upstream-added (absent at the merge-base, present at the
+    tip) and upstream-deleted (the reverse) both count as differing,
+    because either way the manifest's snapshot would replace an upstream
+    change.
+
+    A path the host side could not read is *not* compared: it lands in
+    ``undetermined`` instead.  Reporting it identical would be #866 in
+    miniature -- a clean verdict from a comparison that never happened.
+    """
+    if local is None:
+        return UpstreamGuardReport(
+            merge_base="",
+            conflicts=[],
+            undetermined=(
+                "no merge-base between HEAD and the base branch in this "
+                "container's clone -- nothing to compare against"
+            ),
+        )
+    if tip.error:
+        return UpstreamGuardReport(
+            merge_base=local.merge_base,
+            conflicts=[],
+            undetermined=f"base branch tip unreadable: {tip.error}",
+        )
+
+    conflicts: list[str] = []
+    unreadable: list[str] = []
+    for path in paths:
+        tip_blob = tip.blobs.get(path, _BLOB_UNREADABLE)
+        if tip_blob == _BLOB_UNREADABLE:
+            unreadable.append(path)
+        elif tip_blob != local.blobs.get(path, _BLOB_ABSENT):
+            conflicts.append(path)
+
+    return UpstreamGuardReport(
+        merge_base=local.merge_base,
+        conflicts=conflicts,
+        undetermined=(
+            "base branch tip content unreadable for "
+            f"{len(unreadable)} declared path(s): {', '.join(unreadable)}"
+            if unreadable
+            else ""
+        ),
     )
 
 
@@ -536,10 +747,13 @@ def _upstream_conflict_commits(
 ) -> dict[str, list[str]]:
     """List the upstream commits behind each conflicting path (one exec).
 
-    Local git only -- the guard never calls the GitHub API (#863 non-goals).
-    The paths travel in the environment for the same reason as in
-    :func:`_upstream_guard_probe`.  A path whose log could not be read maps
-    to an empty list rather than disappearing from the report.
+    Diagnostics only: the decision is already made by the time this runs,
+    so it stays local git and stays best-effort.  *base_ref* is the clone's
+    own remote-tracking ref, which an unauthenticated container cannot
+    refresh -- when it is stale the log comes back empty and the refusal
+    says the commits could not be listed, rather than losing the path.  The
+    paths travel in the environment for the same reason as in
+    :func:`_upstream_guard_probe`.
     """
     if not paths:
         return {}
@@ -576,12 +790,17 @@ def _upstream_overwrite_error(
     merge_base: str,
     conflicts: list[str],
     commits: dict[str, list[str]],
+    base_tip: str = "",
 ) -> dict[str, Any]:
     """Build publish's refusal payload for the upstream-overwrite guard.
 
     ``step`` is the machine-distinguishable part -- callers branch on
     ``"upstream_overwrite"`` rather than on the prose, exactly as they do for
     the other refusals publish reports.
+
+    *base_tip* is the commit the host read the upstream side from (#866).
+    It is reported because the container's own ``{base_ref}`` may well be
+    behind it -- that gap is the whole reason the refusal fires.
     """
     listed = "\n".join(
         f"  {path}\n"
@@ -597,7 +816,8 @@ def _upstream_overwrite_error(
         "error": (
             f"publish refused: {len(conflicts)} declared path(s) changed on "
             f"{base_ref} since this container last saw it (merge-base "
-            f"{merge_base[:7]}).  A manifest publish stages each declared "
+            f"{merge_base[:7]}; base tip {base_tip[:7] or 'unknown'}, read "
+            "host-side).  A manifest publish stages each declared "
             "path as a whole snapshot of the container's copy, so pushing "
             "now would revert those upstream changes silently.\n"
             f"{listed}"
@@ -608,6 +828,7 @@ def _upstream_overwrite_error(
         },
         "merge_base": merge_base,
         "base_ref": base_ref,
+        "base_tip": base_tip,
         "hint": (
             "Re-clone from the current base and re-apply the change (the "
             "container's copy of these paths predates the upstream commits "
@@ -933,7 +1154,7 @@ def publish(
     # guard compares declared paths, so a stage-all publish has nothing to
     # declare; the defaults keep the result-building code below branch-free.
     upstream_overwritten: list[str] = []
-    upstream_guard_undetermined = False
+    upstream_guard_undetermined = ""
     if manifest:
         assert files is not None
         scan_files = [f for f in files if not os.path.isabs(f)]
@@ -1028,28 +1249,45 @@ def publish(
 
         # Refresh remote-tracking refs so base resolution does not
         # work from a stale clone (#818).  Fetch failure must not
-        # hard-fail publish (offline test environments).
+        # hard-fail publish (offline test environments) -- and for a
+        # private repo it always fails, since no credential is inside
+        # the container.
         #
-        # The same exec reads the upstream-overwrite guard's two refs
-        # (#863): the manifest declares which files the worker changed,
-        # but staging them as whole snapshots also replaces whatever the
-        # base branch has now -- including commits that landed after this
-        # container was cloned, which is how a publish reverted a
-        # just-merged PR without a conflict or a warning.  Both refs are
-        # read here, after the refresh and before anything is committed.
+        # The same exec reads the upstream-overwrite guard's
+        # container-side half (#863): the manifest declares which files
+        # the worker changed, but staging them as whole snapshots also
+        # replaces whatever the base branch has now -- including commits
+        # that landed after this container was cloned, which is how a
+        # publish reverted a just-merged PR without a conflict or a
+        # warning.  Only the merge-base is read here; the base branch's
+        # real tip is read host-side below, because that is the side
+        # that holds the token (#866).  Both happen before anything is
+        # committed.
         guard_base_ref = (
             f"origin/{base_branch}" if base_branch else "origin/HEAD"
         )
         guard_cmd, guard_env = _upstream_guard_probe(guard_base_ref, files)
         _, guard_out, _ = _run(guard_cmd, guard_env)
-        guard_report = _read_upstream_guard(guard_out, files)
-        if guard_report is None:
-            # No sync point to compare against (no such remote ref in this
-            # clone, or the probe answered nothing usable).  #818's
-            # contract stands: publish proceeds -- but says so, rather
-            # than letting the caller read silence as "checked, clean".
-            upstream_guard_undetermined = True
-        elif guard_report.conflicts:
+        guard_local = _read_merge_base_blobs(guard_out, files)
+        if guard_local is None:
+            # Nothing on this side to compare against, so the host read
+            # would answer a question no one can use: skip it.
+            guard_tip = UpstreamTipRead(base_sha="", blobs={}, error="")
+        else:
+            try:
+                guard_tip = _fetch_base_tip_blobs(
+                    repo, _resolve_vcs_token(), base_branch, files,
+                )
+            except Exception as exc:  # pragma: no cover - defence in depth
+                guard_tip = UpstreamTipRead("", {}, f"{exc}")
+        guard_report = _read_upstream_guard(guard_local, guard_tip, files)
+        if guard_report.undetermined:
+            # The guard could not obtain a usable comparison.  #818's
+            # contract stands: publish proceeds -- but it says so, and
+            # says why, rather than letting the caller read silence as
+            # "checked, clean" (#865 finding 1, #866).
+            upstream_guard_undetermined = guard_report.undetermined
+        if guard_report.conflicts:
             if not allow_upstream_overwrite:
                 record_boundary_crossing(
                     cid, "publish",
@@ -1066,6 +1304,7 @@ def publish(
                             _run, guard_report.merge_base,
                             guard_base_ref, guard_report.conflicts,
                         ),
+                        guard_tip.base_sha,
                     ),
                     verified,
                 )
@@ -1313,7 +1552,13 @@ def publish(
         result["upstream_overwrite_override"] = True
         result["upstream_overwrite_paths"] = upstream_overwritten
     if upstream_guard_undetermined:
+        # The guard did not perform the comparison it exists to perform.
+        # The reason travels with the flag: "undetermined" with no cause
+        # is only marginally better than silence (#866).
         result["upstream_guard_undetermined"] = True
+        result["upstream_guard_undetermined_reason"] = (
+            upstream_guard_undetermined
+        )
     if merge_discarded_sha:
         # Merge report fields (issue #711): present only when a merge
         # commit was detected at HEAD before git_prepare_commit reset it.

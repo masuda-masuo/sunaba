@@ -20,6 +20,12 @@ import pytest
 from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
 from sunaba.tools.publish_ops import git_prepare_commit
 from sunaba.tools.vcs.publishing import (
+    _BLOB_ABSENT,
+    _BLOB_UNREADABLE,
+    UpstreamMergeBaseBlobs,
+    UpstreamTipRead,
+    _fetch_base_tip_blobs,
+    _read_merge_base_blobs,
     _read_upstream_guard,
     _upstream_conflict_commits,
     _upstream_guard_probe,
@@ -1207,7 +1213,21 @@ class TestAutoIncludeBaseBinary:
 
 
 # ============================================================================
-# Test f: upstream-overwrite guard (issue #863)
+# Test f: upstream-overwrite guard (issue #863, split across the credential
+# boundary by issue #866)
+#
+# The guard has two halves and they sit on opposite sides of the sandbox's
+# credential boundary, so the tests keep them apart too:
+#
+# * the container half (merge-base + its blobs) runs for real in the clone;
+# * the host half (the base branch's tip) is read from the bare origin --
+#   which is what "GitHub" is here -- by a stand-in for the tokened REST
+#   read, because the container is never given a way to reach it.
+#
+# ``_break_fetch`` is what makes that separation load-bearing: it reproduces
+# production, where an in-container ``git fetch origin`` cannot succeed.
+# #864's tests could not see this defect because their origin was a local
+# ``file://`` remote that answers an unauthenticated fetch happily.
 # ============================================================================
 
 
@@ -1247,6 +1267,50 @@ def _advance_upstream(
     return _git(str(other), "rev-parse", "HEAD").stdout.strip()
 
 
+def _break_fetch(clone: str, origin_dir: str) -> None:
+    """Make ``git fetch origin`` fail the way it always does in production.
+
+    Credentials never enter a sandbox container, so for a private repo the
+    in-container fetch dies with "could not read Username" every time --
+    which is why #864's guard, whose probe read the tip after that fetch,
+    reported clean for every private-repo publish (#866).  A fetch URL that
+    cannot answer reproduces that deterministically, with no network and no
+    credential prompt.  The *push* URL is left pointing at the real origin,
+    because publish still has to be able to push once the guard clears it.
+    """
+    _git(clone, "remote", "set-url", "--push", "origin", origin_dir)
+    _git(clone, "remote", "set-url", "origin",
+         str(Path(clone).parent / "no-such-origin.git"))
+    dead = _git(clone, "fetch", "origin")
+    assert dead.returncode != 0, "the fetch was supposed to be unusable"
+
+
+def _origin_tip_blobs(
+    origin_dir: str, base_branch: str, paths: list[str],
+) -> UpstreamTipRead:
+    """Stand in for the host's tokened read of the base branch tip.
+
+    The bare origin is what GitHub is in these tests, and the host is the
+    only side allowed to read it.  ``git ls-tree`` yields exactly what the
+    Contents API's ``sha`` field carries -- the path's git blob id at the
+    tip -- so the two halves compare on the same footing here as they do in
+    production.
+    """
+    tip = _git(
+        origin_dir, "rev-parse", f"refs/heads/{base_branch}",
+    ).stdout.strip()
+    blobs: dict[str, str] = {}
+    for path in paths:
+        # "<mode> <type> <sha>\t<path>", or nothing when the tip has no
+        # such path (the Contents API's 404).
+        fields = _git(origin_dir, "ls-tree", tip, "--", path).stdout.split()
+        blobs[path] = (
+            fields[2] if len(fields) >= 3 and fields[1] == "blob"
+            else _BLOB_ABSENT
+        )
+    return UpstreamTipRead(base_sha=tip, blobs=blobs, error="")
+
+
 def _make_exec_run(working_dir: str):
     """``_make_run`` with docker's env semantics.
 
@@ -1263,8 +1327,8 @@ def _make_exec_run(working_dir: str):
     return run
 
 
-def _probe(run, base_ref: str, paths: list[str]):
-    """Run the guard's probe against the real clone and return its report."""
+def _probe_local(run, base_ref: str, paths: list[str]):
+    """Run the container-side probe against the real clone."""
     command, env = _upstream_guard_probe(base_ref, paths)
     # The declared paths reach the probe through the environment, so the
     # command text stays independent of the manifest.
@@ -1272,11 +1336,27 @@ def _probe(run, base_ref: str, paths: list[str]):
         "declared paths must not appear in the probe command"
     )
     _, out, _ = run(command, env)
-    return _read_upstream_guard(out, paths)
+    return _read_merge_base_blobs(out, paths)
+
+
+#: A container-side half with one declared path, for the comparison tests
+#: that are about the *host* half and want the other one held still.
+_MERGE_BASE_SIDE = UpstreamMergeBaseBlobs(
+    merge_base="e" * 40, blobs={"shared.py": "a" * 40},
+)
+
+
+def _guard(run, origin_dir: str, base_branch: str, paths: list[str]):
+    """The whole verdict: container half + host half, compared."""
+    return _read_upstream_guard(
+        _probe_local(run, f"origin/{base_branch}", paths),
+        _origin_tip_blobs(origin_dir, base_branch, paths),
+        paths,
+    )
 
 
 class TestUpstreamGuardDecision:
-    """The guard's read of a real clone whose base moved under it (#863).
+    """The guard's verdict on a real clone whose base moved under it (#863).
 
     The container is cloned, upstream advances, and the container still
     holds the pre-advance copy of the files it declares.  Publishing that
@@ -1307,8 +1387,8 @@ class TestUpstreamGuardDecision:
         _git(clone, "checkout", "-b", "feat/x")
         (Path(clone) / "shared.py").write_text("base\ncontainer edit\n")
 
-        report = _probe(run, "origin/main", ["shared.py"])
-        assert report is not None, "guard could not resolve the sync point"
+        report = _guard(run, repo_setup["origin_dir"], "main", ["shared.py"])
+        assert report.undetermined == "", report.undetermined
         assert report.conflicts == ["shared.py"]
 
         # The refusal names the upstream commits behind the conflict, read
@@ -1320,6 +1400,43 @@ class TestUpstreamGuardDecision:
         assert any(
             "extend shared.py" in line for line in commits["shared.py"]
         ), commits
+
+    def test_verdict_does_not_depend_on_the_in_container_fetch(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """The #866 invariant: a dead fetch changes nothing about the verdict.
+
+        #864's guard read the tip through ``origin/<base>`` after a
+        best-effort fetch, so killing the fetch turned every verdict into
+        "clean".  The tip now comes from the host, so the same container
+        state must produce the same answer either way.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_exec_run(clone)
+
+        (Path(clone) / "shared.py").write_text("base\n")
+        _git(clone, "add", "shared.py")
+        _git(clone, "commit", "-m", "add shared.py")
+        assert _git(clone, "push", "origin", "main").returncode == 0
+        _git(clone, "fetch", "origin")
+
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"shared.py": "base\nupstream feature\n"},
+            message="upstream PR: extend shared.py",
+        )
+        _git(clone, "checkout", "-b", "feat/x")
+        (Path(clone) / "shared.py").write_text("base\ncontainer edit\n")
+
+        live = _guard(run, repo_setup["origin_dir"], "main", ["shared.py"])
+        _break_fetch(clone, repo_setup["origin_dir"])
+        dead = _guard(run, repo_setup["origin_dir"], "main", ["shared.py"])
+
+        assert live.conflicts == ["shared.py"]
+        assert dead == live, (
+            "the guard's verdict must not depend on a fetch the container "
+            "cannot perform"
+        )
 
     def test_untouched_upstream_paths_are_identical(
         self, repo_setup: dict[str, Any],
@@ -1337,11 +1454,11 @@ class TestUpstreamGuardDecision:
         _git(clone, "checkout", "-b", "feat/y")
         (Path(clone) / "mine.py").write_text("mine\n")
 
-        report = _probe(run, "origin/main", ["mine.py"])
-        assert report is not None
+        report = _guard(run, repo_setup["origin_dir"], "main", ["mine.py"])
         # mine.py is absent at both refs ("both absent" = identical) and the
         # upstream file is not declared, so nothing is at risk.
         assert report.conflicts == []
+        assert report.undetermined == ""
 
     def test_upstream_added_and_deleted_paths_conflict(
         self, repo_setup: dict[str, Any],
@@ -1370,38 +1487,151 @@ class TestUpstreamGuardDecision:
         (Path(clone) / "added.py").write_text("container's own version\n")
         (Path(clone) / "doomed.py").write_text("container still has it\n")
 
-        report = _probe(run, "origin/main", ["added.py", "doomed.py"])
-        assert report is not None
+        report = _guard(
+            run, repo_setup["origin_dir"], "main", ["added.py", "doomed.py"],
+        )
         assert report.conflicts == ["added.py", "doomed.py"]
+        assert report.undetermined == ""
 
     def test_unresolvable_sync_point_is_undetermined(
         self, repo_setup: dict[str, Any],
     ) -> None:
         """No such remote ref -> no comparison, and the guard says so.
 
-        ``None`` is the "cannot tell" answer, not "clean": publish proceeds
-        (a failed fetch must never block it, #818) but reports that the
-        comparison never happened.
+        Undetermined is the "cannot tell" answer, not "clean": publish
+        proceeds (a failed fetch must never block it, #818) but reports that
+        the comparison never happened.
         """
         run = _make_exec_run(repo_setup["clone_dir"])
         (Path(repo_setup["clone_dir"]) / "mine.py").write_text("mine\n")
 
-        assert _probe(run, "origin/no-such-branch", ["mine.py"]) is None
+        assert _probe_local(run, "origin/no-such-branch", ["mine.py"]) is None
         # Same answer for output that carries no marker at all.
-        assert _read_upstream_guard("", ["mine.py"]) is None
+        assert _read_merge_base_blobs("", ["mine.py"]) is None
+
+        report = _read_upstream_guard(
+            None, _origin_tip_blobs(repo_setup["origin_dir"], "main", []),
+            ["mine.py"],
+        )
+        assert report.conflicts == []
+        assert "merge-base" in report.undetermined
+
+    def test_unreadable_base_tip_is_undetermined_not_clean(self) -> None:
+        """A tip the host could not read never comes out as "identical".
+
+        This is the shape #866 measured: the guard did not perform the
+        comparison, so the only honest report is that it did not.
+        """
+        local = _read_upstream_guard(
+            _MERGE_BASE_SIDE,
+            UpstreamTipRead("", {}, "GitHub API GET /repos/x returned HTTP 401"),
+            ["shared.py"],
+        )
+        assert local.conflicts == []
+        assert "401" in local.undetermined
+
+    def test_per_path_unreadable_tip_is_undetermined_for_that_path(
+        self,
+    ) -> None:
+        """One unreadable path does not make the others undetermined.
+
+        The readable path is still compared and still refused; the
+        unreadable one is named in the reason instead of being folded into
+        either verdict.
+        """
+        report = _read_upstream_guard(
+            _MERGE_BASE_SIDE._replace(
+                blobs={"shared.py": "a" * 40, "opaque.bin": "b" * 40},
+            ),
+            UpstreamTipRead(
+                "c" * 40,
+                {"shared.py": "d" * 40, "opaque.bin": _BLOB_UNREADABLE},
+                "",
+            ),
+            ["shared.py", "opaque.bin"],
+        )
+        assert report.conflicts == ["shared.py"]
+        assert "opaque.bin" in report.undetermined
+
+
+class TestBaseTipBlobRead:
+    """The host-side half on its own: what the REST answers become (#866)."""
+
+    @staticmethod
+    def _read(responses: dict[str, Any]):
+        """Drive ``_fetch_base_tip_blobs`` over a canned REST transcript."""
+
+        def fake_request(path: str, token: str, *args: Any, **kwargs: Any):
+            answer = responses[path]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        with patch(
+            "sunaba.tools.github_api._github_api_request",
+            side_effect=fake_request,
+        ):
+            return _fetch_base_tip_blobs(
+                "owner/repo", "tok", "main", ["kept.py", "gone.py", "bad.py"],
+            )
+
+    def test_sha_absent_and_unreadable_are_distinguished(self) -> None:
+        tip = "f" * 40
+        result = self._read({
+            "/repos/owner/repo/git/refs/heads/main": {"object": {"sha": tip}},
+            # The Contents API's ``sha`` IS the git blob id, so no decoding
+            # and no size limit stands between the two halves.
+            f"/repos/owner/repo/contents/kept.py?ref={tip}": {
+                "sha": "a" * 40, "encoding": "none", "content": "",
+            },
+            # 404 is an answer: the tip does not carry this path.
+            f"/repos/owner/repo/contents/gone.py?ref={tip}": RuntimeError(
+                "GitHub API GET /repos/owner/repo/contents/gone.py "
+                "returned HTTP 404: Not Found"
+            ),
+            # Anything else means we never got to look.
+            f"/repos/owner/repo/contents/bad.py?ref={tip}": RuntimeError(
+                "GitHub API GET /repos/owner/repo/contents/bad.py failed: "
+                "timed out"
+            ),
+        })
+
+        assert result.error == ""
+        assert result.base_sha == tip
+        assert result.blobs == {
+            "kept.py": "a" * 40,
+            "gone.py": _BLOB_ABSENT,
+            "bad.py": _BLOB_UNREADABLE,
+        }
+
+    def test_unreadable_tip_reports_the_reason_and_no_blobs(self) -> None:
+        result = self._read({
+            "/repos/owner/repo/git/refs/heads/main": RuntimeError(
+                "GitHub API GET /repos/owner/repo/git/refs/heads/main "
+                "returned HTTP 401: Bad credentials"
+            ),
+        })
+
+        assert result.blobs == {}
+        assert result.base_sha == ""
+        assert "401" in result.error
 
 
 class TestPublishUpstreamOverwriteGuard:
-    """publish() itself against a real clone + bare origin (#863).
+    """publish() itself against a real clone + bare origin (#863, #866).
 
-    Everything below the tool is real: the guard's git, the commit, and the
-    push to the bare origin.  Only the container boundary (``exec_run``),
-    the host-side token/proxy lookups, and the host-side auto-include fetch
-    are stood in for.
+    Everything below the tool is real: the guard's container-side git, the
+    commit, and the push to the bare origin.  Only the container boundary
+    (``exec_run``), the host-side token/proxy lookups, the host-side
+    auto-include fetch, and the host-side tip read are stood in for -- the
+    last of these by a read of the bare origin, which is the closest a
+    hermetic test gets to "the host has a token and the container does not".
     """
 
     @pytest.fixture(autouse=True)
-    def _publish_env(self, monkeypatch: pytest.MonkeyPatch):
+    def _publish_env(
+        self, monkeypatch: pytest.MonkeyPatch, repo_setup: dict[str, Any],
+    ):
         """Keep publish host-side: no proxy, no token, no GitHub call."""
         monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
         with (
@@ -1414,11 +1644,21 @@ class TestPublishUpstreamOverwriteGuard:
                 return_value=False,
             ),
             patch("sunaba.tools.vcs.publishing.record_boundary_crossing"),
-            # The #712 auto-include is a GitHub REST read; this guard is
-            # local-git only, so the merge-shaped test must not reach out.
+            # The #712 auto-include is a GitHub REST read; this guard does
+            # not use it, so the merge-shaped test must not reach out.
             patch(
                 "sunaba.tools.vcs.publishing._fetch_base_auto_include",
                 return_value=None,
+            ),
+            # The guard's host-side half, answered from the bare origin.
+            # Tests that need it to fail patch over this one.
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_tip_blobs",
+                side_effect=lambda repo, token, base_branch, paths: (
+                    _origin_tip_blobs(
+                        repo_setup["origin_dir"], base_branch or "main", paths,
+                    )
+                ),
             ),
             # The baseline is a REST read too (#708); off keeps the test
             # hermetic without changing what the guard sees.
@@ -1508,6 +1748,79 @@ class TestPublishUpstreamOverwriteGuard:
             repo_setup["origin_dir"], "rev-parse", "--verify", "refs/heads/feat/x",
         ).returncode != 0, "the refused publish still pushed a branch"
         pr_mock.assert_not_called()
+
+    def test_refuses_when_the_container_fetch_cannot_succeed(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """The #866 reproduction, as a test.
+
+        Measured live on 2026-08-16 against a private repo: the guard's
+        in-container ``git fetch origin`` failed (as it must -- no
+        credentials in the sandbox), the probe compared the clone-point refs
+        against themselves, and the publish that reproduced the #863
+        incident came back ``status: pushed``.  With the tip read host-side
+        the same run ends in refusal.
+        """
+        clone = repo_setup["clone_dir"]
+        self._stale_container(repo_setup)
+        _break_fetch(clone, repo_setup["origin_dir"])
+        head_before = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+        result, pr_mock = self._publish(
+            clone,
+            branch="feat/x",
+            message="Manifest publish over a moved base, fetch dead",
+            files=["shared.py"],
+            base_branch="main",
+            create_pr=True,
+            pr_title="Feature",
+            pr_body="Body",
+        )
+
+        assert result["status"] == "error", result
+        assert result["step"] == "upstream_overwrite"
+        assert result["conflicting_paths"] == ["shared.py"]
+        # The comparison happened, so it is not undetermined either.
+        assert "upstream_guard_undetermined" not in result
+        assert _git(clone, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(
+            repo_setup["origin_dir"], "rev-parse", "--verify", "refs/heads/feat/x",
+        ).returncode != 0, "the refused publish still pushed a branch"
+        pr_mock.assert_not_called()
+
+    def test_unreadable_base_tip_publishes_and_reports_undetermined(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """Host read fails entirely -> publish proceeds, and says why.
+
+        #818's contract: an undetermined guard must never block publish.
+        #866's correction: it must not be mistakable for a clean one, so the
+        result carries the flag and the reason.
+        """
+        clone = repo_setup["clone_dir"]
+        self._stale_container(repo_setup)
+
+        with patch(
+            "sunaba.tools.vcs.publishing._fetch_base_tip_blobs",
+            return_value=UpstreamTipRead(
+                "", {},
+                "could not read the tip of owner/repo@main: GitHub API GET "
+                "/repos/owner/repo/git/refs/heads/main returned HTTP 401",
+            ),
+        ):
+            result, _pr = self._publish(
+                clone,
+                branch="feat/x",
+                message="Manifest publish with an unreadable base tip",
+                files=["shared.py"],
+                base_branch="main",
+            )
+
+        assert result["status"] == "pushed", result
+        assert result["upstream_guard_undetermined"] is True
+        assert "401" in result["upstream_guard_undetermined_reason"]
+        # It did not quietly claim to have checked and waved anything through.
+        assert "upstream_overwrite_override" not in result
 
     def test_declared_paths_untouched_upstream_publish_as_before(
         self, repo_setup: dict[str, Any],
@@ -1614,6 +1927,7 @@ class TestPublishUpstreamOverwriteGuard:
 
         assert result["status"] == "pushed", result
         assert "upstream_overwrite_override" not in result
+        assert "upstream_guard_undetermined" not in result
         pushed = _git(
             repo_setup["origin_dir"], "show", "refs/heads/feat/x:shared.py",
         ).stdout

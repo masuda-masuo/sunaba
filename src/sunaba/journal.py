@@ -723,6 +723,43 @@ def record_tool_use(
     _append_json(entry)
 
 
+def record_capture_health(
+    container_id: str | None,
+    state: str,
+    *,
+    consecutive_empty: int,
+    canary_nonce_found: bool | None = None,
+    canary_error: str | None = None,
+) -> None:
+    """Record a capture-health guard state change (issue #852).
+
+    Written when the guard trips (``state="broken"``) or clears
+    (``state="recovered"``), carrying the consecutive-empty counter value
+    at the transition and the canary result, so post-incident forensics
+    does not depend on client-side logs.  ``canary_nonce_found`` is
+    ``None`` when no canary ran (e.g. recovery observed from a non-empty
+    decode rather than a re-probe).
+
+    The entry is attributed to the triggering call's container run when
+    one exists; a guard call without container attribution falls back to
+    the host run (mirroring :func:`record_busy_refusal`).
+    """
+    run_id = get_or_create_run_id(container_id) if container_id else get_host_run_id()
+    entry: dict[str, Any] = {
+        "ts": _utcnow_iso(),
+        "run_id": run_id,
+        "operation": "capture_health",
+        "state": state,
+        "consecutive_empty": consecutive_empty,
+        "canary_nonce_found": canary_nonce_found,
+    }
+    if container_id:
+        entry["container_id"] = container_id
+    if canary_error is not None:
+        entry["canary_error"] = canary_error
+    _append_json(entry)
+
+
 # ---------------------------------------------------------------------------
 # Journal reading
 # ---------------------------------------------------------------------------

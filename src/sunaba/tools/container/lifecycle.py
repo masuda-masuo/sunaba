@@ -18,7 +18,7 @@ from docker.errors import APIError, NotFound
 from fastmcp import Context
 from pydantic import BeforeValidator
 
-from sunaba import proxy_lifecycle
+from sunaba import capture_health, proxy_lifecycle
 from sunaba.journal import (
     get_last_activity_per_container,
     get_session_label,
@@ -909,6 +909,9 @@ def sandbox_stop(
     try:
         container = client.containers.get(container_id)
     except NotFound:
+        # The container is gone; its capture-health guard state (issue #852)
+        # is stale and must not linger in the per-container dict.
+        capture_health.prune(cid)
         return f"Error: container {cid} not found"
     except Exception as e:
         return f"Error: {e}"
@@ -996,6 +999,10 @@ def sandbox_stop(
         return f"Error: {e}"
 
     record_stop(cid)
+    # Drop the container's capture-health guard state (issue #852): the
+    # per-container dict must not grow unboundedly with dead containers,
+    # and a later sandbox with the same id must start from a fresh counter.
+    capture_health.prune(cid)
     return f"Container {cid} stopped and removed"
 
 

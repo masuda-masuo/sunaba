@@ -13,10 +13,11 @@ import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from docker.errors import APIError, NotFound
 
-from sunaba import undo
+from sunaba import capture_health, undo
 from sunaba.edit_verify import (
     _file_size_from_counts,
     edit_symbol_in_container,
@@ -1039,6 +1040,28 @@ def copy_file(
 _DEFAULT_READ_LIMIT = 50
 
 
+def _gate_read_result(
+    container: Any,
+    result: dict[str, Any],
+    container_id: str,
+) -> str | None:
+    """Feed the capture-health guard from a ``read_file_lines`` result.
+
+    ``file_size.bytes`` reflects the *decoded* read (the full file), not
+    the paged window, so an empty page past the end of a non-empty file
+    still counts as a non-empty decode.  Error results (no ``file_size``)
+    are not the empty-output fail-open and pass through ungated.
+    """
+    file_size = result.get("file_size")
+    if file_size is None:
+        return None
+    return capture_health.check_capture(
+        container,
+        decoded_empty=file_size.get("bytes", 0) == 0,
+        container_id=container_id[:12],
+    )
+
+
 def read_file_range(
     container_id: str,
     file_path: str,
@@ -1069,7 +1092,7 @@ def read_file_range(
     """
     client = _docker()
     try:
-        _ = client.containers.get(container_id)
+        container = client.containers.get(container_id)
     except NotFound:
         return container_not_found_error(container_id)
     except Exception as e:
@@ -1122,7 +1145,7 @@ def read_file_range(
         {"file_path": file_path},
     )
     if tail_lines is not None:
-        result = read_file_lines(_, file_path, offset=0, limit=-1)
+        result = read_file_lines(container, file_path, offset=0, limit=-1)
         if result.get("error"):
             return json.dumps(result)
         lines = result["content"].split("\n")
@@ -1137,10 +1160,16 @@ def read_file_range(
         # earlier lines are reached by offset, computed from total_lines.
         result["has_more"] = False
         result["next_offset"] = None
+        guard_error = _gate_read_result(container, result, container_id)
+        if guard_error is not None:
+            return guard_error
         return json.dumps(result)
     result = read_file_lines(
-        _, file_path, offset=resolved_offset, limit=resolved_limit
+        container, file_path, offset=resolved_offset, limit=resolved_limit
     )
+    guard_error = _gate_read_result(container, result, container_id)
+    if guard_error is not None:
+        return guard_error
     return json.dumps(result)
 
 

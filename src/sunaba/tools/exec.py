@@ -13,6 +13,7 @@ from typing import Annotated, Any
 from docker.errors import NotFound
 from pydantic import BeforeValidator
 
+from sunaba import capture_health
 from sunaba.journal import record_exec as journal_record_exec
 from sunaba.journal import record_exec_start as journal_record_exec_start
 from sunaba.journal import record_tool_use
@@ -300,6 +301,19 @@ def sandbox_exec(
         output_size=raw_size,
         max_output_tokens=max_output_tokens if max_output_tokens > 0 else None,
     )
+
+    # Capture-health guard (issue #852): feed the decoded output and gate
+    # the response.  A broken capture path returns a loud error instead of
+    # a phantom ``status: ok`` + empty result.  Runs after the completion
+    # journal record so the exec's real outcome stays journaled even when
+    # the guard refuses to serve the result.
+    guard_error = capture_health.check_capture(
+        container,
+        decoded_empty=not bool(stdout_text or stderr_text),
+        container_id=container_id[:12],
+    )
+    if guard_error is not None:
+        return guard_error
 
     return json.dumps(result)
 

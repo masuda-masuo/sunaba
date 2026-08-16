@@ -95,6 +95,9 @@ _PHASE_MAP: dict[str, str] = {
     # resource events, not workflow steps -- they must never inject an
     # init/explore/... segment into a run's semantic phases.
     "busy_refusal":            "other",
+    # Issue #852: capture-health guard state changes (trip/recovery) are
+    # server-side observability events, not workflow steps.
+    "capture_health":          "other",
 }
 
 

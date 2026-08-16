@@ -85,6 +85,23 @@ def _isolate_journal(tmp_path: Path) -> None:
         yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_capture_guard() -> None:
+    """Reset the capture-health guard between tests (issue #852).
+
+    The guard's per-container consecutive-empty counters and
+    ``capture_broken`` flags are module-level state.  Without a reset,
+    empty decodes from one test accumulate into the next and spuriously
+    trip the canary on a mocked docker client, so this fixture guarantees
+    each test starts from a clean, healthy guard.
+    """
+    from sunaba import capture_health
+
+    capture_health.reset()
+    yield
+    capture_health.reset()
+
+
 # -------------------------------------------------------------------
 # Shared helpers for VCS tool tests
 # -------------------------------------------------------------------

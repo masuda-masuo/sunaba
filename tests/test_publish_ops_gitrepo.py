@@ -29,6 +29,7 @@ from sunaba.tools.vcs.publishing import (
     _read_upstream_guard,
     _upstream_conflict_commits,
     _upstream_guard_probe,
+    _upstream_overwrite_error,
     _validate_manifest_path,
     publish,
 )
@@ -1553,6 +1554,162 @@ class TestUpstreamGuardDecision:
         assert report.conflicts == ["shared.py"]
         assert "opaque.bin" in report.undetermined
 
+    def test_worktree_identical_to_tip_is_not_a_conflict(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """The #865 residual: a re-publish whose copy already IS the tip.
+
+        The container's change reached the base branch (squash-merged first
+        PR); publishing the same manifest again stages bytes identical to
+        the tip, which reverts nothing -- tip != merge-base is not a
+        conflict on its own.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_exec_run(clone)
+
+        (Path(clone) / "shared.py").write_text("base\n")
+        _git(clone, "add", "shared.py")
+        _git(clone, "commit", "-m", "add shared.py")
+        assert _git(clone, "push", "origin", "main").returncode == 0
+        _git(clone, "fetch", "origin")
+
+        # The container's own change, squash-merged into main upstream.
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"shared.py": "base\ncontainer change\n"},
+            message="upstream PR: squash-merge the container's change",
+        )
+
+        _git(clone, "checkout", "-b", "feat/re-publish")
+        # The worktree copy is byte-identical to the base tip.
+        (Path(clone) / "shared.py").write_text("base\ncontainer change\n")
+
+        report = _guard(run, repo_setup["origin_dir"], "main", ["shared.py"])
+        assert report.undetermined == "", report.undetermined
+        assert report.conflicts == []
+
+    def test_deleting_what_upstream_already_deleted_is_not_a_conflict(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """Declaring a deletion of a path upstream already deleted is clean.
+
+        tip == worktree == absent: staging deletes what upstream already
+        deleted, so no upstream bytes are replaced.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_exec_run(clone)
+
+        (Path(clone) / "doomed.py").write_text("doomed\n")
+        _git(clone, "add", "doomed.py")
+        _git(clone, "commit", "-m", "add doomed.py")
+        assert _git(clone, "push", "origin", "main").returncode == 0
+        _git(clone, "fetch", "origin")
+
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"doomed.py": None},
+            message="upstream PR: delete doomed.py",
+        )
+
+        _git(clone, "checkout", "-b", "feat/delete")
+        # The container agrees: the file is gone from the worktree too.
+        (Path(clone) / "doomed.py").unlink()
+
+        report = _guard(run, repo_setup["origin_dir"], "main", ["doomed.py"])
+        assert report.undetermined == "", report.undetermined
+        assert report.conflicts == []
+
+    def test_upstream_added_file_already_held_identically_is_clean(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """Upstream added a file the container already holds byte-identical.
+
+        tip == worktree (both the new blob): staging writes the same bytes
+        the tip has, so nothing upstream is reverted.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_exec_run(clone)
+
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"added.py": "upstream version\n"},
+            message="upstream PR: add added.py",
+        )
+
+        _git(clone, "checkout", "-b", "feat/has-it")
+        (Path(clone) / "added.py").write_text("upstream version\n")
+
+        report = _guard(run, repo_setup["origin_dir"], "main", ["added.py"])
+        assert report.undetermined == "", report.undetermined
+        assert report.conflicts == []
+
+    def test_unreadable_worktree_blob_still_conflicts(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """An unhashable worktree file can never equal the tip: fail closed.
+
+        The guard refuses exactly as before when tip != merge-base -- an
+        unreadable file must not masquerade as a deletion and clear the
+        conflict.
+        """
+        clone = repo_setup["clone_dir"]
+        run = _make_exec_run(clone)
+
+        (Path(clone) / "shared.py").write_text("base\n")
+        _git(clone, "add", "shared.py")
+        _git(clone, "commit", "-m", "add shared.py")
+        assert _git(clone, "push", "origin", "main").returncode == 0
+        _git(clone, "fetch", "origin")
+
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"shared.py": "base\nupstream feature\n"},
+            message="upstream PR: extend shared.py",
+        )
+
+        _git(clone, "checkout", "-b", "feat/x")
+        (Path(clone) / "shared.py").write_text("base\ncontainer edit\n")
+        # The file is there but cannot be hashed (no read permission).
+        (Path(clone) / "shared.py").chmod(0)
+
+        report = _guard(run, repo_setup["origin_dir"], "main", ["shared.py"])
+        assert report.undetermined == "", report.undetermined
+        assert report.conflicts == ["shared.py"]
+
+    def test_probe_reports_worktree_blob_alongside_merge_base(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """The probe's worktree field: hash of the file, or absent."""
+        clone = repo_setup["clone_dir"]
+        run = _make_exec_run(clone)
+
+        (Path(clone) / "mine.py").write_text("mine\n")
+        _git(clone, "add", "mine.py")
+        _git(clone, "commit", "-m", "add mine.py")
+        (Path(clone) / "doomed.py").write_text("doomed\n")
+        _git(clone, "add", "doomed.py")
+        _git(clone, "commit", "-m", "add doomed.py")
+        assert _git(clone, "push", "origin", "main").returncode == 0
+        _git(clone, "fetch", "origin")
+
+        _git(clone, "checkout", "-b", "feat/wt")
+        (Path(clone) / "mine.py").write_text("mine\nedited\n")
+        parsed = _probe_local(run, "origin/main", ["mine.py"])
+        assert parsed is not None
+        want = _git(clone, "hash-object", "--", "mine.py").stdout.strip()
+        assert parsed.worktree_blobs == {"mine.py": want}
+        # The merge-base still holds the pre-edit blob, so the two halves
+        # of the probe genuinely differ.
+        assert parsed.blobs["mine.py"] != want
+
+        # A declared deletion: absent from the worktree, so its worktree
+        # blob is _BLOB_ABSENT even though the merge-base has the file.
+        (Path(clone) / "doomed.py").unlink()
+        parsed_rm = _probe_local(run, "origin/main", ["doomed.py"])
+        assert parsed_rm is not None
+        assert parsed_rm.worktree_blobs == {"doomed.py": _BLOB_ABSENT}
+        assert parsed_rm.blobs["doomed.py"] != _BLOB_ABSENT
+
 
 class TestBaseTipBlobRead:
     """The host-side half on its own: what the REST answers become (#866)."""
@@ -1615,6 +1772,166 @@ class TestBaseTipBlobRead:
         assert result.blobs == {}
         assert result.base_sha == ""
         assert "401" in result.error
+
+
+class TestUpstreamGuardWorktreeBlobs:
+    """The worktree half of the comparison, pure (#865).
+
+    Verdict shapes that do not need a real clone: the probe parser's
+    extended format, and the decision rules for the worktree blob.
+    """
+
+    @staticmethod
+    def _local(
+        blobs: dict[str, str], worktree: dict[str, str],
+    ) -> UpstreamMergeBaseBlobs:
+        return UpstreamMergeBaseBlobs(
+            merge_base="e" * 40, blobs=blobs, worktree_blobs=worktree,
+        )
+
+    def test_parser_reads_worktree_blobs(self) -> None:
+        out = (
+            "__sunaba_upstream_guard__\n"
+            "base eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n"
+            "blob 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+            "blob 1 - -\n"
+        )
+        parsed = _read_merge_base_blobs(out, ["kept.py", "gone.py"])
+        assert parsed is not None
+        assert parsed.merge_base == "e" * 40
+        assert parsed.blobs == {
+            "kept.py": "a" * 40, "gone.py": _BLOB_ABSENT,
+        }
+        assert parsed.worktree_blobs == {
+            "kept.py": "b" * 40, "gone.py": _BLOB_ABSENT,
+        }
+
+    def test_parser_rejects_probe_lines_without_worktree_field(
+        self,
+    ) -> None:
+        """A pre-#865 3-field line is not a usable answer: undetermined."""
+        out = (
+            "__sunaba_upstream_guard__\n"
+            "base eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n"
+            "blob 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        )
+        assert _read_merge_base_blobs(out, ["kept.py"]) is None
+
+    def test_identical_worktree_blob_clears_a_tip_merge_base_gap(
+        self,
+    ) -> None:
+        """tip != merge-base with tip == worktree: clean (#865)."""
+        report = _read_upstream_guard(
+            self._local({"shared.py": "a" * 40}, {"shared.py": "d" * 40}),
+            UpstreamTipRead("c" * 40, {"shared.py": "d" * 40}, ""),
+            ["shared.py"],
+        )
+        assert report.conflicts == []
+        assert report.undetermined == ""
+
+    def test_both_absent_clears_an_upstream_deletion(self) -> None:
+        """tip == worktree == absent: deleting what upstream deleted."""
+        report = _read_upstream_guard(
+            self._local({"shared.py": "a" * 40}, {"shared.py": _BLOB_ABSENT}),
+            UpstreamTipRead("c" * 40, {"shared.py": _BLOB_ABSENT}, ""),
+            ["shared.py"],
+        )
+        assert report.conflicts == []
+        assert report.undetermined == ""
+
+    def test_unreadable_worktree_blob_fails_closed(self) -> None:
+        """Worktree unreadable -> never equal to the tip -> conflict.
+
+        An unreadable worktree file must not masquerade as a deletion and
+        clear the conflict; with tip == merge-base there is nothing to
+        refuse either way.
+        """
+        report = _read_upstream_guard(
+            self._local(
+                {"shared.py": "a" * 40},
+                {"shared.py": _BLOB_UNREADABLE},
+            ),
+            UpstreamTipRead("c" * 40, {"shared.py": "d" * 40}, ""),
+            ["shared.py"],
+        )
+        assert report.conflicts == ["shared.py"]
+        assert report.undetermined == ""
+
+        report = _read_upstream_guard(
+            self._local(
+                {"shared.py": "a" * 40},
+                {"shared.py": _BLOB_UNREADABLE},
+            ),
+            UpstreamTipRead("c" * 40, {"shared.py": "a" * 40}, ""),
+            ["shared.py"],
+        )
+        assert report.conflicts == []
+
+    def test_worktree_divergence_alone_is_not_a_conflict(self) -> None:
+        """tip == merge-base: upstream never moved the path; clean."""
+        report = _read_upstream_guard(
+            self._local({"shared.py": "a" * 40}, {"shared.py": "b" * 40}),
+            UpstreamTipRead("c" * 40, {"shared.py": "a" * 40}, ""),
+            ["shared.py"],
+        )
+        assert report.conflicts == []
+        assert report.undetermined == ""
+
+    def test_tip_differing_from_both_halves_is_a_conflict(self) -> None:
+        """tip != merge-base and tip != worktree: conflict, as before."""
+        report = _read_upstream_guard(
+            self._local({"shared.py": "a" * 40}, {"shared.py": "b" * 40}),
+            UpstreamTipRead("c" * 40, {"shared.py": "d" * 40}, ""),
+            ["shared.py"],
+        )
+        assert report.conflicts == ["shared.py"]
+        assert report.undetermined == ""
+
+    def test_missing_worktree_entry_fails_closed(self) -> None:
+        """A path with no worktree data can never equal the tip.
+
+        This is the shape of pre-#865 callers that construct the local half
+        without worktree blobs: the verdict is exactly as before.
+        """
+        report = _read_upstream_guard(
+            _MERGE_BASE_SIDE,
+            UpstreamTipRead("c" * 40, {"shared.py": "d" * 40}, ""),
+            ["shared.py"],
+        )
+        assert report.conflicts == ["shared.py"]
+
+
+class TestUpstreamOverwriteRefusalMessage:
+    """The refusal payload's prose (#865): an empty commit listing is
+    reported as unlistable from stale refs, never as an empty history."""
+
+    def test_empty_commit_listing_says_the_refs_are_stale(self) -> None:
+        err = _upstream_overwrite_error(
+            "origin/main",
+            "a" * 40,
+            ["shared.py"],
+            {"shared.py": []},
+            base_tip="b" * 40,
+        )
+        assert err["step"] == "upstream_overwrite"
+        assert err["upstream_commits"] == {"shared.py": []}
+        assert "could not be listed" in err["error"]
+        assert "stale" in err["error"]
+        assert "host-side tip comparison" in err["error"]
+        # The hint does not point at commits that were never listed.
+        assert "upstream commits above" not in err["hint"]
+
+    def test_listed_commits_keep_the_old_prose(self) -> None:
+        err = _upstream_overwrite_error(
+            "origin/main",
+            "a" * 40,
+            ["shared.py"],
+            {"shared.py": ["abc1234 upstream PR: extend shared.py"]},
+            base_tip="b" * 40,
+        )
+        assert "abc1234 upstream PR: extend shared.py" in err["error"]
+        assert "predates the upstream commits above" in err["hint"]
 
 
 class TestPublishUpstreamOverwriteGuard:
@@ -1934,3 +2251,105 @@ class TestPublishUpstreamOverwriteGuard:
         assert pushed == "base\nupstream feature\ncontainer edit\n", (
             "the merged-in upstream line must survive the manifest publish"
         )
+
+    def test_republish_of_squash_merged_change_passes_without_override(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """The #865 residual through publish(): the GUARD no longer refuses.
+
+        The container's change was squash-merged into main; declaring it
+        again stages bytes identical to the base tip.  Before the fix the
+        upstream guard refused that manifest with "upstream changed X" --
+        naming the operator's own change.  After the fix the guard is
+        silent; what fires instead is the PRE-EXISTING ``declared_unchanged``
+        hygiene gate (publish_ops.py, untouched here), whose message is
+        honest and actionable: the identical path contributed nothing, drop
+        it from the manifest.  Dropping it, the re-publish goes through end
+        to end without ``allow_upstream_overwrite`` -- which is the flow
+        #865 wanted unblocked.
+        """
+        clone = repo_setup["clone_dir"]
+        (Path(clone) / "shared.py").write_text("base\n")
+        _git(clone, "add", "shared.py")
+        _git(clone, "commit", "-m", "add shared.py")
+        assert _git(clone, "push", "origin", "main").returncode == 0
+        _git(clone, "fetch", "origin")
+
+        _advance_upstream(
+            repo_setup["origin_dir"],
+            {"shared.py": "base\ncontainer change\n"},
+            message="upstream PR: squash-merge the container's change",
+        )
+
+        _git(clone, "checkout", "-b", "feat/re-publish")
+        (Path(clone) / "shared.py").write_text("base\ncontainer change\n")
+        (Path(clone) / "newfile.py").write_text("brand new\n")
+
+        result, _pr = self._publish(
+            clone,
+            branch="feat/re-publish",
+            message="Re-publish the already-merged manifest",
+            files=["shared.py", "newfile.py"],
+            base_branch="main",
+        )
+
+        # The upstream guard stays silent on the identical path; the refusal
+        # that remains is declared_unchanged's, naming the no-op path with
+        # its actionable remedy -- NOT an upstream_overwrite refusal.
+        assert result["status"] == "error", result
+        assert result["step"] == "declared_unchanged", result
+        assert result["declared_unchanged"] == ["shared.py"], result
+        assert "upstream_overwrite_override" not in result
+        assert "upstream_guard_undetermined" not in result
+
+        # Dropping the contributing-nothing path, the re-publish ships
+        # without allow_upstream_overwrite -- the #865 flow, unblocked.
+        result, _pr = self._publish(
+            clone,
+            branch="feat/re-publish",
+            message="Re-publish minus the already-merged path",
+            files=["newfile.py"],
+            base_branch="main",
+        )
+        assert result["status"] == "pushed", result
+        assert "upstream_overwrite_override" not in result
+        assert "upstream_guard_undetermined" not in result
+        pushed = _git(
+            repo_setup["origin_dir"], "show",
+            "refs/heads/feat/re-publish:newfile.py",
+        ).stdout
+        assert pushed == "brand new\n"
+
+    def test_refusal_with_stale_refs_names_the_unlistable_commits(
+        self, repo_setup: dict[str, Any],
+    ) -> None:
+        """An empty commit listing is reported as stale refs, not history.
+
+        The container's origin/main cannot advance (dead fetch URL), so the
+        conflict verdict -- from the host-side tip read -- still fires, but
+        the per-path commit listing is empty; the refusal says the commits
+        could not be listed from the stale ref, instead of rendering an
+        empty history.
+        """
+        clone = repo_setup["clone_dir"]
+        self._stale_container(repo_setup)
+        _break_fetch(clone, repo_setup["origin_dir"])
+
+        result, pr_mock = self._publish(
+            clone,
+            branch="feat/x",
+            message="Manifest publish over a moved base, stale refs",
+            files=["shared.py"],
+            base_branch="main",
+        )
+
+        assert result["status"] == "error"
+        assert result["step"] == "upstream_overwrite"
+        assert result["conflicting_paths"] == ["shared.py"]
+        assert result["upstream_commits"]["shared.py"] == []
+        assert "could not be listed" in result["error"]
+        assert "stale" in result["error"]
+        assert "host-side tip comparison" in result["error"]
+        # Never an empty-history reading.
+        assert "no upstream commits" not in result["error"]
+        pr_mock.assert_not_called()

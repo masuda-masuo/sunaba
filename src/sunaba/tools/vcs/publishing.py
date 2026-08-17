@@ -423,6 +423,15 @@ def _fetch_base_auto_include(
 #   publish (#866).
 #
 # So: merge-base from the container, tip from the host, comparison pure.
+#
+# The comparison needs one more container-side datum: the blob the working
+# tree would stage.  Replacing upstream bytes is only a violation when the
+# replacement differs from what the base tip holds -- staging bytes
+# identical to the tip replaces nothing, so a path whose worktree copy
+# already IS the tip is not a conflict.  That is the #865 residual: a first
+# PR squash-merged, then the same manifest re-published, leaves the
+# container's worktree byte-identical to the base tip while its merge-base
+# still holds the pre-merge bytes.
 
 #: Opens the guard probe's machine-readable block.  The probe shares one
 #: exec with the ``git fetch origin`` refresh, whose own chatter lands on the
@@ -453,11 +462,12 @@ _BLOB_UNREADABLE = "?"
 
 
 class UpstreamMergeBaseBlobs(NamedTuple):
-    """The container-side half: what this clone last saw of the base branch.
+    """The container-side half: what this clone last saw of the base
+    branch, plus what its working tree would stage.
 
-    Both fields come from the container's own object store, so they are
-    available whether or not the container can reach the remote -- which,
-    by design, it cannot.
+    Both come from the container's own object store and working tree, so
+    they are available whether or not the container can reach the remote --
+    which, by design, it cannot.
 
     Attributes
     ----------
@@ -467,10 +477,18 @@ class UpstreamMergeBaseBlobs(NamedTuple):
     blobs:
         ``path -> blob id at *merge_base*``, or :data:`_BLOB_ABSENT` when
         the path does not exist there.
+    worktree_blobs:
+        ``path -> blob id of the working tree copy`` -- the bytes staging
+        the path would publish.  :data:`_BLOB_ABSENT` when the path is
+        absent from the working tree (a declared deletion);
+        :data:`_BLOB_UNREADABLE` when the file is there but could not be
+        hashed -- an unreadable file must never masquerade as a deletion
+        (#865).
     """
 
     merge_base: str
     blobs: dict[str, str]
+    worktree_blobs: dict[str, str] = {}
 
 
 class UpstreamTipRead(NamedTuple):
@@ -507,9 +525,11 @@ class UpstreamGuardReport(NamedTuple):
         there was none).
     conflicts:
         Declared paths whose blob at the base branch's real tip differs
-        from their blob at *merge_base*.  These are the paths whose
-        upstream changes a manifest publish would overwrite without ever
-        having seen them (issue #863).
+        from their blob at *merge_base* **and** from the blob the
+        container's working tree would stage.  Only these paths' upstream
+        changes a manifest publish would overwrite with bytes it has not
+        seen (issue #863); a worktree copy already identical to the tip
+        reverts nothing and is not a conflict (#865).
     undetermined:
         Empty when every declared path was actually compared.  Otherwise a
         short reason why the guard could not obtain a usable comparison --
@@ -535,8 +555,13 @@ def _upstream_guard_probe(
 
     One exec, not one per path: everything the container side owes the
     decision is printed under :data:`_UPSTREAM_GUARD_MARK` as ``blob
-    <index> <merge_base_blob>``, with :data:`_BLOB_ABSENT` standing for
-    "path absent at the merge-base".
+    <index> <merge_base_blob> <worktree_blob>`` -- the blob at the
+    merge-base and the blob the working tree would stage, per declared
+    path.  Both spell :data:`_BLOB_ABSENT` for "absent" (no such path at
+    the merge-base; no such file in the working tree -- a declared
+    deletion), and the worktree field spells :data:`_BLOB_UNREADABLE`
+    when the file is there but ``git hash-object`` cannot hash it: an
+    unreadable file must never masquerade as a deletion (#865).
 
     The declared paths travel in the environment, never in the command
     text.  A manifest path is arbitrary caller input; keeping it out means
@@ -561,7 +586,10 @@ def _upstream_guard_probe(
         f'printf "%s\\n" "${_UPSTREAM_GUARD_PATHS_ENV}" | '
         "while IFS= read -r _sp; do "
         '_sa=$(git rev-parse --quiet --verify "$_sm:$_sp" 2>/dev/null) || _sa=-; '
-        f'printf "blob %s %s\\n" "$_si" "${{_sa:-{_BLOB_ABSENT}}}"; '
+        'if test -f "$_sp"; then '
+        '_sw=$(git hash-object -- "$_sp" 2>/dev/null) || _sw=?; '
+        'else _sw=-; fi; '
+        f'printf "blob %s %s %s\\n" "$_si" "$_sa" "$_sw"; '
         "_si=$((_si+1)); "
         "done"
     )
@@ -573,6 +601,9 @@ def _read_merge_base_blobs(
 ) -> UpstreamMergeBaseBlobs | None:
     """Parse the container-side probe's output -- pure, and stateless.
 
+    Expects one ``blob <index> <merge_base_blob> <worktree_blob>`` line
+    per declared path, mirroring :func:`_upstream_guard_probe`'s format.
+
     Returns ``None`` when the probe answered nothing usable: no marker, no
     merge-base, or a line per declared path missing.  The caller turns that
     into an undetermined verdict, never into a clean one.
@@ -581,24 +612,27 @@ def _read_merge_base_blobs(
         return None
 
     merge_base = ""
-    indexed: dict[int, str] = {}
+    indexed: dict[int, tuple[str, str]] = {}
     for line in output.split(_UPSTREAM_GUARD_MARK, 1)[1].splitlines():
         fields = line.split()
         if len(fields) == 2 and fields[0] == "base":
             merge_base = fields[1]
-        elif len(fields) == 3 and fields[0] == "blob":
+        elif len(fields) == 4 and fields[0] == "blob":
             try:
                 index = int(fields[1])
             except ValueError:
                 continue
-            indexed[index] = fields[2]
+            indexed[index] = (fields[2], fields[3])
 
     if not merge_base or set(indexed) != set(range(len(paths))):
         return None
 
     return UpstreamMergeBaseBlobs(
         merge_base=merge_base,
-        blobs={path: indexed[index] for index, path in enumerate(paths)},
+        blobs={path: indexed[index][0] for index, path in enumerate(paths)},
+        worktree_blobs={
+            path: indexed[index][1] for index, path in enumerate(paths)
+        },
     )
 
 
@@ -669,7 +703,13 @@ def _fetch_base_tip_blobs(
             )
         except Exception as exc:
             if "HTTP 404" in str(exc):
-                # An answer, not a failure: the tip does not carry this path.
+                # An answer, not a failure: the tip does not carry this
+                # path.  Treating 404 as "absent" is safe even when the 404
+                # is spurious -- an access hiccup on a path that does exist
+                # upstream: that path still has a blob at the merge-base,
+                # so tip_blob=absent differs from the merge-base blob and
+                # the guard refuses (fail closed).  A spurious 404 can
+                # never silently clear a conflict.
                 blobs[path] = _BLOB_ABSENT
             else:
                 logger.warning(
@@ -694,12 +734,27 @@ def _read_upstream_guard(
 ) -> UpstreamGuardReport:
     """Compare the two halves -- pure, stateless, and never optimistic.
 
-    Both halves are recomputed by every publish, so nothing here is
-    remembered between them.  A path absent at both refs counts as
-    identical; upstream-added (absent at the merge-base, present at the
-    tip) and upstream-deleted (the reverse) both count as differing,
-    because either way the manifest's snapshot would replace an upstream
-    change.
+    The invariant this protects: **a manifest publish must never replace
+    upstream bytes with different bytes it has not seen**.  Each declared
+    path is staged as a whole snapshot of the container's copy, so the
+    question per path is whether staging the worktree copy would change
+    what the base tip holds.
+
+    A path is a conflict only when the tip blob differs from the
+    merge-base blob **and** from the worktree blob:
+
+    * tip == merge-base -- upstream never moved the path; nothing to
+      refuse (as before).
+    * tip == worktree -- equal blob ids, or both :data:`_BLOB_ABSENT`.
+      Staging replaces identical bytes, or deletes what upstream already
+      deleted; nothing is reverted, so it is not a conflict.  This is the
+      squash-merged re-publish shape: the container's change already
+      reached the base branch, so its worktree copy IS the tip (#865).
+    * worktree :data:`_BLOB_UNREADABLE` -- it can never equal the tip, so
+      the guard fails closed: conflict whenever tip != merge-base (as
+      before).
+    * otherwise -- tip differs from both halves; conflict, exactly as
+      before.
 
     A path the host side could not read is *not* compared: it lands in
     ``undetermined`` instead.  Reporting it identical would be #866 in
@@ -727,7 +782,12 @@ def _read_upstream_guard(
         tip_blob = tip.blobs.get(path, _BLOB_UNREADABLE)
         if tip_blob == _BLOB_UNREADABLE:
             unreadable.append(path)
-        elif tip_blob != local.blobs.get(path, _BLOB_ABSENT):
+            continue
+        merge_base_blob = local.blobs.get(path, _BLOB_ABSENT)
+        # A missing worktree entry can never equal the tip: fail closed,
+        # exactly as before the worktree comparison existed.
+        worktree_blob = local.worktree_blobs.get(path, _BLOB_UNREADABLE)
+        if tip_blob != merge_base_blob and tip_blob != worktree_blob:
             conflicts.append(path)
 
     return UpstreamGuardReport(
@@ -751,9 +811,9 @@ def _upstream_conflict_commits(
     so it stays local git and stays best-effort.  *base_ref* is the clone's
     own remote-tracking ref, which an unauthenticated container cannot
     refresh -- when it is stale the log comes back empty and the refusal
-    says the commits could not be listed, rather than losing the path.  The
-    paths travel in the environment for the same reason as in
-    :func:`_upstream_guard_probe`.
+    says the commits could not be listed (never an empty history), rather
+    than losing the path.  The paths travel in the environment for the
+    same reason as in :func:`_upstream_guard_probe`.
     """
     if not paths:
         return {}
@@ -801,15 +861,33 @@ def _upstream_overwrite_error(
     *base_tip* is the commit the host read the upstream side from (#866).
     It is reported because the container's own ``{base_ref}`` may well be
     behind it -- that gap is the whole reason the refusal fires.
+
+    The per-path commit listing is best-effort local git, and the
+    container cannot refresh ``{base_ref}`` (no credential inside the
+    sandbox), so an empty listing means "could not be listed from a stale
+    ref", never "no commits exist" -- and the conflict verdict itself
+    comes from the host-side tip comparison, not from the listing.  The
+    message says so rather than rendering an empty history.
     """
     listed = "\n".join(
         f"  {path}\n"
         + (
             "\n".join(f"    {line}" for line in commits.get(path, []))
-            or "    (upstream commits could not be listed)"
+            or (
+                "    (upstream commits could not be listed from the "
+                f"container's stale {base_ref} ref; the conflict verdict "
+                "comes from the host-side tip comparison)"
+            )
         )
         for path in conflicts
     )
+    if any(commits.get(path) for path in conflicts):
+        provenance = "predates the upstream commits above"
+    else:
+        provenance = (
+            "predates upstream commits this container's stale refs could "
+            "not list"
+        )
     return {
         "status": "error",
         "step": "upstream_overwrite",
@@ -831,9 +909,9 @@ def _upstream_overwrite_error(
         "base_tip": base_tip,
         "hint": (
             "Re-clone from the current base and re-apply the change (the "
-            "container's copy of these paths predates the upstream commits "
-            "above), or pass allow_upstream_overwrite=True to publish the "
-            "container's version over the upstream one deliberately."
+            f"container's copy of these paths {provenance}), or pass "
+            "allow_upstream_overwrite=True to publish the container's "
+            "version over the upstream one deliberately."
         ),
     }
 

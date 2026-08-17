@@ -6,6 +6,7 @@ import json
 
 from docker.errors import NotFound
 
+from sunaba import capture_health
 from sunaba.edit_verify import (
     _determine_scope,
     _get_extension,
@@ -473,6 +474,43 @@ def verify_in_container(
         tests, diff_summary, gate_fail_reasons, test_selection,
         diff_hash.
     """
+    # Capture-health boundary (issue #870): ``_gate_capture`` raises at
+    # each client-facing return, before the verdict is recorded, and this
+    # is the single place that turns the refusal into the client's result.
+    # A broken capture makes every exec look empty, which reads as "clean
+    # diff, no tests" -- a green gate assembled from nothing.
+    try:
+        return _verify_in_container_impl(
+            container_id,
+            path,
+            test_filter=test_filter,
+            verbose=verbose,
+            pytest_args=pytest_args,
+            language=language,
+            working_dir=working_dir,
+            skip_lint_gate=skip_lint_gate,
+            skip_type_gate=skip_type_gate,
+            skip_patch_targets_gate=skip_patch_targets_gate,
+            test_scope=test_scope,
+        )
+    except capture_health.CaptureBrokenError as e:
+        return e.payload
+
+
+def _verify_in_container_impl(
+    container_id: str,
+    path: str,
+    test_filter: str | None = None,
+    verbose: bool = False,
+    pytest_args: str | None = None,
+    language: str | None = None,
+    working_dir: str | None = None,
+    skip_lint_gate: bool = False,
+    skip_type_gate: bool = False,
+    skip_patch_targets_gate: bool = False,
+    test_scope: str = "full",
+) -> str:
+    """Body of :func:`verify_in_container` (see it for the contract)."""
     import shlex
 
     from sunaba.edit_verify import (
@@ -543,6 +581,11 @@ def verify_in_container(
     # --- Language detection ---
     detected = detect_languages(container, path, language, working_dir=working_dir)
 
+    # Capture-health state for this call (issue #870): _run records
+    # whether anything at all came back, _gate_capture spends it once at
+    # each client-facing return.
+    saw_output = False
+
     def _run(cmd: str, workdir: str | None = working_dir) -> tuple[int, str, str]:
         ec, out = container.exec_run(
             ["/bin/sh", "-c", cmd], stdout=True, stderr=True,
@@ -557,7 +600,31 @@ def verify_in_container(
         stderr_text = (
             out_stderr.decode("utf-8", errors="replace") if out_stderr else ""
         )
+        if stdout_text or stderr_text:
+            # Capture-health evidence (issue #870): every exec of this
+            # call -- diff summary, affected-test selector, inline pytest
+            # -- decodes here, and one non-empty decode is proof the
+            # capture path works for this container.
+            nonlocal saw_output
+            saw_output = True
         return ec, stdout_text, stderr_text
+
+    def _gate_capture() -> None:
+        """Feed the capture-health guard once for this call (issue #870).
+
+        ``check_capture`` is contracted to one call per output-bearing
+        call, so verify feeds the aggregate: "this verify captured nothing
+        at all" is the fail-open shape, and it reads as a clean diff with
+        no tests -- a green gate assembled from phantom empties.  Called
+        at each client-facing return *before* ``record_verify_success``
+        and ``_record_verify_outcome``, so a refused call records neither;
+        it raises, and :func:`verify_in_container` returns the payload.
+        """
+        capture_health.gate_or_raise(
+            container,
+            decoded_empty=not saw_output,
+            container_id=container_id[:12],
+        )
 
     def _run_affected_selector(
         repo_root: str,
@@ -765,6 +832,7 @@ def verify_in_container(
                 "status": "skipped",
                 "message": "precondition gate failed; tests not run",
             }
+            _gate_capture()  # issue #870
             _record_verify_outcome(container_id, result)
             return json.dumps(result)
 
@@ -963,6 +1031,7 @@ def verify_in_container(
                 result["gate_fail_reasons"] = [
                     _test_failure_reason(affected_result, "affected tests")
                 ]
+            _gate_capture()  # issue #870
             _record_verify_outcome(container_id, result)
             return json.dumps(result)
 
@@ -989,6 +1058,7 @@ def verify_in_container(
                         f"{filtered_result.get('failed', 0)} failed"
                     )
                 result["gate_fail_reasons"] = [msg]
+                _gate_capture()  # issue #870
                 _record_verify_outcome(container_id, result)
                 return json.dumps(result)
 
@@ -1010,6 +1080,9 @@ def verify_in_container(
         result["tests"]["full"] = {"status": "no_tests", "error": "no languages detected"}
         result["gate_pass_reason"] = "no languages detected \u2014 gate passes"
         result["gate_passed"] = True
+        # Before the success is recorded: a broken capture is exactly what
+        # makes a project look language-less (issue #870).
+        _gate_capture()
         record_verify_success(container_id)
         _record_verify_outcome(container_id, result)
         return json.dumps(result)
@@ -1093,6 +1166,11 @@ def verify_in_container(
             if not reasons and not overall_ok:
                 result["gate_pass_reason"] = "no tests found \u2014 gate passes"
                 result["gate_passed"] = True
+
+    # Last word before the verdict is recorded and served: a verify whose
+    # every exec captured nothing reads as "clean diff, no tests" and
+    # would record a green gate built from phantom empties (issue #870).
+    _gate_capture()
 
     # Track full-gate success for state-conditioned nudges (Issue #550):
     # publish warns when called without a recorded verify success.

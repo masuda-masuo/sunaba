@@ -164,7 +164,39 @@ def is_capture_broken(container_id: str) -> bool:
         return st.capture_broken if st else False
 
 
-def _run_canary(container: Any, nonce: str) -> tuple[CanaryOutcome, str | None]:
+#: Fallback bound (seconds) for one canary probe, used only when the
+#: docker-facing recovery timeout cannot be imported (see
+#: :func:`_canary_timeout`).  Kept equal to
+#: ``sunaba.tools.common._DEFAULT_RECOVERY_DOCKER_TIMEOUT``.
+_CANARY_TIMEOUT_FALLBACK: float = 15.0
+
+
+def _canary_timeout() -> float:
+    """Return the wall-clock bound for one canary probe.
+
+    ``sunaba.tools.common.RECOVERY_DOCKER_TIMEOUT`` (default 15s, env
+    ``SUNABA_RECOVERY_DOCKER_TIMEOUT``) is this project's existing bound
+    for docker calls that must not hang on a wedged container --
+    ``sandbox_exec_check`` already passes it to ``_docker``.  The canary is
+    exactly that kind of call, so it reuses that number rather than
+    inventing a second one.  The import is deliberately local: this module
+    is stdlib-only by contract and ``tools.common`` imports docker, so the
+    guard must stay importable without the docker SDK -- that case falls
+    back to the same default value.
+    """
+    try:
+        from sunaba.tools.common import RECOVERY_DOCKER_TIMEOUT
+
+        return float(RECOVERY_DOCKER_TIMEOUT)
+    except Exception:  # noqa: BLE001 - the guard must not depend on docker
+        return _CANARY_TIMEOUT_FALLBACK
+
+
+def _run_canary(
+    container: Any,
+    nonce: str,
+    timeout: float | None = None,
+) -> tuple[CanaryOutcome, str | None]:
     """Probe the capture path through the same docker SDK call that broke.
 
     ``echo <nonce>`` writes the nonce to stdout; with ``demux=True`` the
@@ -172,29 +204,59 @@ def _run_canary(container: Any, nonce: str) -> tuple[CanaryOutcome, str | None]:
     alternate channel (that would be a guard approximating another resolver,
     and it drifts).
 
+    The probe is **bounded** (issue #870): ``exec_run`` runs on a daemon
+    thread joined with *timeout* (default :func:`_canary_timeout`).  The
+    guard fires precisely when a container may be wedged, docker-py offers
+    no per-exec timeout, and before the guard existed such a call returned
+    an empty ``ok`` immediately -- an unbounded probe would turn a
+    fail-open empty result into a tool call that never returns.  A probe
+    that does not answer in time is the ``"error"`` outcome (the
+    container-level class), not the #852 empty-nonce class.
+
     Returns ``(outcome, error)``:
 
     * ``"nonce_found"`` -- the nonce came back through the capture path;
     * ``"empty"`` -- the probe ran but the nonce did not come back (the
       incident class: silent empty capture);
-    * ``"error"`` -- the probe itself raised; *error* is the exception repr.
+    * ``"error"`` -- the probe itself raised, or exceeded the bound;
+      *error* is the exception repr / the timeout detail.
     """
-    try:
-        _exit_code, output = container.exec_run(
-            ["echo", nonce],
-            stdout=True,
-            stderr=True,
-            demux=True,
+    bound = _canary_timeout() if timeout is None else timeout
+    outcome: list[tuple[CanaryOutcome, str | None]] = []
+
+    def _probe() -> None:
+        try:
+            _exit_code, output = container.exec_run(
+                ["echo", nonce],
+                stdout=True,
+                stderr=True,
+                demux=True,
+            )
+            stdout_part, _stderr_part = output
+            stdout_text = (
+                stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+            )
+            if nonce in stdout_text:
+                outcome.append(("nonce_found", None))
+            else:
+                outcome.append(("empty", None))
+        except Exception as e:  # noqa: BLE001 - the canary must never raise into a tool
+            outcome.append(("error", repr(e)))
+
+    worker = threading.Thread(
+        target=_probe, name="capture-health-canary", daemon=True
+    )
+    worker.start()
+    worker.join(timeout=bound)
+    if not outcome:
+        # Still blocked inside exec_run.  The thread is a daemon and its
+        # late result (if any) is dropped: the tool call must not wait on
+        # a wedged container.
+        return "error", (
+            f"canary probe did not return within {bound:g}s "
+            "(container wedged or docker exec unresponsive)"
         )
-        stdout_part, _stderr_part = output
-        stdout_text = (
-            stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-        )
-        if nonce in stdout_text:
-            return "nonce_found", None
-        return "empty", None
-    except Exception as e:  # noqa: BLE001 - the canary must never raise into a tool
-        return "error", repr(e)
+    return outcome[0]
 
 
 def _journal(
@@ -344,3 +406,48 @@ def check_capture(
             }
         )
     return json.dumps({"status": "error", "error": CAPTURE_BROKEN_MESSAGE})
+
+
+class CaptureBrokenError(Exception):
+    """Raised instead of serving a result the guard refuses (issue #870).
+
+    :func:`check_capture` returns the loud error as a JSON string, which
+    suits call sites that decode and return in the same frame
+    (``sandbox_exec``, ``read_file_range``).  The tools wired in issue
+    #870 sit several frames above their decodes -- ``search``'s
+    ``_search_lexical``, ``diff``'s ``_run_diff`` / ``_summary_diff``,
+    ``verify``'s ``_run`` -- and threading a ``str | None`` back through
+    every intermediate signature would put the guard's error in the shape
+    of a search result, a ``(exit_code, text)`` tuple and a diff hunk list
+    respectively.  Raising and catching once at the tool boundary keeps
+    the error where the client result is produced, and it skips the rest
+    of the call: a broken capture must not go on to record a verify
+    success or serve a diff assembled from phantom empties.
+
+    ``payload`` is exactly what :func:`check_capture` returned, so every
+    tool serves the identical message.
+    """
+
+    def __init__(self, payload: str) -> None:
+        super().__init__(payload)
+        self.payload = payload
+
+
+def gate_or_raise(
+    container: Any,
+    *,
+    decoded_empty: bool,
+    container_id: str | None = None,
+) -> None:
+    """Feed the guard for one call, raising when it refuses the result.
+
+    Same contract as :func:`check_capture` (exactly one call per
+    output-bearing call), expressed as an exception for tools whose
+    client-facing return sits above their decodes -- see
+    :class:`CaptureBrokenError`.
+    """
+    error = check_capture(
+        container, decoded_empty=decoded_empty, container_id=container_id
+    )
+    if error is not None:
+        raise CaptureBrokenError(error)

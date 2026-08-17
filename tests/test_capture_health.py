@@ -15,14 +15,21 @@ client that returns empty output for everything (the incident shape).
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 from sunaba import capture_health
-from sunaba.tools.exec import sandbox_exec
+from sunaba.tools.diff import diff_in_container
+from sunaba.tools.exec import sandbox_exec, sandbox_exec_check
 from sunaba.tools.file import read_file_range
+from sunaba.tools.verify import search_in_container, verify_in_container
 
 _CID = "abc123def456"
+
+#: A well-formed job id for ``sandbox_exec_check`` (``<cid>-<epoch>-<hex>``).
+_JOB_ID = f"{_CID}-1700000000-a1b2c3"
 
 
 class _FakeContainer:
@@ -534,3 +541,350 @@ class TestReadFileRangeCaptureGuard:
             result = json.loads(read_file_range(_CID, "/f.txt"))
             assert "status" not in result
         assert not capture_health.is_capture_broken(_CID)
+
+
+# ---------------------------------------------------------------------------
+# Issue #870: the four output-bearing tools PR #868 left fail-open
+# ---------------------------------------------------------------------------
+#
+# #868 wired the guard into sandbox_exec and read_file_range only, so
+# search_in_container, diff_in_container, verify_in_container and
+# sandbox_exec_check neither fed the counter (a search-only session never
+# tripped the canary) nor consulted the flag (they kept serving empty
+# results after another tool had already found capture broken).  The wire
+# tests below drive each tool in the incident shape -- every real command
+# captures nothing -- with the same fixture style as
+# ``TestSandboxExecCaptureGuard`` above.
+
+
+def _incident_exec_run(state: dict[str, bool]):
+    """Return an ``exec_run`` stand-in in the #852 incident shape.
+
+    Real commands "run" but capture nothing; the canary (``echo <nonce>``,
+    always ``demux=True``) answers according to ``state["canary_empty"]``.
+    Non-canary calls answer in the shape docker-py itself would use:
+    demuxed calls get a ``(stdout, stderr)`` tuple, plain ones get bytes.
+    """
+
+    def exec_run(argv: list[str], **kwargs: Any) -> tuple[int, object]:
+        if argv and argv[0] == "echo":
+            nonce = argv[1]
+            if state["canary_empty"]:
+                return (0, (b"", b""))
+            return (0, (nonce.encode("utf-8") + b"\n", b""))
+        if kwargs.get("demux"):
+            return (0, (b"", b""))
+        return (0, b"")
+
+    return exec_run
+
+
+def _incident_container(canary_empty: bool) -> tuple[MagicMock, dict[str, bool]]:
+    """A mock container in the incident shape, plus its mutable state."""
+    state = {"canary_empty": canary_empty}
+    container = MagicMock()
+    container.exec_run.side_effect = _incident_exec_run(state)
+    container.attrs = {"Config": {"WorkingDir": "/workspace"}}
+    return container, state
+
+
+def _break_capture_via_sandbox_exec(container: MagicMock) -> None:
+    """Trip the guard for ``_CID`` through a *different* tool.
+
+    The point of the "consult" half of #870: once ``capture_broken`` is
+    set for a container, the four tools must stop serving empty results
+    even though they were not the ones that tripped it.
+    """
+    with patch("sunaba.tools.exec._docker") as mock_docker:
+        mock_docker.return_value.containers.get.return_value = container
+        for _ in range(capture_health.EMPTY_TRIGGER):
+            sandbox_exec(container_id=_CID, commands=["true"])
+    assert capture_health.is_capture_broken(_CID)
+
+
+class TestSearchInContainerCaptureGuard:
+    """search_in_container: "no hits" must not mean "capture is broken"."""
+
+    def test_incident_shape_trips_loud_error(self) -> None:
+        container, _state = _incident_container(canary_empty=True)
+        with patch("sunaba.tools.verify._docker") as mock_docker:
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(capture_health.EMPTY_TRIGGER - 1):
+                result = json.loads(
+                    search_in_container(_CID, "pattern", path="/workspace")
+                )
+                assert result["matches"] == []  # still fail-open, pre-threshold
+            result = json.loads(
+                search_in_container(_CID, "pattern", path="/workspace")
+            )
+        assert result["status"] == "error"
+        assert capture_health.RESTART_REMEDY in result["error"]
+
+    def test_healthy_canary_still_serves_no_match(self) -> None:
+        container, _state = _incident_container(canary_empty=False)
+        with patch("sunaba.tools.verify._docker") as mock_docker:
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(10 * capture_health.EMPTY_TRIGGER):
+                result = json.loads(
+                    search_in_container(_CID, "pattern", path="/workspace")
+                )
+                assert result["matches"] == []
+                assert "status" not in result
+        assert not capture_health.is_capture_broken(_CID)
+
+    def test_flag_set_by_another_tool_blocks_search(self) -> None:
+        container, _state = _incident_container(canary_empty=True)
+        _break_capture_via_sandbox_exec(container)
+        with patch("sunaba.tools.verify._docker") as mock_docker:
+            mock_docker.return_value.containers.get.return_value = container
+            result = json.loads(
+                search_in_container(_CID, "pattern", path="/workspace")
+            )
+        assert result["status"] == "error"
+        assert capture_health.RESTART_REMEDY in result["error"]
+
+
+class TestDiffInContainerCaptureGuard:
+    """diff_in_container: the first tool observed failing in #852."""
+
+    def test_incident_shape_trips_loud_error(self) -> None:
+        container, _state = _incident_container(canary_empty=True)
+        with patch("sunaba.tools.diff._docker") as mock_docker, patch(
+            "sunaba.tools.diff.resolve_git_root", return_value="/repo"
+        ):
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(capture_health.EMPTY_TRIGGER - 1):
+                result = json.loads(diff_in_container(_CID, worktree=True))
+                assert result["total_files"] == 0  # fail-open empty diff
+            result = json.loads(diff_in_container(_CID, worktree=True))
+        assert result["status"] == "error"
+        assert capture_health.RESTART_REMEDY in result["error"]
+
+    def test_no_merge_base_is_replaced_by_the_loud_error(self) -> None:
+        """The incident's first symptom, now attributed to capture.
+
+        An empty merge-base decode reads as "git found no merge base",
+        which sent the operator looking for a branch problem that did not
+        exist.  Once the guard trips, the answer names the real cause.
+        """
+        container, _state = _incident_container(canary_empty=True)
+        with patch("sunaba.tools.diff._docker") as mock_docker, patch(
+            "sunaba.tools.diff.resolve_git_root", return_value="/repo"
+        ), patch(
+            "sunaba.tools.diff._resolve_base_branch",
+            return_value=("main", "mocked"),
+        ):
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(capture_health.EMPTY_TRIGGER - 1):
+                result = json.loads(diff_in_container(_CID))
+                assert result["step"] == "merge_base"  # the bogus symptom
+            result = json.loads(diff_in_container(_CID))
+        assert result["status"] == "error"
+        assert "merge base" not in result["error"]
+        assert capture_health.RESTART_REMEDY in result["error"]
+
+    def test_healthy_canary_still_serves_empty_diff(self) -> None:
+        container, _state = _incident_container(canary_empty=False)
+        with patch("sunaba.tools.diff._docker") as mock_docker, patch(
+            "sunaba.tools.diff.resolve_git_root", return_value="/repo"
+        ):
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(10 * capture_health.EMPTY_TRIGGER):
+                result = json.loads(diff_in_container(_CID, worktree=True))
+                assert result["total_files"] == 0
+                assert result["untracked"] == []
+        assert not capture_health.is_capture_broken(_CID)
+
+    def test_flag_set_by_another_tool_blocks_diff(self) -> None:
+        container, _state = _incident_container(canary_empty=True)
+        _break_capture_via_sandbox_exec(container)
+        with patch("sunaba.tools.diff._docker") as mock_docker, patch(
+            "sunaba.tools.diff.resolve_git_root", return_value="/repo"
+        ):
+            mock_docker.return_value.containers.get.return_value = container
+            result = json.loads(diff_in_container(_CID, worktree=True))
+        assert result["status"] == "error"
+        assert capture_health.RESTART_REMEDY in result["error"]
+
+
+class TestVerifyInContainerCaptureGuard:
+    """verify_in_container: a green gate must not be built from empties."""
+
+    def test_incident_shape_trips_loud_error(self) -> None:
+        container, _state = _incident_container(canary_empty=True)
+        with patch("sunaba.tools.verify._docker") as mock_docker:
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(capture_health.EMPTY_TRIGGER - 1):
+                result = json.loads(verify_in_container(_CID, "tests/"))
+                assert "gate_passed" in result  # fail-open verdict
+            result = json.loads(verify_in_container(_CID, "tests/"))
+        assert result["status"] == "error"
+        assert capture_health.RESTART_REMEDY in result["error"]
+
+    def test_refused_verify_records_no_success(self) -> None:
+        """A refused verify must not leave a publish-unblocking record."""
+        container, _state = _incident_container(canary_empty=True)
+        with patch("sunaba.tools.verify._docker") as mock_docker, patch(
+            "sunaba.tools.verify.record_verify_success"
+        ) as rec:
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(capture_health.EMPTY_TRIGGER):
+                result = json.loads(verify_in_container(_CID, "tests/"))
+        assert result["status"] == "error"
+        # The pre-threshold calls still recorded (they were served); the
+        # refused one did not.
+        assert rec.call_count == capture_health.EMPTY_TRIGGER - 1
+
+    def test_healthy_canary_still_serves_the_verdict(self) -> None:
+        container, _state = _incident_container(canary_empty=False)
+        with patch("sunaba.tools.verify._docker") as mock_docker:
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(10 * capture_health.EMPTY_TRIGGER):
+                result = json.loads(verify_in_container(_CID, "tests/"))
+                assert "gate_passed" in result
+                assert result.get("status") != "error"
+        assert not capture_health.is_capture_broken(_CID)
+
+    def test_flag_set_by_another_tool_blocks_verify(self) -> None:
+        container, _state = _incident_container(canary_empty=True)
+        _break_capture_via_sandbox_exec(container)
+        with patch("sunaba.tools.verify._docker") as mock_docker:
+            mock_docker.return_value.containers.get.return_value = container
+            result = json.loads(verify_in_container(_CID, "tests/"))
+        assert result["status"] == "error"
+        assert capture_health.RESTART_REMEDY in result["error"]
+
+
+class TestSandboxExecCheckCaptureGuard:
+    """sandbox_exec_check: a poll must not report "running" forever."""
+
+    def test_incident_shape_trips_loud_error(self) -> None:
+        container, _state = _incident_container(canary_empty=True)
+        with patch("sunaba.tools.exec._docker") as mock_docker:
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(capture_health.EMPTY_TRIGGER - 1):
+                result = json.loads(sandbox_exec_check(_CID, _JOB_ID))
+                assert result["status"] == "running"  # fail-open poll
+            result = json.loads(sandbox_exec_check(_CID, _JOB_ID))
+        assert result["status"] == "error"
+        assert capture_health.RESTART_REMEDY in result["error"]
+
+    def test_healthy_empty_job_output_still_served(self) -> None:
+        """A job that printed nothing is a legitimate empty, not a break."""
+        container = MagicMock()
+
+        def exec_run(argv: list[str], **kwargs: Any) -> tuple[int, object]:
+            if argv and argv[0] == "echo":
+                nonce = argv[1]
+                return (0, (nonce.encode("utf-8") + b"\n", b""))
+            cmd = argv[-1]
+            if "EXIT=" in cmd:  # the status block always prints
+                return (0, b"NOW=100\nSTART=90\nOUT_MTIME=0\nERR_MTIME=0\nEXIT=0")
+            return (0, b"")  # the job itself printed nothing
+
+        container.exec_run.side_effect = exec_run
+        with patch("sunaba.tools.exec._docker") as mock_docker:
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(10 * capture_health.EMPTY_TRIGGER):
+                result = json.loads(sandbox_exec_check(_CID, _JOB_ID))
+                assert result["status"] == "completed"
+                assert result["output"] == ""
+        assert not capture_health.is_capture_broken(_CID)
+
+    def test_invalid_job_id_is_not_fed_to_the_guard(self) -> None:
+        """A structured error the tool already returns is not an empty decode."""
+        container, _state = _incident_container(canary_empty=True)
+        with patch("sunaba.tools.exec._docker") as mock_docker:
+            mock_docker.return_value.containers.get.return_value = container
+            for _ in range(10 * capture_health.EMPTY_TRIGGER):
+                result = json.loads(sandbox_exec_check(_CID, "not a job id"))
+                assert result["status"] == "error"
+                assert "invalid job_id" in result["error"]
+        assert capture_health.consecutive_empty(_CID) == 0
+
+    def test_flag_set_by_another_tool_blocks_exec_check(self) -> None:
+        container, _state = _incident_container(canary_empty=True)
+        _break_capture_via_sandbox_exec(container)
+        with patch("sunaba.tools.exec._docker") as mock_docker:
+            mock_docker.return_value.containers.get.return_value = container
+            result = json.loads(sandbox_exec_check(_CID, _JOB_ID))
+        assert result["status"] == "error"
+        assert capture_health.RESTART_REMEDY in result["error"]
+
+
+class TestCanaryTimeout:
+    """The canary must not block on a wedged container (issue #870, [low]).
+
+    The guard fires precisely when a container may be wedged, and docker-py
+    has no per-exec timeout: an unbounded ``echo`` probe turns a fail-open
+    empty result into a tool call that never returns.  Before #868 the same
+    call returned an empty ``ok`` immediately.
+    """
+
+    def test_bound_is_the_existing_recovery_docker_timeout(self) -> None:
+        from sunaba.tools.common import RECOVERY_DOCKER_TIMEOUT
+
+        assert capture_health._canary_timeout() == RECOVERY_DOCKER_TIMEOUT
+
+    def test_hung_canary_returns_container_level_error(self) -> None:
+        release = threading.Event()
+
+        class _HungContainer:
+            def exec_run(self, argv: list[str], **kwargs: Any) -> tuple[int, object]:
+                if argv and argv[0] == "echo":
+                    release.wait(30)  # never answers within the bound
+                return (0, (b"", b""))
+
+        container = _HungContainer()
+        try:
+            started = time.monotonic()
+            with patch.object(
+                capture_health, "_canary_timeout", return_value=0.2
+            ):
+                result = None
+                for _ in range(capture_health.EMPTY_TRIGGER):
+                    result = capture_health.check_capture(
+                        container, decoded_empty=True, container_id=_CID
+                    )
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+
+        assert result is not None
+        payload = json.loads(result)
+        assert payload["status"] == "error"
+        # The container-level class, not the #852 empty-nonce class: a
+        # wedged container is not fixed by restarting the server.
+        assert capture_health.RESTART_REMEDY not in payload["error"]
+        assert _CID in payload["error"]
+        assert "did not return" in payload["error"]
+        assert capture_health.is_capture_broken(_CID)
+        assert elapsed < 5, "the canary blocked instead of timing out"
+
+    def test_timeout_is_journaled_as_the_canary_error(self) -> None:
+        release = threading.Event()
+
+        class _HungContainer:
+            def exec_run(self, argv: list[str], **kwargs: Any) -> tuple[int, object]:
+                if argv and argv[0] == "echo":
+                    release.wait(30)
+                return (0, (b"", b""))
+
+        container = _HungContainer()
+        try:
+            with patch(
+                "sunaba.capture_health.record_capture_health"
+            ) as rec, patch.object(
+                capture_health, "_canary_timeout", return_value=0.2
+            ):
+                for _ in range(capture_health.EMPTY_TRIGGER):
+                    capture_health.check_capture(
+                        container, decoded_empty=True, container_id=_CID
+                    )
+            trip_call = rec.call_args_list[0]
+        finally:
+            release.set()
+
+        assert trip_call.args[1] == "broken"
+        assert trip_call.kwargs["canary_nonce_found"] is False
+        assert "did not return" in trip_call.kwargs["canary_error"]

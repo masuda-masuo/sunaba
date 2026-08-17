@@ -54,6 +54,14 @@ class _FakeContainer:
         return (0, (b"", b""))
 
 
+class _IdContainer(_FakeContainer):
+    """A canary-answering container that carries a docker id (issue #869)."""
+
+    def __init__(self, container_id: str, canary_empty: bool = False) -> None:
+        super().__init__(canary_empty=canary_empty)
+        self.id = container_id
+
+
 class _RaisingContainer:
     """A container whose ``exec_run`` raises (container/channel-level failure)."""
 
@@ -322,6 +330,92 @@ class TestCaptureHealthPerContainer:
                 container, decoded_empty=True, container_id=_CID
             )
         assert err is None
+
+
+class TestCaptureHealthResolvedId:
+    """Issue #869: state is keyed by the container object's docker id.
+
+    ``sandbox_stop`` and the reaper prune by the resolved id prefix
+    (``container.id[:12]``), so guard state keyed by the caller-supplied
+    string would linger forever when the client passed a container NAME
+    (prune never matches), and distinct names can collide where ids
+    cannot.  These tests pin keying by the object's id prefix -- and the
+    journal carrying the same resolved id.  The caller string remains
+    only as a fallback for stubs without ``.id``; the other classes in
+    this file still exercise that path.
+    """
+
+    def test_state_stored_and_pruned_under_resolved_id(self) -> None:
+        container = _IdContainer(
+            container_id="abcdef1234567890", canary_empty=True
+        )
+        for _ in range(capture_health.EMPTY_TRIGGER):
+            capture_health.check_capture(
+                container, decoded_empty=True, container_id="my-container-name"
+            )
+        # keyed by the resolved id prefix, not the caller-supplied name
+        assert capture_health.is_capture_broken("abcdef123456")
+        assert not capture_health.is_capture_broken("my-container-name")
+        assert capture_health.consecutive_empty("my-container-name") == 0
+        # prune by the resolved prefix (sandbox_stop / reaper shape) removes it
+        capture_health.prune("abcdef123456")
+        assert not capture_health.is_capture_broken("abcdef123456")
+        assert capture_health.consecutive_empty("abcdef123456") == 0
+
+    def test_names_sharing_a_prefix_keep_state_independent(self) -> None:
+        broken = _IdContainer(container_id="aaaa11111111aaaa", canary_empty=True)
+        healthy = _IdContainer(container_id="bbbb22222222bbbb")
+        name_a = "aaaa11111111-worker-a"
+        name_b = "aaaa11111111-worker-b"  # shares name_a's 12-char prefix
+        for _ in range(capture_health.EMPTY_TRIGGER):
+            capture_health.check_capture(
+                broken, decoded_empty=True, container_id=name_a
+            )
+        assert capture_health.is_capture_broken("aaaa11111111")
+        # the healthy container's non-empty decode is direct evidence only
+        # for its own id; it must not clear the broken flag
+        assert (
+            capture_health.check_capture(
+                healthy, decoded_empty=False, container_id=name_b
+            )
+            is None
+        )
+        assert capture_health.is_capture_broken("aaaa11111111")
+        assert not capture_health.is_capture_broken("bbbb22222222")
+        assert capture_health.consecutive_empty("bbbb22222222") == 0
+        # and the broken container still errors on its next empty decode
+        result = capture_health.check_capture(
+            broken, decoded_empty=True, container_id=name_a
+        )
+        assert result is not None
+        assert json.loads(result)["status"] == "error"
+
+    def test_journal_carries_resolved_id(self) -> None:
+        container = _IdContainer(
+            container_id="abcdef1234567890", canary_empty=True
+        )
+        with patch("sunaba.capture_health.record_capture_health") as rec:
+            for _ in range(capture_health.EMPTY_TRIGGER):
+                capture_health.check_capture(
+                    container, decoded_empty=True, container_id="my-container-name"
+                )
+        assert rec.call_count == 1
+        trip_call = rec.call_args_list[0]
+        assert trip_call.args[1] == "broken"
+        assert trip_call.args[0] == "abcdef123456"  # the resolved id, not the name
+
+    def test_stub_without_id_falls_back_to_caller_string(self) -> None:
+        # _FakeContainer has no .id: the caller string must keep keying
+        # state, so stubs (and defensive paths) stay meaningful.
+        container = _FakeContainer(canary_empty=True)
+        for _ in range(capture_health.EMPTY_TRIGGER):
+            capture_health.check_capture(
+                container, decoded_empty=True, container_id="stub-key"
+            )
+        assert capture_health.is_capture_broken("stub-key")
+        assert not capture_health.is_capture_broken("stub-ke")
+        capture_health.prune("stub-key")
+        assert not capture_health.is_capture_broken("stub-key")
 
 
 class TestCaptureHealthCanaryError:

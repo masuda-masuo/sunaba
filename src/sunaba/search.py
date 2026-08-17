@@ -10,6 +10,8 @@ import json
 import re
 from typing import Any
 
+from sunaba import capture_health
+
 #: Regex for standard grep output: ``file:line:text``
 _GREP_OUTPUT_RE = re.compile(r"^([^:]+):(\d+):(.*)$")
 
@@ -133,12 +135,46 @@ def search_files(
                     f"--hidden/--no-ignore. Use mode='lexical' instead."
                 ),
             }
-        return _search_structural(container, pattern, path, max_results)
-    return _search_lexical(
-        container, pattern, path, max_results,
-        glob=glob, ignore_case=ignore_case, context=context,
-        output_mode=output_mode, offset=offset,
-        hidden=hidden, no_ignore=no_ignore,
+        try:
+            return _search_structural(
+                container, pattern, path, max_results,
+                container_id=container_id,
+            )
+        except capture_health.CaptureBrokenError as e:
+            return json.loads(e.payload)
+    try:
+        return _search_lexical(
+            container, pattern, path, max_results,
+            glob=glob, ignore_case=ignore_case, context=context,
+            output_mode=output_mode, offset=offset,
+            hidden=hidden, no_ignore=no_ignore,
+            container_id=container_id,
+        )
+    except capture_health.CaptureBrokenError as e:
+        # The guard's loud error replaces the search result: "no matches"
+        # from a broken capture path is the fail-open shape #852 was made
+        # of (issue #870).  Parsed back into the dict this function
+        # returns, so every caller sees the same message text.
+        return json.loads(e.payload)
+
+
+def _gate(container: Any, raw: str, container_id: str | None) -> None:
+    """Feed the capture-health guard with one search decode (issue #870).
+
+    The search decode lives here, not in the ``search_in_container``
+    wrapper, so this is where the guard has to be fed: a search-only
+    session must be able to trip the canary on its own, and a container
+    already flagged broken by another tool must stop being served
+    ``matches: []``.  Raises
+    :class:`~sunaba.capture_health.CaptureBrokenError`, caught in
+    :func:`search_files`.
+    """
+    if container_id is None:
+        return
+    capture_health.gate_or_raise(
+        container,
+        decoded_empty=not raw,
+        container_id=container_id[:12],
     )
 
 
@@ -234,8 +270,15 @@ def _search_lexical(
     offset: int = 0,
     hidden: bool = False,
     no_ignore: bool = False,
+    container_id: str | None = None,
 ) -> dict[str, Any]:
-    """Lexical search: ripgrep first, grep fallback."""
+    """Lexical search: ripgrep first, grep fallback.
+
+    *container_id* attributes the decode to the capture-health guard
+    (issue #870).  ``None`` -- direct callers that have no container
+    attribution -- skips the guard rather than feeding the ``<unknown>``
+    bucket, which would mix unrelated containers' empties.
+    """
     args = _build_rg_args(
         pattern, path, max_results,
         glob=glob, ignore_case=ignore_case,
@@ -269,6 +312,7 @@ def _search_lexical(
             container, pattern, path, max_results,
             ignore_case=ignore_case, context=context,
             output_mode=output_mode,
+            container_id=container_id,
         )
     if exit_code not in (0, 1):
         stdout_part, stderr_part = (
@@ -281,6 +325,12 @@ def _search_lexical(
 
     stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
     raw = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    # Capture-health guard (issue #870): this decode is what becomes the
+    # client's ``matches``.  An empty one is either a real no-hit run or the
+    # #852 fail-open shape -- the canary is the discriminator, so feed it
+    # and let the guard decide.  The error paths above are already-loud
+    # structured errors and are deliberately not fed.
+    _gate(container, raw, container_id)
     if output_mode == "content":
         return _parse_rg_json(raw, max_results)
     elif output_mode == "count":
@@ -296,8 +346,12 @@ def _grep_fallback(
     ignore_case: bool = False,
     context: int = 0,
     output_mode: str = "content",
+    container_id: str | None = None,
 ) -> dict[str, Any]:
-    """Fallback to grep when ripgrep is not available."""
+    """Fallback to grep when ripgrep is not available.
+
+    *container_id*: see :func:`_search_lexical`.
+    """
     args = _build_grep_args(
         pattern, path, max_results,
         ignore_case=ignore_case, context=context, output_mode=output_mode,
@@ -320,6 +374,7 @@ def _grep_fallback(
 
     stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
     raw = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    _gate(container, raw, container_id)  # issue #870, see _search_lexical
     if output_mode == "content":
         return _parse_grep_output(raw, max_results)
     elif output_mode == "count":
@@ -332,8 +387,12 @@ def _search_structural(
     pattern: str,
     path: str,
     max_results: int,
+    container_id: str | None = None,
 ) -> dict[str, Any]:
-    """Structural search using ast-grep."""
+    """Structural search using ast-grep.
+
+    *container_id*: see :func:`_search_lexical`.
+    """
     args = ["sg", "run", "-p", pattern, path, "--json=stream"]
     exit_code, output = container.exec_run(
         args,
@@ -353,6 +412,7 @@ def _search_structural(
 
     stdout_part, _ = output if isinstance(output, tuple) else (output, b"")
     raw = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+    _gate(container, raw, container_id)  # issue #870, see _search_lexical
     return _parse_sg_json(raw, max_results)
 
 

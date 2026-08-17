@@ -516,6 +516,18 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
     exit_code_output = status_kv.get("EXIT", "not_found")
 
     if exit_code_output == "not_found":
+        # Capture-health guard (issue #870), one feed per client-facing
+        # result.  The status command always echoes NOW=, START=, ...,
+        # EXIT=, so a healthy capture is never empty here -- while a broken
+        # one made every poll report ``status: running`` forever, the #852
+        # fail-open shape.  Same per-container counter sandbox_exec feeds.
+        guard_error = capture_health.check_capture(
+            container,
+            decoded_empty=not status_output,
+            container_id=container_id[:12],
+        )
+        if guard_error is not None:
+            return guard_error
         return json.dumps({
             "status": "running",
             "elapsed_seconds": elapsed_seconds,
@@ -533,6 +545,20 @@ def sandbox_exec_check(container_id: str, job_id: str) -> str:
         stdout=True, stderr=True,
     )
     stdout_text = stdout_result[1].decode("utf-8", errors="replace") if stdout_result[1] else ""
+
+    # Capture-health guard (issue #870), one feed per client-facing
+    # result: this call captured the status block and the job's stdout, so
+    # "empty" means neither produced a byte.  A job that legitimately
+    # printed nothing still has a non-empty status block, so it never
+    # feeds an empty -- and when capture is broken both are empty and the
+    # canary decides, exactly as for ``sandbox_exec(["true"])``.
+    guard_error = capture_health.check_capture(
+        container,
+        decoded_empty=not (status_output or stdout_text),
+        container_id=container_id[:12],
+    )
+    if guard_error is not None:
+        return guard_error
 
     result: dict[str, Any] = {
         "status": "completed",

@@ -910,7 +910,11 @@ def sandbox_stop(
         container = client.containers.get(container_id)
     except NotFound:
         # The container is gone; its capture-health guard state (issue #852)
-        # is stale and must not linger in the per-container dict.
+        # is stale and must not linger in the per-container dict.  With the
+        # container unresolvable, only the caller-supplied prefix can be
+        # pruned (issue #869): a NAME-addressed stop of an already-gone
+        # container may leave a resolved-id bucket behind until the reaper
+        # or a server restart clears it -- the id cannot be recovered here.
         capture_health.prune(cid)
         return f"Error: container {cid} not found"
     except Exception as e:
@@ -1002,7 +1006,16 @@ def sandbox_stop(
     # Drop the container's capture-health guard state (issue #852): the
     # per-container dict must not grow unboundedly with dead containers,
     # and a later sandbox with the same id must start from a fresh counter.
-    capture_health.prune(cid)
+    # Prune by the RESOLVED docker id (issue #869): the guard keys by
+    # ``container.id[:12]``, so a caller-supplied name would never match.
+    try:
+        resolved = str(container.id)[:12]
+    except Exception:
+        resolved = cid
+    capture_health.prune(resolved)
+    if resolved != cid:
+        # Best effort for legacy buckets keyed by the caller string.
+        capture_health.prune(cid)
     return f"Container {cid} stopped and removed"
 
 

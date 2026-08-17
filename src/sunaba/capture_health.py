@@ -11,7 +11,9 @@ empty results.
 
 The guard state is **per container**, not server-global (issue #852 review):
 a consecutive-empty counter and a ``capture_broken`` flag live in a dict keyed
-by the triggering call's ``container_id``.  Per-container keying is
+by the container's resolved docker id (``container.id[:12]``), falling back to
+the caller-supplied ``container_id`` string when the container object carries
+no usable id (issue #869).  Per-container keying is
 deliberate.  The incident was server-wide, but a single-container capture
 break must not be masked by healthy traffic from other containers: with a
 global counter, any non-empty decode from *any* container reset it, and the
@@ -108,8 +110,9 @@ class _CaptureState:
         self.capture_broken: bool = False
 
 
-#: Per-container guard state, keyed by container_id (12-char prefix as the
-#: call sites pass it).
+#: Per-container guard state, keyed by the resolved docker id prefix
+#: (``container.id[:12]``), falling back to the caller-supplied
+#: ``container_id`` string (issue #869).
 _state: dict[str, _CaptureState] = {}
 _lock = threading.Lock()
 
@@ -285,6 +288,30 @@ def _journal(
         pass
 
 
+def _resolve_state_key(
+    container: Any,
+    container_id: str | None,
+) -> str:
+    """Resolve the guard-state key for one call (issue #869).
+
+    ``sandbox_stop`` and the reaper prune by the resolved docker id
+    prefix (``container.id[:12]``), so the guard must key by the same
+    identity: state keyed by a caller-supplied name never matches the
+    prune (entries linger until server restart), and names can collide
+    where ids cannot.  The container object's ``.id`` is used when it is
+    a usable (non-empty) string; otherwise fall back to the
+    caller-supplied string, then ``_UNKNOWN_CONTAINER`` -- stubs without
+    ``.id`` keep working through the caller string.
+    """
+    try:
+        raw_id = container.id
+    except Exception:  # noqa: BLE001 - key resolution must never raise
+        raw_id = None
+    if isinstance(raw_id, str) and raw_id:
+        return raw_id[:12]
+    return container_id or _UNKNOWN_CONTAINER
+
+
 def check_capture(
     container: Any,
     *,
@@ -305,7 +332,9 @@ def check_capture(
     error string (``{"status": "error", ...}``) when capture is broken
     and the caller must return it in place of its result.
 
-    State is per ``container_id``: the counter, the flag, and the canary
+    State is per the resolved container identity (``str(container.id)[:12]``,
+    with the caller-supplied ``container_id`` string as fallback when the
+    object carries no usable id): the counter, the flag, and the canary
     target all belong to the triggering call's container, so one
     container's traffic cannot mask or clear another container's state.
 
@@ -330,9 +359,16 @@ def check_capture(
     loud error without journaling, so a broken server under load does
     not spam the journal with ``consecutive_empty=0`` entries.
     """
+    # Issue #869: key state by the container object's resolved docker id
+    # (12-char prefix), not the caller-supplied string -- prune
+    # (sandbox_stop / reaper) uses the same prefix, and names can collide
+    # where ids cannot.  The journal carries the resolved id too, so
+    # forensics and prune agree on identity.
+    state_key = _resolve_state_key(container, container_id)
+
     if not decoded_empty:
         with _lock:
-            st = _state_for(container_id)
+            st = _state_for(state_key)
             recovered = st.capture_broken
             st.consecutive_empty = 0
             st.capture_broken = False
@@ -341,12 +377,12 @@ def check_capture(
                 "recovered",
                 counter=0,
                 canary_nonce_found=None,
-                container_id=container_id,
+                container_id=state_key,
             )
         return None
 
     with _lock:
-        st = _state_for(container_id)
+        st = _state_for(state_key)
         if st.capture_broken:
             should_probe = True
         else:
@@ -362,7 +398,7 @@ def check_capture(
 
     if outcome == "nonce_found":
         with _lock:
-            st = _state_for(container_id)
+            st = _state_for(state_key)
             was_broken = st.capture_broken
             st.consecutive_empty = 0
             st.capture_broken = False
@@ -371,7 +407,7 @@ def check_capture(
                 "recovered",
                 counter=0,
                 canary_nonce_found=True,
-                container_id=container_id,
+                container_id=state_key,
             )
         return None
 
@@ -383,7 +419,7 @@ def check_capture(
         # empties" and hide the real value.  The trip entry below preserves
         # the snapshot counter that triggered it; failed re-probes just
         # return the loud error.
-        st = _state_for(container_id)
+        st = _state_for(state_key)
         was_broken = st.capture_broken
         st.capture_broken = True
         st.consecutive_empty = 0
@@ -392,7 +428,7 @@ def check_capture(
             "broken",
             counter=counter,
             canary_nonce_found=False,
-            container_id=container_id,
+            container_id=state_key,
             canary_error=canary_error,
         )
     if outcome == "error":

@@ -343,7 +343,8 @@ def _body_loss_error(
 def _find_all_matches(text: str, pattern: str) -> list[tuple[int, int]]:
     """Find all non-overlapping occurrences of *pattern* in *text*.
 
-    Returns a list of ``(offset, line_number)`` tuples.
+    Returns a list of ``(offset, line_number)`` tuples.  An empty
+    pattern matches at every position; the scan still terminates.
     """
     matches: list[tuple[int, int]] = []
     idx = 0
@@ -353,7 +354,10 @@ def _find_all_matches(text: str, pattern: str) -> list[tuple[int, int]]:
             break
         line_no = text[:idx].count("\n") + 1
         matches.append((idx, line_no))
-        idx += 1
+        # Advance past the match so occurrences never overlap.  An
+        # empty pattern has len 0, so advance by at least 1 or the
+        # scan would never terminate.
+        idx += max(len(pattern), 1)
     return matches
 
 
@@ -605,6 +609,132 @@ def _build_near_miss_echo(existing: str, old_str: str, dest_path: str) -> str:
 # 30-row overall cap with the middle elided.
 _SUCCESS_ECHO_CONTEXT = 2
 _SUCCESS_ECHO_MAX_ROWS = 30
+
+# ---------------------------------------------------------------------------
+# Transaction-based multi-replacement (sunaba#875)
+# ---------------------------------------------------------------------------
+
+
+def _validate_and_apply_replacements(
+    original: str,
+    replacements: list[dict],
+    dest_path: str,
+) -> tuple[str, str | None]:
+    """Validate and apply a series of replacements transactionally.
+
+    All matching and counting is done against *original*.  If every
+    replacement's expected_count (when declared) matches the actual
+    count, and matched regions do not overlap, all replacements are
+    applied at once.  Otherwise nothing is written.
+
+    *replacements* is a list of dicts, each with:
+    - ``old_str``: the literal text to find
+    - ``new_str``: the replacement text
+    - ``expected_count`` (optional): how many occurrences are expected
+
+    Returns ``(new_content, None)`` on success, or
+    ``("", error_message)`` on failure.
+    """
+    if not replacements:
+        return "", "Error: edits list must not be empty"
+
+    # Phase 1: validate every replacement against the original text.
+    # Collect all match regions (offset, length, replacement_index).
+    all_regions: list[tuple[int, int, int]] = []
+    for i, rep in enumerate(replacements):
+        # edits is an untyped list[dict], so a malformed entry (a non-dict,
+        # a missing old_str/new_str, a non-string key) must fail with the
+        # tool's structured 'edits[i]' error rather than a raw KeyError or
+        # TypeError leaking out of the validation phase.
+        if not isinstance(rep, dict):
+            return "", (
+                f"Error: edits[{i}] must be a dict with old_str and "
+                "new_str. Nothing was written."
+            )
+        old = rep.get("old_str")
+        new = rep.get("new_str")
+        expected = rep.get("expected_count")
+
+        if old is None:
+            return "", (
+                f"Error: edits[{i}].old_str is required. "
+                "Nothing was written."
+            )
+        if not isinstance(old, str):
+            return "", (
+                f"Error: edits[{i}].old_str must be a string. "
+                "Nothing was written."
+            )
+        if not old:
+            return "", f"Error: edits[{i}].old_str must not be empty"
+        if new is None:
+            return "", (
+                f"Error: edits[{i}].new_str is required. "
+                "Nothing was written."
+            )
+        if not isinstance(new, str):
+            return "", (
+                f"Error: edits[{i}].new_str must be a string. "
+                "Nothing was written."
+            )
+
+        matches = _find_all_matches(original, old)
+        actual_count = len(matches)
+
+        if expected is not None:
+            if actual_count != expected:
+                near_miss = _build_near_miss_echo(original, old, dest_path) if actual_count == 0 else ""
+                hint = f"\n{near_miss}" if near_miss else ""
+                return "", (
+                    f"Error: edits[{i}].old_str has {actual_count} "
+                    f"occurrence(s) but expected_count is {expected}. "
+                    f"Nothing was written."
+                    f"{hint}"
+                )
+            # All occurrences are replaced
+            for offset, _line_no in matches:
+                all_regions.append((offset, len(old), i))
+        else:
+            # No expected_count: use legacy behaviour -- unique match required
+            if actual_count > 1:
+                line_nos = ", ".join(str(m[1]) for m in matches[:10])
+                suffix = "..." if len(matches) > 10 else ""
+                return "", (
+                    f"Error: edits[{i}].old_str matches at {actual_count} "
+                    f"locations (lines {line_nos}{suffix}). Declare "
+                    f"expected_count={actual_count} to replace all, or add "
+                    f"more context to make it unique. Nothing was written."
+                )
+            if actual_count == 0:
+                near_miss = _build_near_miss_echo(original, old, dest_path)
+                return "", (
+                    f"Error: edits[{i}].old_str not found in {dest_path}. "
+                    f"Nothing was written.\n{near_miss}"
+                )
+            offset, _line_no = matches[0]
+            all_regions.append((offset, len(old), i))
+
+    # Phase 2: check for overlapping regions.
+    # Sort by offset, then check adjacent pairs.
+    all_regions.sort()
+    for j in range(len(all_regions) - 1):
+        r1_offset, r1_len, r1_idx = all_regions[j]
+        r2_offset, _r2_len, r2_idx = all_regions[j + 1]
+        if r1_offset + r1_len > r2_offset:
+            return "", (
+                f"Error: edits[{r1_idx}].old_str and edits[{r2_idx}].old_str "
+                f"have overlapping matches. Nothing was written."
+            )
+
+    # Phase 3: apply all replacements in reverse offset order so that
+    # earlier offsets remain valid.
+    result = original
+    for offset, length, rep_idx in reversed(all_regions):
+        new = replacements[rep_idx]["new_str"]
+        result = result[:offset] + new + result[offset + length:]
+
+    return result, None
+
 
 # Minimum (stripped) file_contents length for the "already applied" hint on
 # a failed old_str match -- short snippets appear coincidentally too often

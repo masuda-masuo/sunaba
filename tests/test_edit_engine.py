@@ -193,6 +193,18 @@ class TestFindAllMatches:
         assert len(result) > 0
         assert result[0] == (0, 1)  # first match at offset 0, line 1
 
+    def test_self_overlapping_pattern_counts_like_str_count(self) -> None:
+        """Occurrences must not overlap: 'aa' in 'aaa' counts once, matching
+        str.count (the scan previously advanced by 1 and counted 2)."""
+        assert _find_all_matches("aaa", "aa") == [(0, 1)]
+        assert len(_find_all_matches("ababa", "aba")) == "ababa".count("aba")
+
+    def test_empty_pattern_advances_and_terminates(self) -> None:
+        """An empty pattern matches at every position and the scan still
+        terminates: advancing by len('') = 0 would loop forever."""
+        assert _find_all_matches("ab", "") == [(0, 1), (1, 1), (2, 1)]
+        assert len(_find_all_matches("ab", "")) == "ab".count("")
+
 
 # ===================================================================
 # _get_line_indent

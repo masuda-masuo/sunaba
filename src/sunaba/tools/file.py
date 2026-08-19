@@ -37,6 +37,7 @@ from sunaba.output_control import (
 from sunaba.tools.common import WORKSPACE, _docker, container_not_found_error
 from sunaba.tools.edit_engine import (
     _ALREADY_APPLIED_MIN_CHARS,
+    _SUCCESS_ECHO_MAX_ROWS,
     _body_loss_error,
     _build_near_miss_echo,
     _build_success_echo,
@@ -46,6 +47,7 @@ from sunaba.tools.edit_engine import (
     _parses_as_definition,
     _python_syntax_note,
     _try_whitespace_flexible,
+    _validate_and_apply_replacements,
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -121,6 +123,8 @@ def edit_file(
     end_line: int | None = None,
     append: bool = False,
     old_str: str | None = None,
+    expected_count: int | None = None,
+    edits: list[dict] | None = None,
     preserve: str | None = None,
     line: int | None = None,
     ast: bool | None = None,
@@ -129,32 +133,28 @@ def edit_file(
 
     Exactly one edit mode is required: string replace (old_str),
     line-range (start_line[/end_line], 1-indexed inclusive), or
-    append=True.  The file must already exist -- to create a file or
-    replace one wholesale use write_file.
+    append=True.  The file must already exist -- to create or fully
+    overwrite one use write_file.
 
-    old_str is designed for small, targeted replacements -- keep it
-    minimal and unique.  It matches the exact string you provide (a
-    multi-line match is replaced whole).  Multiple matches are
-    rejected with their line numbers; an inexact match retries with
-    per-line whitespace stripped and re-indents on success; no match
-    returns the nearest-miss region (and says so when file_contents
-    is already in the file -- probably applied by an earlier call).
-    A successful replace echoes the post-edit region with line
-    numbers; a .py edit that leaves the file unparseable is flagged
-    there.
+    old_str replaces the exact string you provide (a multi-line match
+    is replaced whole).  A unique match is required: multiple matches
+    are rejected with line numbers, an inexact match retries with
+    whitespace stripped, and a miss returns the nearest region.
 
-    To replace a whole Python function/class, pass its signature as
-    old_str (e.g. ``def foo():``) -- it resolves via AST; a no-op
-    returns "No changes" and a resolution failure is surfaced when
-    file_contents is a complete definition (no silent fallback).
+    On .py files a definition-like old_str is resolved via AST first:
+    a no-op returns "No changes", and a failed resolution is surfaced
+    when file_contents is a complete definition (no silent string
+    fallback).
 
-    For large blocks prefer:
-      .py: pass ``def foo():`` for AST resolution (no multi-line match).
-      Any: use ``start_line``/``end_line`` for line-range replacement.
+    expected_count declares how many occurrences of old_str the file
+    should contain.  A mismatch is an error and nothing is written; a
+    match replaces every occurrence.
 
-    Every edit snapshots the pre-edit file; undo_file_edit restores it
-    -- prefer that over repairing a broken file in place.  For bulk or
-    computed edits use transform_file.
+    edits is an ordered list of replacement dicts applied as one
+    transaction.  Matching is against the original text (text
+    produced by an earlier entry is not seen); overlapping matches
+    are refused.  Either all apply or none does: one diff and one
+    undo snapshot per call.  Mutually exclusive with the other modes.
 
     Args:
         container_id: Container ID prefix.
@@ -164,19 +164,20 @@ def edit_file(
         start_line: Line-range start (1-indexed, inclusive).
         end_line: Line-range end (1-indexed, inclusive; default last line).
         append: Append to the end of the existing file.
-        old_str: Exact text to replace with file_contents (matching
-            contract above).  For small replacements only -- large
-            blocks: use ``def foo():`` (.py, AST) or
-            ``start_line``/``end_line`` (any file).
-        preserve: AST mode only.  Parts of the old definition to keep:
-            ``"decorators+docstring"`` (default), ``"decorators"``,
-            ``"docstring"``, or ``"none"``.
+        old_str: Exact text to replace with file_contents.
+        expected_count: Declared occurrence count of old_str; on
+            mismatch nothing is written.
+        edits: Ordered list of replacement dicts (old_str, new_str,
+            optional expected_count) applied as one transaction;
+            exclusive with the other modes.
+        preserve: AST mode only.  Keep: ``"decorators+docstring"``
+            (default), ``"decorators"``, ``"docstring"``, or
+            ``"none"``.
         line: AST mode only.  Disambiguates same-name definitions (any
             line inside the target).
-        ast: Overrides the implicit old_str AST trigger on .py files.
-            ``True`` forces AST resolution (error, no fallback).
-            ``False`` forces a plain string replace even for a
-            def/class old_str (e.g. docstring-only edits).
+        ast: Overrides the implicit old_str AST trigger on .py files:
+            ``True`` forces AST resolution (error, no fallback);
+            ``False`` forces a plain string replace.
 
     Returns:
         Success or error message.
@@ -190,6 +191,7 @@ def edit_file(
         client-visible description -- see
         tests/test_issue550_descriptions.py.)
     """
+
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -204,18 +206,37 @@ def edit_file(
     # that is write_file's job (issue #630: the split is by intent,
     # and any overlap would re-create the old tool-shadowing problem).
     has_line_range = start_line is not None or end_line is not None
-    mode_count = sum([append, old_str is not None, has_line_range])
+    has_edits = edits is not None
+    mode_count = sum([append, old_str is not None, has_line_range, has_edits])
     if mode_count > 1:
-        return "Error: start_line/end_line, append, and old_str are mutually exclusive"
+        return (
+            "Error: start_line/end_line, append, old_str, and edits "
+            "are mutually exclusive"
+        )
     if mode_count == 0:
         return (
             "Error: edit_file requires one edit mode: old_str, "
-            "start_line/end_line, or append=True. To create a new file "
+            "start_line/end_line, append=True, or edits. To create a new file "
             "or fully overwrite one use write_file."
         )
 
+    # edits mode is incompatible with AST/preserve/line params
+    if has_edits:
+        if preserve is not None or line is not None or ast is not None:
+            return (
+                "Error: edits cannot be combined with preserve, line, "
+                "or ast parameters"
+            )
+        if expected_count is not None:
+            return (
+                "Error: expected_count is per-entry in edits mode; "
+                "set it inside each edit dict, not at top level"
+            )
+
     if old_str is not None and old_str == "":
         return "Error: old_str must not be empty"
+    if expected_count is not None and old_str is None and not has_edits:
+        return "Error: expected_count requires old_str"
     if start_line is not None and start_line < 1:
         return "Error: start_line must be >= 1"
 
@@ -243,7 +264,8 @@ def edit_file(
         {
             "file_path": dest_path,
             "mode": (
-                "old_str" if old_str is not None
+                "edits" if has_edits
+                else "old_str" if old_str is not None
                 else "append" if append
                 else "line_range"
             ),
@@ -255,13 +277,79 @@ def edit_file(
     # content; set only for successful old_str edits (issue #580).
     replaced_span: tuple[int, int] | None = None
 
-    if append:
+    # ---------------------------------------------------------------
+    # Transaction mode: edits list (sunaba#875)
+    # ---------------------------------------------------------------
+    if has_edits:
+        content, error = _validate_and_apply_replacements(
+            existing, edits, dest_path,
+        )
+        if error is not None:
+            return error
+
+        syntax_note = _python_syntax_note(dest_path, content)
+        undo.save_version(container_id, dest_path, existing)
+
+        try:
+            write_file_in_container(container, container_id[:12], dest_path, content)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        # Build a unified diff for the transaction, capped like the
+        # old_str success echo (_SUCCESS_ECHO_MAX_ROWS) so a scattered
+        # transaction cannot flood the caller with a full-file diff.
+        diff_lines = list(difflib.unified_diff(
+            existing.splitlines(),
+            content.splitlines(),
+            fromfile=dest_path,
+            tofile=dest_path,
+            lineterm="",
+        ))
+        if len(diff_lines) > _SUCCESS_ECHO_MAX_ROWS:
+            keep = (_SUCCESS_ECHO_MAX_ROWS - 1) // 2
+            omitted = len(diff_lines) - 2 * keep
+            diff_lines = (
+                diff_lines[:keep]
+                + [f"... ({omitted} lines)"]
+                + diff_lines[-keep:]
+            )
+        diff_str = "\n".join(diff_lines) if diff_lines else "(no diff)"
+        return (
+            f"Written {len(content)} bytes to {dest_path} "
+            f"({len(edits)} replacement(s) applied)\n{diff_str}"
+            + syntax_note
+        )
+
+    elif append:
         sep = "\n" if existing else ""
         content = existing.rstrip("\n") + sep + file_contents
         # rstrip() would also swallow the file's final newline (#570).
         if existing.endswith("\n") and not content.endswith("\n"):
             content += "\n"
     elif old_str is not None:
+        # expected_count asserts how many times the literal old_str
+        # occurs in the file.  That is true or false before any engine
+        # is chosen, so validate it here, once, above the AST attempt:
+        # a declared mismatch is an error and nothing is written, on
+        # every path (including the .py def-line AST path).
+        exact_matches: list[tuple[int, int]] = []
+        if expected_count is not None:
+            exact_matches = _find_all_matches(existing, old_str)
+            actual = len(exact_matches)
+            if actual != expected_count:
+                if actual == 0:
+                    near_miss = _build_near_miss_echo(existing, old_str, dest_path)
+                    return (
+                        f"Error: old_str has {actual} occurrence(s) but "
+                        f"expected_count is {expected_count}. "
+                        f"Nothing was written.\n{near_miss}"
+                    )
+                return (
+                    f"Error: old_str has {actual} occurrence(s) but "
+                    f"expected_count is {expected_count}. "
+                    f"Nothing was written."
+                )
+
         symbol: str | None = None
         ast_error: str | None = None
         if ast is True and not dest_path.endswith(".py"):
@@ -343,9 +431,24 @@ def edit_file(
                     dest_path, symbol, ast_error,
                 )
 
-        # 1. Exact match with uniqueness check
-        exact_matches = _find_all_matches(existing, old_str)
-        if len(exact_matches) > 1:
+        # 1. Exact match with count check
+        if expected_count is None:
+            exact_matches = _find_all_matches(existing, old_str)
+
+        # When expected_count is declared, replace every occurrence.
+        # (The count itself was validated once, above the AST attempt;
+        # a mismatch already returned there, so at this point the
+        # declared count and the actual count are equal.)
+        if expected_count is not None:
+            # Replace all occurrences in reverse order
+            content = existing
+            for offset, _line_no in reversed(exact_matches):
+                content = (
+                    content[:offset]
+                    + file_contents
+                    + content[offset + len(old_str) :]
+                )
+        elif len(exact_matches) > 1:
             line_nos = ", ".join(str(m[1]) for m in exact_matches[:10])
             suffix = "..." if len(exact_matches) > 10 else ""
             return (
@@ -354,7 +457,7 @@ def edit_file(
                 "Add more surrounding context to make it unique, or use "
                 "transform_file to edit several occurrences in one call."
             )
-        if len(exact_matches) == 1:
+        elif len(exact_matches) == 1:
             idx = exact_matches[0][0]
             content = (
                 existing[:idx]

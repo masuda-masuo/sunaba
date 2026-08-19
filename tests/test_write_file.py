@@ -11,10 +11,13 @@ Tests cover:
 from __future__ import annotations
 
 import io
+import json
 import tarfile
 from unittest.mock import MagicMock, patch
 
-from sunaba.tools.file import edit_file, write_file
+from sunaba import undo
+from sunaba.tools.edit_engine import _SUCCESS_ECHO_MAX_ROWS
+from sunaba.tools.file import edit_file, undo_file_edit, write_file
 
 
 def _exec_run_for(
@@ -1755,3 +1758,439 @@ class TestLlmErgonomicsGuards:
         )
         assert "Error: old_str not found" in result
         assert "transform_file" in result
+
+class TestEditFileExpectedCount:
+    """expected_count: a declared occurrence count is checked, not assumed.
+
+    The contract (sunaba#875): the declared count must match the actual
+    number of occurrences of old_str in the file.  On a match every
+    occurrence is replaced; on a mismatch nothing is written and the
+    error reports both counts.
+    """
+
+    def _mock_container_with_file(
+        self, mock_docker: MagicMock, content: str,
+    ) -> MagicMock:
+        content_bytes = content.encode("utf-8") if content else b""
+        mock_container = MagicMock()
+        mock_container.exec_run.side_effect = _exec_run_for(content_bytes)
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        return mock_container
+
+    @patch("sunaba.tools.file._docker")
+    def test_matching_count_replaces_all_occurrences(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """Declared count 4 against a file containing 4: all four replaced."""
+        existing = "a\nb\na\nb\na\nb\na\nb\n"
+        mock_container = self._mock_container_with_file(mock_docker, existing)
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="count.txt",
+            file_contents="A",
+            dest_dir="/root",
+            old_str="a",
+            expected_count=4,
+        )
+        assert "Error" not in result
+        assert "Written" in result
+        assert _get_written_content(mock_container) == (
+            "A\nb\nA\nb\nA\nb\nA\nb\n"
+        )
+
+    @patch("sunaba.tools.file._docker")
+    def test_underdeclared_count_writes_nothing(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """Declared 4 against a file containing 3: error reports both counts
+        and the file is untouched."""
+        existing = "a\nb\na\nb\na\nb\n"
+        mock_container = self._mock_container_with_file(mock_docker, existing)
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="count.txt",
+            file_contents="A",
+            dest_dir="/root",
+            old_str="a",
+            expected_count=4,
+        )
+        assert result.startswith("Error")
+        assert "has 3 occurrence(s) but expected_count is 4" in result
+        assert "Nothing was written" in result
+        mock_container.put_archive.assert_not_called()
+
+    @patch("sunaba.tools.file._docker")
+    def test_overdeclared_count_writes_nothing(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """Declared 1 against a file containing 2: nothing written."""
+        existing = "a\nb\na\nb\n"
+        mock_container = self._mock_container_with_file(mock_docker, existing)
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="count.txt",
+            file_contents="A",
+            dest_dir="/root",
+            old_str="a",
+            expected_count=1,
+        )
+        assert result.startswith("Error")
+        assert "has 2 occurrence(s) but expected_count is 1" in result
+        assert "Nothing was written" in result
+        mock_container.put_archive.assert_not_called()
+
+    @patch("sunaba.tools.file._docker")
+    @patch("sunaba.tools.file.edit_symbol_in_container")
+    def test_py_def_old_str_wrong_count_errors_before_ast(
+        self, mock_edit_symbol: MagicMock, mock_docker: MagicMock,
+    ) -> None:
+        """expected_count is validated before AST resolution: on a .py file a
+        def-like old_str with a wrong count errors and writes nothing, and
+        the AST engine is never even consulted.  (The three .txt tests above
+        all miss this path -- the hole that survived two review rounds.)"""
+        existing = "def foo():\n    return 1\n"
+        mock_container = self._mock_container_with_file(mock_docker, existing)
+        # If the guard ran only after the AST attempt, this fake success
+        # would make the edit apply and the mismatch go unreported.
+        mock_edit_symbol.return_value = {
+            "status": "ok",
+            "changed": True,
+            "resolved": {
+                "kind": "function",
+                "qualname": "foo",
+                "start_line": 1,
+                "end_line": 1,
+            },
+        }
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="m.py",
+            file_contents="def foo():\n    return 2\n",
+            dest_dir="/root",
+            old_str="def foo():",
+            expected_count=99,
+        )
+        assert result.startswith("Error")
+        assert "has 1 occurrence(s) but expected_count is 99" in result
+        assert "Nothing was written" in result
+        mock_edit_symbol.assert_not_called()
+        mock_container.put_archive.assert_not_called()
+
+    @patch("sunaba.tools.file._docker")
+    def test_py_def_old_str_correct_count_still_applies(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """A correct count on the same .py def-like input still applies the
+        edit normally (the AST attempt runs first, then the string fallback
+        under the plain container mock)."""
+        existing = "def foo():\n    return 1\n"
+        mock_container = self._mock_container_with_file(mock_docker, existing)
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="m.py",
+            file_contents="def bar():",
+            dest_dir="/root",
+            old_str="def foo():",
+            expected_count=1,
+        )
+        assert "Error" not in result
+        assert "Written" in result
+        assert _get_written_content(mock_container) == "def bar():\n    return 1\n"
+
+
+class TestEditFileEditsSeries:
+    """edits: an ordered series applied as one all-or-nothing transaction.
+
+    The contract (sunaba#875): matching and counting run against the
+    original file text only, regions matched by different entries must
+    not overlap, and a failure anywhere leaves the file byte-identical
+    with an error naming the failing entry.
+    """
+
+    def _mock_container_with_file(
+        self, mock_docker: MagicMock, content: str,
+    ) -> MagicMock:
+        content_bytes = content.encode("utf-8") if content else b""
+        mock_container = MagicMock()
+        mock_container.exec_run.side_effect = _exec_run_for(content_bytes)
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        return mock_container
+
+    @patch("sunaba.tools.file._docker")
+    def test_failing_second_entry_aborts_the_whole_series(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """The second of three replacements fails its expectation: the error
+        identifies edits[1] and nothing is written."""
+        existing = "a\nb\nc\n"
+        mock_container = self._mock_container_with_file(mock_docker, existing)
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=[
+                {"old_str": "a", "new_str": "A", "expected_count": 1},
+                {"old_str": "b", "new_str": "B", "expected_count": 2},
+                {"old_str": "c", "new_str": "C", "expected_count": 1},
+            ],
+        )
+        assert result.startswith("Error")
+        assert "edits[1]" in result
+        assert "has 1 occurrence(s) but expected_count is 2" in result
+        assert "Nothing was written" in result
+        mock_container.put_archive.assert_not_called()
+
+    @patch("sunaba.tools.file._docker")
+    def test_successful_series_one_diff_one_undo(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """A successful series: every entry applied, one unified diff, one
+        undo snapshot, and a single undo_file_edit restores the file to its
+        pre-call state."""
+        existing = "a\nb\nc\n"
+        mock_container = self._mock_container_with_file(mock_docker, existing)
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=[
+                {"old_str": "a", "new_str": "A"},
+                {"old_str": "b", "new_str": "B"},
+                {"old_str": "c", "new_str": "C"},
+            ],
+        )
+        assert "Error" not in result
+        assert "3 replacement(s) applied" in result
+        # One diff: exactly one from/to header pair in the echo.
+        assert result.count("--- /root/series.txt") == 1
+        assert result.count("+++ /root/series.txt") == 1
+        written = _get_written_content(mock_container)
+        assert written == "A\nB\nC\n"
+
+        # One undo snapshot for the whole call, holding the pre-edit text.
+        assert undo.get_version("abc123", "/root/series.txt", 1) == existing
+
+        # A single undo_file_edit returns the file to its pre-call state.
+        mock_container.exec_run.side_effect = _exec_run_for(
+            written.encode("utf-8")
+        )
+        undo_result = json.loads(undo_file_edit("abc123", "/root/series.txt"))
+        assert undo_result["status"] == "ok"
+        assert _get_written_content(mock_container) == existing
+
+    @patch("sunaba.tools.file._docker")
+    def test_large_transaction_diff_echo_is_capped(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """A transaction diff of more than 30 rows is capped with the middle
+        elided, like the old_str success echo (same marker and shape)."""
+        lines = [f"line {i:02d}" for i in range(1, 61)]
+        existing = "\n".join(lines) + "\n"
+        self._mock_container_with_file(mock_docker, existing)
+
+        # 5 scattered one-line changes: 2 header rows + 5 hunks of 9 rows
+        # (or 6 for the file's first line) = 44 diff rows -- over the cap.
+        edits = [
+            {"old_str": f"line {i:02d}", "new_str": f"LINE {i:02d}"}
+            for i in (1, 11, 21, 31, 41)
+        ]
+        result = edit_file(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=edits,
+        )
+        assert "Error" not in result
+        assert "5 replacement(s) applied" in result
+        # Elision marker names the omitted rows; the whole echo stays
+        # within the 30-row cap plus the one-line summary.
+        assert "... (16 lines)" in result
+        assert len(result.splitlines()) <= _SUCCESS_ECHO_MAX_ROWS + 1
+        # First and last hunks survive, the middle hunks are gone.
+        assert "LINE 01" in result
+        assert "LINE 41" in result
+        assert "line 21" not in result
+
+    @patch("sunaba.tools.file._docker")
+    def test_overlapping_matches_refused(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """Two entries whose matches overlap: error, nothing written."""
+        mock_container = self._mock_container_with_file(mock_docker, "abc\n")
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=[
+                {"old_str": "ab", "new_str": "XY"},
+                {"old_str": "bc", "new_str": "YZ"},
+            ],
+        )
+        assert result.startswith("Error")
+        assert "overlapping matches" in result
+        assert "Nothing was written" in result
+        mock_container.put_archive.assert_not_called()
+
+    @patch("sunaba.tools.file._docker")
+    def test_match_produced_by_earlier_entry_is_invisible(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """Matching is against the original text: text produced by an earlier
+        entry is not found by a later one."""
+        mock_container = self._mock_container_with_file(mock_docker, "foo\n")
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=[
+                {"old_str": "foo", "new_str": "bar"},
+                {"old_str": "bar", "new_str": "baz"},
+            ],
+        )
+        assert result.startswith("Error")
+        assert "edits[1]" in result
+        assert "not found" in result
+        assert "Nothing was written" in result
+        mock_container.put_archive.assert_not_called()
+
+    @patch("sunaba.tools.file._docker")
+    def test_edits_exclusive_with_other_modes(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """edits refuses the line-range, append, old_str and AST modes and a
+        top-level expected_count: error, nothing written."""
+        mock_client = MagicMock()
+        mock_docker.return_value = mock_client
+        mock_container = mock_client.containers.get.return_value
+        base = dict(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=[{"old_str": "a", "new_str": "A"}],
+        )
+
+        for extra, expect in (
+            ({"start_line": 1}, "mutually exclusive"),
+            ({"append": True}, "mutually exclusive"),
+            ({"old_str": "a"}, "mutually exclusive"),
+            ({"ast": True}, "cannot be combined"),
+            ({"preserve": "docstring"}, "cannot be combined"),
+            ({"expected_count": 1}, "per-entry"),
+        ):
+            result = edit_file(**base, **extra)
+            assert result.startswith("Error"), (extra, result)
+            assert expect in result, (extra, result)
+        mock_container.put_archive.assert_not_called()
+
+    @patch("sunaba.tools.file._docker")
+    def test_malformed_entry_missing_new_str_is_structured_error(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """An entry without new_str fails with the edits[i] error convention,
+        not a raw KeyError, and nothing is written."""
+        mock_container = self._mock_container_with_file(mock_docker, "a\n")
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=[{"old_str": "a"}],
+        )
+        assert result.startswith("Error")
+        assert "edits[0]" in result
+        assert "new_str" in result
+        assert "Nothing was written" in result
+        mock_container.put_archive.assert_not_called()
+
+    @patch("sunaba.tools.file._docker")
+    def test_malformed_entry_missing_old_str_is_structured_error(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """An entry without old_str fails with the edits[i] error convention,
+        not a raw KeyError, and nothing is written."""
+        mock_container = self._mock_container_with_file(mock_docker, "a\n")
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=[{"new_str": "A"}],
+        )
+        assert result.startswith("Error")
+        assert "edits[0]" in result
+        assert "old_str" in result
+        assert "Nothing was written" in result
+        mock_container.put_archive.assert_not_called()
+
+    @patch("sunaba.tools.file._docker")
+    def test_malformed_entry_non_dict_is_structured_error(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """A non-dict entry fails with the edits[i] error convention, not a
+        raw TypeError, and nothing is written."""
+        mock_container = self._mock_container_with_file(mock_docker, "a\n")
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=["not a dict"],
+        )
+        assert result.startswith("Error")
+        assert "edits[0]" in result
+        assert "must be a dict" in result
+        assert "Nothing was written" in result
+        mock_container.put_archive.assert_not_called()
+
+    @patch("sunaba.tools.file._docker")
+    def test_malformed_entry_non_string_keys_are_structured_errors(
+        self, mock_docker: MagicMock,
+    ) -> None:
+        """Non-string old_str/new_str values fail with the edits[i] error
+        convention, not a raw TypeError, and nothing is written."""
+        mock_container = self._mock_container_with_file(mock_docker, "a\n")
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=[{"old_str": 42, "new_str": "A"}],
+        )
+        assert result.startswith("Error")
+        assert "edits[0].old_str must be a string" in result
+        assert "Nothing was written" in result
+
+        result = edit_file(
+            container_id="abc123",
+            file_name="series.txt",
+            file_contents="",
+            dest_dir="/root",
+            edits=[{"old_str": "a", "new_str": 42}],
+        )
+        assert result.startswith("Error")
+        assert "edits[0].new_str must be a string" in result
+        assert "Nothing was written" in result
+        mock_container.put_archive.assert_not_called()

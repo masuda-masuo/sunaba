@@ -1262,41 +1262,44 @@ def list_files(
 
 def transform_file(
     container_id: str,
-    file_path: str,
-    code: str,
+    file_path: str | None = None,
+    code: str = "",
+    paths: list[str] | None = None,
     max_lines: int = 200,
     offset: int = 0,
     limit: int = 100,
 ) -> str:
-    """Edit a file by running Python that computes the new text.
+    """Edit files by running Python that computes the new text.
 
-    code executes as a complete module inside the container (never on
-    the host); when it finishes, a top-level callable
-    transform(text: str) -> str must exist (helpers and imports are
-    fine).  The file's text goes in, the returned text is written back,
-    and a unified diff is returned -- always check it: an over-broad
-    pattern can change more than intended (the pre-edit file is
-    snapshotted; undo_file_edit rolls it back).  Prefer
-    edit_file old_str for a single known replacement; use
-    this for bulk, pattern, or computed edits.  Example::
+    code executes in the container (never on host); when it finishes,
+    callable transform(text: str) -> str must exist. The returned text
+    replaces file text and returns a unified diff (pre-edit content is
+    snapshotted; undo_file_edit rolls back). Example::
 
         import re
         def transform(text):
             return re.sub("todo", "TODO", text)
 
+    ``paths`` (never with ``file_path``) applies this one transform
+    to each listed file all-or-nothing (staged, then atomic rename).
+
     Args:
         container_id: Container ID prefix.
-        file_path: Absolute path inside the container.
-        code: Python source defining transform(text) -> str. Transported
-            base64-encoded, so quotes, backslashes, and newlines need no
-            escaping -- write it exactly as a .py file.
+        file_path: Absolute path of one file.
+        code: Python source defining transform(text) -> str;
+            base64-transported, so quotes, backslashes, and newlines
+            need no escaping.
+        paths: Explicit list of absolute paths (never with
+            ``file_path``).
         max_lines: Max diff lines shown.
         offset: Diff paging offset (0-indexed).
         limit: Max diff lines per page.
 
     Returns:
         JSON: status, changed, diff (paginated, with paging metadata);
-        on failure error, and traceback when your code raised.
+        on failure error, and traceback when your code raised.  For a
+        multi-path call, ``files`` lists each target path with its
+        ``changed`` flag and ``file_size``.
 
         The paging metadata means what sandbox_exec's does: ``shown`` is
         the number of lines in the returned ``diff``, ``total_lines``
@@ -1305,6 +1308,23 @@ def transform_file(
         anything was withheld, paging and ``offset`` > 0 included.
         ``has_more`` still means only "more pages follow this one".
     """
+    if (file_path is None) == (paths is None):
+        return json.dumps({
+            "status": "error",
+            "error": (
+                "exactly one of file_path or paths must be given: pass a "
+                "single path, or an explicit list of paths to edit with "
+                "the same transform"
+            ),
+        })
+    if paths is not None and not paths:
+        return json.dumps({"status": "error", "error": "paths must not be empty"})
+    if not code:
+        return json.dumps({
+            "status": "error",
+            "error": "code must not be empty: it must define transform(text) -> str",
+        })
+
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -1313,57 +1333,115 @@ def transform_file(
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
-    record_tool_use(
-        container_id[:12],
-        "transform_file",
-        {"file_path": file_path},
-    )
-    # Pre-edit snapshot for undo_file_edit -- best-effort: the edit
-    # must never fail because its undo snapshot could not be read.
-    try:
-        before = read_file(container, file_path)
-    except Exception:
-        before = None
-    result = transform_file_in_container(client, container_id, file_path, code)
-
-    if result.get("status") == "ok" and result.get("changed"):
-        if before is not None:
-            undo.save_version(container_id, file_path, before)
-
-        display, meta = truncate_output(
-            result.get("diff", ""),
-            max_lines=max_lines,
-            verbose="full",
+    if paths is None:
+        assert file_path is not None  # mutual exclusion checked above
+        record_tool_use(
+            container_id[:12],
+            "transform_file",
+            {"file_path": file_path},
         )
-        # Same envelope meanings as sandbox_exec, from the same helper:
-        # meta describes the truncation, the page describes the paging,
-        # and reporting meta.truncated alone told a caller holding page
-        # 1 of 4 that the diff was complete.
-        envelope = build_output_envelope(
-            display,
-            total_lines=meta.total_lines,
-            content_withheld=content_withheld(meta),
-            offset=offset,
-            limit=limit,
-        )
-        return json.dumps({
-            "status": "ok",
-            "changed": True,
-            "diff": envelope.output,
-            "shown": envelope.shown,
-            "total_lines": envelope.total_lines,
-            "truncated": envelope.truncated,
-            "next_offset": envelope.next_offset,
-            "has_more": envelope.has_more,
-            "file_size": _file_size_from_counts(
+        # Pre-edit snapshot for undo_file_edit -- best-effort: the edit
+        # must never fail because its undo snapshot could not be read.
+        try:
+            before = read_file(container, file_path)
+        except Exception:
+            before = None
+        result = transform_file_in_container(client, container_id, file_path, code)
+
+        if result.get("status") == "ok" and result.get("changed"):
+            if before is not None:
+                undo.save_version(container_id, file_path, before)
+
+            display, meta = truncate_output(
+                result.get("diff", ""),
+                max_lines=max_lines,
+                verbose="full",
+            )
+            # Same envelope meanings as sandbox_exec, from the same helper:
+            # meta describes the truncation, the page describes the paging,
+            # and reporting meta.truncated alone told a caller holding page
+            # 1 of 4 that the diff was complete.
+            envelope = build_output_envelope(
+                display,
+                total_lines=meta.total_lines,
+                content_withheld=content_withheld(meta),
+                offset=offset,
+                limit=limit,
+            )
+            return json.dumps({
+                "status": "ok",
+                "changed": True,
+                "diff": envelope.output,
+                "shown": envelope.shown,
+                "total_lines": envelope.total_lines,
+                "truncated": envelope.truncated,
+                "next_offset": envelope.next_offset,
+                "has_more": envelope.has_more,
+                "file_size": _file_size_from_counts(
+                    int(result.get("new_size", 0)), int(result.get("new_lines", 0))
+                ),
+            })
+
+        # Unchanged (or error-free no-op) results still surface file_size so the
+        # model sees the current size without a separate read (issue #187, \u2460).
+        if result.get("status") == "ok" and not result.get("changed"):
+            result["file_size"] = _file_size_from_counts(
                 int(result.get("new_size", 0)), int(result.get("new_lines", 0))
-            ),
-        })
+            )
+        return json.dumps(result)
 
-    # Unchanged (or error-free no-op) results still surface file_size so the
-    # model sees the current size without a separate read (issue #187, ①).
-    if result.get("status") == "ok" and not result.get("changed"):
-        result["file_size"] = _file_size_from_counts(
-            int(result.get("new_size", 0)), int(result.get("new_lines", 0))
-        )
+    record_tool_use(container_id[:12], "transform_file", {"paths": list(paths)})
+    # Pre-edit snapshots for undo_file_edit -- best-effort, per path: an
+    # edit must never fail because one undo snapshot could not be read.
+    befores: dict[str, str | None] = {}
+    for p in paths:
+        try:
+            befores[p] = read_file(container, p)
+        except Exception:
+            befores[p] = None
+    result = transform_file_in_container(client, container_id, None, code, paths=paths)
+
+    if result.get("status") == "ok":
+        for entry in result.get("files", []):
+            before = befores.get(entry["path"])
+            if entry.get("changed") and before is not None:
+                undo.save_version(container_id, entry["path"], before)
+        files = [
+            {
+                "path": entry["path"],
+                "changed": entry["changed"],
+                "file_size": _file_size_from_counts(
+                    int(entry.get("new_size", 0)), int(entry.get("new_lines", 0))
+                ),
+            }
+            for entry in result.get("files", [])
+        ]
+        if result.get("changed"):
+            display, meta = truncate_output(
+                result.get("diff", ""),
+                max_lines=max_lines,
+                verbose="full",
+            )
+            # Same envelope meanings as the single-path branch above.
+            envelope = build_output_envelope(
+                display,
+                total_lines=meta.total_lines,
+                content_withheld=content_withheld(meta),
+                offset=offset,
+                limit=limit,
+            )
+            return json.dumps({
+                "status": "ok",
+                "changed": True,
+                "diff": envelope.output,
+                "shown": envelope.shown,
+                "total_lines": envelope.total_lines,
+                "truncated": envelope.truncated,
+                "next_offset": envelope.next_offset,
+                "has_more": envelope.has_more,
+                "files": files,
+            })
+        # Unchanged: no diff, but per-file sizes still surface so the model
+        # sees current sizes without separate reads (mirrors single-path).
+        return json.dumps({"status": "ok", "changed": False, "diff": "", "files": files})
     return json.dumps(result)

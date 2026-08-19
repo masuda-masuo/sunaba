@@ -121,6 +121,164 @@ emit({"status": "ok", "changed": True, "diff": diff, "new_size": len(new), "new_
 '''
 
 
+# In-container runner for the multi-file form of ``transform_file`` (issue
+# #874): one caller-supplied ``transform(text) -> str`` applied to an explicit
+# list of paths, all-or-nothing.  Phase 1 reads every file and computes every
+# new text; phase 2 probes writability of every changed target; phase 3
+# stages writes to unique temp files in each target's directory before
+# committing them via atomic rename -- a missing path, a raising transform, a
+# non-writable target, or a staging failure therefore leaves every file
+# byte-identical, and the error names the path that caused it.
+#
+# The single-file ``_TRANSFORM_RUNNER`` above is deliberately NOT generalised
+# into this template: the single-path form is a public contract with existing
+# callers (error message shapes, diff format, result fields), and this runner's
+# per-path error naming, combined diff, and per-file metadata change those
+# shapes.  The shared prologue (emit / decode / exec / callable check) is
+# duplicated instead of parameterised, which is the safer trade in a template
+# that executes caller-supplied code inside the container.
+#
+# ``__PATHS_REPR__`` / ``__CODE_B64__`` / ``__MARK_A__`` / ``__MARK_B__`` are
+# substituted on the host.  This script runs inside the sandbox container,
+# **never on the host**.
+_TRANSFORM_RUNNER_MULTI = r'''
+import sys, json, base64, difflib, traceback, os, tempfile, stat
+
+PATHS = __PATHS_REPR__
+USER_CODE_B64 = "__CODE_B64__"
+MARK_A = "__MARK_A__"
+MARK_B = "__MARK_B__"
+
+def emit(obj):
+    sys.stdout.write(MARK_A + json.dumps(obj) + MARK_B)
+    sys.stdout.flush()
+    sys.exit(0)
+
+try:
+    user_code = base64.b64decode(USER_CODE_B64).decode("utf-8")
+except Exception as e:
+    emit({"status": "error", "error": "could not decode code: " + repr(e)})
+
+ns = {}
+try:
+    exec(user_code, ns)
+except Exception as e:
+    emit({"status": "error",
+          "error": "code failed at definition time: " + type(e).__name__ + ": " + str(e),
+          "traceback": traceback.format_exc()})
+
+transform = ns.get("transform")
+if not callable(transform):
+    emit({"status": "error",
+          "error": "code must define a callable `transform(text: str) -> str`"})
+
+# Phase 1 -- read everything, compute everything.  No file is touched here:
+# a missing/unreadable path or a raising transform must leave every file
+# byte-identical, so the error names the path that caused it.
+entries = []
+for path in PATHS:
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            original = fh.read()
+    except FileNotFoundError:
+        emit({"status": "error", "error": "file not found: " + path})
+    except Exception as e:
+        emit({"status": "error", "error": "read failed: " + repr(e) + " (while processing " + path + ")"})
+    try:
+        new = transform(original)
+    except Exception as e:
+        emit({"status": "error",
+              "error": "transform() raised " + type(e).__name__ + ": " + str(e) + " (while processing " + path + ")",
+              "traceback": traceback.format_exc()})
+    if not isinstance(new, str):
+        emit({"status": "error",
+              "error": "transform() must return str, got " + type(new).__name__ + " (while processing " + path + ")"})
+    entries.append({"path": path, "original": original, "new": new})
+
+# Phase 2 -- probe writability of every changed target before any write, so a
+# read-only file in the middle of the list cannot split the edit into a
+# partial write.  ``r+`` opens for read/write without truncating or creating.
+changed_entries = [e for e in entries if e["new"] != e["original"]]
+for entry in changed_entries:
+    path = entry["path"]
+    try:
+        with open(path, "r+") as fh:
+            pass
+    except Exception as e:
+        emit({"status": "error", "error": "write failed: " + repr(e) + " (while processing " + path + ")"})
+
+# Phase 3 -- stage, then commit. Every computed text is written to a unique
+# temp file in its target's directory. Only once every temp is fully written
+# and flushed, os.replace commits each file atomically. Any staging or commit
+# failure cleans up all temp files and returns an error naming the failing path.
+# A failure during the rename batch leaves each landed target with complete
+# valid content and unlanded targets untouched.
+staged = []
+for entry in changed_entries:
+    path = entry["path"]
+    target_dir = os.path.dirname(path) or "."
+    fd = None
+    temp_path = None
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        fd, temp_path = tempfile.mkstemp(
+            dir=target_dir,
+            prefix="." + os.path.basename(path) + ".tmp_",
+        )
+        os.fchmod(fd, mode)
+        with open(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(entry["new"])
+        staged.append((temp_path, path))
+    except Exception as e:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+        for t_p, _ in staged:
+            try:
+                os.unlink(t_p)
+            except Exception:
+                pass
+        emit({"status": "error", "error": "write failed: " + repr(e) + " (while processing " + path + ")"})
+
+for temp_path, target_path in staged:
+    try:
+        os.replace(temp_path, target_path)
+    except Exception as e:
+        for t_p, _ in staged:
+            try:
+                os.unlink(t_p)
+            except Exception:
+                pass
+        emit({"status": "error", "error": "write failed: " + repr(e) + " (while processing " + target_path + ")"})
+
+# Phase 4 -- one combined diff with each file's section headed by its own
+# ---/+++ path lines, plus per-file metadata.
+diff_parts = []
+files = []
+for entry in entries:
+    path = entry["path"]
+    original = entry["original"]
+    new = entry["new"]
+    if new == original:
+        orig_lines = original.count("\n") + (1 if original and not original.endswith("\n") else 0)
+        files.append({"path": path, "changed": False, "new_size": len(original), "new_lines": orig_lines})
+    else:
+        new_lines = new.count("\n") + (1 if new and not new.endswith("\n") else 0)
+        files.append({"path": path, "changed": True, "new_size": len(new), "new_lines": new_lines})
+        diff_parts.append("\n".join(difflib.unified_diff(
+            original.splitlines(), new.splitlines(),
+            fromfile=path, tofile=path, lineterm="")))
+emit({"status": "ok", "changed": bool(changed_entries), "diff": "\n".join(diff_parts), "files": files})
+'''
+
+
 # In-container driver for ``edit_symbol_in_container``.  Unlike the transform
 # runner it never executes caller-supplied code: the resolve / edit / verify
 # logic is this fixed script, parameterized via a base64-encoded JSON blob, so

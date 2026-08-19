@@ -472,7 +472,9 @@ class _FakeContainer:
     def exec_run(self, cmd, **kwargs):
         import base64 as _b64
         import io
+        import os
         import sys
+        import tempfile
 
         self.ran = True
         shell_cmd = cmd[-1]
@@ -480,20 +482,94 @@ class _FakeContainer:
         runner_src = _b64.b64decode(blob).decode("utf-8")
 
         real_open = open
+        real_replace = os.replace
+        real_unlink = os.unlink
+        real_remove = os.remove
+        real_mkstemp = tempfile.mkstemp
+        real_stat = os.stat
+        real_chmod = os.chmod
         pm = self.path_map
 
+        def map_dir(d):
+            if not d:
+                return d
+            if d in pm:
+                return pm[d]
+            for v_path, r_path in pm.items():
+                if os.path.dirname(v_path) == d:
+                    return os.path.dirname(r_path)
+            d_prefix = d.rstrip("/") + "/"
+            for v_path, r_path in pm.items():
+                if v_path.startswith(d_prefix):
+                    return os.path.dirname(r_path)
+            return d
+
+        def _to_str(p):
+            return os.fspath(p) if isinstance(p, os.PathLike) else p
+
         def mapped_open(path, *a, **k):
-            return real_open(pm.get(path, path), *a, **k)
+            if isinstance(path, (str, os.PathLike)):
+                p = _to_str(path)
+                return real_open(pm.get(p, path), *a, **k)
+            return real_open(path, *a, **k)
+
+        def mapped_mkstemp(*a, dir=None, **k):
+            if dir is not None:
+                dir = map_dir(dir)
+            return real_mkstemp(*a, dir=dir, **k)
+
+        def mapped_replace(src, dst, *a, **k):
+            s = _to_str(src)
+            d = _to_str(dst)
+            return real_replace(pm.get(s, src), pm.get(d, dst), *a, **k)
+
+        def mapped_unlink(path, *a, **k):
+            p = _to_str(path)
+            return real_unlink(pm.get(p, path), *a, **k)
+
+        def mapped_remove(path, *a, **k):
+            p = _to_str(path)
+            return real_remove(pm.get(p, path), *a, **k)
+
+        def mapped_stat(path, *a, **k):
+            if isinstance(path, (str, os.PathLike)):
+                p = _to_str(path)
+                return real_stat(pm.get(p, path), *a, **k)
+            return real_stat(path, *a, **k)
+
+        def mapped_chmod(path, *a, **k):
+            if isinstance(path, (str, os.PathLike)):
+                p = _to_str(path)
+                return real_chmod(pm.get(p, path), *a, **k)
+            return real_chmod(path, *a, **k)
 
         buf = io.StringIO()
         old = sys.stdout
         sys.stdout = buf
+        orig_mkstemp = tempfile.mkstemp
+        orig_replace = os.replace
+        orig_unlink = os.unlink
+        orig_remove = os.remove
+        orig_stat = os.stat
+        orig_chmod = os.chmod
         try:
+            tempfile.mkstemp = mapped_mkstemp
+            os.replace = mapped_replace
+            os.unlink = mapped_unlink
+            os.remove = mapped_remove
+            os.stat = mapped_stat
+            os.chmod = mapped_chmod
             try:
                 exec(compile(runner_src, "<runner>", "exec"), {"open": mapped_open})
             except SystemExit:
                 pass
         finally:
+            tempfile.mkstemp = orig_mkstemp
+            os.replace = orig_replace
+            os.unlink = orig_unlink
+            os.remove = orig_remove
+            os.stat = orig_stat
+            os.chmod = orig_chmod
             sys.stdout = old
         # Follow docker-py's contract (Issue #742): the split pair is only
         # returned when the caller asked for demux; otherwise the streams

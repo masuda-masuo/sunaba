@@ -15,7 +15,12 @@ from typing import Any
 
 from sunaba.journal import record_file_write
 
-from .drivers import _EDIT_SYMBOL_DRIVER, _GIT_APPLY_TRANSFORM, _TRANSFORM_RUNNER
+from .drivers import (
+    _EDIT_SYMBOL_DRIVER,
+    _GIT_APPLY_TRANSFORM,
+    _TRANSFORM_RUNNER,
+    _TRANSFORM_RUNNER_MULTI,
+)
 from .paths import _is_test_file
 from .shell import _exec_run
 
@@ -92,50 +97,21 @@ def apply_patch_to_file(
     return f"Patch applied successfully to {file_path} in container {container_id[:12]}"
 
 
-def transform_file_in_container(
-    client: Any,
-    container_id: str,
-    file_path: str,
-    code: str,
+def _exec_python_runner(
+    container: Any,
+    runner_b64: str,
+    nonce: str,
+    mark_a: str,
+    mark_b: str,
 ) -> dict[str, Any]:
-    """Apply an imperative ``transform(text) -> text`` to a file in-container.
+    """Execute an embedded Python runner inside the sandbox container.
 
-    The caller's *code* is executed as a complete Python module; the only
-    requirement is that a top-level callable ``transform(text: str) -> str``
-    exists once it finishes (helper functions, classes, and imports alongside
-    it are fine).  It is base64-encoded and executed by a Python runner
-    **inside the disposable sandbox container** (never on the host), the result
-    is written back, and a unified diff of the change is returned so the effect
-    is visible without a separate read-back.
-
-    Returns a dict with ``status`` (``"ok"`` / ``"error"``).  On success:
-    ``changed`` (bool), ``diff`` (str), ``new_size`` (int).  On failure:
-    ``error`` (str) and, when the caller's code raised, ``traceback`` (str).
+    Shared by the single-file and multi-file transform runners: writes the
+    base64-encoded runner to a temp file, executes it with ``python3``,
+    removes the temp file, and parses the JSON envelope the runner emits
+    between its start/end sentinels (so stray prints from the caller's code
+    cannot corrupt the result envelope).
     """
-    if not file_path.startswith("/"):
-        return {"status": "error", "error": f"file_path must be absolute: {file_path!r}"}
-    canon = posixpath.normpath(file_path)
-    if ".." in canon.split(posixpath.sep):
-        return {"status": "error", "error": f"Path traversal detected: {file_path!r}"}
-
-    try:
-        container = client.containers.get(container_id)
-    except Exception as e:
-        return {"status": "error", "error": f"Container {container_id[:12]} not found: {e}"}
-
-    code_b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
-    nonce = secrets.token_hex(8)
-    mark_a = f"<<<TF_{nonce}>>>"
-    mark_b = f"<<<END_TF_{nonce}>>>"
-
-    runner = (
-        _TRANSFORM_RUNNER
-        .replace("__FILE_PATH_REPR__", repr(file_path))
-        .replace("__CODE_B64__", code_b64)
-        .replace("__MARK_A__", mark_a)
-        .replace("__MARK_B__", mark_b)
-    )
-    runner_b64 = base64.b64encode(runner.encode("utf-8")).decode("ascii")
     tmpf = f"/tmp/.tf_{nonce}.py"
     cmd = (
         f"echo {shlex.quote(runner_b64)} | base64 -d > {tmpf}"
@@ -163,15 +139,120 @@ def transform_file_in_container(
         result: dict[str, Any] = json.loads(stdout_text[start + len(mark_a):end])
     except json.JSONDecodeError as e:
         return {"status": "error", "error": f"could not parse runner result: {e}"}
+    return result
 
-    if result.get("status") == "ok" and result.get("changed"):
-        record_file_write(
-            container_id[:12],
-            posixpath.basename(file_path),
-            posixpath.dirname(file_path) or "/",
-            int(result.get("new_size", 0)),
-            is_test=_is_test_file(file_path),
+
+def transform_file_in_container(
+    client: Any,
+    container_id: str,
+    file_path: str | None,
+    code: str,
+    paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Apply an imperative ``transform(text) -> text`` to files in-container.
+
+    The caller's *code* is executed as a complete Python module; the only
+    requirement is that a top-level callable ``transform(text: str) -> str``
+    exists once it finishes (helper functions, classes, and imports alongside
+    it are fine).  It is base64-encoded and executed by a Python runner
+    **inside the disposable sandbox container** (never on the host), the
+    result is written back, and a unified diff of the change is returned so
+    the effect is visible without a separate read-back.
+
+    Either *file_path* (a single file) or *paths* (an explicit list of
+    absolute paths, all edited with the **same** transform in one
+    all-or-nothing call) must be given -- never both.  With *paths*, every
+    file is read, every new text is computed, and writes are staged to temp
+    files before committing via atomic rename, so a raising transform, a
+    missing/unreadable/non-writable path, or a staging failure leaves
+    every file unchanged and the error names the path that caused it.
+
+    Returns a dict with ``status`` (``"ok"`` / ``"error"``).  On success:
+    ``changed`` (bool), ``diff`` (str), ``new_size`` (int) for a single
+    path, or ``files`` (list of ``{path, changed, new_size, new_lines}``)
+    for multiple paths.  On failure: ``error`` (str) and, when the caller's
+    code raised, ``traceback`` (str).
+    """
+    if (file_path is None) == (paths is None):
+        return {
+            "status": "error",
+            "error": "exactly one of file_path or paths must be given",
+        }
+
+    if paths is not None:
+        if not paths:
+            return {"status": "error", "error": "paths must not be empty"}
+        seen: set[str] = set()
+        for p in paths:
+            if not isinstance(p, str) or not p.startswith("/"):
+                return {"status": "error", "error": f"paths must be absolute: {p!r}"}
+            if p in seen:
+                return {"status": "error", "error": f"paths contains duplicate: {p!r}"}
+            seen.add(p)
+            canon = posixpath.normpath(p)
+            if ".." in canon.split(posixpath.sep):
+                return {"status": "error", "error": f"Path traversal detected: {p!r}"}
+    else:
+        assert file_path is not None  # mutual exclusion checked above
+        if not file_path.startswith("/"):
+            return {"status": "error", "error": f"file_path must be absolute: {file_path!r}"}
+        canon = posixpath.normpath(file_path)
+        if ".." in canon.split(posixpath.sep):
+            return {"status": "error", "error": f"Path traversal detected: {file_path!r}"}
+
+    try:
+        container = client.containers.get(container_id)
+    except Exception as e:
+        return {"status": "error", "error": f"Container {container_id[:12]} not found: {e}"}
+
+    code_b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    nonce = secrets.token_hex(8)
+    mark_a = f"<<<TF_{nonce}>>>"
+    mark_b = f"<<<END_TF_{nonce}>>>"
+
+    if paths is None:
+        assert file_path is not None
+        runner = (
+            _TRANSFORM_RUNNER
+            .replace("__FILE_PATH_REPR__", repr(file_path))
+            .replace("__CODE_B64__", code_b64)
+            .replace("__MARK_A__", mark_a)
+            .replace("__MARK_B__", mark_b)
         )
+    else:
+        runner = (
+            _TRANSFORM_RUNNER_MULTI
+            .replace("__PATHS_REPR__", repr(paths))
+            .replace("__CODE_B64__", code_b64)
+            .replace("__MARK_A__", mark_a)
+            .replace("__MARK_B__", mark_b)
+        )
+    runner_b64 = base64.b64encode(runner.encode("utf-8")).decode("ascii")
+    result = _exec_python_runner(container, runner_b64, nonce, mark_a, mark_b)
+
+    if result.get("status") != "ok":
+        return result
+
+    if paths is None:
+        assert file_path is not None
+        if result.get("changed"):
+            record_file_write(
+                container_id[:12],
+                posixpath.basename(file_path),
+                posixpath.dirname(file_path) or "/",
+                int(result.get("new_size", 0)),
+                is_test=_is_test_file(file_path),
+            )
+    else:
+        for entry in result.get("files", []):
+            if entry.get("changed"):
+                record_file_write(
+                    container_id[:12],
+                    posixpath.basename(entry["path"]),
+                    posixpath.dirname(entry["path"]) or "/",
+                    int(entry.get("new_size", 0)),
+                    is_test=_is_test_file(entry["path"]),
+                )
     return result
 
 
@@ -259,5 +340,4 @@ def edit_symbol_in_container(
             is_test=_is_test_file(file_path),
         )
     return result
-
 

@@ -7,8 +7,13 @@ import json
 import pathlib
 from unittest.mock import MagicMock, patch
 
-from sunaba import server, workflow_guide
-from sunaba.tools.file import list_files, read_file_range
+import pytest
+
+from sunaba import server, undo, workflow_guide
+from sunaba.tools.file import list_files, read_file_range, transform_file, undo_file_edit
+from tests.conftest import _FakeClient
+from tests.test_edit_symbol import _FakeContainerWithIO
+from tests.test_write_file import _exec_run_for, _get_written_content
 
 
 def _make_container(exec_returns):
@@ -432,6 +437,217 @@ class TestReadFileRangeTailLines:
         )
         assert result["error"] is None
         assert result["content"] == "line2\nline3"
+
+
+class TestFilePathAlias:
+    """Issue #876: ``path`` is accepted as an alias for ``file_path``.
+
+    A model that guesses ``path`` on the file_path tools must not lose
+    the round: the three tools accept both names, and refuse ambiguity
+    instead of silently picking one.  All four resolution cases are
+    covered here for read_file_range; the plain ``path=`` success case
+    for undo_file_edit and transform_file proves the three agree.
+
+    ``path`` is keyword-only on all three tools (it sits after a bare
+    ``*``), so the positional contract from before the alias held by
+    construction: the parameter after ``file_path`` still binds where it
+    always did, and a positional ``path`` is impossible.
+    """
+
+    @patch("sunaba.tools.file._docker")
+    def test_read_file_range_path_alias_reads_the_same_file(self, mock_docker):
+        """path= and file_path= name the same file, identically."""
+        file_body = "line0\nline1\nline2\n"
+        container = _make_container([
+            (0, file_body.encode(), b""),
+            (0, file_body.encode(), b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        via_file_path = json.loads(
+            read_file_range("abc123def456", "/f.txt", limit=-1)
+        )
+        via_path = json.loads(
+            read_file_range("abc123def456", path="/f.txt", limit=-1)
+        )
+        assert via_path == via_file_path
+        assert via_path["content"] == "line0\nline1\nline2\n"
+
+    @patch("sunaba.tools.file._docker")
+    def test_read_file_range_neither_name_is_an_error_naming_file_path(
+        self, mock_docker,
+    ):
+        """Neither name: refused, with the error pointing at file_path."""
+        result = json.loads(read_file_range("abc123def456"))
+        assert result["status"] == "error"
+        assert "file_path" in result["error"]
+
+    @patch("sunaba.tools.file._docker")
+    def test_read_file_range_equal_values_are_accepted(self, mock_docker):
+        """Both names, same value: not ambiguous, reads normally."""
+        file_body = "line0\nline1\n"
+        container = _make_container([
+            (0, file_body.encode(), b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        result = json.loads(
+            read_file_range("abc123def456", file_path="/f.txt", path="/f.txt")
+        )
+        assert result["error"] is None
+        assert result["content"] == "line0\nline1\n"
+
+    @patch("sunaba.tools.file._docker")
+    def test_read_file_range_conflicting_values_are_an_error(self, mock_docker):
+        """Both names, different values: refused, never silently picked."""
+        result = json.loads(
+            read_file_range("abc123def456", file_path="/a.txt", path="/b.txt")
+        )
+        assert result["status"] == "error"
+        assert "disagree" in result["error"]
+
+    @patch("sunaba.tools.file._docker")
+    def test_undo_file_edit_path_alias_restores_the_same_file(
+        self, mock_docker, monkeypatch,
+    ):
+        """undo_file_edit accepts path= where it took file_path=."""
+        good = "def foo():\n    return 1\n"
+        broken = "def foo(:\n    pass\n"
+        undo.save_version("abc123def456", "/sandbox/alias.py", good)
+        container = MagicMock()
+        container.exec_run.side_effect = _exec_run_for(broken.encode("utf-8"))
+        client = MagicMock()
+        client.containers.get.return_value = container
+        mock_docker.return_value = client
+        monkeypatch.setattr("sunaba.tools.file.record_tool_use", lambda *a, **k: None)
+
+        result = json.loads(
+            undo_file_edit(container_id="abc123def456", path="/sandbox/alias.py")
+        )
+        assert result["status"] == "ok"
+        assert result["restored_steps_back"] == 1
+        assert _get_written_content(container) == good
+
+    def test_transform_file_path_alias_applies_the_transform(
+        self, tmp_path, monkeypatch,
+    ):
+        """transform_file accepts path= where it took file_path=."""
+        posix = "/sandbox/alias_target.py"
+        f = tmp_path / "alias_target.py"
+        f.write_text("aaa\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _FakeClient(_FakeContainerWithIO({posix: str(f)})),
+        )
+        monkeypatch.setattr("sunaba.tools.file.record_tool_use", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "sunaba.edit_verify.edits.record_file_write", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "src.sunaba.edit_verify.fileio.record_file_write", lambda *a, **k: None
+        )
+
+        result = json.loads(transform_file(
+            container_id="abc123def456",
+            path=posix,
+            code="def transform(text):\n    return text.upper()\n",
+        ))
+        assert result["status"] == "ok"
+        assert result["changed"] is True
+        assert f.read_text(encoding="utf-8") == "AAA\n"
+
+    @patch("sunaba.tools.file._docker")
+    def test_read_file_range_second_positional_still_binds_offset(self, mock_docker):
+        """read_file_range(cid, path, N, M) binds N to offset and M to limit.
+
+        The alias is keyword-only, so the parameters that followed
+        file_path before the alias existed bind exactly where they did:
+        a mid-signature path would swallow the third positional.
+        """
+        file_body = "line0\nline1\nline2\nline3\n"
+        container = _make_container([
+            (0, file_body.encode(), b""),
+        ])
+        mock_docker.return_value = _make_client(container)
+
+        result = json.loads(
+            read_file_range("abc123def456", "/home/sandbox/f.txt", 1, 2)
+        )
+        assert result["error"] is None
+        assert result["content"] == "line1\nline2"
+
+    @patch("sunaba.tools.file._docker")
+    def test_undo_file_edit_second_positional_still_binds_steps(
+        self, mock_docker, monkeypatch,
+    ):
+        """undo_file_edit(cid, path, N) binds N to steps, as before the alias."""
+        good = "def foo():\n    return 1\n"
+        broken = "def foo(:\n    pass\n"
+        undo.save_version("abc123def456", "/sandbox/alias.py", good)
+        undo.save_version("abc123def456", "/sandbox/alias.py", broken)
+        container = MagicMock()
+        container.exec_run.side_effect = _exec_run_for(broken.encode("utf-8"))
+        client = MagicMock()
+        client.containers.get.return_value = container
+        mock_docker.return_value = client
+        monkeypatch.setattr("sunaba.tools.file.record_tool_use", lambda *a, **k: None)
+
+        result = json.loads(
+            undo_file_edit("abc123def456", "/sandbox/alias.py", 2)
+        )
+        assert result["status"] == "ok"
+        assert result["restored_steps_back"] == 2
+        assert _get_written_content(container) == good
+
+    def test_transform_file_second_positional_still_binds_code(
+        self, tmp_path, monkeypatch,
+    ):
+        """transform_file(cid, path, code) binds code positionally, as before."""
+        posix = "/sandbox/alias_target.py"
+        f = tmp_path / "alias_target.py"
+        f.write_text("aaa\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "sunaba.tools.file._docker",
+            lambda: _FakeClient(_FakeContainerWithIO({posix: str(f)})),
+        )
+        monkeypatch.setattr("sunaba.tools.file.record_tool_use", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "sunaba.edit_verify.edits.record_file_write", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "src.sunaba.edit_verify.fileio.record_file_write", lambda *a, **k: None
+        )
+
+        result = json.loads(transform_file(
+            "abc123def456",
+            posix,
+            "def transform(text):\n    return text.upper()\n",
+        ))
+        assert result["status"] == "ok"
+        assert result["changed"] is True
+        assert f.read_text(encoding="utf-8") == "AAA\n"
+
+    def test_read_file_range_path_cannot_be_passed_positionally(self):
+        """path is keyword-only: passing it positionally raises TypeError."""
+        with pytest.raises(TypeError):
+            read_file_range(
+                "abc123def456", "/f.txt", 0, 50, None, None, None, "/f.txt"
+            )
+
+    def test_undo_file_edit_path_cannot_be_passed_positionally(self):
+        """path is keyword-only: passing it positionally raises TypeError."""
+        with pytest.raises(TypeError):
+            undo_file_edit(
+                "abc123def456", "/sandbox/alias.py", 1, "/sandbox/alias.py"
+            )
+
+    def test_transform_file_path_cannot_be_passed_positionally(self):
+        """path is keyword-only: passing it positionally raises TypeError."""
+        with pytest.raises(TypeError):
+            transform_file(
+                "abc123def456", "/sandbox/alias_target.py", "", None, 200, 0, 100,
+                "/sandbox/alias_target.py",
+            )
 
 
 class TestTailGuidanceSurfaces:

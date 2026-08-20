@@ -52,6 +52,40 @@ from sunaba.tools.edit_engine import (
 
 logger: logging.Logger = logging.getLogger(__name__)
 
+
+def _resolve_file_path_alias(
+    file_path: str | None,
+    path: str | None,
+    *,
+    require_one: bool = True,
+) -> tuple[str | None, str | None]:
+    """Resolve the ``file_path`` / ``path`` alias pair (issue #876).
+
+    ``path`` is accepted as an alias for ``file_path`` on the read/undo/
+    transform tools, so a caller who guessed the wrong name is not
+    punished.  Exactly one of the two must name the file: neither is an
+    error naming ``file_path`` as the parameter to pass (unless
+    *require_one* is False -- transform_file can name its targets via
+    ``paths`` instead, so its caller checks the neither case itself);
+    both given with different values is an error (silently picking one is
+    worse than refusing); equal values are fine.  Returns
+    ``(resolved, error)`` with at most one of the two non-None.
+    """
+    if file_path is None and path is None:
+        if not require_one:
+            return None, None
+        return None, (
+            "exactly one of file_path or path must be given: pass the "
+            "file path as file_path (path is accepted as an alias)"
+        )
+    if file_path is not None and path is not None and file_path != path:
+        return None, (
+            "file_path and path disagree: pass the file path under only "
+            "one of the two names"
+        )
+    return (file_path if file_path is not None else path), None
+
+
 def write_file(
     container_id: str,
     file_name: str,
@@ -539,8 +573,10 @@ _UNDO_DIFF_MAX_LINES = 50
 
 def undo_file_edit(
     container_id: str,
-    file_path: str,
+    file_path: str | None = None,
     steps: int = 1,
+    *,
+    path: str | None = None,
 ) -> str:
     """Restore *file_path* to the state it had before a recent edit.
 
@@ -559,13 +595,18 @@ def undo_file_edit(
         container_id: Container ID prefix.
         file_path: Absolute path of the file inside the container
             (the same path echoed by the editing tools).
-        steps: How many edits to step back (default 1).
+        steps: How many edits to step back.
 
     Returns:
         JSON: status, file_path, restored diff (capped), and the
         remaining snapshots; error with available snapshots when
         no matching snapshot exists.
     """
+    file_path, path_error = _resolve_file_path_alias(file_path, path)
+    if path_error is not None:
+        return json.dumps({"status": "error", "error": path_error})
+    assert file_path is not None  # resolution guarantees exactly one name
+
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -1167,12 +1208,14 @@ def _gate_read_result(
 
 def read_file_range(
     container_id: str,
-    file_path: str,
+    file_path: str | None = None,
     offset: int = 0,
     limit: int = _DEFAULT_READ_LIMIT,
     start_line: int | None = None,
     end_line: int | None = None,
     tail_lines: int | None = None,
+    *,
+    path: str | None = None,
 ) -> str:
     """Read lines from *file_path* inside the container.
 
@@ -1193,6 +1236,11 @@ def read_file_range(
         A tail read ends at the last line, so has_more is false and
         next_offset null; page backwards using total_lines.
     """
+    file_path, path_error = _resolve_file_path_alias(file_path, path)
+    if path_error is not None:
+        return json.dumps({"status": "error", "error": path_error})
+    assert file_path is not None  # resolution guarantees exactly one name
+
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -1371,6 +1419,8 @@ def transform_file(
     max_lines: int = 200,
     offset: int = 0,
     limit: int = 100,
+    *,
+    path: str | None = None,
 ) -> str:
     """Edit files by running Python that computes the new text.
 
@@ -1411,6 +1461,11 @@ def transform_file(
         anything was withheld, paging and ``offset`` > 0 included.
         ``has_more`` still means only "more pages follow this one".
     """
+    file_path, path_error = _resolve_file_path_alias(
+        file_path, path, require_one=False,
+    )
+    if path_error is not None:
+        return json.dumps({"status": "error", "error": path_error})
     if (file_path is None) == (paths is None):
         return json.dumps({
             "status": "error",

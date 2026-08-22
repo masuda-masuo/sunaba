@@ -606,6 +606,7 @@ def sandbox_initialize(
         mem_limit=mem_limit,
         cpus=cpus,
         session_label=session_label,
+        repo=clone_repo or repo,
     )
 
     # The CA must be trusted before anything in the sandbox (starting with
@@ -1207,6 +1208,7 @@ def run_container_and_exec(
         mem_limit=None,
         cpus=None,
         session_label=session_label,
+        repo=clone_repo or repo,
     )
 
     # Same fail-closed CA wiring as sandbox_initialize (#358).

@@ -2591,3 +2591,49 @@ class TestVerifyAffectedScope:
         assert ts["changed_files"] == ["src/app.py"]
         assert ts["selected_count"] == 0
         assert ts["widened_to_full_reason"] is None
+
+
+# ===================================================================
+# _record_verify_outcome fail_kinds classification (AC 1)
+# ===================================================================
+
+class TestRecordVerifyOutcome:
+    """Tests for _record_verify_outcome fail_kinds classification (AC 1)."""
+
+    def test_lint_only_failure(self) -> None:
+        result = {
+            "gate_passed": False,
+            "gate_fail_reasons": ["lint (ruff): 3 violation(s)"],
+            "tests": {"status": "skipped"},
+        }
+        with patch("sunaba.tools.verify.record_tool_use") as mock_record:
+            from sunaba.tools.verify import _record_verify_outcome
+            _record_verify_outcome("abc123456789", result)
+            mock_record.assert_called_once()
+            res = mock_record.call_args[0][2]["result"]
+            assert res["fail_kinds"] == ["lint"]
+            assert res["status"] == "skipped"
+            assert res["gate_passed"] is False
+
+    def test_collection_error_failure(self) -> None:
+        result = {
+            "gate_passed": False,
+            "gate_fail_reasons": ["collection error: failed to collect tests"],
+            "tests": {"full": {"status": "collection_error"}},
+        }
+        with patch("sunaba.tools.verify.record_tool_use") as mock_record:
+            from sunaba.tools.verify import _record_verify_outcome
+            _record_verify_outcome("abc123456789", result)
+            res = mock_record.call_args[0][2]["result"]
+            assert res["fail_kinds"] == ["collection_error"]
+
+    def test_passing_verify_empty_kinds(self) -> None:
+        result = {
+            "gate_passed": True,
+            "tests": {"full": {"status": "ok", "passed": 5}},
+        }
+        with patch("sunaba.tools.verify.record_tool_use") as mock_record:
+            from sunaba.tools.verify import _record_verify_outcome
+            _record_verify_outcome("abc123456789", result)
+            res = mock_record.call_args[0][2]["result"]
+            assert res["fail_kinds"] == []

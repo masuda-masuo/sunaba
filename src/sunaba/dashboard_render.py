@@ -207,7 +207,7 @@ def _build_phase_view(run_state: dict[str, Any] | None) -> str:
     if rtrips:
         lines.append(
             f'<div class="phase-roundtrip">'
-            f'{rtrips} edit \u2192 verify-fail \u2192 edit roundtrip(s)'
+            f'{rtrips} verify-fail \u2192 retry loop(s)'
             f'</div>'
         )
 
@@ -506,11 +506,14 @@ def _render_insights_page(
         rate_color = "#7ee787" if tool["failure_rate"] == 0 else (
             "#ffa657" if tool["failure_rate"] < 0.2 else "#f97583"
         )
+        extra_note = ""
+        if tool["operation"] == "exec" and "expected_failures" in tool:
+            extra_note = f' <span style="font-size:10px;color:#8b949e">(of which expected non-zero: {tool["expected_failures"]})</span>'
         err_rows.append(
             f'<tr>'
             f'<td class="mono">{_escape(tool["operation"])}</td>'
             f'<td>{tool["calls"]}</td>'
-            f'<td>{tool["failures"]}</td>'
+            f'<td>{tool["failures"]}{extra_note}</td>'
             f'<td style="color:{rate_color}">{tool["failure_rate"]:.1%}</td>'
             f'</tr>'
         )
@@ -597,7 +600,7 @@ def _render_insights_page(
     )
     roundtrip_panel = (
         f'<div class="card">'
-        f'<h2>3. Edit→Verify Roundtrip Distribution</h2>'
+        f'<h2>3. Verify retry loops</h2>'
         f'{rt_bars}'
         f'{rt_mean_html}'
         f'</div>'
@@ -746,6 +749,30 @@ def _render_insights_page(
         f'</div>'
     )
 
+    # ── Metric 8: Verify failure reasons ──
+    vfr = d.get("verify_failure_reasons", {"total_failed": 0, "by_kind": {}})
+    by_kind = vfr.get("by_kind", {})
+    total_failed = vfr.get("total_failed", 0)
+    sorted_kinds = sorted(by_kind.items(), key=lambda x: (-x[1], x[0]))
+    max_count = max((c for _, c in sorted_kinds), default=1)
+    vfr_bars = ""
+    for kind, count in sorted_kinds:
+        vfr_bars += _render_bar(count, max_count, kind, color="#f97583")
+    vfr_table = (
+        vfr_bars
+        if vfr_bars
+        else '<div class="empty">No verify failure reasons recorded</div>'
+    )
+    verify_reasons_panel = (
+        f'<div class="card">'
+        f'<h2>Verify failure reasons (window) '
+        f'<span style="font-size:11px;color:#8b949e;font-weight:400">'
+        f'({total_failed} total)'
+        f'</span></h2>'
+        f'{vfr_table}'
+        f'</div>'
+    )
+
     return _INSIGHTS_HTML.format(
         style=_STYLE,
         nav=_render_nav("insights"),
@@ -756,6 +783,7 @@ def _render_insights_page(
         first_verify_panel=first_verify_panel,
         roundtrip_panel=roundtrip_panel,
         unused_panel=unused_panel,
+        verify_reasons_panel=verify_reasons_panel,
         run_dist_panel=run_dist_panel,
         init_duration_panel=init_duration_panel,
         busy_refusals_panel=busy_refusals_panel,

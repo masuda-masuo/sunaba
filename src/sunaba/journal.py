@@ -343,6 +343,7 @@ def record_initialize(
     mem_limit: str | None = None,
     cpus: float | None = None,
     session_label: str | None = None,
+    repo: str | None = None,
 ) -> None:
     """Record a container initialization event.
 
@@ -354,6 +355,7 @@ def record_initialize(
         cpus: Override cpus if specified (Issue #201).
         session_label: Optional session identifier (e.g. model name,
             task name) for this session (Issue #479).
+        repo: Optional repository slug (e.g. 'owner/repo').
     """
     if session_label is not None:
         set_session_label(container_id, session_label)
@@ -369,13 +371,14 @@ def record_initialize(
     label = get_session_label(container_id)
     if label is not None:
         entry["session_label"] = label
+    if repo is not None:
+        entry["repo"] = repo
     if mem_limit is not None:
         entry["mem_limit"] = mem_limit
     if cpus is not None:
         entry["cpus"] = cpus
     _append_json(entry)
     _update_container_state(container_id, init_ts=entry["ts"])
-
 
 def record_initialize_complete(container_id: str) -> None:
     """Record that ``sandbox_initialize`` finished all setup phases.
@@ -1264,6 +1267,17 @@ def classify_exec_command(cmd: str) -> str:
 
     return "other"
 
+def is_expected_exec_nonzero(cmd: str) -> bool:
+    """True when a non-zero exit code is expected for this shell command."""
+    cmd = cmd.strip()
+    if not cmd:
+        return False
+    bucket = classify_exec_command(cmd)
+    if bucket in ("search", "list", "read"):
+        return True
+    first_token = cmd.split()[0].rstrip(";") if cmd.split() else ""
+    return first_token in ("test", "[", "diff", "cmp")
+
 
 def get_tool_usage(
     from_date: str | None = None,
@@ -1292,6 +1306,9 @@ def get_tool_usage(
         - ``cd_redundant_count`` — the subset of ``cd_count`` that cd's to the
           default working directory (``/workspace``), i.e. a no-op
         - ``cd_redundant_rate_pct`` — redundant cds as % of exec entries
+        - ``exec_nonzero_count`` — count of exec entries with non-zero exit_code
+        - ``exec_nonzero_expected_count`` — count of non-zero exec entries whose command is expected non-zero (search, list, read, test, [, diff, cmp)
+        - ``exec_nonzero_unexpected_count`` — count of non-zero exec entries whose command is unexpected non-zero
         - ``structured_ops`` — count of each structured tool operation
         - ``bypass_count`` — exec commands that could have used a dedicated
           tool: the first word maps to one that already existed, *and* the
@@ -1327,6 +1344,9 @@ def get_tool_usage(
     command_buckets: dict[str, int] = {}
     cd_count = 0
     cd_redundant_count = 0
+    exec_nonzero_count = 0
+    exec_nonzero_expected_count = 0
+    exec_nonzero_unexpected_count = 0
     structured_ops: dict[str, int] = {}
     bypass_count = 0
     bypass_detail: dict[str, int] = {}
@@ -1356,6 +1376,15 @@ def get_tool_usage(
             exec_ops += 1
             exec_entry_count += 1
             commands = entry.get("commands", [])
+            exit_code = entry.get("exit_code", 0)
+
+            if exit_code != 0 and exit_code != -1:
+                exec_nonzero_count += 1
+                first_cmd = commands[0] if commands and isinstance(commands, list) else ""
+                if is_expected_exec_nonzero(first_cmd):
+                    exec_nonzero_expected_count += 1
+                else:
+                    exec_nonzero_unexpected_count += 1
 
             if commands and isinstance(commands, list):
                 first_cmd = commands[0] if commands else ""
@@ -1428,6 +1457,9 @@ def get_tool_usage(
         "cd_rate_pct": cd_rate_pct,
         "cd_redundant_count": cd_redundant_count,
         "cd_redundant_rate_pct": cd_redundant_rate_pct,
+        "exec_nonzero_count": exec_nonzero_count,
+        "exec_nonzero_expected_count": exec_nonzero_expected_count,
+        "exec_nonzero_unexpected_count": exec_nonzero_unexpected_count,
         "structured_ops": dict(sorted(structured_ops.items(), key=lambda x: -x[1])),
         "bypass_count": bypass_count,
         "bypass_rate_pct": bypass_rate_pct,

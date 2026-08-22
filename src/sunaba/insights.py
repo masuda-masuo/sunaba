@@ -98,6 +98,40 @@ def compute_all_insights(
         "roundtrip_distribution": edit_verify_roundtrip_distribution(runs),
         "unused_tools": unused_tools(runs, all_tools=all_tools),
         "run_distributions": run_duration_op_distribution(runs),
+        "verify_failure_reasons": verify_failure_reasons(runs),
+        "initialize_distributions": initialize_duration_distribution(runs),
+        "busy_refusals": busy_refusal_counts(runs),
+    }
+
+
+def verify_failure_reasons(
+    state: dict[str, dict[str, Any]],
+    since: str | None = None,
+) -> dict[str, Any]:
+    """Return counts of verify failure reasons across runs.
+
+    Scans all runs for verify_outcome timeline entries and counts occurrences of
+    each reason in fail_kinds.
+    """
+    runs = filter_runs_by_period(state, from_ts=since, to_ts=None) if since is not None else state
+    by_kind: dict[str, int] = {}
+    total_failed = 0
+
+    for run in runs.values():
+        vt = run.get("verify_timeline", [])
+        for entry in vt:
+            if entry.get("type") == "verify_outcome":
+                if not entry.get("passed", True):
+                    total_failed += 1
+                    fail_kinds = entry.get("fail_kinds")
+                    if not fail_kinds:
+                        fail_kinds = ["unknown"]
+                    for kind in fail_kinds:
+                        by_kind[kind] = by_kind.get(kind, 0) + 1
+
+    return {
+        "total_failed": total_failed,
+        "by_kind": by_kind,
     }
 
 
@@ -131,6 +165,8 @@ def per_tool_error_rate(
             for next_op, n in next_ops.items():
                 rec[next_op] = rec.get(next_op, 0) + n
 
+    exec_expected = sum(run.get("exec_expected_failures", 0) for run in state.values())
+
     # Build per-tool results
     by_tool: list[dict[str, Any]] = []
     for op in sorted(totals.keys()):
@@ -138,12 +174,15 @@ def per_tool_error_rate(
         calls = t["calls"]
         fails = t["fails"]
         rate = round(fails / calls, 4) if calls > 0 else 0.0
-        by_tool.append({
+        row: dict[str, Any] = {
             "operation": op,
             "calls": calls,
             "failures": fails,
             "failure_rate": rate,
-        })
+        }
+        if op == "exec":
+            row["expected_failures"] = exec_expected
+        by_tool.append(row)
 
     return {
         "by_tool": by_tool,
@@ -318,7 +357,11 @@ def run_duration_op_distribution(
     # ── by repo ──
     by_repo: dict[str, list[dict[str, Any]]] = {}
     for run in state.values():
-        repo = run.get("repo") or "(no repo)"
+        repo = run.get("repo")
+        if not repo and run.get("session_label"):
+            repo = "(label) " + run["session_label"]
+        elif not repo:
+            repo = "(no repo)"
         dur = _run_duration_s(run)
         ops = sum(run.get("op_calls", {}).values())
         by_repo.setdefault(repo, []).append({"duration_s": dur, "op_count": ops})

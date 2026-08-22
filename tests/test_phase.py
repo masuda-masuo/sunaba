@@ -405,15 +405,12 @@ class TestAggregationDetails:
         assert run["phases"][0]["op_count"] == 2
 
     def test_edit_verify_roundtrip_detected(self):
-        """edit → verify-fail → edit should increment roundtrip count."""
+        """a failed verify outcome followed by another verify outcome in the same run increments roundtrips."""
         entries = [
-            _tool_entry("edit_file", params={"file_path": "a.py"},
-                        ts="2026-01-01T00:00:01Z"),
-            _tool_entry("verify_in_container", ts="2026-01-01T00:00:02Z"),
-            _entry("exec", commands=["pytest tests/"], exit_code=1,
-                   ts="2026-01-01T00:00:03Z"),
-            _tool_entry("edit_file", params={"file_path": "a.py"},
-                        ts="2026-01-01T00:00:04Z"),
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:02Z",
+                        params={"result": {"gate_passed": False, "fails": 1, "status": "failed"}}),
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:04Z",
+                        params={"result": {"gate_passed": True, "passes": 1, "fails": 0, "status": "passed"}}),
         ]
         state = aggregate_run_phases(None, entries)
         run = state["test-run"]
@@ -429,6 +426,42 @@ class TestAggregationDetails:
                    ts="2026-01-01T00:00:03Z"),
             _tool_entry("edit_file", params={"file_path": "a.py"},
                         ts="2026-01-01T00:00:04Z"),
+        ]
+        state = aggregate_run_phases(None, entries)
+        run = state["test-run"]
+        assert run["edit_verify_roundtrips"] == 0
+
+    def test_roundtrip_failed_as_last_verify(self) -> None:
+        """A failed verify that is the last verify of the run gives roundtrips == 0."""
+        entries = [
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:02Z",
+                        params={"result": {"gate_passed": False, "fails": 1, "status": "failed"}}),
+        ]
+        state = aggregate_run_phases(None, entries)
+        run = state["test-run"]
+        assert run["edit_verify_roundtrips"] == 0
+
+    def test_roundtrip_two_failures_then_pass(self) -> None:
+        """Two failed verify outcomes followed by a passing verify outcome gives roundtrips == 2."""
+        entries = [
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:02Z",
+                        params={"result": {"gate_passed": False, "fails": 1, "status": "failed"}}),
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:04Z",
+                        params={"result": {"gate_passed": False, "fails": 1, "status": "failed"}}),
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:06Z",
+                        params={"result": {"gate_passed": True, "passes": 1, "fails": 0, "status": "passed"}}),
+        ]
+        state = aggregate_run_phases(None, entries)
+        run = state["test-run"]
+        assert run["edit_verify_roundtrips"] == 2
+
+    def test_roundtrip_failure_with_later_edits_no_later_verify(self) -> None:
+        """A failed verify followed by edit calls but no later verify outcome gives roundtrips == 0."""
+        entries = [
+            _tool_entry("verify_in_container", ts="2026-01-01T00:00:02Z",
+                        params={"result": {"gate_passed": False, "fails": 1, "status": "failed"}}),
+            _tool_entry("edit_file", params={"file_path": "a.py"}, ts="2026-01-01T00:00:04Z"),
+            _tool_entry("edit_file", params={"file_path": "b.py"}, ts="2026-01-01T00:00:06Z"),
         ]
         state = aggregate_run_phases(None, entries)
         run = state["test-run"]
@@ -696,3 +729,21 @@ class TestHealthMarkers:
         assert full["published"] is True and inc["published"] is True
         assert full["stopped"] is True and inc["stopped"] is True
         assert full["last_op"] == "stop" and inc["last_op"] == "stop"
+
+
+class TestRepoAttributionAggregation:
+    """AC 3: A run whose only repo evidence is record_initialize(..., repo="o/r") shows repo == "o/r"."""
+
+    def test_repo_from_initialize(self):
+        entries = [
+            _entry("initialize", repo="owner/repo", ts="2026-01-01T00:00:01Z"),
+        ]
+        state = aggregate_run_phases(None, entries)
+        assert state["test-run"]["repo"] == "owner/repo"
+
+    def test_repo_none_when_neither(self):
+        entries = [
+            _entry("initialize", ts="2026-01-01T00:00:01Z"),
+        ]
+        state = aggregate_run_phases(None, entries)
+        assert state["test-run"]["repo"] is None

@@ -382,6 +382,48 @@ def type_check_in_container(container_id: str, file_path: str) -> str:
 # lets the LLM review what will be pushed before publish.
 
 
+def _classify_fail_reason(reason: str, full_status: str | None = None) -> str:
+    if reason.startswith("lint (") or reason.startswith("lint"):
+        return "lint"
+    if reason.startswith("type_check (") or reason.startswith("type_check"):
+        return "type_check"
+    if reason.startswith("patch_targets"):
+        return "patch_targets"
+    if "collection error" in reason or reason.startswith("collection error"):
+        return "collection_error"
+    if "pytest not available" in reason or "not available" in reason:
+        return "not_available"
+    if "test execution error" in reason:
+        return "test_error"
+    if full_status == "failed" or "failure(s)" in reason or "failed" in reason:
+        return "test_failure"
+    return "other"
+
+
+def _derive_fail_kinds(result: dict, full_status: str | None = None) -> list[str]:
+    if result.get("gate_passed", False):
+        return []
+    reasons = result.get("gate_fail_reasons", [])
+    kinds: list[str] = []
+    if reasons:
+        for r in reasons:
+            kind = _classify_fail_reason(r, full_status)
+            if kind not in kinds:
+                kinds.append(kind)
+    else:
+        if full_status == "failed":
+            kinds.append("test_failure")
+        elif full_status == "collection_error":
+            kinds.append("collection_error")
+        elif full_status == "not_available":
+            kinds.append("not_available")
+        elif full_status == "error":
+            kinds.append("test_error")
+        else:
+            kinds.append("other")
+    return kinds
+
+
 def _record_verify_outcome(container_id: str, result: dict) -> None:
     """Record the verify outcome in the journal for the phase view (#774).
 
@@ -397,13 +439,22 @@ def _record_verify_outcome(container_id: str, result: dict) -> None:
     outcome: dict = {"gate_passed": result.get("gate_passed", False)}
     tests = result.get("tests", {})
     full = tests.get("full", {})
-    if isinstance(full, dict):
+    full_status = None
+    if isinstance(full, dict) and full:
         outcome["passes"] = full.get("passed", full.get("passes", 0))
         outcome["fails"] = full.get("failed", full.get("fails", 0))
         outcome["collected"] = full.get("collected", 0)
-        outcome["status"] = full.get("status", "unknown")
+        full_status = full.get("status", tests.get("status", "unknown"))
+        outcome["status"] = full_status
+    elif isinstance(full, dict) and not full:
+        outcome["passes"] = 0
+        outcome["fails"] = 0
+        outcome["collected"] = 0
+        full_status = tests.get("status", "skipped")
+        outcome["status"] = full_status
     elif isinstance(full, list):
         outcome["status"] = "multi_lang"
+    outcome["fail_kinds"] = _derive_fail_kinds(result, full_status=full_status)
     record_tool_use(
         container_id[:12],
         "verify_in_container",

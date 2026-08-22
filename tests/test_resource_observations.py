@@ -314,6 +314,9 @@ class TestBusyRefusalInsight:
             "roundtrip_distribution",
             "unused_tools",
             "run_distributions",
+            "verify_failure_reasons",
+            "initialize_distributions",
+            "busy_refusals",
         }
         # The new metrics compute from the same period-filtered runs.
         from sunaba.insights import filter_runs_by_period

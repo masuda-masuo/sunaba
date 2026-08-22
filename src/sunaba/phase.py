@@ -369,6 +369,9 @@ def _incorporate(run: dict[str, Any], entry: dict[str, Any]) -> None:
         img = entry.get("image")
         if img:
             run["image"] = img
+        repo = entry.get("repo")
+        if repo and not run.get("repo"):
+            run["repo"] = repo
 
     # \u2500\u2500 resource observations (Issue #783) \u2500\u2500
     # ``initialize`` opens the init span (kept on first sighting -- a run
@@ -444,6 +447,7 @@ def _incorporate(run: dict[str, Any], entry: dict[str, Any]) -> None:
                 "fails": result_info.get("fails", 0),
                 "collected": result_info.get("collected", 0),
                 "status": result_info.get("status", "unknown"),
+                "fail_kinds": result_info.get("fail_kinds", []),
             })
         else:
             run["verify_timeline"].append({
@@ -536,6 +540,12 @@ def _track_op_metrics(run: dict[str, Any], entry: dict[str, Any]) -> None:
     # ── failure counting ──
     if _entry_failed(entry):
         run["op_failures"][eff] = run["op_failures"].get(eff, 0) + 1
+        if entry.get("operation") == "exec":
+            commands = entry.get("commands", [])
+            first_cmd = commands[0] if commands and isinstance(commands, list) else ""
+            from sunaba import journal
+            if journal.is_expected_exec_nonzero(first_cmd):
+                run["exec_expected_failures"] = run.get("exec_expected_failures", 0) + 1
         if not is_outcome:
             # A failing call is still an action: it is the immediately-
             # following action of any previously pending failures, so flush
@@ -567,74 +577,22 @@ def _recompute_durations(run: dict[str, Any]) -> None:
 
 
 def _update_roundtrips(run: dict[str, Any]) -> None:
-    """Recompute the edit → verify-fail → edit roundtrip count idempotently.
+    """Recompute verify retry loop count (redefined roundtrips).
 
-    Called on every ``_incorporate``; because it scans the *full* semantic
-    phase list and sets ``edit_verify_roundtrips`` to the computed total
-    (rather than incrementing), it is naturally idempotent — the same
-    journal entries always produce the same count regardless of
-    chunking or call frequency.
-
-    A roundtrip is counted for each consecutive triple of semantic
-    segments (edit, verify, edit) where the time window spanning the
-    verify segment contains **no** passing ``pytest_run`` or
-    ``verify_outcome`` entry.
+    Counts verify_outcome entries in verify_timeline with passed is False
+    that are followed by a later verify_outcome entry in the same run.
     """
-    semantic = _build_semantic(run["phases"])
-    timeline = run["verify_timeline"]
-
-    if len(semantic) < 3:
+    vt = run.get("verify_timeline", [])
+    outcomes = [e for e in vt if e.get("type") == "verify_outcome"]
+    if len(outcomes) < 2:
         run["edit_verify_roundtrips"] = 0
         return
 
     count = 0
-    for i in range(len(semantic) - 2):
-        a, b, c = semantic[i], semantic[i + 1], semantic[i + 2]
-        if a["phase"] != "edit" or b["phase"] != "verify" or c["phase"] != "edit":
-            continue
-
-        # Time window: from verify segment start to second edit segment start.
-        window_start = b.get("start_ts", "")
-        window_end = c.get("start_ts", "")
-
-        # A passing outcome anywhere in this window defeats the roundtrip.
-        passed = False
-        for vt in timeline:
-            vts = vt.get("ts", "")
-            if not (window_start <= vts <= window_end):
-                continue
-            if vt["type"] == "pytest_run" and vt.get("passed") is True:
-                passed = True
-                break
-            if vt["type"] == "verify_outcome" and vt.get("passed") is True:
-                passed = True
-                break
-
-        if not passed:
+    for v in outcomes[:-1]:
+        if not bool(v.get("passed", False)):
             count += 1
-
     run["edit_verify_roundtrips"] = count
-
-
-def _build_semantic(phases: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop ``"other"`` segments and merge consecutive same-phase segments.
-
-    Returns a new list; does not mutate *phases*.
-    """
-    semantic: list[dict[str, Any]] = []
-    for seg in phases:
-        p = seg["phase"]
-        if p == "other":
-            continue
-        if semantic and semantic[-1]["phase"] == p:
-            prev = semantic[-1]
-            prev["end_ts"] = seg.get("end_ts", prev.get("end_ts", ""))
-            prev["op_count"] += seg.get("op_count", 0)
-            for k, v in seg.get("breakdown", {}).items():
-                prev["breakdown"][k] = prev["breakdown"].get(k, 0) + v
-        else:
-            semantic.append(dict(seg))
-    return semantic
 
 
 # ── Public helpers for rendering ────────────────────────────────────────────

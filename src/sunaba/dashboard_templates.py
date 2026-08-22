@@ -536,6 +536,7 @@ _INSIGHTS_HTML: str = """<!DOCTYPE html>
 <div class="grid">
   {error_rate_panel}
   {first_verify_panel}
+  {verify_reasons_panel}
 </div>
 
 <div class="grid">

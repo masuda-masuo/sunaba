@@ -9,9 +9,12 @@ from __future__ import annotations
 from typing import Any
 
 from sunaba.insights import (
+    canonical_operation,
     compute_all_insights,
     edit_verify_roundtrip_distribution,
     first_verify_failure_by_image,
+    first_verify_failure_by_repo,
+    low_frequency_tools,
     per_tool_error_rate,
     run_duration_op_distribution,
     unused_tools,
@@ -79,6 +82,11 @@ def _ts(offset: int, base: str = "2026-01-01T00:00:") -> str:
 class TestPerToolErrorRate:
     """Metric 1: failure rate per operation/tool, plus recovery distribution."""
 
+    def test_canonical_operation_helper(self):
+        assert canonical_operation("tool:write_file") == "write_file"
+        assert canonical_operation("boundary:setup_branch") == "setup_branch"
+        assert canonical_operation("exec") == "exec"
+
     def test_basic_counts(self):
         """Operations that fail increment op_failures; op_calls count all calls."""
         # Issue #789: each exec journals a start (no exit_code -- the call)
@@ -97,10 +105,48 @@ class TestPerToolErrorRate:
         result = per_tool_error_rate(state)
 
         calls = {t["operation"]: t for t in result["by_tool"]}
-        assert calls["tool:edit_file"]["calls"] == 2
-        assert calls["tool:edit_file"]["failures"] == 0
+        assert calls["edit_file"]["calls"] == 2
+        assert calls["edit_file"]["failures"] == 0
+        assert calls["edit_file"]["sources"] == {"tool:edit_file": 2}
         assert calls["exec"]["calls"] == 2
         assert calls["exec"]["failures"] == 1
+
+        raw = {t["operation"]: t for t in result["raw_rows"]}
+        assert raw["tool:edit_file"]["calls"] == 2
+
+    def test_canonical_operations_aggregation_and_sources(self):
+        """Criterion 1: raw keys are merged into canonical tool rows with sources."""
+        # Fixture with write_file: 3, tool:write_file: 2, boundary:setup_branch: 1, setup_branch: 1, exec: 4 (1 failure)
+        entries = [
+            _tool_entry("write_file", ts=_ts(1)),
+            _tool_entry("write_file", ts=_ts(2)),
+            _entry("write_file", ts=_ts(3)),  # direct bare operation name
+            _entry("boundary_crossing", sub_operation="setup_branch", ts=_ts(4)),
+            _entry("setup_branch", ts=_ts(5)),
+            _entry("exec", ts=_ts(6), commands=["pytest"]),
+            _entry("exec", ts=_ts(7), commands=["pytest"], exit_code=1),
+            _entry("exec", ts=_ts(8), commands=["pytest"]),
+            _entry("exec", ts=_ts(9), commands=["pytest"]),
+        ]
+        state = aggregate_run_phases(None, entries)
+        result = per_tool_error_rate(state)
+
+        by_tool = {t["operation"]: t for t in result["by_tool"]}
+        assert by_tool["write_file"]["calls"] == 3
+        assert by_tool["write_file"]["failures"] == 0
+        assert by_tool["write_file"]["sources"] == {"write_file": 1, "tool:write_file": 2}
+
+        assert by_tool["setup_branch"]["calls"] == 2
+        assert by_tool["setup_branch"]["failures"] == 0
+        assert by_tool["setup_branch"]["sources"] == {"boundary:setup_branch": 1, "setup_branch": 1}
+
+        assert by_tool["exec"]["calls"] == 3
+        assert by_tool["exec"]["failures"] == 1
+        assert by_tool["exec"]["failure_rate"] == 0.3333
+
+        # raw_rows lists raw keys
+        raw_ops = [r["operation"] for r in result["raw_rows"]]
+        assert set(raw_ops) == {"tool:write_file", "write_file", "boundary:setup_branch", "setup_branch", "exec"}
 
     def test_failure_rate_zero_on_no_calls(self):
         """An operation that exists only in failures but has no calls is not
@@ -125,8 +171,8 @@ class TestPerToolErrorRate:
         result = per_tool_error_rate(state)
         rec = result["recovery_distribution"]
         assert "exec" in rec
-        assert rec["exec"].get("tool:edit_file") == 1
-        assert rec["exec"].get("tool:lint_in_container") == 1
+        assert rec["exec"].get("edit_file") == 1
+        assert rec["exec"].get("lint_in_container") == 1
 
     def test_verify_outcome_is_counted_as_failure(self):
         """A verify_in_container outcome with gate_passed=False is a failure."""
@@ -139,8 +185,8 @@ class TestPerToolErrorRate:
         calls = {t["operation"]: t for t in result["by_tool"]}
         # The first entry is a verify_call (not an outcome), the second is an outcome.
         # Outcome entries are not counted as calls, but they are counted as failures.
-        assert calls.get("tool:verify_in_container", {}).get("calls", 0) == 1
-        assert calls.get("tool:verify_in_container", {}).get("failures", 0) == 1
+        assert calls.get("verify_in_container", {}).get("calls", 0) == 1
+        assert calls.get("verify_in_container", {}).get("failures", 0) == 1
 
     def test_verify_outcome_failure_recovery_recorded(self):
         """A failed verify outcome must be queued so the next call is
@@ -154,7 +200,7 @@ class TestPerToolErrorRate:
         state = aggregate_run_phases(None, entries)
         result = per_tool_error_rate(state)
         rec = result["recovery_distribution"]
-        assert rec.get("tool:verify_in_container", {}).get("tool:edit_file") == 1
+        assert rec.get("verify_in_container", {}).get("edit_file") == 1
 
     def test_lint_outcome_failure_recovery_recorded(self):
         """The same holds for other two-entry tools, e.g. lint_in_container."""
@@ -167,7 +213,7 @@ class TestPerToolErrorRate:
         state = aggregate_run_phases(None, entries)
         result = per_tool_error_rate(state)
         rec = result["recovery_distribution"]
-        assert rec.get("tool:lint_in_container", {}).get("tool:edit_file") == 1
+        assert rec.get("lint_in_container", {}).get("edit_file") == 1
 
     def test_consecutive_failures_each_get_recovery(self):
         """exec → exec-fail → edit: the second exec is the first failure's
@@ -187,7 +233,7 @@ class TestPerToolErrorRate:
         result = per_tool_error_rate(state)
         rec = result["recovery_distribution"]["exec"]
         assert rec.get("exec") == 1
-        assert rec.get("tool:edit_file") == 1
+        assert rec.get("edit_file") == 1
 
 
 # ── Metric 2: First-verify failure rate by image ───────────────────
@@ -254,6 +300,43 @@ class TestFirstVerifyFailureByImage:
         state = aggregate_run_phases(None, entries)
         result = first_verify_failure_by_image(state)
         assert result["overall"]["total_runs_with_verify"] == 0
+
+
+class TestFirstVerifyFailureByRepo:
+    """Share of runs whose first verify failed, grouped by repo."""
+
+    def test_grouped_by_repo(self):
+        """Criterion 2: groups by repo, handles (no repo), overall numbers match image variant."""
+        entries = [
+            _entry("initialize", ts=_ts(1), run_id="r1", image="python:3.12", repo="repoA"),
+            _tool_entry("verify_in_container", ts=_ts(2), run_id="r1"),
+            _verify_outcome(True, run_id="r1", ts=_ts(3)),
+
+            _entry("initialize", ts=_ts(4), run_id="r2", image="node:20", repo="repoB"),
+            _tool_entry("verify_in_container", ts=_ts(5), run_id="r2"),
+            _verify_outcome(False, run_id="r2", ts=_ts(6)),
+
+            _entry("initialize", ts=_ts(7), run_id="r3", image="python:3.12"),  # no repo
+            _tool_entry("verify_in_container", ts=_ts(8), run_id="r3"),
+            _verify_outcome(True, run_id="r3", ts=_ts(9)),
+        ]
+        state = aggregate_run_phases(None, entries)
+        res_repo = first_verify_failure_by_repo(state)
+        res_img = first_verify_failure_by_image(state)
+
+        by_repo = {r["repo"]: r for r in res_repo["by_repo"]}
+        assert "repoA" in by_repo
+        assert by_repo["repoA"]["first_verify_failed"] == 0
+        assert by_repo["repoA"]["failure_rate"] == 0.0
+
+        assert "repoB" in by_repo
+        assert by_repo["repoB"]["first_verify_failed"] == 1
+        assert by_repo["repoB"]["failure_rate"] == 1.0
+
+        assert "(no repo)" in by_repo
+        assert by_repo["(no repo)"]["first_verify_failed"] == 0
+
+        assert res_repo["overall"] == res_img["overall"]
 
 
 # ── Metric 3: Edit→verify roundtrip distribution ───────────────────
@@ -351,6 +434,39 @@ class TestUnusedTools:
         assert "exec" not in ops
         assert "stop" not in ops
         assert "tool:edit_file" in ops
+
+
+class TestLowFrequencyTools:
+    """Low-frequency tools (<= max_calls)."""
+
+    def test_low_frequency_filtering_and_sorting(self):
+        """Criterion 3: returns tools with <= max_calls, sorted by calls then name, with reasons."""
+        entries = [
+            # tool_b called 3 times
+            _tool_entry("tool_b", ts=_ts(1)),
+            _tool_entry("tool_b", ts=_ts(2)),
+            _tool_entry("tool_b", ts=_ts(3)),
+            # tool_c called 6 times
+            _tool_entry("tool_c", ts=_ts(4)),
+            _tool_entry("tool_c", ts=_ts(5)),
+            _tool_entry("tool_c", ts=_ts(6)),
+            _tool_entry("tool_c", ts=_ts(7)),
+            _tool_entry("tool_c", ts=_ts(8)),
+            _tool_entry("tool_c", ts=_ts(9)),
+            # tool_a called 0 times
+        ]
+        state = aggregate_run_phases(None, entries)
+        all_tools = {"tool_a", "tool_b", "tool_c"}
+        res = low_frequency_tools(state, all_tools=all_tools, max_calls=5)
+
+        assert len(res) == 2
+        assert res[0]["operation"] == "tool_a"
+        assert res[0]["calls"] == 0
+        assert res[0]["reason"] == "zero calls in selected period"
+
+        assert res[1]["operation"] == "tool_b"
+        assert res[1]["calls"] == 3
+        assert res[1]["reason"] == "3 call(s) in selected period"
 
 
 # ── Metric 5: Run duration & op-count distributions ────────────────
@@ -531,8 +647,10 @@ class TestComputeAllInsights:
         expected_keys = {
             "per_tool_error_rate",
             "first_verify_failure_by_image",
+            "first_verify_failure_by_repo",
             "roundtrip_distribution",
             "unused_tools",
+            "low_frequency_tools",
             "run_distributions",
             "verify_failure_reasons",
             "initialize_distributions",

@@ -723,3 +723,280 @@ class TestInitializeRunsIdleReap:
         )
 
         mock_reap.assert_called_once()
+
+
+class TestDefaultDockerName:
+    """Issue #862: managed containers get a meaningful Docker name by default."""
+
+    _IMAGE = "python@sha256:" + "0" * 64
+
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SUNABA_ENABLE_EGRESS_PROXY", "false")
+
+    @patch("sunaba.tools.container.lifecycle._reap_idle_containers")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
+    def test_default_name_from_clone_repo(
+        self,
+        mock_build: MagicMock,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+        mock_reap: MagicMock,
+    ) -> None:
+        """clone_repo='masuda-masuo/kusabi' -> sunaba-kusabi-HHMM."""
+        import re as _re
+
+        mock_container = _make_container()
+        mock_container.labels = {}
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.side_effect = Exception("not found")
+        mock_docker.return_value = mock_client
+        mock_build.return_value = {"command": "sleep infinity", "detach": True}
+        mock_reap.return_value = []
+
+        result = sandbox_initialize(
+            clone_repo="masuda-masuo/kusabi",
+            image=self._IMAGE,
+        )
+
+        assert not result.startswith("Error"), result
+        call_kwargs = mock_client.containers.run.call_args.kwargs
+        docker_name = call_kwargs.get("name", "")
+        assert _re.match(r"^sunaba-kusabi-\d{4}$", docker_name), docker_name
+        # NAME_LABEL must NOT be set for default names
+        labels = call_kwargs.get("labels", {})
+        assert "com.sunaba.name" not in labels
+        # The return message should include [docker name: ...]
+        assert "[docker name: sunaba-kusabi-" in result
+
+    @patch("sunaba.tools.container.lifecycle._reap_idle_containers")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
+    def test_explicit_name_sets_label_and_docker_name(
+        self,
+        mock_build: MagicMock,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+        mock_reap: MagicMock,
+    ) -> None:
+        """name='mybox' -> docker name 'mybox' + NAME_LABEL 'mybox'."""
+        mock_container = _make_container()
+        mock_container.labels = {}
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.side_effect = Exception("not found")
+        mock_docker.return_value = mock_client
+        def _build_side_effect(profile, **kwargs):
+            # Preserve the labels dict that sandbox_initialize passed in
+            return {"command": "sleep infinity", "detach": True, "labels": kwargs.get("labels", {})}
+        mock_build.side_effect = _build_side_effect
+        mock_reap.return_value = []
+
+        result = sandbox_initialize(
+            image=self._IMAGE,
+            name="mybox",
+        )
+
+        assert not result.startswith("Error"), result
+        call_kwargs = mock_client.containers.run.call_args.kwargs
+        assert call_kwargs.get("name") == "mybox"
+        labels = call_kwargs.get("labels", {})
+        assert labels.get("com.sunaba.name") == "mybox"
+        # Explicit name should NOT show [docker name: ...]
+        assert "[docker name:" not in result
+
+    @patch("sunaba.tools.container.lifecycle._reap_idle_containers")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
+    def test_default_name_collision_appends_suffix(
+        self,
+        mock_build: MagicMock,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+        mock_reap: MagicMock,
+    ) -> None:
+        """When sunaba-kusabi-HHMM exists, the run uses sunaba-kusabi-HHMM-2."""
+        import re as _re
+
+        mock_container = _make_container()
+        mock_container.labels = {}
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_build.return_value = {"command": "sleep infinity", "detach": True}
+        mock_reap.return_value = []
+
+        # Simulate that containers.get("sunaba-kusabi-XXXX") finds an existing one
+        # but "sunaba-kusabi-XXXX-2" is free.
+        existing = _make_container(container_id="existing123")
+        call_count = [0]
+
+        def _get(name_or_id):
+            call_count[0] += 1
+            # First call: the base name exists; second call: the -2 suffix is free
+            if call_count[0] == 1 and "sunaba-kusabi-" in str(name_or_id) and "-2" not in str(name_or_id):
+                return existing
+            raise Exception("not found")
+
+        mock_client.containers.get.side_effect = _get
+
+        result = sandbox_initialize(
+            clone_repo="masuda-masuo/kusabi",
+            image=self._IMAGE,
+        )
+
+        assert not result.startswith("Error"), result
+        call_kwargs = mock_client.containers.run.call_args.kwargs
+        docker_name = call_kwargs.get("name", "")
+        assert _re.match(r"^sunaba-kusabi-\d{4}-2$", docker_name), docker_name
+
+    @patch("sunaba.tools.container.lifecycle._reap_idle_containers")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
+    def test_api_error_race_retries_without_name(
+        self,
+        mock_build: MagicMock,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+        mock_reap: MagicMock,
+    ) -> None:
+        """APIError 'already in use' from containers.run -> retry without name."""
+        from docker.errors import APIError as DockerAPIError
+
+        mock_container = _make_container(container_id="retry12345")
+        mock_container.labels = {}
+        mock_client = MagicMock()
+        # First call raises APIError (name race), second succeeds
+        mock_client.containers.run.side_effect = [
+            DockerAPIError("409 Conflict: name 'sunaba-kusabi-1847' is already in use"),
+            mock_container,
+        ]
+        mock_client.containers.get.side_effect = Exception("not found")
+        mock_docker.return_value = mock_client
+        mock_build.return_value = {"command": "sleep infinity", "detach": True}
+        mock_reap.return_value = []
+
+        result = sandbox_initialize(
+            clone_repo="masuda-masuo/kusabi",
+            image=self._IMAGE,
+        )
+
+        assert not result.startswith("Error"), result
+        assert mock_client.containers.run.call_count == 2
+        # The second call should NOT have a name
+        second_call_kwargs = mock_client.containers.run.call_args_list[1].kwargs
+        assert "name" not in second_call_kwargs
+        # No [docker name: ...] in the result since the race fallback occurred
+        assert "[docker name:" not in result
+
+    @patch("sunaba.tools.container.lifecycle._reap_idle_containers")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
+    def test_default_name_image_alias_python(
+        self,
+        mock_build: MagicMock,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+        mock_reap: MagicMock,
+    ) -> None:
+        """image='python' (alias, no clone) -> sunaba-python-HHMM."""
+        import re as _re
+
+        mock_container = _make_container()
+        mock_container.labels = {}
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.side_effect = Exception("not found")
+        mock_docker.return_value = mock_client
+        mock_build.return_value = {"command": "sleep infinity", "detach": True}
+        mock_reap.return_value = []
+
+        result = sandbox_initialize(image="python")
+
+        assert not result.startswith("Error"), result
+        call_kwargs = mock_client.containers.run.call_args.kwargs
+        docker_name = call_kwargs.get("name", "")
+        assert _re.match(r"^sunaba-python-\d{4}$", docker_name), docker_name
+
+    @patch("sunaba.tools.container.lifecycle._reap_idle_containers")
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    @patch("sunaba.tools.container.lifecycle.build_secure_run_kwargs")
+    def test_default_name_no_clone_no_alias(
+        self,
+        mock_build: MagicMock,
+        mock_validate: MagicMock,
+        mock_ensure: MagicMock,
+        mock_docker: MagicMock,
+        mock_reap: MagicMock,
+    ) -> None:
+        """No clone_repo, raw image ref -> sunaba-HHMM."""
+        import re as _re
+
+        mock_container = _make_container()
+        mock_container.labels = {}
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.side_effect = Exception("not found")
+        mock_docker.return_value = mock_client
+        mock_build.return_value = {"command": "sleep infinity", "detach": True}
+        mock_reap.return_value = []
+
+        result = sandbox_initialize(image=self._IMAGE)
+
+        assert not result.startswith("Error"), result
+        call_kwargs = mock_client.containers.run.call_args.kwargs
+        docker_name = call_kwargs.get("name", "")
+        assert _re.match(r"^sunaba-\d{4}$", docker_name), docker_name
+
+
+class TestComputeDefaultDockerName:
+    """Unit tests for _compute_default_docker_name helper."""
+
+    def test_clone_repo_slug(self) -> None:
+        from sunaba.tools.container.lifecycle import _compute_default_docker_name
+        name = _compute_default_docker_name("masuda-masuo/kusabi", None, "2026-08-22T18:47:00+00:00")
+        assert name == "sunaba-kusabi-1847"
+
+    def test_clone_repo_special_chars(self) -> None:
+        from sunaba.tools.container.lifecycle import _compute_default_docker_name
+        name = _compute_default_docker_name("owner/my.repo_name", None, "2026-08-22T09:12:00+00:00")
+        assert name == "sunaba-my.repo_name-0912"
+
+    def test_image_alias(self) -> None:
+        from sunaba.tools.container.lifecycle import _compute_default_docker_name
+        name = _compute_default_docker_name(None, "python", "2026-08-22T09:12:00+00:00")
+        assert name == "sunaba-python-0912"
+
+    def test_image_alias_go(self) -> None:
+        from sunaba.tools.container.lifecycle import _compute_default_docker_name
+        name = _compute_default_docker_name(None, "go", "2026-08-22T21:01:00+00:00")
+        assert name == "sunaba-go-2101"
+
+    def test_no_clone_no_alias(self) -> None:
+        from sunaba.tools.container.lifecycle import _compute_default_docker_name
+        name = _compute_default_docker_name(None, None, "2026-08-22T21:01:00+00:00")
+        assert name == "sunaba-2101"
+
+    def test_raw_image_ref_not_alias(self) -> None:
+        from sunaba.tools.container.lifecycle import _compute_default_docker_name
+        name = _compute_default_docker_name(None, "ghcr.io/foo/bar@sha256:abc", "2026-08-22T00:30:00+00:00")
+        assert name == "sunaba-0030"

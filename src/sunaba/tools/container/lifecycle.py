@@ -7,6 +7,7 @@ import base64
 import json
 import logging
 import os
+import re
 import shlex
 import threading
 import time
@@ -101,6 +102,74 @@ logger: logging.Logger = logging.getLogger(__name__)
 #: Hard cap ratio for per-call mem_limit override (Issue #201).
 #: Override values exceeding this fraction of host memory are rejected.
 _HARD_CAP_RATIO: float = 0.9
+
+#: Known image aliases for default Docker name generation (Issue #862).
+#: Matches the keys in ``image_pins.json``; used when no ``clone_repo`` is
+#: given and the image argument is a known alias rather than a raw ref.
+_KNOWN_IMAGE_ALIASES: set[str] = {"full", "neutral", "python", "go", "rust", "js"}
+
+#: Maximum suffix iterations when resolving a default Docker name collision.
+#: After this many attempts, fall back to no name (Docker random) rather
+#: than failing the initialize.
+_MAX_DOCKER_NAME_TRIES: int = 20
+
+
+def _compute_default_docker_name(
+    clone_repo: str | None,
+    image: str | None,
+    created_at: str,
+) -> str:
+    """Compute a default Docker container name from init arguments (Issue #862).
+
+    Format: ``sunaba-{slug}-{HHMM}`` where *slug* is derived from *clone_repo*
+    (the repo short name) or *image* (when it is a known alias), and *HHMM*
+    is the local-time creation hour+minute extracted from *created_at*.
+
+    When neither source provides a slug, the name is ``sunaba-{HHMM}``.
+    """
+    # Extract HHMM from the ISO timestamp (local time via datetime.now()).
+    # created_at is an ISO-8601 string; HH and MM sit at fixed offsets.
+    # Example: "2026-08-22T18:47:00+00:00" -> "1847"
+    hhmm = created_at[11:13] + created_at[14:16]
+
+    slug: str | None = None
+    if clone_repo:
+        # clone_repo is "owner/name" -> extract "name"
+        repo_name = clone_repo.split("/")[-1]
+        # Slug: lower-case, replace characters outside [a-z0-9_.-] with '-'
+        slug = re.sub(r"[^a-z0-9_.\-]", "-", repo_name.lower())
+    elif image and image in _KNOWN_IMAGE_ALIASES:
+        slug = image
+
+    if slug:
+        return f"sunaba-{slug}-{hhmm}"
+    return f"sunaba-{hhmm}"
+
+
+def _docker_name_exists(client: Any, name: str) -> bool:
+    """Check whether any Docker container (running or stopped) has *name*."""
+    try:
+        client.containers.get(name)
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_docker_name(client: Any, base_name: str) -> str | None:
+    """Find a unique Docker name, appending ``-2``, ``-3``, … on collision.
+
+    Returns *base_name* when it is already free, a suffixed variant when
+    the base is taken, or ``None`` if all attempts are exhausted (caller
+    should fall back to Docker-random naming).
+    """
+    if not _docker_name_exists(client, base_name):
+        return base_name
+    for i in range(2, _MAX_DOCKER_NAME_TRIES + 1):
+        candidate = f"{base_name}-{i}"
+        if not _docker_name_exists(client, candidate):
+            return candidate
+    return None
+
 
 #: How often the async ``sandbox_initialize`` emits a progress notification to
 #: keep the MCP/HTTP connection alive during slow setup (Issue #298).  Must be
@@ -584,6 +653,23 @@ def sandbox_initialize(
         labels[NAME_LABEL] = name
     if session_label:
         labels[SESSION_LABEL] = session_label
+
+    # Issue #862: generate a default Docker name when no explicit name is given,
+    # so containers are identifiable in Docker Desktop by their name.
+    docker_name: str | None = None
+    default_docker_name_msg: str | None = None
+    if name:
+        docker_name = name
+    else:
+        local_created_at = datetime.now().isoformat(timespec="seconds")
+        base_default = _compute_default_docker_name(
+            clone_repo, image, local_created_at,
+        )
+        resolved_name = _resolve_docker_name(client, base_default)
+        if resolved_name is not None:
+            docker_name = resolved_name
+            default_docker_name_msg = resolved_name
+
     # The workspace is the container's working directory, so an exec that
     # names no workdir still runs in the repo root (#600).  Docker records it
     # in the container config, which is where resolve_git_root reads the repo
@@ -598,6 +684,8 @@ def sandbox_initialize(
         working_dir=clone_dest,
         **resource_overrides,
     )
+    if docker_name is not None:
+        run_kwargs["name"] = docker_name
     if proxy_runtime is not None:
         run_kwargs = proxy_lifecycle.apply_network(run_kwargs, proxy_runtime)
 
@@ -605,6 +693,24 @@ def sandbox_initialize(
         _ensure_image(resolved)
         container = client.containers.run(resolved, **run_kwargs)
         _ensure_workspace(container, clone_dest)
+    except APIError as e:
+        # Issue #862: a name race condition (another container claimed the
+        # Docker name between our check and containers.run) is non-fatal:
+        # retry once without a name rather than failing the sandbox.
+        if docker_name is not None and "already in use" in str(e).lower():
+            logger.warning(
+                "Docker name %r race condition, retrying without name: %s",
+                docker_name, e,
+            )
+            run_kwargs.pop("name", None)
+            default_docker_name_msg = None
+            try:
+                container = client.containers.run(resolved, **run_kwargs)
+                _ensure_workspace(container, clone_dest)
+            except Exception as e2:
+                return f"Error: {e2}"
+        else:
+            return f"Error: {e}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -737,12 +843,16 @@ def sandbox_initialize(
     net_state = "on" if allow_network else "off"
     net_msg = f" [network: {net_state}]"
     name_msg = f" [name: {name}]" if name else ""
+    docker_name_msg = ""
+    if not name and default_docker_name_msg is not None:
+        docker_name_msg = f" [docker name: {default_docker_name_msg}]"
     return (
         cid
         + clone_msg
         + pr_msg
         + net_msg
         + name_msg
+        + docker_name_msg
         + " [advisory: if you intend to edit or publish, "
         + "call get_workflow_guide first]"
     )

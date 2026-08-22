@@ -1164,3 +1164,52 @@ class TestBypassCountsOnlySimpleCommands:
             "wc -l < a",
         ):
             assert not _is_simple_command(compound), compound
+
+
+class TestRepoAttributionAndExecNonzero:
+    """Tests for record_initialize repo parameter (AC 3) and exec non-zero split (AC 5)."""
+
+    def test_record_initialize_records_repo(self, tmp_path: Path) -> None:
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_BACKUP_PATH", journal_dir / "journal.log.1"), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir), \
+             patch("sunaba.journal._state_synced", False):
+            record_initialize("abc123456789", "python:3.12", repo="owner/repo")
+            text = log_path.read_text(encoding="utf-8")
+        assert '"repo": "owner/repo"' in text
+
+    def test_is_expected_exec_nonzero(self) -> None:
+        from sunaba.journal import is_expected_exec_nonzero
+        assert is_expected_exec_nonzero("grep -n foo bar.py") is True
+        assert is_expected_exec_nonzero("ls missing") is True
+        assert is_expected_exec_nonzero("test -f foo") is True
+        assert is_expected_exec_nonzero("[ -f foo ]") is True
+        assert is_expected_exec_nonzero("diff a b") is True
+        assert is_expected_exec_nonzero("cmp a b") is True
+        assert is_expected_exec_nonzero("cd /nope") is False
+        assert is_expected_exec_nonzero("python script.py") is False
+
+    def test_get_tool_usage_exec_nonzero_split(self, tmp_path: Path) -> None:
+        """AC 5: get_tool_usage on fixture reports nonzero 4, expected 2, unexpected 2."""
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+        log_path = journal_dir / "journal.log"
+        commands = [
+            ("grep x f", 1),          # search (expected)
+            ("ls missing", 2),        # list (expected)
+            ("cd /nope", 1),          # cd (unexpected)
+            ("python -m pytest", 1),  # python (unexpected)
+            ("true", 0),              # exit 0
+        ]
+        with patch("sunaba.journal._JOURNAL_PATH", log_path), \
+             patch("sunaba.journal._JOURNAL_DIR", journal_dir):
+            for cmd, ec in commands:
+                record_exec("abc123456789", [cmd], exit_code=ec)
+            usage = get_tool_usage()
+
+        assert usage["exec_nonzero_count"] == 4
+        assert usage["exec_nonzero_expected_count"] == 2
+        assert usage["exec_nonzero_unexpected_count"] == 2

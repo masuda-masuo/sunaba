@@ -90,17 +90,17 @@ def _verify_outcome(ts: str, gate_passed: bool = True, passes: int = 1, **kwargs
 
 
 def _looping_journal(n: int, run_id: str = "test-run") -> list[dict]:
-    """``n`` consecutive edit -> verify-fail -> edit roundtrips as journal entries."""
+    """``n`` consecutive verify-fail retries followed by a verify outcome as journal entries."""
     entries = [_entry("initialize", _seq(0), run_id=run_id)]
     t = 1
     for _ in range(n):
         entries.append(_tool("edit_file", _seq(t), run_id=run_id, params={"file_path": "a.py"}))
         t += 1
-        entries.append(_verify_pending(_seq(t), run_id=run_id))
-        t += 1
-        entries.append(_pytest(_seq(t), exit_code=1, run_id=run_id))
+        entries.append(_verify_outcome(_seq(t), gate_passed=False, passes=0, status="failed", run_id=run_id))
         t += 1
     entries.append(_tool("edit_file", _seq(t), run_id=run_id, params={"file_path": "a.py"}))
+    t += 1
+    entries.append(_verify_outcome(_seq(t), gate_passed=False, passes=0, status="failed", run_id=run_id))
     return entries
 
 

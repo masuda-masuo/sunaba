@@ -15,6 +15,7 @@ from sunaba.insights import (
     per_tool_error_rate,
     run_duration_op_distribution,
     unused_tools,
+    verify_failure_reasons,
 )
 from sunaba.phase import _PHASE_MAP, aggregate_run_phases
 
@@ -277,10 +278,8 @@ class TestEditVerifyRoundtripDistribution:
 
     def test_one_roundtrip(self):
         entries = [
-            _tool_entry("edit_file", ts=_ts(1)),  # edit
-            _tool_entry("verify_in_container", ts=_ts(2)),  # verify
-            _entry("exec", commands=["pytest"], exit_code=1, ts=_ts(3)),  # fail
-            _tool_entry("edit_file", ts=_ts(4)),  # edit (roundtrip!)
+            _verify_outcome(False, ts=_ts(1)),
+            _verify_outcome(True, ts=_ts(2)),
         ]
         state = aggregate_run_phases(None, entries)
         result = edit_verify_roundtrip_distribution(state)
@@ -295,11 +294,10 @@ class TestEditVerifyRoundtripDistribution:
             _tool_entry("edit_file", ts=_ts(1), run_id="r1"),
             _tool_entry("verify_in_container", ts=_ts(2), run_id="r1"),
             _entry("exec", commands=["pytest"], exit_code=0, ts=_ts(3), run_id="r1"),
-            # Run 2: one roundtrip
+            # Run 2: one roundtrip (failed verify outcome followed by another verify outcome)
             _tool_entry("edit_file", ts=_ts(4), run_id="r2"),
-            _tool_entry("verify_in_container", ts=_ts(5), run_id="r2"),
-            _entry("exec", commands=["pytest"], exit_code=1, ts=_ts(6), run_id="r2"),
-            _tool_entry("edit_file", ts=_ts(7), run_id="r2"),
+            _verify_outcome(False, ts=_ts(5), run_id="r2"),
+            _verify_outcome(True, ts=_ts(6), run_id="r2"),
         ]
         state = aggregate_run_phases(None, entries)
         result = edit_verify_roundtrip_distribution(state)
@@ -536,6 +534,9 @@ class TestComputeAllInsights:
             "roundtrip_distribution",
             "unused_tools",
             "run_distributions",
+            "verify_failure_reasons",
+            "initialize_distributions",
+            "busy_refusals",
         }
         assert set(result.keys()) == expected_keys
 
@@ -566,3 +567,61 @@ class TestDeterminism:
         r1 = compute_all_insights(s1, all_tools=set(_PHASE_MAP.keys()))
         r2 = compute_all_insights(s2, all_tools=set(_PHASE_MAP.keys()))
         assert r1 == r2
+
+
+class TestVerifyFailureReasonsAndExecExpected:
+    """AC 2 & AC 5 unit tests in test_insights.py."""
+
+    def test_verify_failure_reasons_fixture(self):
+        """AC 2: 3 failed outcomes (lint, lint+type_check, pre-change without fail_kinds) -> lint:2, type_check:1, unknown:1, total_failed == 3; period filter excludes an older one."""
+        state = {
+            "run_old": {
+                "start_ts": "2026-01-01T00:00:00Z",
+                "last_ts": "2026-01-01T00:01:00Z",
+                "verify_timeline": [
+                    {"type": "verify_outcome", "passed": False, "fail_kinds": ["other"]},
+                ],
+            },
+            "run1": {
+                "start_ts": "2026-08-01T00:00:00Z",
+                "last_ts": "2026-08-01T00:01:00Z",
+                "verify_timeline": [
+                    {"type": "verify_outcome", "passed": False, "fail_kinds": ["lint"]},
+                ],
+            },
+            "run2": {
+                "start_ts": "2026-08-01T00:00:00Z",
+                "last_ts": "2026-08-01T00:01:00Z",
+                "verify_timeline": [
+                    {"type": "verify_outcome", "passed": False, "fail_kinds": ["lint", "type_check"]},
+                ],
+            },
+            "run3": {
+                "start_ts": "2026-08-01T00:00:00Z",
+                "last_ts": "2026-08-01T00:01:00Z",
+                "verify_timeline": [
+                    {"type": "verify_outcome", "passed": False},  # pre-change entry without fail_kinds
+                ],
+            },
+        }
+        res = verify_failure_reasons(state, since="2026-07-01T00:00:00Z")
+        assert res["total_failed"] == 3
+        assert res["by_kind"] == {"lint": 2, "type_check": 1, "unknown": 1}
+
+        insights = compute_all_insights(state, from_ts="2026-07-01T00:00:00Z")
+        assert insights["verify_failure_reasons"]["total_failed"] == 3
+        assert insights["verify_failure_reasons"]["by_kind"] == {"lint": 2, "type_check": 1, "unknown": 1}
+
+    def test_per_tool_error_rate_exec_expected_failures(self):
+        """AC 5: per_tool_error_rate exec row reports failures 4, expected_failures 2."""
+        state = {
+            "run1": {
+                "op_calls": {"exec": 10},
+                "op_failures": {"exec": 4},
+                "exec_expected_failures": 2,
+            }
+        }
+        res = per_tool_error_rate(state)
+        exec_row = next(r for r in res["by_tool"] if r["operation"] == "exec")
+        assert exec_row["failures"] == 4
+        assert exec_row["expected_failures"] == 2

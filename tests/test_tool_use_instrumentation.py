@@ -107,7 +107,7 @@ class TestTransformFileRecordsToolUse:
             code="def transform(text): return text",
         )
 
-        mock_record.assert_called_once_with(
+        mock_record.assert_any_call(
             "abc123def456", "transform_file", {"file_path": "/tmp/f.txt"}
         )
 
@@ -126,4 +126,6 @@ class TestTransformFileRecordsToolUse:
             code="def transform(text): return text",
         )
 
-        mock_record.assert_not_called()
+        mock_record.assert_any_call(
+            "abc123def456", "transform_file", {"result": {"ok": False, "error_kind": "container"}}
+        )

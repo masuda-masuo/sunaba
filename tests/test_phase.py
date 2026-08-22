@@ -747,3 +747,29 @@ class TestRepoAttributionAggregation:
         ]
         state = aggregate_run_phases(None, entries)
         assert state["test-run"]["repo"] is None
+
+
+class TestEditToolOpMetrics:
+    """Tests for edit tool call/failure/recovery metrics aggregation (Criterion 2)."""
+
+    def test_edit_file_outcomes_aggregation(self) -> None:
+        entries = [
+            _entry("initialize", ts="2026-01-01T00:00:01Z"),
+            # Call 1 (success)
+            _tool_entry("edit_file", params={"file_path": "a.py"}, ts="2026-01-01T00:00:02Z"),
+            _tool_entry("edit_file", params={"result": {"ok": True, "error_kind": None}}, ts="2026-01-01T00:00:03Z"),
+            # Call 2 (failure)
+            _tool_entry("edit_file", params={"file_path": "a.py"}, ts="2026-01-01T00:00:04Z"),
+            _tool_entry("edit_file", params={"result": {"ok": False, "error_kind": "not_found"}}, ts="2026-01-01T00:00:05Z"),
+            # Next op: read_file_range (recovery action)
+            _tool_entry("read_file_range", ts="2026-01-01T00:00:06Z"),
+        ]
+        state = aggregate_run_phases(None, entries)
+        run = state["test-run"]
+
+        # Calls count only non-outcome entries (N=2)
+        assert run["op_calls"]["tool:edit_file"] == 2
+        # Failures count failed outcomes (1)
+        assert run["op_failures"]["tool:edit_file"] == 1
+        # Failure recovery records the next op after edit failure
+        assert run["failure_recovery"].get("tool:edit_file", {}).get("tool:read_file_range") == 1

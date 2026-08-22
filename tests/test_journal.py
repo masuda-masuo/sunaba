@@ -6,7 +6,7 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sunaba.journal import (
     classify_exec_command,
@@ -1213,3 +1213,73 @@ class TestRepoAttributionAndExecNonzero:
         assert usage["exec_nonzero_count"] == 4
         assert usage["exec_nonzero_expected_count"] == 2
         assert usage["exec_nonzero_unexpected_count"] == 2
+
+
+class TestJournalDockerLabelFallback:
+    """Tests for journal get_or_create_run_id and get_session_label fallback to Docker labels."""
+
+    @patch("sunaba.tools.common._docker")
+    def test_run_id_and_session_label_read_from_docker_labels(self, mock_docker: MagicMock) -> None:
+        from sunaba.journal import (
+            _run_map,
+            _run_map_lock,
+            _session_map,
+            _session_map_lock,
+            get_or_create_run_id,
+            get_session_label,
+        )
+        from sunaba.security import RUN_ID_LABEL, SESSION_LABEL
+
+        mock_container = MagicMock()
+        mock_container.labels = {
+            RUN_ID_LABEL: "run_from_label_123",
+            SESSION_LABEL: "label_sess_x",
+        }
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with _run_map_lock:
+            _run_map.clear()
+        with _session_map_lock:
+            _session_map.clear()
+
+        # Should fetch from Docker labels and store in in-process maps
+        assert get_or_create_run_id("cid123") == "run_from_label_123"
+        assert get_session_label("cid123") == "label_sess_x"
+
+        with _run_map_lock:
+            assert _run_map["cid123"] == "run_from_label_123"
+        with _session_map_lock:
+            assert _session_map["cid123"] == "label_sess_x"
+
+    @patch("sunaba.tools.common._docker")
+    def test_get_session_label_caches_none_for_unlabelled_containers(self, mock_docker: MagicMock) -> None:
+        from sunaba.journal import (
+            _session_map,
+            _session_map_lock,
+            get_session_label,
+        )
+
+        mock_container = MagicMock()
+        mock_container.labels = {}
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with _session_map_lock:
+            _session_map.clear()
+
+        # First call: cache miss, queries Docker, caches None
+        assert get_session_label("cid_unlabelled") is None
+        mock_client.containers.get.assert_called_once_with("cid_unlabelled")
+
+        with _session_map_lock:
+            assert "cid_unlabelled" in _session_map
+            assert _session_map["cid_unlabelled"] is None
+
+        mock_client.containers.get.reset_mock()
+
+        # Second call: cache hit, returns None immediately without calling Docker API
+        assert get_session_label("cid_unlabelled") is None
+        mock_client.containers.get.assert_not_called()

@@ -222,7 +222,8 @@ def _entry_failed(entry: dict[str, Any]) -> bool:
     * ``exec`` completion -- ``exit_code`` is not 0 (``None`` counts as 0).
       An exec START entry (no ``exit_code`` -- Issue #789) has no outcome
       yet and is never failed.
-    * ``tool_use`` outcome entry -- ``result.gate_passed`` is ``False``.
+    * ``tool_use`` outcome entry -- ``result.gate_passed`` is ``False``
+      or ``result.ok`` is ``False``.
 
     Every other operation type has no failure signal and is never failed.
     """
@@ -235,7 +236,11 @@ def _entry_failed(entry: dict[str, Any]) -> bool:
     if op == "tool_use":
         params = entry.get("params")
         if isinstance(params, dict) and isinstance(params.get("result"), dict):
-            return params["result"].get("gate_passed") is False
+            res = params["result"]
+            if res.get("gate_passed") is False:
+                return True
+            if res.get("ok") is False:
+                return True
     return False
 
 

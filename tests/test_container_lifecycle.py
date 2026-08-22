@@ -5,11 +5,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sunaba.journal import (
+    get_or_create_run_id,
+    get_session_label,
+)
 from sunaba.proxy_lifecycle import (
     EGRESS_NETWORK_NAME,
     ENABLE_EGRESS_PROXY_ENV,
     EgressProxyError,
     EgressProxyRuntime,
+)
+from sunaba.security import (
+    RUN_ID_LABEL,
+    SESSION_LABEL,
 )
 from sunaba.tools.container import (
     sandbox_initialize,
@@ -627,3 +635,54 @@ class TestSandboxInitializeEgressProxy:
         result = sandbox_initialize(image=self._IMAGE, allow_network=True)
         assert result.startswith("Error: egress proxy CA install failed")
         container.remove.assert_called_once_with(force=True)
+
+
+class TestDockerLabelPersistence:
+    """Tests for run_id and session_label Docker labels and simulated restart (Criterion 3)."""
+
+    _IMAGE = "python@sha256:" + "0" * 64
+
+    @patch("sunaba.tools.container._docker")
+    @patch("sunaba.tools.common._docker")
+    @patch("sunaba.tools.container.lifecycle._ensure_image")
+    @patch("sunaba.tools.container.lifecycle.validate_image_ref")
+    def test_container_labels_and_simulated_restart(
+        self,
+        mock_validate: MagicMock,
+        mock_ensure_image: MagicMock,
+        mock_common_docker: MagicMock,
+        mock_container_docker: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_container.id = "abc123def456"
+        mock_container.status = "running"
+        mock_container.exec_run.return_value = (0, (b"", b""))
+
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.return_value = mock_container
+        mock_common_docker.return_value = mock_client
+        mock_container_docker.return_value = mock_client
+
+        res = sandbox_initialize(image=self._IMAGE, session_label="sess-x", allow_network=False)
+        assert not res.startswith("Error")
+
+        labels = mock_client.containers.run.call_args.kwargs.get("labels", {})
+        assert RUN_ID_LABEL in labels
+        assert isinstance(labels[RUN_ID_LABEL], str) and len(labels[RUN_ID_LABEL]) > 0
+        assert labels.get(SESSION_LABEL) == "sess-x"
+
+        # Simulate restart: update mock container labels and clear in-memory maps
+        run_id = labels[RUN_ID_LABEL]
+        mock_container.labels = {
+            RUN_ID_LABEL: run_id,
+            SESSION_LABEL: "sess-x",
+        }
+
+        monkeypatch.setattr("sunaba.journal._run_map", {})
+        monkeypatch.setattr("sunaba.journal._session_map", {})
+
+        cid = mock_container.id
+        assert get_or_create_run_id(cid) == run_id
+        assert get_session_label(cid) == "sess-x"

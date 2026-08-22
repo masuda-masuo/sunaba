@@ -95,8 +95,10 @@ def compute_all_insights(
     return {
         "per_tool_error_rate": per_tool_error_rate(runs),
         "first_verify_failure_by_image": first_verify_failure_by_image(runs),
+        "first_verify_failure_by_repo": first_verify_failure_by_repo(runs),
         "roundtrip_distribution": edit_verify_roundtrip_distribution(runs),
         "unused_tools": unused_tools(runs, all_tools=all_tools),
+        "low_frequency_tools": low_frequency_tools(runs, all_tools=all_tools),
         "run_distributions": run_duration_op_distribution(runs),
         "verify_failure_reasons": verify_failure_reasons(runs),
         "initialize_distributions": initialize_duration_distribution(runs),
@@ -140,6 +142,15 @@ def verify_failure_reasons(
 # ──────────────────────────────────────────────────────────────────────
 
 
+def canonical_operation(key: str) -> str:
+    """Strip a leading 'tool:' or 'boundary:' prefix from operation *key*."""
+    if key.startswith("tool:"):
+        return key[5:]
+    if key.startswith("boundary:"):
+        return key[9:]
+    return key
+
+
 def per_tool_error_rate(
     state: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
@@ -150,27 +161,38 @@ def per_tool_error_rate(
     recovery distribution maps each failing operation to a dict of
     follow-up actions and their frequencies.
     """
-    totals: dict[str, dict[str, int]] = {}  # op → {"calls": N, "fails": N}
-    recovery: dict[str, dict[str, int]] = {}  # failed_op → {next_op: N}
+    raw_totals: dict[str, dict[str, int]] = {}  # raw_op → {"calls": N, "fails": N}
+    raw_keys_map: dict[str, set[str]] = {}  # canon_op → set of raw_op keys
+    canon_totals: dict[str, dict[str, int]] = {}  # canon_op → {"calls": N, "fails": N}
+    recovery: dict[str, dict[str, int]] = {}  # failed_canon_op → {next_canon_op: N}
 
     for run in state.values():
         for op, n in run.get("op_calls", {}).items():
-            totals.setdefault(op, {"calls": 0, "fails": 0})["calls"] += n
-        for op, n in run.get("op_failures", {}).items():
-            totals.setdefault(op, {"calls": 0, "fails": 0})["fails"] += n
+            raw_totals.setdefault(op, {"calls": 0, "fails": 0})["calls"] += n
+            c_op = canonical_operation(op)
+            raw_keys_map.setdefault(c_op, set()).add(op)
+            canon_totals.setdefault(c_op, {"calls": 0, "fails": 0})["calls"] += n
 
-        # Merge per-run failure_recovery
+        for op, n in run.get("op_failures", {}).items():
+            raw_totals.setdefault(op, {"calls": 0, "fails": 0})["fails"] += n
+            c_op = canonical_operation(op)
+            raw_keys_map.setdefault(c_op, set()).add(op)
+            canon_totals.setdefault(c_op, {"calls": 0, "fails": 0})["fails"] += n
+
+        # Merge per-run failure_recovery (canonicalising failed_op and next_op)
         for failed_op, next_ops in run.get("failure_recovery", {}).items():
-            rec = recovery.setdefault(failed_op, {})
+            c_failed = canonical_operation(failed_op)
+            rec = recovery.setdefault(c_failed, {})
             for next_op, n in next_ops.items():
-                rec[next_op] = rec.get(next_op, 0) + n
+                c_next = canonical_operation(next_op)
+                rec[c_next] = rec.get(c_next, 0) + n
 
     exec_expected = sum(run.get("exec_expected_failures", 0) for run in state.values())
 
-    # Build per-tool results
-    by_tool: list[dict[str, Any]] = []
-    for op in sorted(totals.keys()):
-        t = totals[op]
+    # Build raw_rows (the old per-key list)
+    raw_rows: list[dict[str, Any]] = []
+    for op in sorted(raw_totals.keys()):
+        t = raw_totals[op]
         calls = t["calls"]
         fails = t["fails"]
         rate = round(fails / calls, 4) if calls > 0 else 0.0
@@ -182,13 +204,43 @@ def per_tool_error_rate(
         }
         if op == "exec":
             row["expected_failures"] = exec_expected
+        raw_rows.append(row)
+
+    # Build canonical by_tool results
+    by_tool: list[dict[str, Any]] = []
+    for c_op in sorted(canon_totals.keys()):
+        t = canon_totals[c_op]
+        calls = t["calls"]
+        fails = t["fails"]
+        rate = round(fails / calls, 4) if calls > 0 else 0.0
+        sources = {
+            raw_k: raw_totals[raw_k]["calls"]
+            for raw_k in sorted(raw_keys_map[c_op])
+            if raw_k in raw_totals and raw_totals[raw_k]["calls"] > 0
+        }
+        if not sources:
+            sources = {
+                raw_k: raw_totals[raw_k]["calls"]
+                for raw_k in sorted(raw_keys_map[c_op])
+                if raw_k in raw_totals
+            }
+        row = {
+            "operation": c_op,
+            "calls": calls,
+            "failures": fails,
+            "failure_rate": rate,
+            "sources": sources,
+        }
+        if c_op == "exec":
+            row["expected_failures"] = exec_expected
         by_tool.append(row)
 
     return {
         "by_tool": by_tool,
-        "total_calls": sum(t["calls"] for t in totals.values()),
-        "total_failures": sum(t["fails"] for t in totals.values()),
+        "total_calls": sum(t["calls"] for t in raw_totals.values()),
+        "total_failures": sum(t["fails"] for t in raw_totals.values()),
         "recovery_distribution": recovery,
+        "raw_rows": raw_rows,
     }
 
 
@@ -252,6 +304,67 @@ def first_verify_failure_by_image(
 
     return {
         "by_image": by_image_list,
+        "overall": {
+            "total_runs_with_verify": total_runs_with_verify,
+            "total_first_failed": total_first_failed,
+            "failure_rate": overall_rate,
+        },
+    }
+
+
+def first_verify_failure_by_repo(
+    state: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Return the share of runs whose **first verify** failed, grouped by
+    repository (``run["repo"]`` or ``"(no repo)"``).
+
+    Runs without any verify outcome are excluded from the denominator.
+    """
+    by_repo: dict[str, dict[str, int]] = {}  # repo → {"total": N, "failed": N}
+    total_runs_with_verify = 0
+    total_first_failed = 0
+
+    for run in state.values():
+        repo = run.get("repo") or "(no repo)"
+        vt = run.get("verify_timeline", [])
+
+        # Find the first verify_outcome
+        first = None
+        for entry in vt:
+            if entry.get("type") == "verify_outcome":
+                first = entry
+                break
+        if first is None:
+            continue  # no verify — skip this run
+
+        info = by_repo.setdefault(repo, {"total": 0, "failed": 0})
+        info["total"] += 1
+        total_runs_with_verify += 1
+        if not first.get("passed", True):
+            info["failed"] += 1
+            total_first_failed += 1
+
+    by_repo_list: list[dict[str, Any]] = []
+    for repo in sorted(by_repo.keys()):
+        info = by_repo[repo]
+        total = info["total"]
+        failed = info["failed"]
+        rate = round(failed / total, 4) if total > 0 else 0.0
+        by_repo_list.append({
+            "repo": repo,
+            "total_runs": total,
+            "first_verify_failed": failed,
+            "failure_rate": rate,
+        })
+
+    overall_rate = (
+        round(total_first_failed / total_runs_with_verify, 4)
+        if total_runs_with_verify > 0
+        else 0.0
+    )
+
+    return {
+        "by_repo": by_repo_list,
         "overall": {
             "total_runs_with_verify": total_runs_with_verify,
             "total_first_failed": total_first_failed,
@@ -337,6 +450,57 @@ def unused_tools(
             "operation": tool,
             "reason": "zero calls in selected period",
         })
+    return result
+
+
+def low_frequency_tools(
+    state: dict[str, dict[str, Any]],
+    *,
+    all_tools: set[str] | None = None,
+    max_calls: int = 5,
+) -> list[dict[str, Any]]:
+    """Return tool/operation keys with **<= max_calls** in *state*.
+
+    Args:
+        state: Aggregated state from :func:`aggregate_run_phases`.
+        all_tools: Universe of known operation keys. When ``None``,
+            returns an empty list.
+        max_calls: Inclusive upper threshold for total calls (default 5).
+
+    Returns:
+        List of ``{operation, calls, reason}`` dicts, sorted by calls then name.
+    """
+    if all_tools is None:
+        return []
+
+    canon_tools = {
+        canonical_operation(t)
+        for t in all_tools
+    } - {"exec", "stop", "busy_refusal"}
+
+    calls_by_tool: dict[str, int] = {t: 0 for t in canon_tools}
+    for run in state.values():
+        for op, n in run.get("op_calls", {}).items():
+            c_op = canonical_operation(op)
+            if c_op in calls_by_tool:
+                calls_by_tool[c_op] += n
+
+    result: list[dict[str, Any]] = []
+    for tool in canon_tools:
+        n_calls = calls_by_tool[tool]
+        if n_calls <= max_calls:
+            reason = (
+                "zero calls in selected period"
+                if n_calls == 0
+                else f"{n_calls} call(s) in selected period"
+            )
+            result.append({
+                "operation": tool,
+                "calls": n_calls,
+                "reason": reason,
+            })
+
+    result.sort(key=lambda item: (item["calls"], item["operation"]))
     return result
 
 

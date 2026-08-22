@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import html as _html
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -480,6 +481,13 @@ def _strip_error_prefix(message: str) -> str:
     return message.removeprefix("Error: ")
 
 
+def _shorten_image_digest(image: str) -> str:
+    """Shorten 64-char sha256 digests in *image* to 4 hex chars + ellipsis."""
+    s = re.sub(r"sha256:([0-9a-fA-F]{4})[0-9a-fA-F]+", r"sha256:\1" + "\u2026", image)
+    s = re.sub(r"\b([0-9a-fA-F]{4})[0-9a-fA-F]{60}\b", r"\1" + "\u2026", s)
+    return s
+
+
 def _render_insights_page(
     insights: dict[str, Any],
     period_days: int | None,
@@ -500,18 +508,29 @@ def _render_insights_page(
         d30_cls = active_cls
 
     # ── Metric 1: Per-tool error rate ──
-    err = d["per_tool_error_rate"]
+    err = d.get("per_tool_error_rate") or {
+        "by_tool": [],
+        "total_calls": 0,
+        "total_failures": 0,
+        "recovery_distribution": {},
+    }
     err_rows: list[str] = []
-    for tool in err["by_tool"]:
+    for tool in err.get("by_tool", []):
         rate_color = "#7ee787" if tool["failure_rate"] == 0 else (
             "#ffa657" if tool["failure_rate"] < 0.2 else "#f97583"
         )
         extra_note = ""
         if tool["operation"] == "exec" and "expected_failures" in tool:
             extra_note = f' <span style="font-size:10px;color:#8b949e">(of which expected non-zero: {tool["expected_failures"]})</span>'
+        sources = tool.get("sources", {})
+        title_attr = ""
+        if len(sources) > 1:
+            sources_str = " + ".join(f"{k} {v:,}" for k, v in sources.items())
+            title_text = f'{tool["operation"]} ▸ {sources_str}'
+            title_attr = f' title="{_escape(title_text)}"'
         err_rows.append(
             f'<tr>'
-            f'<td class="mono">{_escape(tool["operation"])}</td>'
+            f'<td class="mono"{title_attr}>{_escape(tool["operation"])}</td>'
             f'<td>{tool["calls"]}</td>'
             f'<td>{tool["failures"]}{extra_note}</td>'
             f'<td style="color:{rate_color}">{tool["failure_rate"]:.1%}</td>'
@@ -547,55 +566,97 @@ def _render_insights_page(
         f'<div class="card">'
         f'<h2>1. Per-Tool Error Rate '
         f'<span style="font-size:11px;color:#8b949e;font-weight:400">'
-        f'({err["total_calls"]} calls, {err["total_failures"]} failures)'
+        f'({err.get("total_calls", 0)} calls, {err.get("total_failures", 0)} failures)'
         f'</span></h2>'
         f'{err_table}'
         f'{recovery_html}'
         f'</div>'
     )
 
-    # ── Metric 2: First-verify failure rate by image ──
-    fv = d["first_verify_failure_by_image"]
+    # ── Metric 2: First-verify failure rate by repo ──
+    fvr = d.get("first_verify_failure_by_repo") or {
+        "by_repo": [],
+        "overall": {"total_runs_with_verify": 0, "total_first_failed": 0, "failure_rate": 0.0},
+    }
+    fv = d.get("first_verify_failure_by_image") or {
+        "by_image": [],
+        "overall": {"total_runs_with_verify": 0, "total_first_failed": 0, "failure_rate": 0.0},
+    }
+    overall = fvr.get("overall") or fv.get("overall") or {
+        "total_runs_with_verify": 0, "total_first_failed": 0, "failure_rate": 0.0
+    }
+
+    fvr_rows: list[str] = []
+    for r in fvr.get("by_repo", []):
+        rate_color = "#7ee787" if r["failure_rate"] == 0 else (
+            "#ffa657" if r["failure_rate"] < 0.3 else "#f97583"
+        )
+        fvr_rows.append(
+            f'<tr>'
+            f'<td class="mono">{_escape(r["repo"])}</td>'
+            f'<td>{r["total_runs"]}</td>'
+            f'<td>{r["first_verify_failed"]}</td>'
+            f'<td style="color:{rate_color}">{r["failure_rate"]:.1%}</td>'
+            f'</tr>'
+        )
+    fvr_table = (
+        f'<table><thead><tr>'
+        f'<th>Repo</th><th>Runs</th><th>Failed</th><th>Rate</th>'
+        f'</tr></thead><tbody>{"".join(fvr_rows)}</tbody></table>'
+        if fvr_rows else '<div class="empty">No runs with verify data</div>'
+    )
+
     fv_rows: list[str] = []
-    for img in fv["by_image"]:
+    for img in fv.get("by_image", []):
         rate_color = "#7ee787" if img["failure_rate"] == 0 else (
             "#ffa657" if img["failure_rate"] < 0.3 else "#f97583"
         )
+        short_img = _shorten_image_digest(img["image"])
         fv_rows.append(
             f'<tr>'
-            f'<td class="mono">{_escape(img["image"])}</td>'
+            f'<td class="mono">{_escape(short_img)}</td>'
             f'<td>{img["total_runs"]}</td>'
             f'<td>{img["first_verify_failed"]}</td>'
             f'<td style="color:{rate_color}">{img["failure_rate"]:.1%}</td>'
             f'</tr>'
         )
-    overall = fv["overall"]
-    fv_table = (
-        f'<table><thead><tr>'
-        f'<th>Image</th><th>Runs</th><th>Failed</th><th>Rate</th>'
-        f'</tr></thead><tbody>{"".join(fv_rows)}</tbody></table>'
-        if fv_rows else '<div class="empty">No runs with verify data</div>'
-    )
+    by_image_details = ""
+    if fv_rows:
+        fv_img_table = (
+            f'<table><thead><tr>'
+            f'<th>Image</th><th>Runs</th><th>Failed</th><th>Rate</th>'
+            f'</tr></thead><tbody>{"".join(fv_rows)}</tbody></table>'
+        )
+        by_image_details = (
+            f'<details><summary>By container image</summary>'
+            f'{fv_img_table}'
+            f'</details>'
+        )
 
     first_verify_panel = (
         f'<div class="card">'
-        f'<h2>2. First-Verify Failure by Image '
+        f'<h2>2. First-Verify Failure by Repo '
         f'<span style="font-size:11px;color:#8b949e;font-weight:400">'
-        f'(overall: {overall["total_first_failed"]}/{overall["total_runs_with_verify"]} = {overall["failure_rate"]:.1%})'
+        f'(overall: {overall.get("total_first_failed", 0)}/{overall.get("total_runs_with_verify", 0)} = {overall.get("failure_rate", 0.0):.1%})'
         f'</span></h2>'
-        f'{fv_table}'
+        f'{fvr_table}'
+        f'{by_image_details}'
         f'</div>'
     )
 
     # ── Metric 3: Roundtrip distribution ──
-    rd = d["roundtrip_distribution"]
-    max_count = max(item["count"] for item in rd["histogram"]) if rd["histogram"] else 1
+    rd = d.get("roundtrip_distribution") or {
+        "histogram": [],
+        "mean_roundtrips": 0.0,
+        "total_runs": 0,
+    }
+    max_count = max((item["count"] for item in rd.get("histogram", [])), default=1)
     rt_bars = ""
-    for item in rd["histogram"]:
+    for item in rd.get("histogram", []):
         rt_bars += _render_bar(item["count"], max_count, item["bucket"], color="#d2a8ff")
     rt_mean_html = (
         f'<div style="font-size:12px;color:#f0f6fc;margin-top:8px">'
-        f'Mean: {rd["mean_roundtrips"]} roundtrips/run ({rd["total_runs"]} runs)'
+        f'Mean: {rd.get("mean_roundtrips", 0.0)} roundtrips/run ({rd.get("total_runs", 0)} runs)'
         f'</div>'
     )
     roundtrip_panel = (
@@ -606,31 +667,39 @@ def _render_insights_page(
         f'</div>'
     )
 
-    # ── Metric 4: Unused tools ──
-    unused = d["unused_tools"]
-    unused_rows: list[str] = []
-    for item in unused:
-        unused_rows.append(
+    # ── Metric 4: Low-frequency tools ──
+    low_freq = d.get("low_frequency_tools")
+    if low_freq is None and "unused_tools" in d:
+        low_freq = d.get("unused_tools")
+    if low_freq is None:
+        low_freq = []
+    low_freq_rows: list[str] = []
+    for item in low_freq:
+        calls_td = f'<td>{item["calls"]}</td>' if "calls" in item else ''
+        low_freq_rows.append(
             f'<tr><td class="mono">{_escape(item["operation"])}</td>'
+            f'{calls_td}'
             f'<td class="dim">{_escape(item.get("reason", ""))}</td></tr>'
         )
-    unused_table = (
-        f'<table><thead><tr><th>Operation</th><th>Reason</th></tr></thead>'
-        f'<tbody>{"".join(unused_rows)}</tbody></table>'
-        if unused_rows else '<div class="empty">All known tools have been used</div>'
+    has_calls = any("calls" in item for item in low_freq) or not low_freq
+    calls_th = '<th>Calls</th>' if has_calls else ''
+    low_freq_table = (
+        f'<table><thead><tr><th>Operation</th>{calls_th}<th>Reason</th></tr></thead>'
+        f'<tbody>{"".join(low_freq_rows)}</tbody></table>'
+        if low_freq_rows else '<div class="empty">No low-frequency tools</div>'
     )
     unused_panel = (
         f'<div class="card">'
-        f'<h2>4. Unused Tools '
+        f'<h2>4. Low-Frequency Tools (≤5 calls) '
         f'<span style="font-size:11px;color:#8b949e;font-weight:400">'
-        f'({len(unused)} candidate{"" if len(unused) == 1 else "s"})'
+        f'({len(low_freq)} candidate{"" if len(low_freq) == 1 else "s"})'
         f'</span></h2>'
-        f'{unused_table}'
+        f'{low_freq_table}'
         f'</div>'
     )
 
     # ── Metric 5: Run duration & op-count distributions ──
-    rdists = d["run_distributions"]
+    rdists = d.get("run_distributions") or {}
 
     # By repo
     repo_rows: list[str] = []
@@ -684,8 +753,14 @@ def _render_insights_page(
     )
 
     # \u2500\u2500 Metric 6 (Issue #783): initialize duration distribution \u2500\u2500
-    initd = d["initialize_duration_distribution"]
-    init_stats = initd["stats"]
+    initd = d.get("initialize_duration_distribution") or {
+        "stats": {"count": 0, "min": 0, "max": 0, "mean": 0, "median": 0},
+        "histogram": [],
+        "abandoned": 0,
+        "in_flight": 0,
+        "total_runs": 0,
+    }
+    init_stats = initd.get("stats") or {"count": 0, "min": 0, "max": 0, "mean": 0, "median": 0}
     max_init_count = max(
         (item["count"] for item in initd["histogram"]), default=1
     )
@@ -722,7 +797,7 @@ def _render_insights_page(
     )
 
     # \u2500\u2500 Metric 7 (Issue #783): per-pool busy refusals (initialize-wait proxy) \u2500\u2500
-    busy = d["busy_refusal_counts"]
+    busy = d.get("busy_refusal_counts") or {"by_pool": [], "total": 0}
     busy_rows: list[str] = []
     for item in busy["by_pool"]:
         pool_color = "#f97583" if item["count"] > 0 else "#8b949e"

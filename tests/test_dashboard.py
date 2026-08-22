@@ -15,6 +15,7 @@ import pytest
 from sunaba.dashboard import (
     _render_cd_rate_row,
     _render_health_badge,
+    _render_insights_page,
     get_dashboard_url,
     start_dashboard,
     stop_dashboard,
@@ -972,3 +973,75 @@ class TestCdRateRow:
 
         assert "52.5%" in html
         assert "0%" in html             # defensive default for the missing keys
+
+
+class TestInsightsPageRender:
+    """Render unit tests for /insights page."""
+
+    def test_render_canonical_tool_sources_tooltip(self) -> None:
+        insights = {
+            "per_tool_error_rate": {
+                "by_tool": [
+                    {
+                        "operation": "write_file",
+                        "calls": 10634,
+                        "failures": 0,
+                        "failure_rate": 0.0,
+                        "sources": {"write_file": 9802, "tool:write_file": 832},
+                    }
+                ],
+                "total_calls": 10634,
+                "total_failures": 0,
+                "recovery_distribution": {},
+            },
+        }
+        html = _render_insights_page(insights, None)
+        assert "write_file" in html
+        assert "title=\"write_file &#9656; write_file 9,802 + tool:write_file 832\"" in html or "title=\"write_file ▸ write_file 9,802 + tool:write_file 832\"" in html
+
+    def test_render_first_verify_by_repo_and_shortened_digest(self) -> None:
+        insights = {
+            "first_verify_failure_by_repo": {
+                "by_repo": [
+                    {"repo": "my-repo", "total_runs": 10, "first_verify_failed": 2, "failure_rate": 0.2},
+                ],
+                "overall": {"total_runs_with_verify": 10, "total_first_failed": 2, "failure_rate": 0.2},
+            },
+            "first_verify_failure_by_image": {
+                "by_image": [
+                    {
+                        "image": "sandbox@sha256:6f49a1b2c3d4e5f6789012345678901234567890123456789012345678901234",
+                        "total_runs": 10,
+                        "first_verify_failed": 2,
+                        "failure_rate": 0.2,
+                    }
+                ],
+                "overall": {"total_runs_with_verify": 10, "total_first_failed": 2, "failure_rate": 0.2},
+            },
+        }
+        html = _render_insights_page(insights, None)
+        assert "First-Verify Failure by Repo" in html
+        assert "my-repo" in html
+        assert "sandbox@sha256:6f49…" in html
+        assert "6f49a1b2c3d4e5f6789012345678901234567890123456789012345678901234" not in html
+
+    def test_render_low_frequency_tools(self) -> None:
+        insights = {
+            "low_frequency_tools": [
+                {"operation": "merge_abort", "calls": 0, "reason": "zero calls in selected period"},
+                {"operation": "merge_base", "calls": 2, "reason": "2 call(s) in selected period"},
+            ]
+        }
+        html = _render_insights_page(insights, None)
+        assert "Low-Frequency Tools (≤5 calls)" in html
+        assert "merge_abort" in html
+        assert "merge_base" in html
+        assert "<th>Calls</th>" in html
+        assert "<td>0</td>" in html
+        assert "<td>2</td>" in html
+
+    def test_render_defensive_defaults_for_missing_keys(self) -> None:
+        """Older snapshot dict missing new keys renders cleanly."""
+        insights = {}
+        html = _render_insights_page(insights, None)
+        assert "/insights" in html or "Per-Tool Error Rate" in html

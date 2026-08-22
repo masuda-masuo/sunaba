@@ -311,8 +311,10 @@ class TestBusyRefusalInsight:
         assert set(insights.keys()) == {
             "per_tool_error_rate",
             "first_verify_failure_by_image",
+            "first_verify_failure_by_repo",
             "roundtrip_distribution",
             "unused_tools",
+            "low_frequency_tools",
             "run_distributions",
             "verify_failure_reasons",
             "initialize_distributions",

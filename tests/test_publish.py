@@ -2668,3 +2668,208 @@ class TestPublishBaseAutoInclude:
         # Merge fields should still be present
         assert "merge_discarded_sha" in result
         assert "auto_include_applied" in result
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_upstream_merge_commit_bypasses_merge_mode(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Issue #887 AC-1: When HEAD^2 exists but git merge-base --is-ancestor
+        exits 0 (HEAD is contained in origin/<base_branch>), publish treats it
+        as an upstream merge commit: no merge_* / auto_include_* keys appear in
+        the response, git_prepare_commit runs with is_merge=False, and no
+        fetch for merge auto-include is triggered."""
+        container = _make_publish_container(
+            [
+                (0, b"", b""),                # test -f 'declared.txt'
+                (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE commit at HEAD)
+                # ancestor check exits 0 -> upstream merge commit
+                (0, b"", b""),                # git fetch origin (#863 guard probe)
+                (0, b"none\n", b""),          # MERGE_HEAD check
+                (0, b"", b""),                # checkout -b
+                (1, b"", b""),                # rev-parse --verify origin/fix/x
+                (0, b"abc1234\n", b""),       # rev-parse --verify origin/main
+                (0, b"", b""),                # git reset --mixed origin/main
+                (0, b"", b""),                # git add -- :(literal)declared.txt
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code
+                (0, b"[fix/x abc1234] Fix\n", b""),  # commit
+                (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
+                (0, b"", b""),                # git status --porcelain -z
+                (0, b"pushed\n", b""),        # push
+                (0, b"abc1234def5678\n", b""),# rev-parse HEAD
+            ],
+            ancestor_check_result=(0, b"", b""),
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="ghp_test",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+            ) as mock_fetch,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                base_branch="main",
+            ))
+
+        assert result["status"] == "pushed"
+        for key in (
+            "merge_discarded_sha",
+            "merge_parents",
+            "merge_discarded_undeclared",
+            "merge_degenerate",
+            "auto_include_applied",
+            "auto_include_skipped",
+        ):
+            assert key not in result
+        mock_fetch.assert_not_called()
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_local_merge_commit_enters_merge_mode(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Issue #887 AC-2: When HEAD^2 exists and ancestor check exits 1
+        (local merge), merge mode is entered as before and merge_discarded_sha
+        is present in the response."""
+        auto_include_data = AutoIncludeResult(
+            included={"moved.txt": "moved content from host\n"},
+            skipped=[],
+        )
+        container = _make_publish_container(
+            [
+                (0, b"", b""),                # test -f 'declared.txt'
+                (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
+                (0, b"merge1234def5678\n", b""),  # rev-parse HEAD
+                (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
+                (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
+                (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
+                (0, b"", b""),                # git fetch origin (#818)
+                (0, b"freshbase1234\n", b""), # rev-parse origin/main (P2)
+                (0, b"none\n", b""),          # MERGE_HEAD check
+                (0, b"", b""),                # checkout -b
+                (1, b"", b""),                # rev-parse --verify origin/fix/x
+                (0, b"abc1234\n", b""),       # rev-parse --verify origin/HEAD
+                (0, b"", b""),                # git reset --mixed origin/HEAD
+                (0, b"", b""),                # echo | base64 -d > moved.txt
+                (0, b"", b""),                # git add -- :(literal)moved.txt
+                (0, b"", b""),                # git add -- :(literal)declared.txt
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code
+                (0, b"abc1234\n", b""),       # rev-parse origin/HEAD (parent1)
+                (1, b"", b""),                # merge-base --is-ancestor p2 p1
+                (0, b"treeSHA1234\n", b""),   # git write-tree
+                (0, b"newSHAbcdef\n", b""),   # git commit-tree
+                (0, b"", b""),                # git update-ref HEAD newSHA
+                (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
+                (0, b"", b""),                # git status --porcelain -z
+                (0, b"pushed\n", b""),        # push
+                (0, b"newSHAbcdef\n", b""),   # rev-parse HEAD
+            ],
+            ancestor_check_result=(1, b"", b""),
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="ghp_test",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+                return_value=auto_include_data,
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                base_branch="main",
+            ))
+
+        assert result["status"] == "pushed"
+        assert result["merge_discarded_sha"] == "merge12"
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_ancestor_check_failure_fails_open_to_merge_mode_with_note(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Issue #887 AC-3: When HEAD^2 exists and ancestor check fails (non-0/1 exit code),
+        merge mode is entered and merge_detection_note explains why."""
+        auto_include_data = AutoIncludeResult(
+            included={"moved.txt": "moved content from host\n"},
+            skipped=[],
+        )
+        container = _make_publish_container(
+            [
+                (0, b"", b""),                # test -f 'declared.txt'
+                (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
+                (0, b"merge1234def5678\n", b""),  # rev-parse HEAD
+                (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
+                (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
+                (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
+                (0, b"", b""),                # git fetch origin (#818)
+                (0, b"freshbase1234\n", b""), # rev-parse origin/main (P2)
+                (0, b"none\n", b""),          # MERGE_HEAD check
+                (0, b"", b""),                # checkout -b
+                (1, b"", b""),                # rev-parse --verify origin/fix/x
+                (0, b"abc1234\n", b""),       # rev-parse --verify origin/HEAD
+                (0, b"", b""),                # git reset --mixed origin/HEAD
+                (0, b"", b""),                # echo | base64 -d > moved.txt
+                (0, b"", b""),                # git add -- :(literal)moved.txt
+                (0, b"", b""),                # git add -- :(literal)declared.txt
+                (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code
+                (0, b"abc1234\n", b""),       # rev-parse origin/HEAD (parent1)
+                (1, b"", b""),                # merge-base --is-ancestor p2 p1
+                (0, b"treeSHA1234\n", b""),   # git write-tree
+                (0, b"newSHAbcdef\n", b""),   # git commit-tree
+                (0, b"", b""),                # git update-ref HEAD newSHA
+                (0, b"declared.txt\n", b""),  # git diff-tree HEAD^ HEAD
+                (0, b"", b""),                # git status --porcelain -z
+                (0, b"pushed\n", b""),        # push
+                (0, b"newSHAbcdef\n", b""),   # rev-parse HEAD
+            ],
+            ancestor_check_result=(128, b"", b"fatal: ref missing"),
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._resolve_vcs_token",
+                return_value="ghp_test",
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_auto_include",
+                return_value=auto_include_data,
+            ),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+                base_branch="main",
+            ))
+
+        assert result["status"] == "pushed"
+        assert result["merge_discarded_sha"] == "merge12"
+        assert "merge_detection_note" in result
+        assert "ancestor check failed" in result["merge_detection_note"]
+        assert "128" in result["merge_detection_note"]

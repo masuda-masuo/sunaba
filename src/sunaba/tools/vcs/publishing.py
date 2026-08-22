@@ -1302,42 +1302,59 @@ def publish(
             "git rev-parse --verify HEAD^2 2>/dev/null"
         )
         if merge_ec == 0 and merge_out.strip():
-            # Capture the merge commit info *before* git_prepare_commit
-            # resets HEAD away.
-            _, _sha_out, _ = _run("git rev-parse HEAD")
-            merge_discarded_sha = _sha_out.strip()[:7]
-            _, p1_out, _ = _run("git rev-parse HEAD^1")
-            _, p2_out, _ = _run("git rev-parse HEAD^2")
-            merge_parents = [p1_out.strip()[:7], p2_out.strip()[:7]]
-
-            # Compute merge-touched paths (diagnostic only -- no security
-            # decision depends on this; see #712 principle).
-            _, diff_out, _ = _run(
-                "git diff --name-only HEAD^1 HEAD"
+            anc_base_ref = (
+                f"origin/{shlex.quote(base_branch)}"
+                if base_branch
+                else "origin/HEAD"
             )
-            merge_touched_paths = set(
-                p.strip() for p in diff_out.split("\n") if p.strip()
+            anc_ec, _, _ = _run(
+                f"git merge-base --is-ancestor HEAD {anc_base_ref} 2>/dev/null"
             )
-
-            # HEAD is a merge -- the container signals this but the
-            # auto-include content always comes from the host's own
-            # API call, never from the container's working tree.
-            git_token = _resolve_vcs_token()
-            try:
-                auto_result = _fetch_base_auto_include(
-                    repo, git_token, branch, base_branch,
+            is_local_merge = True
+            if anc_ec == 0:
+                is_local_merge = False
+            elif anc_ec != 1:
+                merge_info["merge_detection_note"] = (
+                    f"ancestor check failed for {anc_base_ref} (exit code {anc_ec})"
                 )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to fetch base auto-include for %s: %s",
-                    repo, exc,
-                )
-                auto_result = None
 
-            if auto_result is not None:
-                base_auto_include = auto_result.included
-                auto_include_skipped = auto_result.skipped
-                auto_include_included = auto_result.included
+            if is_local_merge:
+                # Capture the merge commit info *before* git_prepare_commit
+                # resets HEAD away.
+                _, _sha_out, _ = _run("git rev-parse HEAD")
+                merge_discarded_sha = _sha_out.strip()[:7]
+                _, p1_out, _ = _run("git rev-parse HEAD^1")
+                _, p2_out, _ = _run("git rev-parse HEAD^2")
+                merge_parents = [p1_out.strip()[:7], p2_out.strip()[:7]]
+
+                # Compute merge-touched paths (diagnostic only -- no security
+                # decision depends on this; see #712 principle).
+                _, diff_out, _ = _run(
+                    "git diff --name-only HEAD^1 HEAD"
+                )
+                merge_touched_paths = set(
+                    p.strip() for p in diff_out.split("\n") if p.strip()
+                )
+
+                # HEAD is a merge -- the container signals this but the
+                # auto-include content always comes from the host's own
+                # API call, never from the container's working tree.
+                git_token = _resolve_vcs_token()
+                try:
+                    auto_result = _fetch_base_auto_include(
+                        repo, git_token, branch, base_branch,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to fetch base auto-include for %s: %s",
+                        repo, exc,
+                    )
+                    auto_result = None
+
+                if auto_result is not None:
+                    base_auto_include = auto_result.included
+                    auto_include_skipped = auto_result.skipped
+                    auto_include_included = auto_result.included
 
         # Refresh remote-tracking refs so base resolution does not
         # work from a stale clone (#818).  Fetch failure must not

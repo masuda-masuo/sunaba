@@ -247,11 +247,11 @@ def _make_docker_compliant_container(
     container.exec_run.side_effect = _side_effect
     return container
 
-
 def _make_publish_container(
     exec_returns: list[tuple[int, bytes, bytes]],
     gitleaks_scan_output: bytes | None = None,
     git_diff_tree_output: bytes | None = None,
+    ancestor_check_result: tuple[int, bytes, bytes] | None = None,
 ):
     """Build a mock container for publish tests that transparently handles
     extra exec_run calls from the secret scan module.
@@ -331,6 +331,12 @@ def _make_publish_container(
 
         # --- Secret scan: cat .secrets.baseline ---
         if ".secrets.baseline" in cmd_str:
+            return (1, (b"", b""))
+
+        # --- Merge detection: ancestor check (#887) ---
+        if "git merge-base --is-ancestor HEAD" in cmd_str:
+            if ancestor_check_result is not None:
+                return (ancestor_check_result[0], (ancestor_check_result[1], ancestor_check_result[2]))
             return (1, (b"", b""))
 
         # --- exec_in_container: git diff-tree ---

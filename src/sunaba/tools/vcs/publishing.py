@@ -916,7 +916,7 @@ def _upstream_overwrite_error(
     }
 
 
-def _validate_manifest_path(run: RunFunc, f: str) -> dict[str, str] | None:
+def _validate_manifest_path(run: RunFunc, f: str, classification: dict[str, str] | None = None) -> dict[str, str] | None:
     """Validate one declared manifest path (publish's manifest mode).
 
     A declared path is acceptable when it is a regular file in the working
@@ -1036,6 +1036,8 @@ def _validate_manifest_path(run: RunFunc, f: str) -> dict[str, str] | None:
                     "Manifests must list regular files one by one."
                 ),
             }
+    if classification is not None:
+        classification[f] = "present" if ec == 0 else "deleted"
     return None
 
 
@@ -1134,6 +1136,10 @@ def publish(
 
     # --- Manifest mode vs fallback mode ---
     manifest = files is not None and len(files) > 0
+    # Classification established during manifest validation (present vs
+    # declared deletion).  Always bound: empty in legacy mode, where no
+    # manifest paths exist to classify.
+    manifest_classification: dict[str, str] = {}
 
     if manifest:
         assert files is not None  # type-narrowing hint for pyright
@@ -1143,7 +1149,7 @@ def publish(
         #   in HEAD (i.e. the file is known to git; deletion declaration,
         #   staged or not).
         for f in files:
-            path_err = _validate_manifest_path(_run, f)
+            path_err = _validate_manifest_path(_run, f, classification=manifest_classification)
             if path_err is not None:
                 return finish_json(path_err, verified)
 
@@ -1233,9 +1239,14 @@ def publish(
     # declare; the defaults keep the result-building code below branch-free.
     upstream_overwritten: list[str] = []
     upstream_guard_undetermined = ""
+    # Declared deletions that the secret scan skips (they are no longer in
+    # the worktree).  Always bound so the result envelope can report it in
+    # both manifest and legacy modes.
+    files_skipped_deleted: list[str] = []
     if manifest:
         assert files is not None
-        scan_files = [f for f in files if not os.path.isabs(f)]
+        scan_files = [f for f in files if not os.path.isabs(f) and manifest_classification.get(f) != "deleted"]
+        files_skipped_deleted = [f for f in files if manifest_classification.get(f) == "deleted"]
         scan_result = run_secret_scan(
             container, scan_files, working_dir,
             baseline_hashes=baseline_hashes_arg,
@@ -1243,11 +1254,13 @@ def publish(
         scan_state = scan_result.get("secret_scan_state", "")
         # Fail-closed: proceed ONLY on known-safe states.
         if scan_state not in ("clean", "skipped"):
+            deleted_n = len(files_skipped_deleted)
             record_boundary_crossing(
                 cid, "publish",
                 f"secret_scan state={scan_state}"
                 f" findings={len(scan_result.get('findings', []))}"
-                f" files={scan_result.get('files_scanned', [])}",
+                f" files={scan_result.get('files_scanned', [])}"
+                f" deleted={deleted_n}",
                 approved=False,
             )
             has_override = check_override(cid)  # noqa: F821  # peek, don't consume yet
@@ -1259,6 +1272,7 @@ def publish(
                     "secret_scan_state": scan_state,
                     "findings": scan_result.get("findings"),
                     "files_scanned": scan_result.get("files_scanned"),
+                    "files_skipped_deleted": files_skipped_deleted,
                     "scan_summary": scan_result.get("scan_summary"),
                     "error": (
                         "publish blocked by secret scan. "
@@ -1504,9 +1518,28 @@ def publish(
         _, diff_out, _ = exec_in_container(
             container,
             cmd=["/bin/sh", "-c",
-                 f"cd {shlex.quote(working_dir)} && git diff-tree --no-commit-id -r --name-only HEAD 2>/dev/null"],
+                 f"cd {shlex.quote(working_dir)} && git diff-tree --no-commit-id -r --name-status HEAD 2>/dev/null"],
         )
-        scan_files = [f.strip() for f in diff_out.splitlines() if f.strip()]
+        # Parse name-status: each line is "<status>\t<path>" (e.g. "A\tf",
+        # "M\tf", "D\tf").  A "D" status means the commit deleted the file,
+        # so it is no longer in the worktree and gitleaks cannot stat it --
+        # skip it from the scan and record it as a skipped deletion.  Lines
+        # without a tab (e.g. bare --name-only output) are treated as
+        # present, preserving the pre-existing behaviour.
+        files_skipped_deleted = []
+        scan_files = []
+        for raw in diff_out.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if "\t" in line:
+                status, path = line.split("\t", 1)
+            else:
+                status, path = "", line
+            if status == "D":
+                files_skipped_deleted.append(path)
+            else:
+                scan_files.append(path)
         scan_result = run_secret_scan(
             container, scan_files, working_dir,
             baseline_hashes=baseline_hashes_arg,
@@ -1514,11 +1547,13 @@ def publish(
         scan_state = scan_result.get("secret_scan_state", "")
         # Fail-closed: proceed ONLY on known-safe states.
         if scan_state not in ("clean", "skipped"):
+            deleted_n = len(files_skipped_deleted)
             record_boundary_crossing(
                 cid, "publish",
                 f"secret_scan state={scan_state}"
                 f" findings={len(scan_result.get('findings', []))}"
-                f" files={scan_result.get('files_scanned', [])}",
+                f" files={scan_result.get('files_scanned', [])}"
+                f" deleted={deleted_n}",
                 approved=False,
             )
             has_override = check_override(cid)  # noqa: F821
@@ -1530,6 +1565,7 @@ def publish(
                     "secret_scan_state": scan_state,
                     "findings": scan_result.get("findings"),
                     "files_scanned": scan_result.get("files_scanned"),
+                    "files_skipped_deleted": files_skipped_deleted,
                     "scan_summary": scan_result.get("scan_summary"),
                     "error": (
                         "publish blocked by secret scan. "
@@ -1623,6 +1659,7 @@ def publish(
     result["staged_files"] = committed_paths
     if manifest:
         result["worktree_leftover"] = worktree_leftover
+    result["files_skipped_deleted"] = files_skipped_deleted
     if upstream_overwritten:
         # The guard found upstream changes on these declared paths and
         # allow_upstream_overwrite waved them through: the push carries the

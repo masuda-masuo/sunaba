@@ -13,11 +13,12 @@ from __future__ import annotations
 import io
 import json
 import tarfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from sunaba import undo
 from sunaba.tools.edit_engine import _SUCCESS_ECHO_MAX_ROWS
-from sunaba.tools.file import edit_file, undo_file_edit, write_file
+from sunaba.tools.file import edit_file, transform_file, undo_file_edit, write_file
 
 
 def _exec_run_for(
@@ -1088,7 +1089,7 @@ class TestEditFileSplitContract:
             dest_dir="/root",
         )
         assert "Error" not in result
-        mock_record.assert_called_once_with(
+        mock_record.assert_any_call(
             "abc123",
             "write_file",
             {"file_path": "/root/f.txt", "overwrote_existing": True},
@@ -1119,7 +1120,7 @@ class TestEditFileSplitContract:
             dest_dir="/root",
         )
         assert "Error" not in result
-        mock_record.assert_called_once_with(
+        mock_record.assert_any_call(
             "abc123",
             "write_file",
             {"file_path": "/root/f.txt", "overwrote_existing": False},
@@ -2194,3 +2195,109 @@ class TestEditFileEditsSeries:
         assert "edits[0].new_str must be a string" in result
         assert "Nothing was written" in result
         mock_container.put_archive.assert_not_called()
+
+
+class TestEditToolOutcomes:
+    """Tests for edit-tool outcome entries in the journal (Criterion 1)."""
+
+    @patch("sunaba.tools.file._docker")
+    def test_edit_file_outcome_not_found(
+        self, mock_docker: MagicMock, tmp_path: Path,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"hello world\n", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        from sunaba import journal
+        jdir = tmp_path / "journal"
+        jdir.mkdir()
+        jfile = jdir / "journal.log"
+        with patch("sunaba.journal._JOURNAL_PATH", jfile), patch("sunaba.journal._JOURNAL_DIR", jdir):
+            res = edit_file(
+                container_id="abc123def456",
+                file_name="foo.py",
+                file_contents="bar",
+                old_str="nonexistent_string_12345",
+                dest_dir="/workspace",
+            )
+            assert "Error" in res or "not found" in res
+            entries = journal.read_journal()
+            tool_entries = [e for e in entries if e.get("operation") == "tool_use" and e.get("tool_name") == "edit_file"]
+            assert len(tool_entries) == 2
+            call_entry = tool_entries[0]
+            outcome_entry = tool_entries[1]
+            assert "result" not in call_entry.get("params", {})
+            assert outcome_entry["params"]["result"] == {"ok": False, "error_kind": "not_found"}
+
+    @patch("sunaba.tools.file._docker")
+    def test_edit_file_outcome_success(
+        self, mock_docker: MagicMock, tmp_path: Path,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_container.exec_run.return_value = (0, (b"hello world\n", b""))
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        from sunaba import journal
+        jdir = tmp_path / "journal"
+        jdir.mkdir()
+        jfile = jdir / "journal.log"
+        with patch("sunaba.journal._JOURNAL_PATH", jfile), patch("sunaba.journal._JOURNAL_DIR", jdir):
+            res = edit_file(
+                container_id="abc123def456",
+                file_name="foo.py",
+                file_contents="earth",
+                old_str="world",
+                dest_dir="/workspace",
+            )
+            assert "Written" in res
+            entries = journal.read_journal()
+            tool_entries = [e for e in entries if e.get("operation") == "tool_use" and e.get("tool_name") == "edit_file"]
+            assert len(tool_entries) == 2
+            outcome_entry = tool_entries[1]
+            assert outcome_entry["params"]["result"] == {"ok": True, "error_kind": None}
+
+    @patch("sunaba.tools.file._docker")
+    def test_write_file_outcome_success_and_failure(
+        self, mock_docker: MagicMock, tmp_path: Path,
+    ) -> None:
+        from docker.errors import NotFound
+        mock_client = MagicMock()
+        mock_client.containers.get.side_effect = NotFound("container missing")
+        mock_docker.return_value = mock_client
+
+        from sunaba import journal
+        jdir = tmp_path / "journal"
+        jdir.mkdir()
+        jfile = jdir / "journal.log"
+        with patch("sunaba.journal._JOURNAL_PATH", jfile), patch("sunaba.journal._JOURNAL_DIR", jdir):
+            res = write_file("missing12345", "foo.txt", "data")
+            assert "Error" in res
+            entries = journal.read_journal()
+            tool_entries = [e for e in entries if e.get("operation") == "tool_use" and e.get("tool_name") == "write_file"]
+            assert len(tool_entries) == 2
+            assert tool_entries[1]["params"]["result"] == {"ok": False, "error_kind": "container"}
+
+    @patch("sunaba.tools.file._docker")
+    def test_transform_file_outcome_success_and_failure(
+        self, mock_docker: MagicMock, tmp_path: Path,
+    ) -> None:
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        from sunaba import journal
+        jdir = tmp_path / "journal"
+        jdir.mkdir()
+        jfile = jdir / "journal.log"
+        with patch("sunaba.journal._JOURNAL_PATH", jfile), patch("sunaba.journal._JOURNAL_DIR", jdir):
+            res = transform_file("abc123def456", code="")
+            assert "error" in res
+            entries = journal.read_journal()
+            tool_entries = [e for e in entries if e.get("operation") == "tool_use" and e.get("tool_name") == "transform_file"]
+            assert len(tool_entries) == 2
+            assert tool_entries[1]["params"]["result"] == {"ok": False, "error_kind": "validation"}

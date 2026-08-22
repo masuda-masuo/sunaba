@@ -641,9 +641,9 @@ class TestTransformFileMultiWrapper:
         assert result["status"] == "ok"
         assert result["changed"] is True
         # The tool use records the targets it was given.
-        assert uses == [
-            ("abc123def456", "transform_file", {"paths": [self._A, self._B]}),
-        ]
+        assert uses[0] == (
+            "abc123def456", "transform_file", {"paths": [self._A, self._B]},
+        )
         # The unchanged file is reported and has no undo snapshot.
         assert result["files"] == [
             {
@@ -712,7 +712,8 @@ class TestTransformFileMultiWrapper:
 
         assert result["status"] == "error"
         assert "exactly one" in result["error"]
-        assert uses == []  # nothing recorded, nothing touched
+        assert uses[0] == ("abc123def456", "transform_file", {"file_path": self._A})
+        assert uses[1] == ("abc123def456", "transform_file", {"result": {"ok": False, "error_kind": "validation"}})
 
     def test_neither_file_path_nor_paths_is_an_error(self, monkeypatch) -> None:
         monkeypatch.setattr(

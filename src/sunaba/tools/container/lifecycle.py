@@ -20,6 +20,9 @@ from pydantic import BeforeValidator
 
 from sunaba import capture_health, proxy_lifecycle
 from sunaba.journal import (
+    _run_map,
+    _run_map_lock,
+    generate_run_id,
     get_last_activity_per_container,
     get_session_label,
     read_journal,
@@ -47,6 +50,8 @@ from sunaba.security import (
     CREATED_AT_LABEL,
     MANAGED_LABEL,
     NAME_LABEL,
+    RUN_ID_LABEL,
+    SESSION_LABEL,
     _detect_host_resources,
     _parse_mem_to_mb,
     build_secure_run_kwargs,
@@ -570,9 +575,15 @@ def sandbox_initialize(
     # this call times out before any journal entry is written (Issue #298).
     # Also stamp the user-assigned name label when provided (Issue #478).
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    labels: dict[str, str] = {CREATED_AT_LABEL: created_at}
+    run_id = generate_run_id()
+    labels: dict[str, str] = {
+        CREATED_AT_LABEL: created_at,
+        RUN_ID_LABEL: run_id,
+    }
     if name:
         labels[NAME_LABEL] = name
+    if session_label:
+        labels[SESSION_LABEL] = session_label
     # The workspace is the container's working directory, so an exec that
     # names no workdir still runs in the repo root (#600).  Docker records it
     # in the container config, which is where resolve_git_root reads the repo
@@ -597,7 +608,11 @@ def sandbox_initialize(
     except Exception as e:
         return f"Error: {e}"
 
-    cid = container.id[:12]
+    cid = str(container.id)[:12]
+    with _run_map_lock:
+        _run_map[cid] = run_id
+    if session_label:
+        set_session_label(cid, session_label)
     logger.info("Container %s started (image=%s)", cid, resolved)
     record_initialize(
         cid,

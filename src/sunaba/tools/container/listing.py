@@ -18,6 +18,8 @@ from sunaba.security import (
     MANAGED_LABEL,
     NAME_LABEL,
     NETWORK_LABEL,
+    RUN_ID_LABEL,
+    SESSION_LABEL,
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -144,6 +146,8 @@ def list_managed_containers() -> tuple[list[dict[str, Any]], str | None]:
         labels = getattr(c, "labels", None) or {}
         created_raw = labels.get(CREATED_AT_LABEL)
         name_val = labels.get(NAME_LABEL)
+        run_id_val = labels.get(RUN_ID_LABEL)
+        session_label_val = labels.get(SESSION_LABEL)
         age = _age_seconds(created_raw, now)
 
         idle = _age_seconds(last_activity.get(cid), now)
@@ -152,6 +156,8 @@ def list_managed_containers() -> tuple[list[dict[str, Any]], str | None]:
         result.append({
             "container_id": cid,
             "name": name_val,
+            "run_id": run_id_val,
+            "session_label": session_label_val,
             "kind": _container_kind(labels, getattr(c, "name", None)),
             "image": c.image.tags[0] if c.image.tags else str(c.image.short_id),
             "status": c.status,

@@ -34,6 +34,12 @@ CREATED_AT_LABEL: str = "com.sunaba.created_at"
 #: ``CREATED_AT_LABEL`` so it survives server restarts.
 NAME_LABEL: str = "com.sunaba.name"
 
+#: Docker label carrying the run_id assigned at container creation time.
+RUN_ID_LABEL: str = "sunaba.run_id"
+
+#: Docker label carrying the session_label assigned at container creation time.
+SESSION_LABEL: str = "sunaba.session_label"
+
 #: Docker label recording whether the container was created with
 #: ``allow_network=True`` (Issue #527).  Stamped by
 #: :func:`build_secure_run_kwargs` from ``profile.allow_network`` -- the very

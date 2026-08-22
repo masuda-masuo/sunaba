@@ -86,6 +86,78 @@ def _resolve_file_path_alias(
     return (file_path if file_path is not None else path), None
 
 
+def _write_file_impl(
+    container_id: str,
+    file_name: str,
+    file_contents: str,
+    dest_dir: str = WORKSPACE,
+) -> tuple[str, bool, str | None]:
+    """Create a file, or fully overwrite an existing one.
+
+    The file becomes exactly file_contents.  This tool never does
+    partial updates: to change part of an existing file (string
+    replace, line range, append) use edit_file; for bulk or computed
+    edits use transform_file.
+
+    An existing file's pre-write content is snapshotted first;
+    undo_file_edit restores it.  On .py files, content that does not
+    parse is flagged with a warning in the echo.
+
+    Args:
+        container_id: Container ID prefix.
+        file_name: Name of the file to write.
+        file_contents: Complete new content of the file.
+        dest_dir: Destination directory.
+
+    Returns:
+        Success or error message.
+    """
+    dest_path = posixpath.join(dest_dir, file_name)
+
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        record_tool_use(
+            container_id[:12],
+            "write_file",
+            {"file_path": dest_path, "overwrote_existing": False},
+        )
+        return f"Error: container {container_id[:12]} not found", False, "container"
+    except Exception as e:
+        record_tool_use(
+            container_id[:12],
+            "write_file",
+            {"file_path": dest_path, "overwrote_existing": False},
+        )
+        return f"Error: {e}", False, "container"
+
+    syntax_note = _python_syntax_note(dest_path, file_contents)
+
+    # Snapshot the pre-write content so undo_file_edit can restore it.
+    try:
+        existing: str | None = read_file(container, dest_path)
+    except ValueError:
+        existing = None  # new file -- nothing to snapshot
+    if existing is not None:
+        undo.save_version(container_id, dest_path, existing)
+
+    # overwrote_existing feeds the issue #630 measurement: how often a
+    # full overwrite hits a file that edit_file could have modified.
+    record_tool_use(
+        container_id[:12],
+        "write_file",
+        {"file_path": dest_path, "overwrote_existing": existing is not None},
+    )
+
+    try:
+        write_file_in_container(container, container_id[:12], dest_path, file_contents)
+    except ValueError as e:
+        return f"Error: {e}", False, "other"
+
+    return f"Written {len(file_contents)} bytes to {dest_path}" + syntax_note, True, None
+
+
 def write_file(
     container_id: str,
     file_name: str,
@@ -112,40 +184,393 @@ def write_file(
     Returns:
         Success or error message.
     """
+    res, ok, error_kind = _write_file_impl(container_id, file_name, file_contents, dest_dir)
+    record_tool_use(
+        container_id[:12],
+        "write_file",
+        {"result": {"ok": ok, "error_kind": error_kind}},
+    )
+    return res
+
+
+def _edit_file_impl(
+    container_id: str,
+    file_name: str,
+    file_contents: str,
+    dest_dir: str = WORKSPACE,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    append: bool = False,
+    old_str: str | None = None,
+    expected_count: int | None = None,
+    edits: list[dict] | None = None,
+    preserve: str | None = None,
+    line: int | None = None,
+    ast: bool | None = None,
+) -> tuple[str, bool, str | None]:
+    """Edit part of an existing file in the container.
+
+    Exactly one edit mode is required: string replace (old_str),
+    line-range (start_line[/end_line], 1-indexed inclusive), or
+    append=True.  The file must already exist -- to create or fully
+    overwrite one use write_file.
+
+    old_str replaces the exact string you provide (a multi-line match
+    is replaced whole).  A unique match is required: multiple matches
+    are rejected with line numbers, an inexact match retries with
+    whitespace stripped, and a miss returns the nearest region.
+
+    On .py files a definition-like old_str is resolved via AST first:
+    a no-op returns "No changes", and a failed resolution is surfaced
+    when file_contents is a complete definition (no silent string
+    fallback).
+
+    expected_count declares how many occurrences of old_str the file
+    should contain.  A mismatch is an error and nothing is written; a
+    match replaces every occurrence.
+
+    edits is an ordered list of replacement dicts applied as one
+    transaction.  Matching is against the original text (text
+    produced by an earlier entry is not seen); overlapping matches
+    are refused.  Either all apply or none does: one diff and one
+    undo snapshot per call.  Mutually exclusive with the other modes.
+
+    Args:
+        container_id: Container ID prefix.
+        file_name: Name of the file to edit.
+        file_contents: Replacement text for the chosen mode.
+        dest_dir: Destination directory.
+        start_line: Line-range start (1-indexed, inclusive).
+        end_line: Line-range end (1-indexed, inclusive; default last line).
+        append: Append to the end of the existing file.
+        old_str: Exact text to replace with file_contents.
+        expected_count: Declared occurrence count of old_str; on
+            mismatch nothing is written.
+        edits: Ordered list of replacement dicts (old_str, new_str,
+            optional expected_count) applied as one transaction;
+            exclusive with the other modes.
+        preserve: AST mode only.  Keep: ``"decorators+docstring"``
+            (default), ``"decorators"``, ``"docstring"``, or
+            ``"none"``.
+        line: AST mode only.  Disambiguates same-name definitions (any
+            line inside the target).
+        ast: Overrides the implicit old_str AST trigger on .py files:
+            ``True`` forces AST resolution (error, no fallback);
+            ``False`` forces a plain string replace.
+
+    Returns:
+        Success or error message.
+
+        An AST edit whose file_contents is a definition with nothing
+        but a docstring for a body is refused rather than applied,
+        because AST resolution replaces the whole definition and the
+        old body would be deleted silently; the error says to pass the
+        full body or ast=False.  (Under ``Returns:`` deliberately:
+        FastMCP drops everything after ``Args:`` from the
+        client-visible description -- see
+        tests/test_issue550_descriptions.py.)
+    """
+    dest_path = posixpath.join(dest_dir, file_name)
+
+    has_line_range = start_line is not None or end_line is not None
+    has_edits = edits is not None
+    mode_str = (
+        "edits" if has_edits
+        else "old_str" if old_str is not None
+        else "append" if append
+        else "line_range"
+    )
+
+    record_tool_use(
+        container_id[:12],
+        "edit_file",
+        {
+            "file_path": dest_path,
+            "mode": mode_str,
+        },
+    )
+
     client = _docker()
     try:
         container = client.containers.get(container_id)
     except NotFound:
-        return f"Error: container {container_id[:12]} not found"
+        return f"Error: container {container_id[:12]} not found", False, "container"
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error: {e}", False, "container"
 
-    dest_path = posixpath.join(dest_dir, file_name)
+    mode_count = sum([append, old_str is not None, has_line_range, has_edits])
+    if mode_count > 1:
+        return (
+            "Error: start_line/end_line, append, old_str, and edits "
+            "are mutually exclusive"
+        ), False, "validation"
+    if mode_count == 0:
+        return (
+            "Error: edit_file requires one edit mode: old_str, "
+            "start_line/end_line, append=True, or edits. To create a new file "
+            "or fully overwrite one use write_file."
+        ), False, "validation"
 
-    syntax_note = _python_syntax_note(dest_path, file_contents)
+    # edits mode is incompatible with AST/preserve/line params
+    if has_edits:
+        if preserve is not None or line is not None or ast is not None:
+            return (
+                "Error: edits cannot be combined with preserve, line, "
+                "or ast parameters"
+            ), False, "validation"
+        if expected_count is not None:
+            return (
+                "Error: expected_count is per-entry in edits mode; "
+                "set it inside each edit dict, not at top level"
+            ), False, "validation"
 
-    # Snapshot the pre-write content so undo_file_edit can restore it.
+    if old_str is not None and old_str == "":
+        return "Error: old_str must not be empty", False, "validation"
+    if expected_count is not None and old_str is None and not has_edits:
+        return "Error: expected_count requires old_str", False, "validation"
+    if start_line is not None and start_line < 1:
+        return "Error: start_line must be >= 1", False, "validation"
+
     try:
-        existing: str | None = read_file(container, dest_path)
+        existing = read_file(container, dest_path)
     except ValueError:
-        existing = None  # new file -- nothing to snapshot
-    if existing is not None:
+        return (
+            f"Error: file {dest_path} not found. edit_file only "
+            "modifies existing files; use write_file to create it."
+        ), False, "not_found"
+    existing_lines = existing.splitlines()
+
+    # Validate bounds
+    if start_line is not None and start_line > len(existing_lines):
+        return f"Error: start_line {start_line} exceeds file length ({len(existing_lines)} lines)", False, "validation"
+    if end_line is not None:
+        if end_line > len(existing_lines):
+            return f"Error: end_line {end_line} exceeds file length ({len(existing_lines)} lines)", False, "validation"
+        if start_line is not None and start_line > end_line:
+            return "Error: start_line is greater than end_line", False, "validation"
+
+    content = file_contents
+    # 1-indexed (start, end) lines of the replaced region in the new
+    # content; set only for successful old_str edits (issue #580).
+    replaced_span: tuple[int, int] | None = None
+
+    # ---------------------------------------------------------------
+    # Transaction mode: edits list (sunaba#875)
+    # ---------------------------------------------------------------
+    if has_edits:
+        content, error = _validate_and_apply_replacements(
+            existing, edits, dest_path,
+        )
+        if error is not None:
+            err_kind = (
+                "not_found" if ("not found" in error or "does not match" in error)
+                else "ambiguous_match" if ("overlapping" in error or "expected_count" in error)
+                else "validation"
+            )
+            return error, False, err_kind
+
+        syntax_note = _python_syntax_note(dest_path, content)
         undo.save_version(container_id, dest_path, existing)
 
-    # overwrote_existing feeds the issue #630 measurement: how often a
-    # full overwrite hits a file that edit_file could have modified.
-    record_tool_use(
-        container_id[:12],
-        "write_file",
-        {"file_path": dest_path, "overwrote_existing": existing is not None},
-    )
+        try:
+            write_file_in_container(container, container_id[:12], dest_path, content)
+        except ValueError as e:
+            return f"Error: {e}", False, "other"
+
+        diff_lines = list(difflib.unified_diff(
+            existing.splitlines(),
+            content.splitlines(),
+            fromfile=dest_path,
+            tofile=dest_path,
+            lineterm="",
+        ))
+        if len(diff_lines) > _SUCCESS_ECHO_MAX_ROWS:
+            keep = (_SUCCESS_ECHO_MAX_ROWS - 1) // 2
+            omitted = len(diff_lines) - 2 * keep
+            diff_lines = (
+                diff_lines[:keep]
+                + [f"... ({omitted} lines)"]
+                + diff_lines[-keep:]
+            )
+        diff_str = "\n".join(diff_lines) if diff_lines else "(no diff)"
+        return (
+            f"Written {len(content)} bytes to {dest_path} "
+            f"({len(edits)} replacement(s) applied)\n{diff_str}"
+            + syntax_note
+        ), True, None
+
+    elif append:
+        sep = "\n" if existing else ""
+        content = existing.rstrip("\n") + sep + file_contents
+        if existing.endswith("\n") and not content.endswith("\n"):
+            content += "\n"
+    elif old_str is not None:
+        exact_matches: list[tuple[int, int]] = []
+        if expected_count is not None:
+            exact_matches = _find_all_matches(existing, old_str)
+            actual = len(exact_matches)
+            if actual != expected_count:
+                if actual == 0:
+                    near_miss = _build_near_miss_echo(existing, old_str, dest_path)
+                    return (
+                        f"Error: old_str has {actual} occurrence(s) but "
+                        f"expected_count is {expected_count}. "
+                        f"Nothing was written.\n{near_miss}"
+                    ), False, "not_found"
+                return (
+                    f"Error: old_str has {actual} occurrence(s) but "
+                    f"expected_count is {expected_count}. "
+                    f"Nothing was written."
+                ), False, "ambiguous_match"
+
+        symbol: str | None = None
+        ast_error: str | None = None
+        if ast is True and not dest_path.endswith(".py"):
+            return "Error: ast=True requires a .py file", False, "validation"
+        attempt_ast = ast is not False and dest_path.endswith(".py")
+        if attempt_ast:
+            symbol = _extract_symbol_from_old_str(old_str)
+            if symbol is None and ast is True:
+                return (
+                    "Error: ast=True requires old_str to start with a "
+                    "function/class definition (a `def`/`async def`/`class` "
+                    "line, optionally preceded by decorators/comments)."
+                ), False, "validation"
+            if symbol is not None:
+                body_loss = _body_loss_error(
+                    existing, symbol, file_contents, dest_path, line,
+                )
+                if body_loss is not None:
+                    return body_loss, False, "validation"
+                ast_result = edit_symbol_in_container(
+                    client, container_id, dest_path, symbol, file_contents, line, preserve or "decorators+docstring",
+                )
+                if ast_result.get("status") == "ok":
+                    resolved = ast_result.get("resolved", {})
+                    if ast_result.get("changed"):
+                        undo.save_version(container_id, dest_path, existing)
+                        try:
+                            new_content = read_file(container, dest_path)
+                        except ValueError:
+                            return f"Error: failed to read {dest_path} after edit", False, "other"
+                        rep_start = resolved.get("start_line", 1)
+                        rep_end = resolved.get("end_line", 1)
+                        return _build_success_echo(new_content, dest_path, rep_start, rep_end), True, None
+                    span = ""
+                    if resolved.get("start_line") and resolved.get("end_line"):
+                        span = f" (lines {resolved['start_line']}-{resolved['end_line']})"
+                    return (
+                        f"No changes to {dest_path}: "
+                        f"{resolved.get('kind', 'definition')} "
+                        f"'{resolved.get('qualname', symbol)}'{span} "
+                        "already matches file_contents"
+                    ), True, None
+                ast_error_val = ast_result.get("error") or "AST resolution failed"
+                ast_error = str(ast_error_val)
+                if ast is True:
+                    err_k = "syntax" if ("parse" in ast_error.lower() or "syntax" in ast_error.lower()) else "other"
+                    return f"Error: {ast_error}", False, err_k
+                if (
+                    _parses_as_definition(file_contents)
+                    and _is_bare_signature(old_str)
+                ):
+                    err_k = "syntax" if ("parse" in ast_error.lower() or "syntax" in ast_error.lower()) else "other"
+                    return (
+                        f"{ast_error}\n"
+                        f"Note: old_str looks like a bare '{symbol}' "
+                        "signature and file_contents is a complete "
+                        "definition, so this edit must go through AST "
+                        "resolution (a plain string replacement would "
+                        "leave the old body behind). Fix the error "
+                        "above, put the full old definition in "
+                        "old_str for an exact string edit, or use "
+                        "transform_file."
+                    ), False, err_k
+                logger.debug(
+                    "AST resolution attempted for %s (symbol=%s) but failed: %s"
+                    " -- falling through to string matching",
+                    dest_path, symbol, ast_error,
+                )
+
+        if expected_count is None:
+            exact_matches = _find_all_matches(existing, old_str)
+
+        if expected_count is not None:
+            content = existing
+            for offset_idx, _line_no in reversed(exact_matches):
+                content = (
+                    content[:offset_idx]
+                    + file_contents
+                    + content[offset_idx + len(old_str) :]
+                )
+        elif len(exact_matches) > 1:
+            line_nos = ", ".join(str(m[1]) for m in exact_matches[:10])
+            suffix = "..." if len(exact_matches) > 10 else ""
+            return (
+                f"Error: old_str matches at {len(exact_matches)} locations "
+                f"(lines {line_nos}{suffix}). "
+                "Add more surrounding context to make it unique, or use "
+                "transform_file to edit several occurrences in one call."
+            ), False, "ambiguous_match"
+        elif len(exact_matches) == 1:
+            idx = exact_matches[0][0]
+            content = (
+                existing[:idx]
+                + file_contents
+                + existing[idx + len(old_str) :]
+            )
+            rep_start = existing[:idx].count("\n") + 1
+            end_offset = idx + len(file_contents)
+            rep_end = content[:end_offset].count("\n") + 1
+            if file_contents.endswith("\n") and file_contents:
+                rep_end -= 1
+            replaced_span = (rep_start, max(rep_start, rep_end))
+        else:
+            result = _try_whitespace_flexible(
+                existing, old_str, file_contents,
+            )
+            if isinstance(result, str):
+                return result, False, "ambiguous_match"
+            if result is not None:
+                content, rep_start, rep_end = result
+                replaced_span = (rep_start, rep_end)
+            else:
+                near_miss = _build_near_miss_echo(existing, old_str, dest_path)
+                if (
+                    len(file_contents.strip()) >= _ALREADY_APPLIED_MIN_CHARS
+                    and file_contents in existing
+                ):
+                    line_no = existing[: existing.find(file_contents)].count("\n") + 1
+                    near_miss += (
+                        f"\nNote: file_contents already appears at line "
+                        f"{line_no} -- this edit may have already been "
+                        "applied. Re-read the file before retrying."
+                    )
+                if ast_error is not None:
+                    near_miss += (
+                        f"\nNote: AST resolution for '{symbol}' was "
+                        f"attempted first and failed: {ast_error}"
+                    )
+                return near_miss, False, "not_found"
+    else:
+        start = start_line - 1 if start_line is not None else 0
+        end = end_line if end_line is not None else len(existing_lines)
+        new_lines = file_contents.splitlines()
+        content_lines = existing_lines[:start] + new_lines + existing_lines[end:]
+        content = "\n".join(content_lines)
+        if existing.endswith("\n") or file_contents.endswith("\n"):
+            content += "\n"
+
+    syntax_note = _python_syntax_note(dest_path, content)
+    undo.save_version(container_id, dest_path, existing)
 
     try:
-        write_file_in_container(container, container_id[:12], dest_path, file_contents)
+        write_file_in_container(container, container_id[:12], dest_path, content)
     except ValueError as e:
-        return f"Error: {e}"
-
-    return f"Written {len(file_contents)} bytes to {dest_path}" + syntax_note
+        return f"Error: {e}", False, "other"
+    if replaced_span is not None:
+        return _build_success_echo(content, dest_path, *replaced_span) + syntax_note, True, None
+    return f"Written {len(content)} bytes to {dest_path}" + syntax_note, True, None
 
 
 def edit_file(
@@ -225,342 +650,27 @@ def edit_file(
         client-visible description -- see
         tests/test_issue550_descriptions.py.)
     """
-
-    client = _docker()
-    try:
-        container = client.containers.get(container_id)
-    except NotFound:
-        return f"Error: container {container_id[:12]} not found"
-    except Exception as e:
-        return f"Error: {e}"
-
-    dest_path = posixpath.join(dest_dir, file_name)
-
-    # Exactly one edit mode -- no mode is not a full overwrite here,
-    # that is write_file's job (issue #630: the split is by intent,
-    # and any overlap would re-create the old tool-shadowing problem).
-    has_line_range = start_line is not None or end_line is not None
-    has_edits = edits is not None
-    mode_count = sum([append, old_str is not None, has_line_range, has_edits])
-    if mode_count > 1:
-        return (
-            "Error: start_line/end_line, append, old_str, and edits "
-            "are mutually exclusive"
-        )
-    if mode_count == 0:
-        return (
-            "Error: edit_file requires one edit mode: old_str, "
-            "start_line/end_line, append=True, or edits. To create a new file "
-            "or fully overwrite one use write_file."
-        )
-
-    # edits mode is incompatible with AST/preserve/line params
-    if has_edits:
-        if preserve is not None or line is not None or ast is not None:
-            return (
-                "Error: edits cannot be combined with preserve, line, "
-                "or ast parameters"
-            )
-        if expected_count is not None:
-            return (
-                "Error: expected_count is per-entry in edits mode; "
-                "set it inside each edit dict, not at top level"
-            )
-
-    if old_str is not None and old_str == "":
-        return "Error: old_str must not be empty"
-    if expected_count is not None and old_str is None and not has_edits:
-        return "Error: expected_count requires old_str"
-    if start_line is not None and start_line < 1:
-        return "Error: start_line must be >= 1"
-
-    try:
-        existing = read_file(container, dest_path)
-    except ValueError:
-        return (
-            f"Error: file {dest_path} not found. edit_file only "
-            "modifies existing files; use write_file to create it."
-        )
-    existing_lines = existing.splitlines()
-
-    # Validate bounds
-    if start_line is not None and start_line > len(existing_lines):
-        return f"Error: start_line {start_line} exceeds file length ({len(existing_lines)} lines)"
-    if end_line is not None:
-        if end_line > len(existing_lines):
-            return f"Error: end_line {end_line} exceeds file length ({len(existing_lines)} lines)"
-        if start_line is not None and start_line > end_line:
-            return "Error: start_line is greater than end_line"
-
+    res, ok, error_kind = _edit_file_impl(
+        container_id=container_id,
+        file_name=file_name,
+        file_contents=file_contents,
+        dest_dir=dest_dir,
+        start_line=start_line,
+        end_line=end_line,
+        append=append,
+        old_str=old_str,
+        expected_count=expected_count,
+        edits=edits,
+        preserve=preserve,
+        line=line,
+        ast=ast,
+    )
     record_tool_use(
         container_id[:12],
         "edit_file",
-        {
-            "file_path": dest_path,
-            "mode": (
-                "edits" if has_edits
-                else "old_str" if old_str is not None
-                else "append" if append
-                else "line_range"
-            ),
-        },
+        {"result": {"ok": ok, "error_kind": error_kind}},
     )
-
-    content = file_contents
-    # 1-indexed (start, end) lines of the replaced region in the new
-    # content; set only for successful old_str edits (issue #580).
-    replaced_span: tuple[int, int] | None = None
-
-    # ---------------------------------------------------------------
-    # Transaction mode: edits list (sunaba#875)
-    # ---------------------------------------------------------------
-    if has_edits:
-        content, error = _validate_and_apply_replacements(
-            existing, edits, dest_path,
-        )
-        if error is not None:
-            return error
-
-        syntax_note = _python_syntax_note(dest_path, content)
-        undo.save_version(container_id, dest_path, existing)
-
-        try:
-            write_file_in_container(container, container_id[:12], dest_path, content)
-        except ValueError as e:
-            return f"Error: {e}"
-
-        # Build a unified diff for the transaction, capped like the
-        # old_str success echo (_SUCCESS_ECHO_MAX_ROWS) so a scattered
-        # transaction cannot flood the caller with a full-file diff.
-        diff_lines = list(difflib.unified_diff(
-            existing.splitlines(),
-            content.splitlines(),
-            fromfile=dest_path,
-            tofile=dest_path,
-            lineterm="",
-        ))
-        if len(diff_lines) > _SUCCESS_ECHO_MAX_ROWS:
-            keep = (_SUCCESS_ECHO_MAX_ROWS - 1) // 2
-            omitted = len(diff_lines) - 2 * keep
-            diff_lines = (
-                diff_lines[:keep]
-                + [f"... ({omitted} lines)"]
-                + diff_lines[-keep:]
-            )
-        diff_str = "\n".join(diff_lines) if diff_lines else "(no diff)"
-        return (
-            f"Written {len(content)} bytes to {dest_path} "
-            f"({len(edits)} replacement(s) applied)\n{diff_str}"
-            + syntax_note
-        )
-
-    elif append:
-        sep = "\n" if existing else ""
-        content = existing.rstrip("\n") + sep + file_contents
-        # rstrip() would also swallow the file's final newline (#570).
-        if existing.endswith("\n") and not content.endswith("\n"):
-            content += "\n"
-    elif old_str is not None:
-        # expected_count asserts how many times the literal old_str
-        # occurs in the file.  That is true or false before any engine
-        # is chosen, so validate it here, once, above the AST attempt:
-        # a declared mismatch is an error and nothing is written, on
-        # every path (including the .py def-line AST path).
-        exact_matches: list[tuple[int, int]] = []
-        if expected_count is not None:
-            exact_matches = _find_all_matches(existing, old_str)
-            actual = len(exact_matches)
-            if actual != expected_count:
-                if actual == 0:
-                    near_miss = _build_near_miss_echo(existing, old_str, dest_path)
-                    return (
-                        f"Error: old_str has {actual} occurrence(s) but "
-                        f"expected_count is {expected_count}. "
-                        f"Nothing was written.\n{near_miss}"
-                    )
-                return (
-                    f"Error: old_str has {actual} occurrence(s) but "
-                    f"expected_count is {expected_count}. "
-                    f"Nothing was written."
-                )
-
-        symbol: str | None = None
-        ast_error: str | None = None
-        if ast is True and not dest_path.endswith(".py"):
-            return "Error: ast=True requires a .py file"
-        attempt_ast = ast is not False and dest_path.endswith(".py")
-        if attempt_ast:
-            symbol = _extract_symbol_from_old_str(old_str)
-            if symbol is None and ast is True:
-                return (
-                    "Error: ast=True requires old_str to start with a "
-                    "function/class definition (a `def`/`async def`/`class` "
-                    "line, optionally preceded by decorators/comments)."
-                )
-            if symbol is not None:
-                # Pre-flight, before anything is written: AST resolution
-                # replaces the WHOLE definition, so a file_contents with
-                # no body of its own deletes the old body and still
-                # leaves a file that parses and verifies (#822).  The
-                # guard below reads the old and new definitions, not the
-                # shape of old_str.
-                body_loss = _body_loss_error(
-                    existing, symbol, file_contents, dest_path, line,
-                )
-                if body_loss is not None:
-                    return body_loss
-                ast_result = edit_symbol_in_container(
-                    client, container_id, dest_path, symbol, file_contents, line, preserve or "decorators+docstring",
-                )
-                if ast_result.get("status") == "ok":
-                    resolved = ast_result.get("resolved", {})
-                    if ast_result.get("changed"):
-                        undo.save_version(container_id, dest_path, existing)
-                        try:
-                            new_content = read_file(container, dest_path)
-                        except ValueError:
-                            return f"Error: failed to read {dest_path} after edit"
-                        rep_start = resolved.get("start_line", 1)
-                        rep_end = resolved.get("end_line", 1)
-                        return _build_success_echo(new_content, dest_path, rep_start, rep_end)
-                    # AST no-op: the resolved definition already matches
-                    # file_contents.  Never fall through to string
-                    # matching here -- old_str would re-match the
-                    # signature line and splice a duplicate body into
-                    # the file.
-                    span = ""
-                    if resolved.get("start_line") and resolved.get("end_line"):
-                        span = f" (lines {resolved['start_line']}-{resolved['end_line']})"
-                    return (
-                        f"No changes to {dest_path}: "
-                        f"{resolved.get('kind', 'definition')} "
-                        f"'{resolved.get('qualname', symbol)}'{span} "
-                        "already matches file_contents"
-                    )
-                ast_error = ast_result.get("error", "AST resolution failed")
-                if ast is True:
-                    return f"Error: {ast_error}"
-                if (
-                    _parses_as_definition(file_contents)
-                    and _is_bare_signature(old_str)
-                ):
-                    # old_str is a bare signature and file_contents a
-                    # complete definition: the string fallback would
-                    # replace only the signature line and orphan the
-                    # old body.  Surface the AST error instead.
-                    return (
-                        f"{ast_error}\n"
-                        f"Note: old_str looks like a bare '{symbol}' "
-                        "signature and file_contents is a complete "
-                        "definition, so this edit must go through AST "
-                        "resolution (a plain string replacement would "
-                        "leave the old body behind). Fix the error "
-                        "above, put the full old definition in "
-                        "old_str for an exact string edit, or use "
-                        "transform_file."
-                    )
-                logger.debug(
-                    "AST resolution attempted for %s (symbol=%s) but failed: %s"
-                    " -- falling through to string matching",
-                    dest_path, symbol, ast_error,
-                )
-
-        # 1. Exact match with count check
-        if expected_count is None:
-            exact_matches = _find_all_matches(existing, old_str)
-
-        # When expected_count is declared, replace every occurrence.
-        # (The count itself was validated once, above the AST attempt;
-        # a mismatch already returned there, so at this point the
-        # declared count and the actual count are equal.)
-        if expected_count is not None:
-            # Replace all occurrences in reverse order
-            content = existing
-            for offset, _line_no in reversed(exact_matches):
-                content = (
-                    content[:offset]
-                    + file_contents
-                    + content[offset + len(old_str) :]
-                )
-        elif len(exact_matches) > 1:
-            line_nos = ", ".join(str(m[1]) for m in exact_matches[:10])
-            suffix = "..." if len(exact_matches) > 10 else ""
-            return (
-                f"Error: old_str matches at {len(exact_matches)} locations "
-                f"(lines {line_nos}{suffix}). "
-                "Add more surrounding context to make it unique, or use "
-                "transform_file to edit several occurrences in one call."
-            )
-        elif len(exact_matches) == 1:
-            idx = exact_matches[0][0]
-            content = (
-                existing[:idx]
-                + file_contents
-                + existing[idx + len(old_str) :]
-            )
-            rep_start = existing[:idx].count("\n") + 1
-            end_offset = idx + len(file_contents)
-            rep_end = content[:end_offset].count("\n") + 1
-            if file_contents.endswith("\n") and file_contents:
-                rep_end -= 1
-            replaced_span = (rep_start, max(rep_start, rep_end))
-        else:
-            # 2. Whitespace-flexible fallback
-            result = _try_whitespace_flexible(
-                existing, old_str, file_contents,
-            )
-            if isinstance(result, str):
-                return result  # ambiguous-match error
-            if result is not None:
-                content, rep_start, rep_end = result
-                replaced_span = (rep_start, rep_end)
-            else:
-                # 3. Near-miss echo
-                near_miss = _build_near_miss_echo(existing, old_str, dest_path)
-                # A retried edit is the most common cause of "old_str
-                # not found": the previous call already replaced it.
-                # Saying so breaks the re-read/retry loop early.
-                if (
-                    len(file_contents.strip()) >= _ALREADY_APPLIED_MIN_CHARS
-                    and file_contents in existing
-                ):
-                    line_no = existing[: existing.find(file_contents)].count("\n") + 1
-                    near_miss += (
-                        f"\nNote: file_contents already appears at line "
-                        f"{line_no} -- this edit may have already been "
-                        "applied. Re-read the file before retrying."
-                    )
-                if ast_error is not None:
-                    near_miss += (
-                        f"\nNote: AST resolution for '{symbol}' was "
-                        f"attempted first and failed: {ast_error}"
-                    )
-                return near_miss
-    else:
-        start = start_line - 1 if start_line is not None else 0
-        end = end_line if end_line is not None else len(existing_lines)
-        new_lines = file_contents.splitlines()
-        content_lines = existing_lines[:start] + new_lines + existing_lines[end:]
-        content = "\n".join(content_lines)
-        # The trailing newline belongs to the file, not to the replacement
-        # snippet: splitlines() drops it, so restore it from *existing*
-        # (#570).  A snippet that ends in "\n" still forces one, so a file
-        # that lacked the final newline can gain it deliberately.
-        if existing.endswith("\n") or file_contents.endswith("\n"):
-            content += "\n"
-
-    syntax_note = _python_syntax_note(dest_path, content)
-
-    # Snapshot the pre-edit content so undo_file_edit can restore it.
-    undo.save_version(container_id, dest_path, existing)
-
-    try:
-        write_file_in_container(container, container_id[:12], dest_path, content)
-    except ValueError as e:
-        return f"Error: {e}"
-    if replaced_span is not None:
-        return _build_success_echo(content, dest_path, *replaced_span) + syntax_note
-    return f"Written {len(content)} bytes to {dest_path}" + syntax_note
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +679,124 @@ def edit_file(
 
 # Max diff lines echoed by undo_file_edit before truncation.
 _UNDO_DIFF_MAX_LINES = 50
+
+
+def _undo_file_edit_impl(
+    container_id: str,
+    file_path: str | None = None,
+    steps: int = 1,
+    *,
+    path: str | None = None,
+) -> tuple[str, bool, str | None]:
+    """Restore *file_path* to the state it had before a recent edit.
+
+    Every write_file / edit_file / transform_file edit snapshots the
+    pre-edit file automatically, so a broken edit is never a dead end:
+    call this to step back to the file as it was BEFORE the edit,
+    instead of trying to repair broken text in place.  steps=1 (default)
+    is the state right before the last edit; steps=2 the edit before
+    that, and so on.
+
+    The current content is snapshotted too before restoring, so an
+    undo can itself be undone: calling again with steps=1 re-applies
+    the undone edit (redo).
+
+    Args:
+        container_id: Container ID prefix.
+        file_path: Absolute path of the file inside the container
+            (the same path echoed by the editing tools).
+        steps: How many edits to step back.
+
+    Returns:
+        JSON: status, file_path, restored diff (capped), and the
+        remaining snapshots; error with available snapshots when
+        no matching snapshot exists.
+    """
+    file_path, path_error = _resolve_file_path_alias(file_path, path)
+    if path_error is not None:
+        record_tool_use(
+            container_id[:12],
+            "undo_file_edit",
+            {"file_path": file_path, "steps": steps},
+        )
+        return json.dumps({"status": "error", "error": path_error}), False, "validation"
+    assert file_path is not None  # resolution guarantees exactly one name
+
+    record_tool_use(
+        container_id[:12],
+        "undo_file_edit",
+        {"file_path": file_path, "steps": steps},
+    )
+
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        return container_not_found_error(container_id), False, "container"
+    except Exception as e:
+        return json.dumps({"status": "error", "error": str(e)}), False, "container"
+
+    target = undo.get_version(container_id, file_path, steps)
+    if target is None:
+        available = undo.list_versions(container_id, file_path)
+        if not available:
+            return json.dumps({
+                "status": "error",
+                "error": (
+                    f"No undo history for {file_path}. Snapshots are taken "
+                    "on every write_file/edit_file/transform_file edit in "
+                    "this server session; pass the exact path echoed by "
+                    "those tools."
+                ),
+            }), False, "not_found"
+        return json.dumps({
+            "status": "error",
+            "error": (
+                f"steps={steps} is out of range for {file_path}: "
+                f"{len(available)} snapshot(s) available."
+            ),
+            "snapshots": available,
+        }), False, "not_found"
+
+    try:
+        current = read_file(container, file_path)
+    except ValueError:
+        current = None
+
+    if current is not None:
+        undo.save_version(container_id, file_path, current)
+
+    try:
+        write_file_in_container(container, container_id[:12], file_path, target)
+    except ValueError as e:
+        return json.dumps({"status": "error", "error": str(e)}), False, "other"
+
+    diff_lines = list(difflib.unified_diff(
+        (current or "").splitlines(),
+        target.splitlines(),
+        fromfile=f"{file_path} (before undo)",
+        tofile=f"{file_path} (restored)",
+        lineterm="",
+    ))
+    truncated = len(diff_lines) > _UNDO_DIFF_MAX_LINES
+    if truncated:
+        remaining = len(diff_lines) - _UNDO_DIFF_MAX_LINES
+        diff_lines = diff_lines[:_UNDO_DIFF_MAX_LINES] + [
+            f"... (truncated, {remaining} more lines)"
+        ]
+
+    return json.dumps({
+        "status": "ok",
+        "file_path": file_path,
+        "restored_steps_back": steps,
+        "diff": "\n".join(diff_lines),
+        "note": (
+            "The replaced content was snapshotted too: undo_file_edit "
+            "with steps=1 now re-applies the undone edit (redo); "
+            "steps=2 goes further back."
+        ),
+        "snapshots": undo.list_versions(container_id, file_path),
+    }), True, None
 
 
 def undo_file_edit(
@@ -602,86 +830,18 @@ def undo_file_edit(
         remaining snapshots; error with available snapshots when
         no matching snapshot exists.
     """
-    file_path, path_error = _resolve_file_path_alias(file_path, path)
-    if path_error is not None:
-        return json.dumps({"status": "error", "error": path_error})
-    assert file_path is not None  # resolution guarantees exactly one name
-
-    client = _docker()
-    try:
-        container = client.containers.get(container_id)
-    except NotFound:
-        return container_not_found_error(container_id)
-    except Exception as e:
-        return json.dumps({"status": "error", "error": str(e)})
-
-    target = undo.get_version(container_id, file_path, steps)
-    if target is None:
-        available = undo.list_versions(container_id, file_path)
-        if not available:
-            return json.dumps({
-                "status": "error",
-                "error": (
-                    f"No undo history for {file_path}. Snapshots are taken "
-                    "on every write_file/edit_file/transform_file edit in "
-                    "this server session; pass the exact path echoed by "
-                    "those tools."
-                ),
-            })
-        return json.dumps({
-            "status": "error",
-            "error": (
-                f"steps={steps} is out of range for {file_path}: "
-                f"{len(available)} snapshot(s) available."
-            ),
-            "snapshots": available,
-        })
-
-    try:
-        current = read_file(container, file_path)
-    except ValueError:
-        current = None
-
-    if current is not None:
-        undo.save_version(container_id, file_path, current)
-
-    try:
-        write_file_in_container(container, container_id[:12], file_path, target)
-    except ValueError as e:
-        return json.dumps({"status": "error", "error": str(e)})
-
+    res, ok, error_kind = _undo_file_edit_impl(
+        container_id=container_id,
+        file_path=file_path,
+        steps=steps,
+        path=path,
+    )
     record_tool_use(
         container_id[:12],
         "undo_file_edit",
-        {"file_path": file_path, "steps": steps},
+        {"result": {"ok": ok, "error_kind": error_kind}},
     )
-
-    diff_lines = list(difflib.unified_diff(
-        (current or "").splitlines(),
-        target.splitlines(),
-        fromfile=f"{file_path} (before undo)",
-        tofile=f"{file_path} (restored)",
-        lineterm="",
-    ))
-    truncated = len(diff_lines) > _UNDO_DIFF_MAX_LINES
-    if truncated:
-        remaining = len(diff_lines) - _UNDO_DIFF_MAX_LINES
-        diff_lines = diff_lines[:_UNDO_DIFF_MAX_LINES] + [
-            f"... (truncated, {remaining} more lines)"
-        ]
-
-    return json.dumps({
-        "status": "ok",
-        "file_path": file_path,
-        "restored_steps_back": steps,
-        "diff": "\n".join(diff_lines),
-        "note": (
-            "The replaced content was snapshotted too: undo_file_edit "
-            "with steps=1 now re-applies the undone edit (redo); "
-            "steps=2 goes further back."
-        ),
-        "snapshots": undo.list_versions(container_id, file_path),
-    })
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -1411,6 +1571,233 @@ def list_files(
 # ---------------------------------------------------------------------------
 
 
+def _transform_file_impl(
+    container_id: str,
+    file_path: str | None = None,
+    code: str = "",
+    paths: list[str] | None = None,
+    max_lines: int = 200,
+    offset: int = 0,
+    limit: int = 100,
+    *,
+    path: str | None = None,
+) -> tuple[str, bool, str | None]:
+    """Edit files by running Python that computes the new text.
+
+    code executes in the container (never on host); when it finishes,
+    callable transform(text: str) -> str must exist. The returned text
+    replaces file text and returns a unified diff (pre-edit content is
+    snapshotted; undo_file_edit rolls back). Example::
+
+        import re
+        def transform(text):
+            return re.sub("todo", "TODO", text)
+
+    ``paths`` (never with ``file_path``) applies this one transform
+    to each listed file all-or-nothing (staged, then atomic rename).
+
+    Args:
+        container_id: Container ID prefix.
+        file_path: Absolute path of one file.
+        code: Python source defining transform(text) -> str;
+            base64-transported, so quotes, backslashes, and newlines
+            need no escaping.
+        paths: Explicit list of absolute paths (never with
+            ``file_path``).
+        max_lines: Max diff lines shown.
+        offset: Diff paging offset (0-indexed).
+        limit: Max diff lines per page.
+
+    Returns:
+        JSON: status, changed, diff (paginated, with paging metadata);
+        on failure error, and traceback when your code raised.  For a
+        multi-path call, ``files`` lists each target path with its
+        ``changed`` flag and ``file_size``.
+
+        The paging metadata means what sandbox_exec's does: ``shown`` is
+        the number of lines in the returned ``diff``, ``total_lines``
+        the line count of the whole diff, and ``truncated`` "the diff
+        you are holding is not the whole diff" -- true whenever
+        anything was withheld, paging and ``offset`` > 0 included.
+        ``has_more`` still means only "more pages follow this one".
+    """
+    file_path, path_error = _resolve_file_path_alias(
+        file_path, path, require_one=False,
+    )
+    if path_error is not None:
+        record_tool_use(
+            container_id[:12],
+            "transform_file",
+            {"file_path": file_path or (paths[0] if paths else None)},
+        )
+        return json.dumps({"status": "error", "error": path_error}), False, "validation"
+    if (file_path is None) == (paths is None):
+        record_tool_use(
+            container_id[:12],
+            "transform_file",
+            {"file_path": file_path},
+        )
+        return json.dumps({
+            "status": "error",
+            "error": (
+                "exactly one of file_path or paths must be given: pass a "
+                "single path, or an explicit list of paths to edit with "
+                "the same transform"
+            ),
+        }), False, "validation"
+    if paths is not None and not paths:
+        record_tool_use(
+            container_id[:12],
+            "transform_file",
+            {"paths": []},
+        )
+        return json.dumps({"status": "error", "error": "paths must not be empty"}), False, "validation"
+    if not code:
+        record_tool_use(
+            container_id[:12],
+            "transform_file",
+            {"file_path": file_path} if file_path is not None else {"paths": list(paths or [])},
+        )
+        return json.dumps({
+            "status": "error",
+            "error": "code must not be empty: it must define transform(text) -> str",
+        }), False, "validation"
+
+    client = _docker()
+    try:
+        container = client.containers.get(container_id)
+    except NotFound:
+        record_tool_use(
+            container_id[:12],
+            "transform_file",
+            {"file_path": file_path} if file_path is not None else {"paths": list(paths or [])},
+        )
+        return container_not_found_error(container_id), False, "container"
+    except Exception as e:
+        record_tool_use(
+            container_id[:12],
+            "transform_file",
+            {"file_path": file_path} if file_path is not None else {"paths": list(paths or [])},
+        )
+        return json.dumps({"status": "error", "error": str(e)}), False, "container"
+
+    if paths is None:
+        assert file_path is not None  # mutual exclusion checked above
+        record_tool_use(
+            container_id[:12],
+            "transform_file",
+            {"file_path": file_path},
+        )
+        try:
+            before = read_file(container, file_path)
+        except Exception:
+            before = None
+        result = transform_file_in_container(client, container_id, file_path, code)
+
+        if result.get("status") == "ok":
+            if result.get("changed"):
+                if before is not None:
+                    undo.save_version(container_id, file_path, before)
+
+                display, meta = truncate_output(
+                    result.get("diff", ""),
+                    max_lines=max_lines,
+                    verbose="full",
+                )
+                envelope = build_output_envelope(
+                    display,
+                    total_lines=meta.total_lines,
+                    content_withheld=content_withheld(meta),
+                    offset=offset,
+                    limit=limit,
+                )
+                return json.dumps({
+                    "status": "ok",
+                    "changed": True,
+                    "diff": envelope.output,
+                    "shown": envelope.shown,
+                    "total_lines": envelope.total_lines,
+                    "truncated": envelope.truncated,
+                    "next_offset": envelope.next_offset,
+                    "has_more": envelope.has_more,
+                    "file_size": _file_size_from_counts(
+                        int(result.get("new_size", 0)), int(result.get("new_lines", 0))
+                    ),
+                }), True, None
+
+            if not result.get("changed"):
+                result["file_size"] = _file_size_from_counts(
+                    int(result.get("new_size", 0)), int(result.get("new_lines", 0))
+                )
+            return json.dumps(result), True, None
+
+        err_msg = str(result.get("error", ""))
+        err_kind = (
+            "not_found" if "not found" in err_msg.lower()
+            else "syntax" if ("syntaxerror" in err_msg.lower() or "traceback" in result)
+            else "other"
+        )
+        return json.dumps(result), False, err_kind
+
+    record_tool_use(container_id[:12], "transform_file", {"paths": list(paths)})
+    befores: dict[str, str | None] = {}
+    for p in paths:
+        try:
+            befores[p] = read_file(container, p)
+        except Exception:
+            befores[p] = None
+    result = transform_file_in_container(client, container_id, None, code, paths=paths)
+
+    if result.get("status") == "ok":
+        for entry in result.get("files", []):
+            before = befores.get(entry["path"])
+            if entry.get("changed") and before is not None:
+                undo.save_version(container_id, entry["path"], before)
+        files = [
+            {
+                "path": entry["path"],
+                "changed": entry["changed"],
+                "file_size": _file_size_from_counts(
+                    int(entry.get("new_size", 0)), int(entry.get("new_lines", 0))
+                ),
+            }
+            for entry in result.get("files", [])
+        ]
+        if result.get("changed"):
+            display, meta = truncate_output(
+                result.get("diff", ""),
+                max_lines=max_lines,
+                verbose="full",
+            )
+            envelope = build_output_envelope(
+                display,
+                total_lines=meta.total_lines,
+                content_withheld=content_withheld(meta),
+                offset=offset,
+                limit=limit,
+            )
+            return json.dumps({
+                "status": "ok",
+                "changed": True,
+                "diff": envelope.output,
+                "shown": envelope.shown,
+                "total_lines": envelope.total_lines,
+                "truncated": envelope.truncated,
+                "next_offset": envelope.next_offset,
+                "has_more": envelope.has_more,
+                "files": files,
+            }), True, None
+        return json.dumps({"status": "ok", "changed": False, "diff": "", "files": files}), True, None
+
+    err_msg = str(result.get("error", ""))
+    err_kind = (
+        "not_found" if "not found" in err_msg.lower()
+        else "syntax" if ("syntaxerror" in err_msg.lower() or "traceback" in result)
+        else "other"
+    )
+    return json.dumps(result), False, err_kind
+
+
 def transform_file(
     container_id: str,
     file_path: str | None = None,
@@ -1461,145 +1848,19 @@ def transform_file(
         anything was withheld, paging and ``offset`` > 0 included.
         ``has_more`` still means only "more pages follow this one".
     """
-    file_path, path_error = _resolve_file_path_alias(
-        file_path, path, require_one=False,
+    res, ok, error_kind = _transform_file_impl(
+        container_id=container_id,
+        file_path=file_path,
+        code=code,
+        paths=paths,
+        max_lines=max_lines,
+        offset=offset,
+        limit=limit,
+        path=path,
     )
-    if path_error is not None:
-        return json.dumps({"status": "error", "error": path_error})
-    if (file_path is None) == (paths is None):
-        return json.dumps({
-            "status": "error",
-            "error": (
-                "exactly one of file_path or paths must be given: pass a "
-                "single path, or an explicit list of paths to edit with "
-                "the same transform"
-            ),
-        })
-    if paths is not None and not paths:
-        return json.dumps({"status": "error", "error": "paths must not be empty"})
-    if not code:
-        return json.dumps({
-            "status": "error",
-            "error": "code must not be empty: it must define transform(text) -> str",
-        })
-
-    client = _docker()
-    try:
-        container = client.containers.get(container_id)
-    except NotFound:
-        return container_not_found_error(container_id)
-    except Exception as e:
-        return json.dumps({"status": "error", "error": str(e)})
-
-    if paths is None:
-        assert file_path is not None  # mutual exclusion checked above
-        record_tool_use(
-            container_id[:12],
-            "transform_file",
-            {"file_path": file_path},
-        )
-        # Pre-edit snapshot for undo_file_edit -- best-effort: the edit
-        # must never fail because its undo snapshot could not be read.
-        try:
-            before = read_file(container, file_path)
-        except Exception:
-            before = None
-        result = transform_file_in_container(client, container_id, file_path, code)
-
-        if result.get("status") == "ok" and result.get("changed"):
-            if before is not None:
-                undo.save_version(container_id, file_path, before)
-
-            display, meta = truncate_output(
-                result.get("diff", ""),
-                max_lines=max_lines,
-                verbose="full",
-            )
-            # Same envelope meanings as sandbox_exec, from the same helper:
-            # meta describes the truncation, the page describes the paging,
-            # and reporting meta.truncated alone told a caller holding page
-            # 1 of 4 that the diff was complete.
-            envelope = build_output_envelope(
-                display,
-                total_lines=meta.total_lines,
-                content_withheld=content_withheld(meta),
-                offset=offset,
-                limit=limit,
-            )
-            return json.dumps({
-                "status": "ok",
-                "changed": True,
-                "diff": envelope.output,
-                "shown": envelope.shown,
-                "total_lines": envelope.total_lines,
-                "truncated": envelope.truncated,
-                "next_offset": envelope.next_offset,
-                "has_more": envelope.has_more,
-                "file_size": _file_size_from_counts(
-                    int(result.get("new_size", 0)), int(result.get("new_lines", 0))
-                ),
-            })
-
-        # Unchanged (or error-free no-op) results still surface file_size so the
-        # model sees the current size without a separate read (issue #187, \u2460).
-        if result.get("status") == "ok" and not result.get("changed"):
-            result["file_size"] = _file_size_from_counts(
-                int(result.get("new_size", 0)), int(result.get("new_lines", 0))
-            )
-        return json.dumps(result)
-
-    record_tool_use(container_id[:12], "transform_file", {"paths": list(paths)})
-    # Pre-edit snapshots for undo_file_edit -- best-effort, per path: an
-    # edit must never fail because one undo snapshot could not be read.
-    befores: dict[str, str | None] = {}
-    for p in paths:
-        try:
-            befores[p] = read_file(container, p)
-        except Exception:
-            befores[p] = None
-    result = transform_file_in_container(client, container_id, None, code, paths=paths)
-
-    if result.get("status") == "ok":
-        for entry in result.get("files", []):
-            before = befores.get(entry["path"])
-            if entry.get("changed") and before is not None:
-                undo.save_version(container_id, entry["path"], before)
-        files = [
-            {
-                "path": entry["path"],
-                "changed": entry["changed"],
-                "file_size": _file_size_from_counts(
-                    int(entry.get("new_size", 0)), int(entry.get("new_lines", 0))
-                ),
-            }
-            for entry in result.get("files", [])
-        ]
-        if result.get("changed"):
-            display, meta = truncate_output(
-                result.get("diff", ""),
-                max_lines=max_lines,
-                verbose="full",
-            )
-            # Same envelope meanings as the single-path branch above.
-            envelope = build_output_envelope(
-                display,
-                total_lines=meta.total_lines,
-                content_withheld=content_withheld(meta),
-                offset=offset,
-                limit=limit,
-            )
-            return json.dumps({
-                "status": "ok",
-                "changed": True,
-                "diff": envelope.output,
-                "shown": envelope.shown,
-                "total_lines": envelope.total_lines,
-                "truncated": envelope.truncated,
-                "next_offset": envelope.next_offset,
-                "has_more": envelope.has_more,
-                "files": files,
-            })
-        # Unchanged: no diff, but per-file sizes still surface so the model
-        # sees current sizes without separate reads (mirrors single-path).
-        return json.dumps({"status": "ok", "changed": False, "diff": "", "files": files})
-    return json.dumps(result)
+    record_tool_use(
+        container_id[:12],
+        "transform_file",
+        {"result": {"ok": ok, "error_kind": error_kind}},
+    )
+    return res

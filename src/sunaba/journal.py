@@ -70,7 +70,7 @@ _run_map_lock: threading.Lock = threading.Lock()
 
 #: Maps container ID prefixes → session labels so that all operations
 #: on the same container (for the current attach session) share a label.
-_session_map: dict[str, str] = {}
+_session_map: dict[str, str | None] = {}
 _session_map_lock: threading.Lock = threading.Lock()
 
 
@@ -81,16 +81,34 @@ def set_session_label(container_id: str, label: str | None) -> None:
     for this container include ``session_label``.
     """
     with _session_map_lock:
-        if label is None:
-            _session_map.pop(container_id, None)
-        else:
-            _session_map[container_id] = label
+        _session_map[container_id] = label
 
 
 def get_session_label(container_id: str) -> str | None:
     """Return the current session label for *container_id*, or ``None``."""
     with _session_map_lock:
-        return _session_map.get(container_id)
+        if container_id in _session_map:
+            return _session_map[container_id]
+
+    labelled: str | None = None
+    try:
+        from sunaba.security import SESSION_LABEL
+        from sunaba.tools.common import _docker
+
+        client = _docker()
+        container = client.containers.get(container_id)
+        labels = getattr(container, "labels", None)
+        if isinstance(labels, dict):
+            raw = labels.get(SESSION_LABEL)
+            if isinstance(raw, str):
+                labelled = raw
+    except Exception:
+        pass
+
+    with _session_map_lock:
+        if container_id not in _session_map:
+            _session_map[container_id] = labelled
+        return _session_map[container_id]
 
 
 def generate_run_id() -> str:
@@ -100,6 +118,27 @@ def generate_run_id() -> str:
 
 def get_or_create_run_id(container_id: str) -> str:
     """Return the run_id for *container_id*, creating one if needed."""
+    with _run_map_lock:
+        if container_id in _run_map:
+            return _run_map[container_id]
+
+    try:
+        from sunaba.security import RUN_ID_LABEL
+        from sunaba.tools.common import _docker
+
+        client = _docker()
+        container = client.containers.get(container_id)
+        labels = getattr(container, "labels", None)
+        if isinstance(labels, dict):
+            run_id = labels.get(RUN_ID_LABEL)
+            if isinstance(run_id, str):
+                with _run_map_lock:
+                    if container_id not in _run_map:
+                        _run_map[container_id] = run_id
+                    return _run_map[container_id]
+    except Exception:
+        pass
+
     with _run_map_lock:
         if container_id not in _run_map:
             _run_map[container_id] = generate_run_id()

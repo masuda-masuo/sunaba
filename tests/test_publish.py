@@ -1801,6 +1801,194 @@ class TestPublishSecretScanIntegration:
         # No override was involved, so none may be spent.
         mock_consume.assert_not_called()
 
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.secret_scan.run_secret_scan")
+    def test_manifest_secret_scan_skips_declared_deletion(
+        self,
+        mock_scan: MagicMock,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        """A manifest mixing a present file and a declared deletion (#837)
+        scans only the present file; the deletion is recorded in
+        ``files_skipped_deleted`` and publish still proceeds (#883)."""
+        mock_scan.return_value = {
+            "secret_scan": "clean",
+            "secret_scan_state": "clean",
+            "files_scanned": ["present.txt"],
+            "scan_summary": "1 file scanned, clean",
+        }
+
+        # Validation order (files=["present.txt", "deleted.txt"]):
+        # present.txt -> test -f 0 (present, accepted);
+        # deleted.txt -> test -f 1, test -d 1, git ls-files 0 (tracked deletion).
+        container = _make_publish_container([
+            (0, b"", b""),                       # test -f 'present.txt' -> present
+            (1, b"", b""),                       # test -f 'deleted.txt' -> absent
+            (1, b"", b""),                       # test -d 'deleted.txt' -> not a dir
+            (0, b"deleted.txt\0", b""),          # git ls-files ':(literal)deleted.txt' -> tracked
+            (1, b"", b""),                       # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"", b""),                        # git fetch origin (#818)
+            (0, b"none\n", b""),                 # MERGE_HEAD check
+            (0, b"", b""),                        # checkout -b fix/x
+            (1, b"", b""),                        # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),                 # rev-parse --verify origin/HEAD
+            (0, b"", b""),                        # git reset --mixed origin/HEAD
+            (0, b"", b""),                        # git add -- ':(literal)present.txt'
+            (0, b"", b""),                        # git add -- ':(literal)deleted.txt'
+            (1, b"diff --git a/f b/f\n", b""),    # git diff --cached --exit-code (diffs found)
+            (0, b"[fix/x abc1234] Fix", b""),     # commit
+            (0, b"present.txt\ndeleted.txt\n", b""),  # git diff-tree HEAD^ HEAD
+            (0, b"", b""),                        # git status --porcelain -z
+            (0, b"pushed", b""),                  # push
+            (0, b"abc1234def5678", b""),          # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["present.txt", "deleted.txt"],
+        ))
+
+        # The scan must have examined only the present file, never the
+        # declared deletion (which gitleaks cannot stat and would have
+        # aborted the whole scan with exit 1).
+        mock_scan.assert_called_once()
+        assert mock_scan.call_args[0][1] == ["present.txt"]
+        assert result["status"] == "pushed"
+        assert result["secret_scan_state"] == "clean"
+        assert result["files_scanned"] == ["present.txt"]
+        # The declared deletion is reported, not scanned.
+        assert result["files_skipped_deleted"] == ["deleted.txt"]
+
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.secret_scan.run_secret_scan")
+    def test_manifest_secret_scan_deletion_only_succeeds(
+        self,
+        mock_scan: MagicMock,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        """A deletion-only manifest scans nothing: run_secret_scan is
+        called with an empty list, publish succeeds as clean, and
+        ``files_skipped_deleted`` lists every declared path (#883).
+
+        Faithful to ``run_secret_scan([])``'s early return (secret_scan.py):
+        ``files_scanned == []`` and a non-error ``secret_scan_state``.
+        """
+        mock_scan.return_value = {
+            "secret_scan": "clean",
+            "secret_scan_state": "clean",
+            "files_scanned": [],
+            "scan_summary": "No files to scan.",
+        }
+
+        # Single declared deletion: test -f 1, test -d 1, git ls-files 0.
+        container = _make_publish_container([
+            (1, b"", b""),                       # test -f 'deleted.txt' -> absent
+            (1, b"", b""),                       # test -d 'deleted.txt' -> not a dir
+            (0, b"deleted.txt\0", b""),          # git ls-files ':(literal)deleted.txt' -> tracked
+            (1, b"", b""),                       # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"", b""),                        # git fetch origin (#818)
+            (0, b"none\n", b""),                 # MERGE_HEAD check
+            (0, b"", b""),                        # checkout -b feat/del
+            (1, b"", b""),                        # rev-parse --verify origin/feat/del
+            (0, b"abc1234", b""),                 # rev-parse --verify origin/HEAD
+            (0, b"", b""),                        # git reset --mixed origin/HEAD
+            (0, b"", b""),                        # git add -- ':(literal)deleted.txt'
+            (1, b"diff --git a/f b/f\n", b""),    # git diff --cached --exit-code (diffs found)
+            (0, b"[feat/del abc1234] Delete", b""),  # commit
+            (0, b"deleted.txt\n", b""),          # git diff-tree HEAD^ HEAD
+            (0, b"", b""),                        # git status --porcelain -z
+            (0, b"pushed", b""),                  # push
+            (0, b"abc1234def5678", b""),          # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="feat/del",
+            message="Delete todelete.txt",
+            files=["deleted.txt"],
+        ))
+
+        assert result["status"] == "pushed"
+        # No file was scanned and no secret_scan error occurred.
+        assert result["secret_scan_state"] == "clean"
+        assert result["files_scanned"] == []
+        # Every declared path is reported as a skipped deletion.
+        assert result["files_skipped_deleted"] == ["deleted.txt"]
+        # The scan received an empty manifest, not the missing file.
+        mock_scan.assert_called_once()
+        assert mock_scan.call_args[0][1] == []
+
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.secret_scan.run_secret_scan")
+    def test_legacy_secret_scan_skips_deleted_file(
+        self,
+        mock_scan: MagicMock,
+        mock_docker: MagicMock,
+        mock_record: MagicMock,
+    ) -> None:
+        """Legacy (stage-all) mode: a file deleted by the commit is skipped
+        from the secret scan and reported in ``files_skipped_deleted``; the
+        surviving file is still scanned (#883).
+
+        The deletion is detected from the ``git diff-tree --name-status``
+        output ("D" status), so no extra worktree stat is needed and the
+        mock container's ``exec_run`` budget is unchanged.
+        """
+        mock_scan.return_value = {
+            "secret_scan": "findings",
+            "secret_scan_state": "findings",
+            "files_scanned": ["secret.txt"],
+            "findings": [
+                {"path": "secret.txt", "line": 5, "type": "Private Key"},
+            ],
+            "scan_summary": "1 potential secret in 1 file",
+        }
+
+        # Legacy flow: no manifest (files=None).  git diff-tree (the
+        # scan's exec_in_container call) is intercepted by the mock and
+        # returns the name-status output below, listing a deletion plus a
+        # present file.
+        container = _make_publish_container(
+            [
+                (0, b"", b""),                          # git ls-files --others --exclude-standard
+                (0, b"none\n", b""),                   # MERGE_HEAD check
+                (0, b"", b""),                          # git checkout -b
+                (0, b"", b""),                          # git add -A
+                (1, b"", b"no upstream"),               # git rev-parse --abbrev-ref @{u}
+                (0, b"[fix/x abc1234] Fix\n1 file changed", b""),  # git commit
+                (0, b"file1.py\n", b""),               # git diff-tree HEAD^ HEAD
+            ],
+            git_diff_tree_output=b"D\tdeleted.txt\nsecret.txt\n",
+        )
+        mock_docker.return_value = _make_client_mock(container)
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=None,
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "secret_scan"
+        # The deleted file is skipped; only secret.txt is scanned.
+        mock_scan.assert_called_once()
+        assert mock_scan.call_args[0][1] == ["secret.txt"]
+        assert result["files_skipped_deleted"] == ["deleted.txt"]
+        assert result["files_scanned"] == ["secret.txt"]
+
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_manifest_declared_unchanged_error(

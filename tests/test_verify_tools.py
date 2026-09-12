@@ -2637,3 +2637,170 @@ class TestRecordVerifyOutcome:
             _record_verify_outcome("abc123456789", result)
             res = mock_record.call_args[0][2]["result"]
             assert res["fail_kinds"] == []
+
+    # --- Issue #908: affected/full pairing + affected-mode aggregation ---
+
+    def test_affected_requested_carries_pairing_metadata(self) -> None:
+        """An affected-requested run exposes scope, selection, diff_hash,
+        partial state, result counts, and duration -- the fields a journal
+        consumer needs to pair it with the later full run."""
+        result = {
+            "gate_passed": False,
+            "partial_test_run": True,
+            "diff_hash": "abc123def4567890",
+            "test_selection": {
+                "mode": "affected",
+                "selected_count": 3,
+                "selection_ms": 12,
+                "widened_to_full_reason": None,
+                "changed_files": ["src/app.py", "src/lib.py"],
+            },
+            "tests": {
+                "full": {
+                    "status": "ok",
+                    "passed": 3,
+                    "failed": 0,
+                    "collected": 3,
+                    "duration": 0.42,
+                },
+            },
+        }
+        with patch("sunaba.tools.verify.record_tool_use") as mock_record:
+            from sunaba.tools.verify import _record_verify_outcome
+            _record_verify_outcome("abc123456789", result)
+            res = mock_record.call_args[0][2]["result"]
+            assert res["diff_hash"] == "abc123def4567890"
+            assert res["test_scope"] == "affected"
+            assert res["partial_test_run"] is True
+            assert res["selected_count"] == 3
+            assert res["selection_ms"] == 12
+            assert res["widened_to_full_reason"] is None
+            assert res["collected"] == 3
+            assert res["duration"] == 0.42
+            assert res["status"] == "ok"
+            assert res["gate_passed"] is False
+            # Unbounded lists are never journaled.
+            assert "changed_files" not in res
+
+    def test_widened_to_full_distinguished(self) -> None:
+        """A widened affected run keeps scope='affected' but partial state
+        False and a widening reason, so a consumer can tell it from a real
+        affected run and from an ordinary full run."""
+        result = {
+            "gate_passed": True,
+            "partial_test_run": False,
+            "diff_hash": "abc123def4567890",
+            "test_selection": {
+                "mode": "affected",
+                "selected_count": 0,
+                "selection_ms": 5,
+                "widened_to_full_reason": "change set includes pyproject.toml",
+            },
+            "tests": {
+                "full": {
+                    "status": "ok",
+                    "passed": 12,
+                    "failed": 0,
+                    "collected": 12,
+                    "duration": 1.1,
+                },
+            },
+        }
+        with patch("sunaba.tools.verify.record_tool_use") as mock_record:
+            from sunaba.tools.verify import _record_verify_outcome
+            _record_verify_outcome("abc123456789", result)
+            res = mock_record.call_args[0][2]["result"]
+            assert res["test_scope"] == "affected"
+            assert res["partial_test_run"] is False
+            assert res["widened_to_full_reason"] == (
+                "change set includes pyproject.toml"
+            )
+            assert res["diff_hash"] == "abc123def4567890"
+            assert res["collected"] == 12
+
+    def test_ordinary_full_carries_same_diff_hash(self) -> None:
+        """An ordinary full run retains the diff hash and collected count so
+        the selected/full ratio and affected-green -> full-red candidates
+        can be derived externally."""
+        result = {
+            "gate_passed": True,
+            "partial_test_run": False,
+            "diff_hash": "abc123def4567890",
+            "test_selection": {
+                "mode": "full",
+                "selected_count": 0,
+                "selection_ms": 0,
+                "widened_to_full_reason": None,
+            },
+            "tests": {
+                "full": {
+                    "status": "ok",
+                    "passed": 12,
+                    "failed": 0,
+                    "collected": 12,
+                    "duration": 1.1,
+                },
+            },
+        }
+        with patch("sunaba.tools.verify.record_tool_use") as mock_record:
+            from sunaba.tools.verify import _record_verify_outcome
+            _record_verify_outcome("abc123456789", result)
+            res = mock_record.call_args[0][2]["result"]
+            assert res["test_scope"] == "full"
+            assert res["partial_test_run"] is False
+            assert res["widened_to_full_reason"] is None
+            assert res["diff_hash"] == "abc123def4567890"
+            assert res["collected"] == 12
+            assert res["duration"] == 1.1
+
+    def test_error_missing_fields_do_not_fabricate_selection(self) -> None:
+        """Error/early-return paths (empty selection, null hash) stay
+        bounded and carry no invented selection data."""
+        result = {
+            "status": "error",
+            "gate_passed": False,
+            "error": "invalid test_scope",
+            "diff_hash": None,
+            "test_selection": {
+                "changed_files": [],
+                "selected_count": 0,
+                "selection_ms": 0,
+                "widened_to_full_reason": None,
+                "mode": "full",
+            },
+        }
+        with patch("sunaba.tools.verify.record_tool_use") as mock_record:
+            from sunaba.tools.verify import _record_verify_outcome
+            _record_verify_outcome("abc123456789", result)
+            res = mock_record.call_args[0][2]["result"]
+            assert res["diff_hash"] is None
+            assert res["test_scope"] == "full"
+            assert res["partial_test_run"] is False
+            assert res["selected_count"] == 0
+            assert res["selection_ms"] == 0
+            assert res["widened_to_full_reason"] is None
+            assert res["gate_passed"] is False
+            assert "changed_files" not in res
+            assert "duration" not in res
+
+    def test_missing_selection_defaults_bounded(self) -> None:
+        """Results lacking test_selection/diff_hash (old/legacy shapes)
+        record bounded defaults and stay backward compatible."""
+        result = {
+            "gate_passed": False,
+            "gate_fail_reasons": ["lint (ruff): 3 violation(s)"],
+            "tests": {"status": "skipped"},
+        }
+        with patch("sunaba.tools.verify.record_tool_use") as mock_record:
+            from sunaba.tools.verify import _record_verify_outcome
+            _record_verify_outcome("abc123456789", result)
+            res = mock_record.call_args[0][2]["result"]
+            assert res["diff_hash"] is None
+            assert res["test_scope"] == "full"
+            assert res["partial_test_run"] is False
+            assert res["selected_count"] == 0
+            assert res["selection_ms"] == 0
+            assert res["widened_to_full_reason"] is None
+            # Pre-existing keys intact.
+            assert res["status"] == "skipped"
+            assert res["fail_kinds"] == ["lint"]

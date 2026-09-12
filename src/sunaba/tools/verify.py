@@ -438,6 +438,11 @@ def _record_verify_outcome(container_id: str, result: dict) -> None:
         outcome["collected"] = full.get("collected", 0)
         full_status = full.get("status", tests.get("status", "unknown"))
         outcome["status"] = full_status
+        # Bounded test-duration data (seconds) when the runner reported it.
+        # A scalar float only -- never an unbounded per-test breakdown.
+        duration = full.get("duration")
+        if isinstance(duration, (int, float)):
+            outcome["duration"] = duration
     elif isinstance(full, dict) and not full:
         outcome["passes"] = 0
         outcome["fails"] = 0
@@ -447,6 +452,30 @@ def _record_verify_outcome(container_id: str, result: dict) -> None:
     elif isinstance(full, list):
         outcome["status"] = "multi_lang"
     outcome["fail_kinds"] = _derive_fail_kinds(result, full_status=full_status)
+
+    # Bounded pairing / affected-selection metadata (Issue #908).  These
+    # let a journal consumer pair an affected run with the later full run
+    # of the same diff, and aggregate affected-mode usefulness, without
+    # journaling the unbounded changed-file or selected-test lists.  All
+    # fields here are bounded scalars or null; error/early-return paths
+    # carry empty selection values (via _empty_test_selection) and a null
+    # diff_hash, so they never fabricate selection data.
+    #
+    # Consumer distinction:
+    #   * requested affected execution  -- test_scope == "affected",
+    #     partial_test_run is True (selected tests actually ran).
+    #   * widened-to-full execution     -- test_scope == "affected",
+    #     partial_test_run is False, widened_to_full_reason set.
+    #   * ordinary full execution       -- test_scope == "full",
+    #     partial_test_run is False, widened_to_full_reason is None.
+    ts = result.get("test_selection") or {}
+    outcome["diff_hash"] = result.get("diff_hash")
+    outcome["test_scope"] = ts.get("mode", "full")
+    outcome["partial_test_run"] = bool(result.get("partial_test_run", False))
+    outcome["selected_count"] = ts.get("selected_count", 0)
+    outcome["selection_ms"] = ts.get("selection_ms", 0)
+    outcome["widened_to_full_reason"] = ts.get("widened_to_full_reason")
+
     record_tool_use(
         container_id[:12],
         "verify_in_container",

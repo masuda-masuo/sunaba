@@ -162,10 +162,14 @@ class TestDriftDetection:
         "diff_hash",              # verify_in_container return JSON field (#781)
         "diff_summary",           # verify_in_container return JSON key
         "gate_passed",            # verify_in_container return JSON field
+        "gate_fail_reasons",      # verify_in_container return JSON field
         "lint_type_incomplete",   # verify_in_container return JSON field
         "partial_test_run",       # verify_in_container return JSON field (#781)
         "test_selection",         # verify_in_container return JSON field (#781)
         "widened_to_full_reason", # verify_in_container return JSON field (#781)
+        "deadline_s",             # verify timeout diagnostics field (#910)
+        "elapsed_s",              # verify timeout diagnostics field (#910)
+        "reap",                   # verify timeout diagnostics field (#910)
         "merge_discarded_sha",    # publish return JSON field
         "merge_discarded_undeclared",  # publish return JSON field
         "merge_rebuilt_parents",  # publish return JSON field (#819)

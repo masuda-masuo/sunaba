@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import uuid
 
 from docker.errors import NotFound
 
@@ -14,11 +16,22 @@ from sunaba.edit_verify import (
     lint_file,
     type_check_file,
 )
+from sunaba.edit_verify.shell import (
+    VerifyTreeTimeout,
+    close_verify_deadline,
+    open_verify_deadline,
+    run_exec_under_verify_deadline,
+    verify_marker_environment,
+)
 from sunaba.journal import record_tool_use
 from sunaba.search import is_path_denied, search_files
 from sunaba.tools.common import _docker, container_not_found_error
 from sunaba.tools.vcs import resolve_git_root
-from sunaba.verify_state import record_verify_success
+from sunaba.verify_state import (
+    record_verify_success,
+    verify_guard_acquire,
+    verify_guard_release,
+)
 
 # ---------------------------------------------------------------------------
 # Tool-absence contract (Issue #584)
@@ -44,6 +57,65 @@ from sunaba.verify_state import record_verify_success
 #: pytest's exit code for a usage error (bad/unknown command-line option).
 #: It means *our* command did not fit this pytest -- never that tests failed.
 _PYTEST_USAGE_ERROR: int = 4
+
+
+# ---------------------------------------------------------------------------
+# Server-side verify deadline (issue #910)
+# ---------------------------------------------------------------------------
+#
+# ``verify_in_container`` is synchronous: if it outlives the MCP client's
+# ~300s tool-call wait, the client sees a transport timeout while the test
+# tree keeps running inside the container -- retrying then starts a second
+# full gate, and the retained trees can exhaust the container's PID
+# capacity (the #910 incident).  The server therefore answers with a
+# terminal ``status: "timeout"`` result *before* that boundary: every
+# verify call arms a wall-clock deadline (resolved per call from
+# ``SUNABA_VERIFY_TIMEOUT``), and at expiry the deadline machinery in
+# ``sunaba.edit_verify.shell`` terminates and reaps the whole marked
+# command tree before the owning thread raises :class:`VerifyTreeTimeout`.
+#
+# The default sits at 270s -- under the observed ~300s client boundary but
+# generous enough for a real full gate.  ``0`` disables the deadline (a
+# deliberate opt-out, pinned through the resolver because a 270s hang is
+# not testable in seconds); invalid or negative values fall back to the
+# default so a misconfiguration can never silently disable the deadline.
+
+#: Default verify deadline in seconds (below the client's ~300s boundary).
+_DEFAULT_VERIFY_TIMEOUT: float = 270.0
+
+#: Environment variable resolving the per-call deadline (seconds).
+_VERIFY_TIMEOUT_ENV: str = "SUNABA_VERIFY_TIMEOUT"
+
+
+def resolve_verify_deadline() -> float:
+    """Resolve this call's verify deadline from ``SUNABA_VERIFY_TIMEOUT``.
+
+    Contract (pinned by ``tests/test_verify_tools.py``): default 270.0s
+    when unset; a positive numeric override is used as-is; exactly ``0``
+    disables the deadline; invalid or negative values fall back to the
+    default (only ``0`` disables -- a misconfiguration must not silently
+    turn the deadline off).
+    """
+    raw = os.environ.get(_VERIFY_TIMEOUT_ENV, "").strip()
+    if raw == "":
+        return _DEFAULT_VERIFY_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_VERIFY_TIMEOUT
+    if value < 0:
+        return _DEFAULT_VERIFY_TIMEOUT
+    return value
+
+
+def _new_verify_marker() -> str:
+    """Unique per-call marker that the deadline reaper matches in /proc.
+
+    Deliberately hyphen-free: the reaper's commands run through contract
+    mocks that classify by substrings like ``-9``, and a marker that could
+    carry ``-9`` would make the probe's own command text ambiguous.
+    """
+    return f"sunaba910{uuid.uuid4().hex[:12]}"
 
 
 def _tool_absence_detail(raw_tail: str, stderr_text: str) -> str:
@@ -476,6 +548,20 @@ def _record_verify_outcome(container_id: str, result: dict) -> None:
     outcome["selection_ms"] = ts.get("selection_ms", 0)
     outcome["widened_to_full_reason"] = ts.get("widened_to_full_reason")
 
+    # Issue #910: terminal non-test verdicts (timeout / in-progress) keep
+    # the journal shape above but must be distinguishable from a test
+    # failure -- the whole point of the deadline contract is that a
+    # timed-out gate is NOT a failed gate.  The status set above from the
+    # tests section is overridden by the call's own terminal status, and
+    # the misleading "other" failure kind is dropped: an interrupted run
+    # or a refused duplicate is not a failure classification.
+    terminal_status = result.get("status")
+    if terminal_status in ("timeout", "in_progress"):
+        outcome["status"] = terminal_status
+        outcome["fail_kinds"] = []
+        if terminal_status == "timeout":
+            outcome["timeout"] = result.get("timeout")
+
     record_tool_use(
         container_id[:12],
         "verify_in_container",
@@ -557,6 +643,25 @@ def verify_in_container(
         )
     except capture_health.CaptureBrokenError as e:
         return e.payload
+    except VerifyTreeTimeout as exc:
+        # Issue #910: the server-side deadline fired.  The deadline
+        # machinery already terminated and reaped the marked tree (or
+        # reported it could not); this terminal result is distinct from a
+        # test failure -- no gate_fail_reasons are invented for an
+        # interrupted run, and no verify success is recorded.
+        result = {
+            "status": "timeout",
+            "gate_passed": False,
+            "timeout": {
+                "deadline_s": exc.deadline_s,
+                "reap": exc.reap,
+                "elapsed_s": exc.elapsed_s,
+            },
+            "diff_hash": None,
+            "test_selection": _empty_test_selection(),
+        }
+        _record_verify_outcome(container_id, result)
+        return json.dumps(result)
 
 
 def _verify_in_container_impl(
@@ -572,7 +677,64 @@ def _verify_in_container_impl(
     skip_patch_targets_gate: bool = False,
     test_scope: str = "full",
 ) -> str:
-    """Body of :func:`verify_in_container` (see it for the contract)."""
+    """Body of :func:`verify_in_container` with the #910 lifecycle wrapper.
+
+    Owns the per-container in-flight guard (issue #910): at most one verify
+    per container at a time.  A concurrent identical call returns
+    ``status: "in_progress"`` without starting any command; the guard is
+    released on every terminal outcome -- success, test failure, timeout
+    and raised exceptions -- via the ``finally`` below.  The deadline
+    scope opened inside :func:`_verify_in_container_guarded` (which sees
+    this same thread) is cancelled and cleared here, so the watchdog never
+    outlives the call.
+    """
+    if not verify_guard_acquire(container_id):
+        _record_verify_outcome(container_id, {
+            "status": "in_progress",
+            "gate_passed": False,
+        })
+        return json.dumps({
+            "status": "in_progress",
+            "gate_passed": False,
+        })
+    try:
+        return _verify_in_container_guarded(
+            container_id,
+            path,
+            test_filter=test_filter,
+            verbose=verbose,
+            pytest_args=pytest_args,
+            language=language,
+            working_dir=working_dir,
+            skip_lint_gate=skip_lint_gate,
+            skip_type_gate=skip_type_gate,
+            skip_patch_targets_gate=skip_patch_targets_gate,
+            test_scope=test_scope,
+        )
+    finally:
+        verify_guard_release(container_id)
+        close_verify_deadline()
+
+
+def _verify_in_container_guarded(
+    container_id: str,
+    path: str,
+    test_filter: str | None = None,
+    verbose: bool = False,
+    pytest_args: str | None = None,
+    language: str | None = None,
+    working_dir: str | None = None,
+    skip_lint_gate: bool = False,
+    skip_type_gate: bool = False,
+    skip_patch_targets_gate: bool = False,
+    test_scope: str = "full",
+) -> str:
+    """Body of :func:`verify_in_container` under the #910 deadline scope.
+
+    See :func:`verify_in_container` for the contract; the caller
+    (:func:`_verify_in_container_impl`) holds the in-flight guard and
+    releases it on every terminal outcome.
+    """
     import shlex
 
     from sunaba.edit_verify import (
@@ -594,6 +756,14 @@ def _verify_in_container_impl(
             "gate_passed": False,
             "error": str(e),
         })
+
+    # Issue #910: arm this call's server-side deadline.  Resolved per call
+    # from SUNABA_VERIFY_TIMEOUT; every exec owned by this call -- the
+    # direct _run path below and the edit/verify shell runners via
+    # shell._exec_run -- runs under the scope and inherits the marker
+    # environment, so the watchdog reaps the whole tree at expiry.  The
+    # caller (_verify_in_container_impl) closes the scope in its finally.
+    open_verify_deadline(container, resolve_verify_deadline(), _new_verify_marker())
 
     record_tool_use(
         container_id[:12],
@@ -649,9 +819,18 @@ def _verify_in_container_impl(
     saw_output = False
 
     def _run(cmd: str, workdir: str | None = working_dir) -> tuple[int, str, str]:
-        ec, out = container.exec_run(
-            ["/bin/sh", "-c", cmd], stdout=True, stderr=True,
-            workdir=workdir,
+        # Issue #910: the exec runs under the active deadline scope (it is
+        # abandoned-and-reaped when the deadline fires) and inherits the
+        # per-call marker environment so the watchdog can find the whole
+        # tree, including setsid-detached descendants.
+        exec_kwargs: dict = {"stdout": True, "stderr": True, "workdir": workdir}
+        marker_env = verify_marker_environment()
+        if marker_env is not None:
+            exec_kwargs["environment"] = marker_env
+        ec, out = run_exec_under_verify_deadline(
+            lambda: container.exec_run(
+                ["/bin/sh", "-c", cmd], **exec_kwargs
+            )
         )
         out_stdout, out_stderr = (
             out if isinstance(out, tuple) else (out, b"")
@@ -1228,6 +1407,12 @@ def _verify_in_container_impl(
             if not reasons and not overall_ok:
                 result["gate_pass_reason"] = "no tests found \u2014 gate passes"
                 result["gate_passed"] = True
+
+    # Terminal status of a completed verify (issue #910): every response
+    # carries a status key so callers can distinguish a completed run
+    # ("ok" / "failed") from the deadline contract's other terminal
+    # categories (in_progress / timeout / error).
+    result["status"] = "ok" if result["gate_passed"] else "failed"
 
     # Last word before the verdict is recorded and served: a verify whose
     # every exec captured nothing reads as "clean diff, no tests" and

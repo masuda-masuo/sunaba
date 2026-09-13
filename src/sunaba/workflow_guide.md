@@ -89,6 +89,45 @@ type check in one call.
   repositories -- it once let two pyright errors through to a pushed branch.
 - `diff_summary` is structured JSON (`{unstaged, staged, untracked}`), not `git diff --stat`.
 
+### Timeout and retry contract (issue #910)
+
+`verify_in_container` is synchronous and enforces a **server-side deadline**:
+by default `SUNABA_VERIFY_TIMEOUT=270` seconds, below the MCP client's ~300s
+tool-call wait, so **with the default deadline the server answers with a
+terminal result before a transport timeout can occur** -- but only as long as
+the reap completes (`reap` "ok", below).  That guarantee is tied to the
+default: a disabled deadline, an override above the client boundary, or a
+failed reap removes it, and the #910 incident shape (a transport timeout that
+leaves the test tree running) can return.
+
+- **A transport/client timeout is NOT a failed gate and NOT a running gate.**
+  If the tool call itself times out (~300s), the server deadline has already
+  fired: the verification tree was terminated and reaped inside the container.
+  Do not treat that as a test failure.
+- **Retry only after a terminal response.** A terminal response is a
+  completed verify (`status` "ok" with `gate_passed` true, or `status`
+  "failed" with `gate_passed` false), `status` "error", `status` "timeout",
+  or `status` "in_progress" -- never a transport timeout. Retrying a call
+  that produced no response starts a duplicate full gate; the retained test
+  trees can exhaust the container's process capacity.
+- **`status` "timeout" is terminal and distinct from a failed gate.** It
+  carries `timeout` diagnostics `{deadline_s, reap, elapsed_s}`: `reap` "ok"
+  means no marked process survived the cleanup (and, under the default
+  deadline, the cleanup finished before the client boundary); `reap`
+  "incomplete" means survivors remained or the reap could not observe the
+  tree -- the tree may keep running, so treat that as an anomaly and do not
+  blindly retry.  No `gate_fail_reasons` are invented for an interrupted
+  run, and no verify success is recorded.
+- **At most one verify per container at a time.** A concurrent identical call
+  returns `status` "in_progress" with `gate_passed` false without starting
+  another command; wait for that call to finish and re-issue.
+- **`SUNABA_VERIFY_TIMEOUT=0` disables the deadline** (only for special
+  cases): the server then relies entirely on the client boundary, and a
+  transport timeout can again leave the test tree running.  The same loss of
+  guarantee applies to a positive override set above the client's ~300s
+  wait.  Invalid or negative values fall back to the 270s default, so a
+  misconfiguration can never silently disable the deadline.
+
 ### Affected-only runs (fast edit-loop feedback)
 
 Pass `test_scope` set to "affected" to run only the tests selected from the

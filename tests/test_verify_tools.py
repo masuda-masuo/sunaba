@@ -13,8 +13,11 @@ checking then delegate to edit_verify module functions:
 from __future__ import annotations
 
 import json
+import threading
+from typing import Any, Callable, cast
 from unittest.mock import MagicMock, patch
 
+import pytest
 from docker.errors import NotFound
 
 from sunaba.tools.common import CONTAINER_NOT_FOUND_NEXT_ACTION
@@ -2638,6 +2641,41 @@ class TestRecordVerifyOutcome:
             res = mock_record.call_args[0][2]["result"]
             assert res["fail_kinds"] == []
 
+    # --- Issue #910: terminal non-test verdicts are not failures ---
+
+    def test_timeout_outcome_not_classified_as_failure(self) -> None:
+        """A timed-out verify is journaled with status "timeout" and NO
+        failure kind: an interrupted run must never read as "other" (or
+        any other failure classification) to journal consumers."""
+        result = {
+            "gate_passed": False,
+            "status": "timeout",
+            "timeout": {"deadline_s": 0.3, "reap": "ok", "elapsed_s": 0.4},
+        }
+        with patch("sunaba.tools.verify.record_tool_use") as mock_record:
+            from sunaba.tools.verify import _record_verify_outcome
+            _record_verify_outcome("abc123456789", result)
+            res = mock_record.call_args[0][2]["result"]
+            assert res["status"] == "timeout"
+            assert res["fail_kinds"] == []
+            assert res["timeout"] == {"deadline_s": 0.3, "reap": "ok", "elapsed_s": 0.4}
+            assert res["gate_passed"] is False
+
+    def test_in_progress_outcome_not_classified_as_failure(self) -> None:
+        """A refused duplicate (in-progress) is journaled with status
+        "in_progress" and NO failure kind -- it is not a failed gate."""
+        result = {
+            "gate_passed": False,
+            "status": "in_progress",
+        }
+        with patch("sunaba.tools.verify.record_tool_use") as mock_record:
+            from sunaba.tools.verify import _record_verify_outcome
+            _record_verify_outcome("abc123456789", result)
+            res = mock_record.call_args[0][2]["result"]
+            assert res["status"] == "in_progress"
+            assert res["fail_kinds"] == []
+            assert res["gate_passed"] is False
+
     # --- Issue #908: affected/full pairing + affected-mode aggregation ---
 
     def test_affected_requested_carries_pairing_metadata(self) -> None:
@@ -2804,3 +2842,478 @@ class TestRecordVerifyOutcome:
             # Pre-existing keys intact.
             assert res["status"] == "skipped"
             assert res["fail_kinds"] == ["lint"]
+# ===================================================================
+# Issue #910: server-side verify deadline and the in-flight guard
+# ===================================================================
+#
+# These tests pin the verify lifecycle contract from issue #910 before
+# the implementation exists: a verify that exceeds the configured
+# deadline must return a terminal ``status: "timeout"`` result -- distinct
+# from a test failure -- with diagnostics (resolved deadline, reap
+# outcome, elapsed time), and at most one verify per container may run at
+# a time: a concurrent identical call observes ``status: "in_progress"``
+# and must not start a second command.  The in-flight guard is released
+# on success, test failure, timeout and raised exceptions, and the normal
+# verify response plus the #908 journal fields are unchanged by the
+# deadline machinery.
+#
+# The deadline is resolved per call from ``SUNABA_VERIFY_TIMEOUT``
+# (seconds), so tests force a fast timeout with a tiny value and never
+# wait the 270s default.
+
+_VERIFY_TIMEOUT_ENV = "SUNABA_VERIFY_TIMEOUT"
+
+
+def _green_junit() -> bytes:
+    return (
+        b'<?xml version="1.0" encoding="utf-8"?>'
+        b'<testsuites name="pytest tests"><testsuite name="pytest" '
+        b'errors="0" failures="0" skipped="0" tests="1" time="0.01" '
+        b'timestamp="2026-01-01T00:00:00" hostname="h">'
+        b'<testcase classname="tests.test_app" name="test_ok" time="0.01" />'
+        b"</testsuite></testsuites>\n"
+        b"---PYTEST-RAW---\n1 passed\n"
+    )
+
+
+def _failed_junit() -> bytes:
+    return (
+        b'<?xml version="1.0" encoding="utf-8"?>'
+        b'<testsuites name="pytest tests"><testsuite name="pytest" '
+        b'errors="0" failures="1" skipped="0" tests="1" time="0.01" '
+        b'timestamp="2026-01-01T00:00:00" hostname="h">'
+        b'<testcase classname="tests.test_app" name="test_bad" time="0.01">'
+        b'<failure message="boom">boom\n\ntests/test_app.py:5: AssertionError</failure>'
+        b"</testcase></testsuite></testsuites>\n"
+        b"---PYTEST-RAW---\n1 failed\n"
+    )
+
+
+_GATE_OK = {
+    "gate_passed": True,
+    "incomplete": False,
+    "lint": [],
+    "types": [],
+    "gate_fail_reasons": [],
+}
+
+
+def _cmd_text(cmd: object) -> str:
+    if isinstance(cmd, list):
+        return " ".join(str(c) for c in cmd)
+    return str(cmd)
+
+
+def _client_with(container: object) -> MagicMock:
+    client = MagicMock()
+    client.containers.get.return_value = container
+    return client
+
+
+def _detection(*languages: str) -> object:
+    from sunaba.edit_verify import DetectionResult
+
+    return DetectionResult(
+        languages=set(languages), scope={}, reason=None,
+    )
+
+
+class _HangingExecContainer:
+    """Mock container whose pytest exec blocks on an event.
+
+    The three diff-collection execs return empty output immediately; the
+    first exec whose command mentions pytest sets *entered* and then
+    blocks until *release* is set.  After release it returns a green
+    report, so the capture-health guard (issue #870) sees non-empty
+    output and never trips.  Every exec_run command is recorded so tests
+    can assert that an in-progress call starts no second command.
+    """
+
+    def __init__(
+        self,
+        pytest_result: tuple[int, tuple[bytes, bytes]] = (0, (_green_junit(), b"")),
+    ) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.exec_calls: list[tuple[object, dict]] = []
+        self._pytest_result = pytest_result
+
+    def exec_run(self, cmd: object, **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
+        self.exec_calls.append((cmd, dict(kwargs)))
+        if "pytest" in _cmd_text(cmd):
+            self.entered.set()
+            self.release.wait()
+            return self._pytest_result
+        return 0, (b"", b"")
+
+
+def _verify_in_thread(
+    cid: str,
+    container: object,
+    result_box: dict,
+    **kwargs: Any,
+) -> tuple[threading.Thread, MagicMock]:
+    """Run verify_in_container on a worker thread with standard mocks.
+
+    *container* is the object ``client.containers.get`` returns.  The
+    result (a JSON string) is stored under ``result_box["value"]``
+    because pytest assertions must not run inside the worker.  Returns
+    the thread and the patched ``record_verify_success`` mock.
+    """
+    recorder = MagicMock()
+
+    def run() -> None:
+        with (
+            patch("sunaba.tools.verify._docker", return_value=_client_with(container)),
+            patch("sunaba.edit_verify.detect_languages", return_value=_detection("python")),
+            patch("sunaba.edit_verify.run_lint_type_gate", return_value=_GATE_OK),
+            patch("sunaba.tools.verify.record_verify_success", recorder),
+        ):
+            result_box["value"] = verify_in_container(
+                cid,
+                "tests/",
+                skip_lint_gate=True,
+                skip_type_gate=True,
+                skip_patch_targets_gate=True,
+                **kwargs,
+            )
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, recorder
+
+
+def _join_bounded(t: threading.Thread, seconds: float, what: str) -> None:
+    t.join(seconds)
+    if t.is_alive():
+        pytest.fail(
+            f"{what} did not return within {seconds}s -- the {_VERIFY_TIMEOUT_ENV} "
+            "deadline (issue #910) is not enforced"
+        )
+
+
+class TestVerifyTimeoutStatus:
+    """A verify exceeding the configured deadline returns a terminal
+    ``status: "timeout"`` result with diagnostics, distinct from a test
+    failure, and never records a success."""
+
+    CID = "910abcd0001"
+
+    def test_timeout_terminal_status_and_diagnostics(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, "0.3")
+        container = _HangingExecContainer()
+        box: dict = {}
+        t, recorder = _verify_in_thread(self.CID, container, box)
+        try:
+            _join_bounded(t, 10.0, "verify_in_container under a 0.3s deadline")
+            result = json.loads(box["value"])
+            assert result["status"] == "timeout"
+            assert result["gate_passed"] is False
+            # Diagnostics: the resolved deadline is echoed, the reap
+            # outcome is reported, and elapsed time is measured.
+            timeout = result["timeout"]
+            assert timeout["deadline_s"] == 0.3
+            assert timeout["reap"] in ("ok", "incomplete")
+            assert isinstance(timeout["elapsed_s"], (int, float))
+            assert timeout["elapsed_s"] >= 0
+            # Distinct from a test failure: no failure verdict is
+            # invented for the interrupted run.
+            assert "gate_fail_reasons" not in result
+            assert result.get("tests") in (None, {})
+            # A timeout is not a recorded success.
+            recorder.assert_not_called()
+        finally:
+            container.release.set()
+            t.join(10.0)
+
+
+class TestVerifyInFlightGuard:
+    """At most one verify per container at a time.
+
+    The in-flight guard is keyed by container id: a concurrent identical
+    call returns ``status: "in_progress"`` without starting a second
+    command, and the guard is released on every terminal outcome
+    (success, test failure, timeout, raised exception).
+    """
+
+    CID = "910cafef00d"
+    OTHER_CID = "910beef0f00"
+
+    def test_concurrent_identical_call_returns_in_progress(self) -> None:
+        """A second identical verify while one is running observes
+        ``status: "in_progress"`` and starts no second command."""
+        container = _HangingExecContainer()
+        box_a: dict = {}
+        t_a, _rec_a = _verify_in_thread(self.CID, container, box_a)
+        try:
+            assert container.entered.wait(10.0), "first verify never started its test run"
+            execs_before = len(container.exec_calls)
+
+            box_b: dict = {}
+            t_b, _rec_b = _verify_in_thread(self.CID, container, box_b)
+            _join_bounded(t_b, 5.0, "concurrent identical verify call")
+            result = json.loads(box_b["value"])
+            assert result["status"] == "in_progress"
+            assert result["gate_passed"] is False
+            # The concurrent call must not have started a second command.
+            assert len(container.exec_calls) == execs_before
+
+            container.release.set()
+            _join_bounded(t_a, 10.0, "first (released) verify")
+            first = json.loads(box_a["value"])
+            assert first["gate_passed"] is True
+        finally:
+            container.release.set()
+            t_a.join(10.0)
+
+    def test_guard_released_after_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A timed-out call releases the guard: the next verify runs."""
+        monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, "0.3")
+        container = _HangingExecContainer()
+        box: dict = {}
+        t, _rec = _verify_in_thread(self.CID, container, box)
+        try:
+            _join_bounded(t, 10.0, "verify that should time out")
+            first = json.loads(box["value"])
+            assert first["status"] == "timeout"
+
+            # Same container id, now free: a fresh verify must run for real.
+            again = _HangingExecContainer()
+            again.release.set()  # the retry's pytest exec completes immediately
+            box2: dict = {}
+            t2, _rec2 = _verify_in_thread(self.CID, again, box2)
+            _join_bounded(t2, 10.0, "verify after the timed-out call")
+            result = json.loads(box2["value"])
+            assert result["status"] != "in_progress"
+            assert result["gate_passed"] is True
+        finally:
+            container.release.set()
+            t.join(10.0)
+
+    def test_guard_released_on_success(self) -> None:
+        """A completed green verify releases the guard (leak detector:
+        passes on pristine code where no guard exists, red on an
+        implementation that forgets to release it)."""
+        container = _HangingExecContainer()
+        container.release.set()  # pytest exec completes immediately
+        box: dict = {}
+        t, _rec = _verify_in_thread(self.CID, container, box)
+        try:
+            _join_bounded(t, 10.0, "green verify")
+            assert json.loads(box["value"])["gate_passed"] is True
+
+            execs_before = len(container.exec_calls)
+            box2: dict = {}
+            t2, _rec2 = _verify_in_thread(self.CID, container, box2)
+            _join_bounded(t2, 10.0, "second verify after success")
+            result = json.loads(box2["value"])
+            assert result.get("status") != "in_progress"
+            assert result["gate_passed"] is True
+            # A real second run happened: the guard did not block it.
+            assert len(container.exec_calls) > execs_before
+        finally:
+            container.release.set()
+            t.join(10.0)
+
+    def test_guard_released_on_test_failure(self) -> None:
+        """A red gate (test failure) releases the guard (leak detector)."""
+        container = _HangingExecContainer(pytest_result=(1, (_failed_junit(), b"")))
+        container.release.set()
+        box: dict = {}
+        t, _rec = _verify_in_thread(self.CID, container, box)
+        try:
+            _join_bounded(t, 10.0, "red verify")
+            result = json.loads(box["value"])
+            assert result["gate_passed"] is False
+            assert result.get("status") != "timeout"
+            assert "tests" in result  # a real verdict, not a timeout
+
+            again = _HangingExecContainer()
+            again.release.set()
+            box2: dict = {}
+            t2, _rec2 = _verify_in_thread(self.CID, again, box2)
+            _join_bounded(t2, 10.0, "verify after the red gate")
+            assert json.loads(box2["value"])["gate_passed"] is True
+        finally:
+            container.release.set()
+            t.join(10.0)
+
+    def test_guard_released_on_raised_exception(self) -> None:
+        """An exception escaping verify releases the guard (leak detector)."""
+
+        class _ExplodingContainer:
+            def exec_run(self, cmd: object, **kwargs: object) -> None:
+                raise RuntimeError("exec exploded")
+
+        with pytest.raises(RuntimeError):
+            with (
+                patch("sunaba.tools.verify._docker", return_value=_client_with(_ExplodingContainer())),
+                patch("sunaba.edit_verify.detect_languages", return_value=_detection("python")),
+                patch("sunaba.edit_verify.run_lint_type_gate", return_value=_GATE_OK),
+            ):
+                verify_in_container(
+                    self.CID,
+                    "tests/",
+                    skip_lint_gate=True,
+                    skip_type_gate=True,
+                    skip_patch_targets_gate=True,
+                )
+
+        # Guard free after the raised exception: a fresh verify runs.
+        again = _HangingExecContainer()
+        box2: dict = {}
+        t2, _rec2 = _verify_in_thread(self.CID, again, box2)
+        try:
+            again.release.set()
+            _join_bounded(t2, 10.0, "verify after raised exception")
+            assert json.loads(box2["value"])["gate_passed"] is True
+        finally:
+            again.release.set()
+            t2.join(10.0)
+
+    def test_guard_is_per_container(self) -> None:
+        """A verify on one container does not block a verify on another
+        (leak detector: the guard must be keyed by container id)."""
+        busy = _HangingExecContainer()
+        other = _HangingExecContainer()
+        other.release.set()
+
+        box_a: dict = {}
+        t_a, _rec_a = _verify_in_thread(self.CID, busy, box_a)
+        try:
+            assert busy.entered.wait(10.0), "verify on container A never started"
+
+            box_b: dict = {}
+            t_b, _rec_b = _verify_in_thread(self.OTHER_CID, other, box_b)
+            _join_bounded(t_b, 10.0, "verify on a different container")
+            assert json.loads(box_b["value"])["gate_passed"] is True
+        finally:
+            busy.release.set()
+            t_a.join(10.0)
+
+
+class TestVerifyResponseUnchanged:
+    """The deadline machinery must not change the normal verify response
+    or the #908 journal fields (regression pin)."""
+
+    CID = "910face0001"
+
+    def test_normal_green_response_and_908_fields(self) -> None:
+        container = _HangingExecContainer()
+        container.release.set()
+        box: dict = {}
+        t, recorder = _verify_in_thread(self.CID, container, box)
+        try:
+            _join_bounded(t, 10.0, "green verify")
+            result = json.loads(box["value"])
+            assert result["gate_passed"] is True
+            assert result.get("status") != "timeout"
+            assert result["tests"]["full"]["status"] == "ok"
+            # #908 fields still present and bounded.
+            assert result["diff_hash"]
+            ts = result["test_selection"]
+            assert ts["mode"] == "full"
+            assert ts["selected_count"] == 0
+            assert ts["widened_to_full_reason"] is None
+            assert result["partial_test_run"] is False
+            recorder.assert_called_once_with(self.CID)
+        finally:
+            container.release.set()
+            t.join(10.0)
+
+
+class TestVerifyDeadlineConfig:
+    """Deadline resolution contract (issue #910).
+
+    ``resolve_verify_deadline`` reads ``SUNABA_VERIFY_TIMEOUT`` per call:
+    default 270.0s (below the observed ~300s MCP client boundary so a
+    transport timeout can never masquerade as a running or failed gate),
+    numeric override, ``0`` disables the deadline, and invalid or
+    negative values fall back to the default (only exactly ``0``
+    disables; a misconfiguration must not silently disable the deadline).
+
+    The default and the disabled case are not observable through
+    ``verify_in_container``'s public behavior within a seconds-fast test
+    (they would require a 270s hang), so they are pinned through the
+    resolver itself.
+    """
+
+    def _resolver(self) -> Callable[[], float]:
+        """The #910 deadline resolver, or a descriptive failure.
+
+        The symbol does not exist on pristine code (the feature is not
+        implemented yet); the import is resolved dynamically so the base
+        failure is the missing behavior rather than a bare ImportError.
+        """
+        import importlib
+
+        try:
+            module = importlib.import_module("sunaba.tools.verify")
+        except ImportError:
+            pytest.fail("#910 missing: sunaba.tools.verify is not importable")
+        resolver = getattr(module, "resolve_verify_deadline", None)
+        if not callable(resolver):
+            pytest.fail(
+                f"#910 missing: resolve_verify_deadline() is not implemented "
+                f"(the {_VERIFY_TIMEOUT_ENV} deadline configuration contract)"
+            )
+        return cast(Callable[[], float], resolver)
+
+    def test_default_is_270_below_client_boundary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(_VERIFY_TIMEOUT_ENV, raising=False)
+        deadline = self._resolver()()
+        assert deadline == 270.0
+        # The whole point of #910: the server must answer before the MCP
+        # client's ~300s tool-call wait.
+        assert deadline < 300.0
+
+    def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, "3.5")
+        assert self._resolver()() == 3.5
+
+    def test_zero_disables_the_deadline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, "0")
+        assert self._resolver()() == 0.0
+
+    def test_invalid_values_fall_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for bad in ("abc", "", "   ", "12x"):
+            monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, bad)
+            assert self._resolver()() == 270.0, f"invalid value {bad!r}"
+
+    def test_negative_values_fall_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, "-5")
+        assert self._resolver()() == 270.0
+
+
+class TestVerifyDeadlineReaperException:
+    """A reaper that raises must still land a bound diagnostic verdict.
+
+    Issue #910 repair: ``_watchdog`` initializes the reap verdict to
+    ``"incomplete"`` before running the reaper, so an exception inside
+    the reaper cannot leave ``scope.reap`` unset -- the timed-out call
+    always gets a terminal result with a reap diagnostic instead of
+    crashing mid-cleanup.
+    """
+
+    def test_reaper_exception_records_incomplete(self) -> None:
+        from sunaba.edit_verify.shell import (
+            _VerifyDeadlineScope,
+            _watchdog,
+        )
+
+        def _boom(scope: object) -> str:
+            raise RuntimeError("reaper exploded")
+
+        container = _HangingExecContainer()
+        with patch(
+            "sunaba.edit_verify.shell._reap_verify_tree",
+            side_effect=_boom,
+        ):
+            scope = _VerifyDeadlineScope(container, 0.01, "sunaba910reaper")
+            with pytest.raises(RuntimeError):
+                _watchdog(scope)
+        # The exception path still produced a bound diagnostic verdict and
+        # signalled completion, so the owning thread never hangs on the
+        # reap and never reports a silent success.
+        assert scope.reap == "incomplete"
+        assert scope.reap_completed.is_set()

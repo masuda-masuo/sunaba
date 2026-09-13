@@ -22,6 +22,7 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ### Fixed
 
+- **Server-side verify deadline with in-container tree reaping** (#910, closes #910): a `verify_in_container` call that would outlive the MCP client's ~300s tool-call wait now fires a per-call server deadline (default `SUNABA_VERIFY_TIMEOUT=270`s, `0` disables, invalid/negative fall back to the default) and returns a terminal `status:"timeout"` result with `timeout: {deadline_s, reap, elapsed_s}` diagnostics instead of leaving the test tree running after a transport timeout. At expiry the whole marked command tree -- including setsid-detached test children -- is terminated and reaped through the same container exec (TERM descendants-first, KILL fallback, `/proc` scan since the images have no `ps`); `reap:"ok"` is never reported while survivors remain. A concurrent identical call returns `status:"in_progress"` without starting a second command, so retrying a timed-out call can no longer spawn a duplicate full gate that exhausts the container's PID capacity. The timeout result is distinct from a test failure: no `gate_fail_reasons` are fabricated and no verify success is recorded.
 - **`copy_project` creates `dest_dir` automatically if missing** (#895): `copy_project` creates `dest_dir` (and any parent directories) in the container before transfer, avoiding Docker archive 404 errors when copying to a new directory; failures during creation or transfer name the destination directory in the error message.
 
 ## [0.12.0] - 2026-08-02

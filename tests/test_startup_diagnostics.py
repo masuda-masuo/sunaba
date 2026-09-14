@@ -78,14 +78,32 @@ def _mk(name, status="ok", **kw):
     return d
 
 
+def _block_forever_probe(_timeout: float) -> dict:
+    """Picklable probe that ignores its budget and blocks indefinitely."""
+    while True:
+        time.sleep(60)
+
+
 @contextmanager
 def _stalling_server():
-    """Local fake HTTP server that accepts POST and hangs without responding."""
+    """Local fake HTTP server that accepts POST and never responds.
+
+    Yields ``(url, connects)`` where *connects* holds the monotonic time of
+    each POST arrival.  The handler deliberately never answers on its own --
+    it unblocks only when the test's ``finally`` sets *stop_event* -- so the
+    probe's own deadline machinery (urllib's socket read timeout, or
+    ``run_probe``'s kill) is the only thing that can free the CLI.  That
+    makes the window from *connects* to the CLI's exit a deterministic
+    measure of deadline enforcement that does not include however long the
+    CLI spent importing docker-py under CPU load.
+    """
     stop_event = threading.Event()
+    connects: list[float] = []
 
     class _StallingHandler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
-            stop_event.wait(timeout=10)
+            connects.append(time.monotonic())
+            stop_event.wait()
 
         def log_message(self, format, *args):
             pass
@@ -95,12 +113,33 @@ def _stalling_server():
     srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
     srv_thread.start()
     try:
-        yield f"http://127.0.0.1:{port}"
+        yield f"http://127.0.0.1:{port}", connects
     finally:
         stop_event.set()
         server.shutdown()
         server.server_close()
         srv_thread.join(timeout=1)
+
+
+class TestStallingServerContract:
+    """The deadline test synchronizes on the probe's connect time, so the
+    fake server must record it and must never answer on its own -- a server
+    that eventually responded would let a hung probe "finish" and mask a
+    broken deadline."""
+
+    def test_records_connect_and_never_responds(self):
+        import socket
+
+        with _stalling_server() as (url, connects):
+            host, _, port = url.removeprefix("http://").partition(":")
+            with socket.create_connection((host, int(port)), timeout=2) as sock:
+                sock.sendall(
+                    b"POST /version HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}"
+                )
+                sock.settimeout(1.0)
+                with pytest.raises(TimeoutError):
+                    sock.recv(1)
+            assert len(connects) == 1
 
 
 # -- smoke (real subprocess) ------------------------------------------------
@@ -618,15 +657,56 @@ class TestAggregation:
 
 
 class TestDeadline:
-    def test_stalled_child_killed(self):
-        """A stalled probe is killed at deadline with error_kind timeout and no dangling child."""
-        with _stalling_server() as url:
+    # ``python -m sunaba.diagnose`` boots the interpreter and imports
+    # sunaba.diagnose + docker-py before it probes anything.  That import is
+    # not what this test measures, and on this 4-CPU container it stretches
+    # from ~0.9s idle to 6.2-8.7s under 4-5x CPU oversubscription (measured).
+    # This budget is therefore deliberately loose: a probe that is never
+    # unblocked cannot hide behind it, because the stalling server never
+    # answers, so a hung probe hangs the CLI until this budget trips.
+    _CLI_START_BUDGET_S = 20.0
+    # From the probe's connect to the CLI's exit: urllib's socket read
+    # timeout (== --timeout, 0.3s) or run_probe's deadline (--timeout +
+    # 0.5s) fires, then the two remaining probes and the JSON print.  That
+    # window measured 0.34-0.38s idle and 0.39-0.99s under 4-5x CPU
+    # oversubscription; 5s is a meaningful "the deadline cut the probe off
+    # promptly" bound that no longer counts the import.
+    _POST_CONNECT_BUDGET_S = 5.0
+
+    def test_stalled_child_killed(self, diagnose_mod, monkeypatch):
+        """A picklable probe that ignores its budget forces parent poll/SIGKILL."""
+        monkeypatch.setitem(diagnose_mod._PROBES, "blocking_test", _block_forever_probe)
+        real_process = diagnose_mod.multiprocessing.Process
+        created = []
+
+        def tracked_process(*args, **kwargs):
+            process = real_process(*args, **kwargs)
+            created.append(process)
+            return process
+
+        started = time.monotonic()
+        with patch.object(diagnose_mod.multiprocessing, "Process", side_effect=tracked_process):
+            result = diagnose_mod.run_probe("blocking_test", timeout=0.05)
+        elapsed = time.monotonic() - started
+
+        assert result["status"] == "error"
+        assert result["error_kind"] == "timeout"
+        assert 0.45 <= elapsed < 3.0, f"Unexpected parent deadline duration: {elapsed:.2f}s"
+        assert len(created) == 1
+        child = created[0]
+        assert child.exitcode is not None, "Timed-out probe child was not reaped"
+        assert not child.is_alive(), "Timed-out probe child is still alive"
+
+    def test_stalled_http_probe_times_out(self):
+        """An HTTP probe's socket timeout is covered separately from parent SIGKILL."""
+        with _stalling_server() as (url, connects):
             env = os.environ.copy()
             env[CONTROL_URL_ENV] = url
             env[ENABLE_EGRESS_PROXY_ENV] = "true"
             env["DOCKER_HOST"] = "unix:///tmp/nonexistent_sunaba_test_docker.sock"
 
             pgid = None
+            p = None
             t0 = time.monotonic()
             try:
                 p = subprocess.Popen(
@@ -638,11 +718,24 @@ class TestDeadline:
                     preexec_fn=os.setsid,
                 )
                 pgid = p.pid
-                stdout, stderr = p.communicate(timeout=5)
+                stdout, stderr = p.communicate(timeout=self._CLI_START_BUDGET_S)
                 elapsed = time.monotonic() - t0
 
                 assert p.returncode == 1, f"Expected exit code 1, got {p.returncode}; stderr: {stderr}"
-                assert elapsed < 4.0, f"Probe deadline not enforced; took {elapsed:.2f}s"
+                assert connects, (
+                    "Probe never reached the stalling server, so the deadline path was "
+                    f"never exercised; stderr: {stderr}"
+                )
+                # Measure from the probe's connect, not from Popen: everything
+                # before the connect is interpreter/import overhead whose
+                # duration depends on machine load, while everything after it
+                # is the deadline-relevant window this test asserts.
+                post_connect = time.monotonic() - connects[0]
+                assert post_connect < self._POST_CONNECT_BUDGET_S, (
+                    f"Probe deadline not enforced: CLI exited {post_connect:.2f}s after "
+                    f"the probe connected (budget {self._POST_CONNECT_BUDGET_S}s); "
+                    f"total {elapsed:.2f}s"
+                )
                 assert stdout.strip(), f"Expected JSON output from CLI, got empty stdout. stderr: {stderr}"
                 data = json.loads(stdout)
                 assert data["ready"] is False
@@ -663,10 +756,18 @@ class TestDeadline:
                         break
                 assert not dangling, "Dangling child process detected after timeout"
             finally:
+                # Clean the whole process group (the CLI and anything it
+                # failed to reap), then reap the CLI itself if it is still a
+                # zombie after a communicate() timeout.
                 if pgid is not None:
                     try:
                         os.killpg(pgid, signal.SIGKILL)
                     except ProcessLookupError:
+                        pass
+                if p is not None and p.poll() is None:
+                    try:
+                        p.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
                         pass
 
 

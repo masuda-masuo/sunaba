@@ -25,7 +25,9 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -75,26 +77,37 @@ def _verify_in_thread(
     """Run verify_in_container on a worker thread with standard mocks.
 
     The result (a JSON string) is stored under ``result_box["value"]``
-    because pytest assertions must not run inside the worker.  Returns
-    the thread and the patched ``record_verify_success`` mock.
+    because pytest assertions must not run inside the worker.  If the
+    worker itself fails, the exception (with its traceback) is stored
+    under ``result_box["error"]`` so the pytest thread can re-raise it
+    faithfully via :func:`_join_verify_thread` -- never masked as a
+    missing ``"value"`` key (the #912 CI failure mode).  Returns the
+    thread and the patched ``record_verify_success`` mock.
     """
     recorder = MagicMock()
 
     def run() -> None:
-        with (
-            patch("sunaba.tools.verify._docker", return_value=_client_with(container)),
-            patch("sunaba.edit_verify.detect_languages", return_value=_detection("python")),
-            patch("sunaba.edit_verify.run_lint_type_gate", return_value=_GATE_OK),
-            patch("sunaba.tools.verify.record_verify_success", recorder),
-        ):
-            result_box["value"] = verify_in_container(
-                cid,
-                "tests/",
-                skip_lint_gate=True,
-                skip_type_gate=True,
-                skip_patch_targets_gate=True,
-                **kwargs,
-            )
+        try:
+            with (
+                patch("sunaba.tools.verify._docker", return_value=_client_with(container)),
+                patch("sunaba.edit_verify.detect_languages", return_value=_detection("python")),
+                patch("sunaba.edit_verify.run_lint_type_gate", return_value=_GATE_OK),
+                patch("sunaba.tools.verify.record_verify_success", recorder),
+            ):
+                result_box["value"] = verify_in_container(
+                    cid,
+                    "tests/",
+                    skip_lint_gate=True,
+                    skip_type_gate=True,
+                    skip_patch_targets_gate=True,
+                    **kwargs,
+                )
+        except BaseException:
+            # Capture the worker's own failure (with its traceback) for
+            # :func:`_join_verify_thread` to re-raise on the pytest
+            # thread; not re-raised here so a worker failure does not
+            # also spam stderr through threading's exception hook.
+            result_box["error"] = sys.exc_info()
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
@@ -108,6 +121,29 @@ def _join_bounded(t: threading.Thread, seconds: float, what: str) -> None:
             f"{what} did not return within {seconds}s -- the {_VERIFY_TIMEOUT_ENV} "
             "deadline (issue #910) is not enforced"
         )
+
+
+def _join_verify_thread(
+    t: threading.Thread,
+    seconds: float,
+    what: str,
+    box: dict,
+) -> None:
+    """Join a verify worker and surface any worker-side exception.
+
+    The worker stores its JSON result under ``box["value"]``; when the
+    worker itself fails (``verify_in_container`` raising against the fake
+    container -- possible under CI load), that key never appears and a
+    bare ``box["value"]`` read would mask the real failure as
+    ``KeyError: 'value'``, exactly what #912's CI run reported.  Re-raise
+    the worker's exception with its original traceback so the pytest
+    thread sees the true diagnostic instead.
+    """
+    _join_bounded(t, seconds, what)
+    error = box.get("error")
+    if error is not None:
+        _exc_type, exc_value, exc_tb = error
+        raise exc_value.with_traceback(exc_tb)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +217,7 @@ class TestVerifyTimeoutReapChoreography:
         box: dict = {}
         t, _rec = _verify_in_thread(self.CID, container, box)
         try:
-            _join_bounded(t, 10.0, "verify whose cleanup cannot reap")
+            _join_verify_thread(t, 10.0, "verify whose cleanup cannot reap", box)
             result = json.loads(box["value"])
             assert result["status"] == "timeout"
             assert result["timeout"]["reap"] == "incomplete"
@@ -206,7 +242,7 @@ class TestVerifyTimeoutReapChoreography:
         box: dict = {}
         t, _rec = _verify_in_thread(self.CID, container, box)
         try:
-            _join_bounded(t, 10.0, "verify whose cleanup fully reaps")
+            _join_verify_thread(t, 10.0, "verify whose cleanup fully reaps", box)
             result = json.loads(box["value"])
             assert result["status"] == "timeout"
             assert result["timeout"]["reap"] == "ok"
@@ -237,8 +273,14 @@ class _LocalExecContainer:
     running" when the deadline fires.
     """
 
-    def __init__(self, test_run_script: str | None = None) -> None:
+    def __init__(
+        self,
+        test_run_script: str | None = None,
+        ready_path: str | None = None,
+    ) -> None:
         self.test_run_script = test_run_script
+        self.ready_path = Path(ready_path) if ready_path is not None else None
+        self.tree_ready = threading.Event()
         self.exec_calls: list[tuple[object, dict]] = []
         self.closed = False
 
@@ -258,13 +300,22 @@ class _LocalExecContainer:
         if isinstance(env, dict):
             env = dict(os.environ, **env)
         workdir = kwargs.get("workdir")
+        # On CI runners, mock roots like /home/sandbox do not exist on the host filesystem.
+        # Fall back to None (process cwd) so subprocess.Popen does not fail with FileNotFoundError.
+        effective_cwd = workdir if isinstance(workdir, str) and os.path.isdir(workdir) else None
         proc = subprocess.Popen(  # noqa: S603 -- the fake container executes
             argv,                  # the same commands docker exec would
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=workdir if isinstance(workdir, str) else None,
+            cwd=effective_cwd,
             env=env if isinstance(env, dict) else None,
         )
+        if self.ready_path is not None and self.test_run_script is not None and "pytest" in _cmd_text(cmd):
+            ready_deadline = time.monotonic() + 15.0
+            while time.monotonic() < ready_deadline and not self.ready_path.exists():
+                time.sleep(0.01)
+            if self.ready_path.exists():
+                self.tree_ready.set()
         try:
             out, err = proc.communicate()
         except BaseException:
@@ -324,25 +375,42 @@ class TestVerifyTimeoutReapsRealDescendants:
         window (that would be load-sensitive)."""
         token = f"sunaba910-{uuid.uuid4().hex[:12]}"
         log = f"/tmp/{token}.log"
-        # Both processes ignore SIGTERM (logging it) and busy-loop with
-        # no child processes, so after the KILL fallback there is nothing
-        # left for a probe to find -- deterministic, not racy.
+        ready = f"/tmp/{token}.ready"
+        # Both marked processes ignore SIGTERM, but sleep between checks so
+        # readiness and timeout cleanup do not burn a CPU.  The ready file
+        # is written only after the setsid child exists, giving the test a
+        # positive pre-cleanup observation point.
         script = (
             f"trap 'echo TERM >> {log}' TERM; "
             f"setsid sh -c 'trap \"echo TERM >> {log}\" TERM; "
-            f"while :; do :; done # {token}' & "
-            f"while :; do :; done # {token}"
+            f"while :; do sleep 60; done # {token}' & child=$!; "
+            f"while [ ! -d /proc/$child ]; do sleep 0.01; done; "
+            f"echo ready > {ready}; "
+            f"while :; do sleep 60; done # {token}"
         )
-        fake = _LocalExecContainer(test_run_script=script)
-        monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, "0.3")
+        fake = _LocalExecContainer(test_run_script=script, ready_path=ready)
+        # Readiness synchronization proves the marked tree exists before reap,
+        # and a generous deadline/wait budget tolerates CPU oversubscription on CI runners.
+        deadline_s = 3.0
+        monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, str(deadline_s))
         box: dict = {}
         t, _rec = _verify_in_thread(self.CID, fake, box)
         try:
-            _join_bounded(t, 15.0, "verify that must time out and reap")
+            if not fake.tree_ready.wait(15.0):
+                error = box.get("error")
+                if error is not None:
+                    _exc_type, exc_value, exc_tb = error
+                    raise exc_value.with_traceback(exc_tb)
+                raise AssertionError("marked pytest command did not create its setsid child")
+            before_cleanup = _token_processes(token)
+            assert len(before_cleanup) >= 2, (
+                "marked command and setsid descendant must both exist before timeout cleanup"
+            )
+            _join_verify_thread(t, 25.0, "verify that must time out and reap", box)
             result = json.loads(box["value"])
             assert result["status"] == "timeout"
             assert result["timeout"]["reap"] == "ok"
-            assert result["timeout"]["deadline_s"] == 0.3
+            assert result["timeout"]["deadline_s"] == deadline_s
 
             # No marked process remains -- neither the direct command nor
             # the setsid-detached descendant.
@@ -367,5 +435,40 @@ class TestVerifyTimeoutReapsRealDescendants:
         finally:
             _kill_token_processes(token)
             Path(log).unlink(missing_ok=True)
+            Path(ready).unlink(missing_ok=True)
             t.join(10.0)
             fake.closed = True
+
+
+class _RaisingContainer:
+    """Fake container whose every exec fails.
+
+    Simulates the worker-side verify failure that #912's CI run hit (and
+    that used to be masked as ``KeyError: 'value'`` on the pytest
+    thread): ``verify_in_container`` raises against the fake container,
+    and the helper thread must hand the real exception back instead of
+    leaving ``box["value"]`` unset.
+    """
+
+    def exec_run(self, cmd: object, **kwargs: object) -> object:
+        raise RuntimeError("exec failed under load")
+
+
+class TestWorkerExceptionSurfacing:
+    """A worker-side verify failure must surface with its original
+    diagnostic on the pytest thread -- never as ``KeyError: 'value'``
+    (#912 CI regression)."""
+
+    CID = "910erro0001"
+
+    def test_worker_exception_is_reraised_with_context(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, "0.3")
+        box: dict = {}
+        t, _rec = _verify_in_thread(self.CID, _RaisingContainer(), box)
+        with pytest.raises(RuntimeError, match="exec failed under load"):
+            _join_verify_thread(t, 10.0, "verify worker that must fail", box)
+        # The masking failure mode is gone: the worker error was captured
+        # and re-raised before any ``box["value"]`` read.
+        assert "value" not in box

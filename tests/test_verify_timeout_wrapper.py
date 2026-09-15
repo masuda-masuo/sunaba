@@ -308,7 +308,7 @@ class _LocalExecContainer:
             env=env if isinstance(env, dict) else None,
         )
         if self.ready_path is not None and self.test_run_script is not None and "pytest" in _cmd_text(cmd):
-            ready_deadline = time.monotonic() + 5.0
+            ready_deadline = time.monotonic() + 15.0
             while time.monotonic() < ready_deadline and not self.ready_path.exists():
                 time.sleep(0.01)
             if self.ready_path.exists():
@@ -386,19 +386,19 @@ class TestVerifyTimeoutReapsRealDescendants:
             f"while :; do sleep 60; done # {token}"
         )
         fake = _LocalExecContainer(test_run_script=script, ready_path=ready)
-        # Readiness synchronization removes the pre-pytest startup race, so
-        # the timeout can stay short while still reaching the marked tree.
-        deadline_s = 1.0
+        # Readiness synchronization proves the marked tree exists before reap,
+        # and a generous deadline/wait budget tolerates CPU oversubscription on CI runners.
+        deadline_s = 3.0
         monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, str(deadline_s))
         box: dict = {}
         t, _rec = _verify_in_thread(self.CID, fake, box)
         try:
-            assert fake.tree_ready.wait(5.0), "marked pytest command did not create its setsid child"
+            assert fake.tree_ready.wait(15.0), "marked pytest command did not create its setsid child"
             before_cleanup = _token_processes(token)
             assert len(before_cleanup) >= 2, (
                 "marked command and setsid descendant must both exist before timeout cleanup"
             )
-            _join_verify_thread(t, 20.0, "verify that must time out and reap", box)
+            _join_verify_thread(t, 25.0, "verify that must time out and reap", box)
             result = json.loads(box["value"])
             assert result["status"] == "timeout"
             assert result["timeout"]["reap"] == "ok"

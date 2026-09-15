@@ -300,11 +300,14 @@ class _LocalExecContainer:
         if isinstance(env, dict):
             env = dict(os.environ, **env)
         workdir = kwargs.get("workdir")
+        # On CI runners, mock roots like /home/sandbox do not exist on the host filesystem.
+        # Fall back to None (process cwd) so subprocess.Popen does not fail with FileNotFoundError.
+        effective_cwd = workdir if isinstance(workdir, str) and os.path.isdir(workdir) else None
         proc = subprocess.Popen(  # noqa: S603 -- the fake container executes
             argv,                  # the same commands docker exec would
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=workdir if isinstance(workdir, str) else None,
+            cwd=effective_cwd,
             env=env if isinstance(env, dict) else None,
         )
         if self.ready_path is not None and self.test_run_script is not None and "pytest" in _cmd_text(cmd):
@@ -393,7 +396,12 @@ class TestVerifyTimeoutReapsRealDescendants:
         box: dict = {}
         t, _rec = _verify_in_thread(self.CID, fake, box)
         try:
-            assert fake.tree_ready.wait(15.0), "marked pytest command did not create its setsid child"
+            if not fake.tree_ready.wait(15.0):
+                error = box.get("error")
+                if error is not None:
+                    _exc_type, exc_value, exc_tb = error
+                    raise exc_value.with_traceback(exc_tb)
+                raise AssertionError("marked pytest command did not create its setsid child")
             before_cleanup = _token_processes(token)
             assert len(before_cleanup) >= 2, (
                 "marked command and setsid descendant must both exist before timeout cleanup"

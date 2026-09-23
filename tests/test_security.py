@@ -220,6 +220,13 @@ class TestBuildSecureRunKwargs:
         result = build_secure_run_kwargs(DEFAULT_SECURITY_PROFILE)
         assert result["pids_limit"] == 500
 
+    def test_init_process_applied(self) -> None:
+        """``sleep infinity`` as PID 1 never reaps orphans, so every reaped
+        or detached descendant stays a zombie counted against pids_limit.
+        Containers must run with a reaping init."""
+        result = build_secure_run_kwargs(DEFAULT_SECURITY_PROFILE)
+        assert result["init"] is True
+
     def test_network_mode_none_by_default(self) -> None:
         result = build_secure_run_kwargs(DEFAULT_SECURITY_PROFILE)
         assert result["network_mode"] == "none"

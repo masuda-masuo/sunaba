@@ -119,6 +119,11 @@ def strip_carriage_returns(text: str) -> str:
     lines = text.split("\n")
     cleaned: list[str] = []
     for line in lines:
+        # A trailing \r is a CRLF line ending, not an in-place overwrite:
+        # nothing follows it on the line, so treating it as one erased the
+        # whole line (#915: Docker's CRLF-terminated "OCI runtime exec
+        # failed ..." message was reduced to an empty line).
+        line = line.rstrip("\r")
         if "\r" in line:
             # Keep only the segment after the last \r
             parts = line.split("\r")
@@ -243,22 +248,24 @@ def compress_repeated_lines(text: str) -> str:
     prev_line = lines[0]
     count = 1
 
+    def flush(line: str, n: int) -> None:
+        # Blank runs are kept verbatim: a counter on an empty line reads as
+        # content (#915: empty output became "[×2] " with shown=1).
+        if n > 1 and line:
+            result.append(f"[×{n}] {line}")
+        else:
+            result.extend([line] * n)
+
     for line in lines[1:]:
         if line == prev_line:
             count += 1
         else:
-            if count > 1:
-                result.append(f"[\u00d7{count}] {prev_line}")
-            else:
-                result.append(prev_line)
+            flush(prev_line, count)
             prev_line = line
             count = 1
 
     # Handle the last group
-    if count > 1:
-        result.append(f"[\u00d7{count}] {prev_line}")
-    else:
-        result.append(prev_line)
+    flush(prev_line, count)
 
     return "\n".join(result)
 

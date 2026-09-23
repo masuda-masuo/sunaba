@@ -89,6 +89,15 @@ class TestStripCarriageReturns:
         raw = "a\rb\rc"
         assert strip_carriage_returns(raw) == "c"
 
+    def test_crlf_line_ending_keeps_the_line(self) -> None:
+        """#915: a CRLF ending is not an overwrite -- it used to erase the line."""
+        raw = "first\r\nsecond\r\n"
+        assert strip_carriage_returns(raw) == "first\nsecond\n"
+
+    def test_progress_bar_ending_in_cr_keeps_final_state(self) -> None:
+        raw = "10%\r50%\r100%\r\n"
+        assert strip_carriage_returns(raw) == "100%\n"
+
 
 # =======================================================================
 # strip_timestamps
@@ -212,6 +221,18 @@ class TestSanitizeOutput:
     def test_empty_string(self) -> None:
         assert sanitize_output("") == ""
 
+    def test_docker_exec_start_failure_message_survives(self) -> None:
+        """#915: the exact bytes docker-py returns when a saturated container
+        refuses an exec (measured on the pinned image).  The message used
+        to be reduced to an empty line and then to ``[×2] ``."""
+        raw = (
+            "OCI runtime exec failed: exec failed: unable to start container "
+            "process: procReady not received\r\n"
+        )
+        result = compress_repeated_lines(sanitize_output(raw))
+        assert "procReady not received" in result
+        assert "×" not in result
+
 
 # =======================================================================
 # compress_repeated_lines
@@ -247,6 +268,11 @@ class TestCompressRepeatedLines:
     def test_no_repetition(self) -> None:
         raw = "a\nb\na\n"  # Not consecutive, should not be compressed
         assert compress_repeated_lines(raw) == "a\nb\na\n"
+
+    def test_blank_runs_are_not_counted(self) -> None:
+        """#915: a counter on an empty line reads as content."""
+        assert compress_repeated_lines("\n") == "\n"
+        assert compress_repeated_lines("a\n\n\nb") == "a\n\n\nb"
 
 
 # =======================================================================

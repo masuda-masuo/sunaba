@@ -14,6 +14,20 @@ from docker.errors import NotFound
 from pydantic import BeforeValidator
 
 from sunaba import capture_health
+from sunaba.edit_verify.shell import (
+    _FOREGROUND_MARKER_ENV,
+    ForegroundTreeTimeout,
+    close_foreground_deadline,
+    foreground_marker_environment,
+    foreground_sweep_command,
+    foreground_wait_fragment,
+    new_foreground_marker,
+    open_foreground_deadline,
+    reap_foreground_tree,
+    resolve_foreground_deadline,
+    run_exec_under_foreground_deadline,
+    subreaper_exec_command,
+)
 from sunaba.journal import record_exec as journal_record_exec
 from sunaba.journal import record_exec_start as journal_record_exec_start
 from sunaba.journal import record_tool_use
@@ -154,7 +168,24 @@ def sandbox_exec(
         verbose=verbose,
     )
 
+    # --- Foreground exec deadline (generalized #910 machinery) ---
+    # Every synchronous sandbox_exec arms a server-owned wall-clock
+    # deadline (SUNABA_FOREGROUND_TIMEOUT, default 270s) so a call that
+    # outlives the MCP client's ~300s tool-call wait answers with a
+    # terminal ``status: "timeout"`` result instead of leaving the
+    # in-container command tree running and exhausting the container's PID
+    # capacity.  The exec inherits the private per-call marker through the
+    # environment; at expiry the watchdog reaps the whole marked tree
+    # (TERM/KILL/probe) and the call returns the terminal timeout result.
+    foreground_deadline_s = resolve_foreground_deadline()
+    foreground_marker = new_foreground_marker()
+    foreground_started_at = time.monotonic()
     try:
+        # Armed inside the try so the finally always clears the thread-local
+        # scope: tool calls run on a reused worker-thread pool, and a scope
+        # left behind by a failed arm would leak into the next call.
+        open_foreground_deadline(container, foreground_deadline_s, foreground_marker)
+
         # --- Execute ---
         if use_argv:
             assert argv is not None  # guaranteed by validation above
@@ -165,25 +196,55 @@ def sandbox_exec(
             exec_kwargs: dict[str, Any] = {"stdout": True, "stderr": True, "demux": True}
             if working_dir:
                 exec_kwargs["workdir"] = working_dir
-            exit_code, output = container.exec_run(run_argv, **exec_kwargs)
+            marker_env = foreground_marker_environment()
+            if marker_env is not None:
+                exec_kwargs["environment"] = marker_env
+            exit_code, output = run_exec_under_foreground_deadline(
+                lambda: container.exec_run(run_argv, **exec_kwargs)
+            )
         else:
             assert commands is not None  # guaranteed by validation above
             joined = " && ".join(commands)
             encoded = base64.b64encode(joined.encode("utf-8")).decode("ascii")
             tmpf = f"/tmp/.sx_{os.urandom(4).hex()}.sh"
+            waitf = f"{tmpf}.wait"
             runner = f"timeout {timeout} {tmpf}" if timeout > 0 else tmpf
-            cmd = (
+            # The wrapper runs under a child subreaper (see
+            # shell.subreaper_exec_command) so a timed-out call's reap never
+            # leaves orphaned zombies behind.
+            rest = (
                 f"echo {shlex.quote(encoded)} | base64 -d > {tmpf}"
                 f" && chmod +x {tmpf}"
                 f" && {runner}; rc=$?"
-                f"; rm -f {tmpf}"
-                f"; exit $rc"
             )
-            exit_code, output = container.exec_run(
-                ["/bin/bash", "-c", cmd],
-                stdout=True,
-                stderr=True,
-                demux=True,
+            if timeout > 0:
+                # Explicit-timeout path (decision 3): when ``timeout(1)``
+                # fires (exit 124) the direct command is gone but ordinary
+                # and setsid-detached descendants survive -- and, once their
+                # ancestors die, they are reparented straight to PID 1 (the
+                # sandbox images ship no init that reaps).  The wrapper
+                # therefore sweeps the marked tree itself, while it is still
+                # alive to reap the adopted orphans, before exiting with the
+                # 124 contract.  The sweep runs with the marker removed from
+                # its environment so it can never match its own processes.
+                rest += (
+                    f'; if [ "$rc" -eq 124 ]; then '
+                    f"env -u {_FOREGROUND_MARKER_ENV} /bin/sh -c "
+                    f"{shlex.quote(foreground_sweep_command(foreground_marker))}; fi"
+                )
+            # The wrapper must outlive the reaper's staged kill: it stays
+            # alive (bounded) until every other marked process is gone, so
+            # the descendants it adopted as the tree's subreaper are reaped
+            # by it instead of falling to PID 1 as zombies.
+            rest += foreground_wait_fragment(foreground_marker, waitf)
+            rest += f"; rm -f {tmpf} {waitf}; exit $rc"
+            cmd = subreaper_exec_command(rest)
+            marker_env = foreground_marker_environment()
+            exec_kwargs = {"stdout": True, "stderr": True, "demux": True}
+            if marker_env is not None:
+                exec_kwargs["environment"] = marker_env
+            exit_code, output = run_exec_under_foreground_deadline(
+                lambda: container.exec_run(["/bin/bash", "-c", cmd], **exec_kwargs)
             )
         stdout_part, stderr_part = output
         stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
@@ -247,10 +308,16 @@ def sandbox_exec(
             limit=limit,
         )
 
+        foreground_reap: str | None = None
         if exit_code == 0:
             status = "ok"
         elif timeout > 0 and exit_code == 124:
             status = "timeout"
+            # The explicit ``timeout(N)`` fired: ``timeout(1)`` kills its
+            # direct child only, so ordinary and setsid-detached
+            # descendants may survive.  Reap the marked tree
+            # deterministically before returning the terminal result.
+            foreground_reap = reap_foreground_tree(container, foreground_marker)
         else:
             status = "error"
 
@@ -269,6 +336,34 @@ def sandbox_exec(
             result["exit_code"] = exit_code
         if stderr_text and verbose != "error_only":
             result["stderr"] = stderr_text
+        if status == "timeout":
+            assert foreground_reap is not None
+            result["timeout"] = {
+                "deadline_s": foreground_deadline_s,
+                "reap": foreground_reap,
+                "elapsed_s": time.monotonic() - foreground_started_at,
+            }
+    except ForegroundTreeTimeout as exc:
+        # The server-side foreground deadline fired: the watchdog already
+        # terminated and reaped the marked tree (or reported that it could
+        # not).  Journal exactly one truthful terminal entry -- the timed-out
+        # exec must never record a completion with exit code 0 -- and return
+        # the terminal timeout result carrying the deadline diagnostics.
+        journal_record_exec(
+            container_id[:12],
+            journal_subject,
+            124,
+            verbose=verbose,
+        )
+        return json.dumps({
+            "status": "timeout",
+            "exit_code": 124,
+            "timeout": {
+                "deadline_s": exc.deadline_s,
+                "reap": exc.reap,
+                "elapsed_s": exc.elapsed_s,
+            },
+        })
     except BaseException:
         # The START entry above must never be orphaned (#789 review):
         # without a closing record the run reads as in-flight until
@@ -283,6 +378,8 @@ def sandbox_exec(
             verbose=verbose,
         )
         raise
+    finally:
+        close_foreground_deadline()
 
     journal_record_exec(
         container_id[:12],

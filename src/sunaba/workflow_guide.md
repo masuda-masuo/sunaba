@@ -128,6 +128,39 @@ leaves the test tree running) can return.
   wait.  Invalid or negative values fall back to the 270s default, so a
   misconfiguration can never silently disable the deadline.
 
+### Foreground exec deadline (issue #915)
+
+The synchronous exec tools (sandbox_exec, run_python, package_install) carry
+the same kind of server-side deadline, configured separately:
+`SUNABA_FOREGROUND_TIMEOUT=270` seconds by default; `0` disables it; a positive
+value overrides it; invalid or negative values fall back to 270.
+Without it, a command that outlived the client's tool-call wait kept running
+in the container after the call was abandoned, and the leftover trees exhausted
+the container's process limit, so unrelated calls failed to start.
+
+- At the deadline the whole command tree -- including setsid-detached
+  children -- is terminated and reaped, and the call returns `status`
+  "timeout" with exit code 124 and `timeout` diagnostics
+  `{deadline_s, reap, elapsed_s}`. `reap` has the same meaning as for verify:
+  "incomplete" is an anomaly, not something to retry blindly.
+- An explicit `timeout` on sandbox_exec still wins and keeps its `status`
+  "timeout" / exit code 124 result; it now also reaps descendants that
+  timeout(1) alone would leave behind.
+- Background exec is **not** subject to this deadline: background jobs are
+  meant to outlive the call. Use it for anything expected to run longer than
+  the deadline.
+- **package_install has no per-call override.** An install that used to run
+  past the client's wait and still finish inside the container is now killed
+  at the deadline. Run a heavy install (large or GPU wheels) as a background
+  exec instead.
+- **What `reap` "ok" does and does not prove.** The tree is found by a private
+  marker in each process's environment, so "ok" means no process *carrying
+  the marker* survived. A descendant that clears or replaces its environment
+  (env -i, a custom envp, a switch to another user) is invisible to the reap
+  and can outlive an "ok". The same limit applies to the verify deadline.
+  When "incomplete" is reported, the server thread waiting on that exec also
+  stays blocked until the process ends.
+
 ### Affected-only runs (fast edit-loop feedback)
 
 Pass `test_scope` set to "affected" to run only the tests selected from the

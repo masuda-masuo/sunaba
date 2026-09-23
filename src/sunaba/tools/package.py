@@ -10,8 +10,28 @@ from typing import Annotated
 from docker.errors import NotFound
 from pydantic import BeforeValidator
 
+from sunaba.edit_verify.shell import (
+    ForegroundTreeTimeout,
+    close_foreground_deadline,
+    ensure_foreground_deadline,
+    foreground_marker_environment,
+    run_exec_under_foreground_deadline,
+)
 from sunaba.journal import record_exec as journal_record_exec
 from sunaba.tools.common import _coerce_list_arg, _docker
+
+
+def _foreground_timeout_result(exc: ForegroundTreeTimeout) -> str:
+    """Terminal ``status: "timeout"`` result for a foreground deadline fire."""
+    return json.dumps({
+        "status": "timeout",
+        "exit_code": 124,
+        "timeout": {
+            "deadline_s": exc.deadline_s,
+            "reap": exc.reap,
+            "elapsed_s": exc.elapsed_s,
+        },
+    })
 
 
 def _run_in_container(container_id: str, cmd: list[str]) -> tuple[int, str, str]:
@@ -24,11 +44,21 @@ def _run_in_container(container_id: str, cmd: list[str]) -> tuple[int, str, str]
     except Exception as e:
         return -1, "", str(e)
 
-    exit_code, output = container.exec_run(
-        cmd,
-        stdout=True,
-        stderr=True,
-        demux=True,
+    # Every exec of a package_install call runs under the call's foreground
+    # deadline (SUNABA_FOREGROUND_TIMEOUT, default 270s) and inherits the
+    # private per-call marker environment.  The deadline is armed on the
+    # first exec (the container object is only available here) and the call
+    # closes the scope in its finally; a deadline fire raises
+    # ForegroundTreeTimeout, which package_install converts into the
+    # terminal timeout result after the watchdog reaped the marked tree.
+    ensure_foreground_deadline(container)
+    marker_env = foreground_marker_environment()
+    exec_kwargs: dict[str, object] = {"stdout": True, "stderr": True, "demux": True}
+    if marker_env is not None:
+        exec_kwargs["environment"] = marker_env
+
+    exit_code, output = run_exec_under_foreground_deadline(
+        lambda: container.exec_run(cmd, **exec_kwargs)
     )
     stdout_part, stderr_part = output
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
@@ -174,7 +204,22 @@ def package_install(
         pkg_list = None
         if packages:
             pkg_list = [packages] if isinstance(packages, str) else list(packages)
-        return _run_npm_install(container_id, pkg_list)
+        try:
+            return _run_npm_install(container_id, pkg_list)
+        except ForegroundTreeTimeout as exc:
+            # The server-side foreground deadline fired while the install
+            # exec was blocked; the watchdog already reaped the marked
+            # tree (or reported it could not).  Journal exactly one
+            # truthful terminal entry -- never a phantom success.
+            journal_record_exec(
+                container_id[:12],
+                ["npm", "install"],
+                124,
+                verbose="package_install",
+            )
+            return _foreground_timeout_result(exc)
+        finally:
+            close_foreground_deadline()
 
     # --- Validate arguments ---
     if not any([packages, editable, constraints, requirements]):
@@ -228,41 +273,56 @@ def package_install(
     ]
 
     # --- Snapshot installed packages before ---
-    before = _get_installed_packages(container_id)
-    before_keys = {_package_to_key(p) for p in before}
+    try:
+        before = _get_installed_packages(container_id)
+        before_keys = {_package_to_key(p) for p in before}
 
-    # --- Run the install ---
-    ec, stdout_text, stderr_text = _run_in_container(container_id, install_cmd)
+        # --- Run the install ---
+        ec, stdout_text, stderr_text = _run_in_container(container_id, install_cmd)
 
-    # Record the install in the audit journal.  package_install mutates
-    # container state (and may reach the network), so it must leave a trail
-    # just like ``sandbox_exec pip install ...`` does; a dedicated tool must
-    # not become an audit blind spot (Issue #359).
-    journal_record_exec(
-        container_id[:12],
-        install_cmd,
-        ec,
-        verbose="package_install",
-    )
+        # Record the install in the audit journal.  package_install mutates
+        # container state (and may reach the network), so it must leave a trail
+        # just like ``sandbox_exec pip install ...`` does; a dedicated tool must
+        # not become an audit blind spot (Issue #359).
+        journal_record_exec(
+            container_id[:12],
+            install_cmd,
+            ec,
+            verbose="package_install",
+        )
 
-    # --- Snapshot installed packages after ---
-    after = _get_installed_packages(container_id)
-    after_keys = {_package_to_key(p) for p in after}
+        # --- Snapshot installed packages after ---
+        after = _get_installed_packages(container_id)
+        after_keys = {_package_to_key(p) for p in after}
 
-    new_or_changed = sorted(after_keys - before_keys)
+        new_or_changed = sorted(after_keys - before_keys)
 
-    if ec != 0:
+        if ec != 0:
+            return json.dumps({
+                "status": "error",
+                "error": f"package install failed (exit code {ec})",
+                "stderr": stderr_text or stdout_text,
+                "installed_packages": new_or_changed,
+                "changed": len(new_or_changed),
+            })
+
         return json.dumps({
-            "status": "error",
-            "error": f"package install failed (exit code {ec})",
-            "stderr": stderr_text or stdout_text,
+            "status": "ok",
             "installed_packages": new_or_changed,
             "changed": len(new_or_changed),
+            "output": stdout_text.strip() or (stderr_text.strip() if stderr_text else ""),
         })
-
-    return json.dumps({
-        "status": "ok",
-        "installed_packages": new_or_changed,
-        "changed": len(new_or_changed),
-        "output": stdout_text.strip() or (stderr_text.strip() if stderr_text else ""),
-    })
+    except ForegroundTreeTimeout as exc:
+        # The server-side foreground deadline fired while an exec of this
+        # call was blocked; the watchdog already reaped the marked tree
+        # (or reported it could not).  Journal exactly one truthful
+        # terminal entry -- never a phantom success.
+        journal_record_exec(
+            container_id[:12],
+            install_cmd,
+            124,
+            verbose="package_install",
+        )
+        return _foreground_timeout_result(exc)
+    finally:
+        close_foreground_deadline()

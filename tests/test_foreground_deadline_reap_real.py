@@ -36,6 +36,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -108,7 +109,10 @@ def _call_sandbox_exec_timeout(cid: str, container: object, commands: list[str],
 
 def _call_run_python(cid: str, container: object, code: str) -> str:
     with patch("sunaba.tools.run_python._docker", return_value=_client_with(container)):
-        return run_python(cid, code=code)
+        # run_python defaults its cwd to /workspace, which exists in every
+        # sandbox container but not on a CI runner or a dev host: the runner
+        # would fail to start the user code and the tree would never appear.
+        return run_python(cid, code=code, working_dir=tempfile.gettempdir())
 
 
 def _call_package_install(cid: str, container: object) -> str:

@@ -398,6 +398,13 @@ def build_secure_run_kwargs(
     if profile.pids_limit:
         result.setdefault("pids_limit", profile.pids_limit)
 
+    # 5b. An init as PID 1.  The container's command is ``sleep infinity``,
+    # which never calls wait(): every orphan -- a setsid-detached child, or a
+    # descendant whose parent the verify deadline just killed -- is
+    # reparented to PID 1 and stays a zombie forever, still counted against
+    # pids_limit.  Reaping trees cannot fix that; only a reaping PID 1 can.
+    result.setdefault("init", True)
+
     # 6. Network off by default (allow_network overrides to "bridge")
     if profile.allow_network:
         result["network_mode"] = "bridge"

@@ -10,6 +10,17 @@ import shlex
 
 from docker.errors import NotFound
 
+from sunaba.edit_verify.shell import (
+    ForegroundTreeTimeout,
+    close_foreground_deadline,
+    foreground_marker_environment,
+    foreground_wait_fragment,
+    new_foreground_marker,
+    open_foreground_deadline,
+    resolve_foreground_deadline,
+    run_exec_under_foreground_deadline,
+    subreaper_exec_command,
+)
 from sunaba.journal import record_tool_use
 from sunaba.output_control import (
     content_withheld,
@@ -129,19 +140,66 @@ def run_python(
     )
     runner_b64 = base64.b64encode(runner.encode("utf-8")).decode("ascii")
     tmpf = f"/tmp/.rp_{nonce}.py"
-    cmd = (
+    waitf = f"{tmpf}.wait"
+    # Per-call marker shared by the deadline scope and the wrapper text (the
+    # wrapper's wait/sweep fragments must match the env marker exactly).
+    marker = new_foreground_marker()
+    # The runner shell runs under a child subreaper (see
+    # shell.subreaper_exec_command) so a deadline reap never leaves the
+    # user code's orphaned descendants (setsid-detached included) as
+    # zombies behind in a container whose PID 1 does not reap.
+    rest = (
         f"echo {shlex.quote(runner_b64)} | base64 -d > {tmpf}"
         f" && python3 {tmpf}; rc=$?"
-        f"; rm -f {tmpf}"
-        f"; exit $rc"
     )
+    # The wrapper must outlive the reaper's staged kill: it stays alive
+    # (bounded) until every other marked process is gone, so the
+    # descendants it adopted as the tree's subreaper are reaped by it
+    # instead of falling to PID 1 as zombies.
+    rest += foreground_wait_fragment(marker, waitf)
+    rest += f"; rm -f {tmpf} {waitf}; exit $rc"
+    cmd = subreaper_exec_command(rest)
 
-    exit_code, output = container.exec_run(
-        ["/bin/sh", "-c", cmd],
-        stdout=True,
-        stderr=True,
-        demux=True,
-    )
+    # --- Foreground exec deadline (generalized #910 machinery) ---
+    # run_python is synchronous and takes no explicit timeout, so the
+    # server-owned deadline (SUNABA_FOREGROUND_TIMEOUT, default 270s) is
+    # its only wall-clock bound: at expiry the watchdog reaps the whole
+    # marked tree -- including setsid-detached children the user code may
+    # have spawned -- and the call returns a terminal ``status: "timeout"``
+    # result instead of a transport timeout that leaves the tree running.
+    try:
+        # Armed inside the try so the finally always clears the thread-local
+        # scope (tool calls run on a reused worker-thread pool).
+        open_foreground_deadline(
+            container,
+            resolve_foreground_deadline(),
+            marker,
+        )
+
+        marker_env = foreground_marker_environment()
+        exec_kwargs: dict[str, object] = {
+            "stdout": True,
+            "stderr": True,
+            "demux": True,
+        }
+        if marker_env is not None:
+            exec_kwargs["environment"] = marker_env
+        exit_code, output = run_exec_under_foreground_deadline(
+            lambda: container.exec_run(["/bin/sh", "-c", cmd], **exec_kwargs)
+        )
+    except ForegroundTreeTimeout as exc:
+        return json.dumps({
+            "status": "timeout",
+            "exit_code": 124,
+            "timeout": {
+                "deadline_s": exc.deadline_s,
+                "reap": exc.reap,
+                "elapsed_s": exc.elapsed_s,
+            },
+        })
+    finally:
+        close_foreground_deadline()
+
     stdout_part, stderr_part = output if isinstance(output, tuple) else (output, b"")
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""

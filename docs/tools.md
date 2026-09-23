@@ -35,6 +35,8 @@ Run commands and manage packages inside the container.
 | `package_install` | `container_id`, `packages` (opt), `editable` (opt), `constraints` (opt), `requirements` (opt), `upgrade` (opt), `extras` (opt), `manager` (opt) | Structured wrapper for package installs (`pip`/`uv`; `manager="npm"` for JS deps). Returns installed package versions and avoids log pollution. |
 | `run_python` | `container_id`, `code`, `working_dir` (opt), `max_lines` (opt), `verbose` (opt) | Executes arbitrary Python code inside the container. Base64-transported (no quoting hell). Returns stdout/stderr/exit_code. |
 
+`sandbox_exec`, `run_python`, and `package_install` run under a server-side foreground deadline (`SUNABA_FOREGROUND_TIMEOUT`, default 270s, `0` disables, invalid/negative fall back to 270). On expiry the whole command tree, including setsid-detached children, is reaped and the call returns `status: "timeout"`, `exit_code: 124`, and `timeout: {deadline_s, reap, elapsed_s}`. An explicit `timeout` on `sandbox_exec` takes precedence and also reaps descendants. `sandbox_exec_background` is not subject to the deadline; `package_install` has no per-call override, so run heavy installs in the background. The tree is found by an environment marker: a descendant that clears its environment escapes the reap.
+
 ---
 
 ## 3. File Operations

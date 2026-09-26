@@ -289,6 +289,7 @@ def _search_lexical(
         args,
         stdout=True,
         stderr=True,
+        demux=True,
     )
     if exit_code == 127:
         # The grep fallback cannot express --hidden / --no-ignore, so a
@@ -360,6 +361,7 @@ def _grep_fallback(
         args,
         stdout=True,
         stderr=True,
+        demux=True,
     )
     if exit_code == 127:
         return {"status": "error", "error": "Neither ripgrep (rg) nor grep found in container"}
@@ -398,6 +400,7 @@ def _search_structural(
         args,
         stdout=True,
         stderr=True,
+        demux=True,
     )
     if exit_code == 127:
         return {"status": "error", "error": "ast-grep (sg) not found in container"}

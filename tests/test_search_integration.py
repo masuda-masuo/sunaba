@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from src.sunaba.search import (
     _build_rg_args,
+    _grep_fallback,
     _search_lexical,
+    _search_structural,
     search_files,
 )
 from sunaba.tools.verify import search_in_container
@@ -371,3 +374,126 @@ class TestSearchInContainerThreading:
             max_results=50, glob=None, ignore_case=False, context=0,
             output_mode="content", offset=0,
         )
+
+
+class DockerPyFakeContainer:
+    """Fake container mimicking docker-py exec_run demux behavior.
+
+    When demux=True is passed in kwargs, returns (exit_code, (stdout, stderr)).
+    Otherwise, returns (exit_code, combined_bytes) where combined_bytes merges
+    stdout and stderr into a single bytes stream.
+    """
+
+    def __init__(
+        self,
+        exit_code: int = 0,
+        stdout: bytes | None = None,
+        stderr: bytes | None = None,
+        responses: list[tuple[int, bytes | None, bytes | None]] | None = None,
+    ) -> None:
+        if responses is not None:
+            self._responses = list(responses)
+        else:
+            self._responses = [(exit_code, stdout, stderr)]
+        self._index = 0
+        self.exec_calls: list[dict[str, Any]] = []
+
+    def exec_run(self, cmd: Any, **kwargs: Any) -> tuple[int, Any]:
+        self.exec_calls.append({"cmd": cmd, "kwargs": kwargs})
+        exit_code, stdout, stderr = self._responses[min(self._index, len(self._responses) - 1)]
+        self._index += 1
+        if kwargs.get("demux") is True:
+            return (exit_code, (stdout, stderr))
+        combined = (stdout or b"") + (stderr or b"")
+        return (exit_code, combined)
+
+
+class TestSearchDemux:
+    """Tests verifying demux=True handling across search execution paths (Issue #919)."""
+
+    def test_rg_exit_2_demux_includes_stderr(self) -> None:
+        fake = DockerPyFakeContainer(
+            exit_code=2,
+            stdout=None,
+            stderr=b"error: regex parse error: repetition operator missing target",
+        )
+        result = _search_lexical(fake, "(?", "/path", 50)
+        assert result["status"] == "error"
+        assert "ripgrep failed (exit 2):" in result["error"]
+        assert "repetition operator missing target" in result["error"]
+        assert fake.exec_calls[0]["kwargs"].get("demux") is True
+
+    def test_rg_exit_0_demux_separates_stderr_warning_from_matches(self) -> None:
+        stdout = b"/path/file1.py\n/path/file2.py\n"
+        stderr = b"rg: /path/secret: Permission denied\n"
+        fake = DockerPyFakeContainer(exit_code=0, stdout=stdout, stderr=stderr)
+        result = _search_lexical(
+            fake, "pattern", "/path", 50, output_mode="files_with_matches",
+        )
+        assert "error" not in result
+        assert len(result["matches"]) == 2
+        matched_files = [m["file"] for m in result["matches"]]
+        assert matched_files == ["/path/file1.py", "/path/file2.py"]
+        assert not any("Permission denied" in m["file"] or "Permission denied" in m["text"] for m in result["matches"])
+        assert fake.exec_calls[0]["kwargs"].get("demux") is True
+
+    def test_grep_fallback_exit_2_demux_includes_stderr(self) -> None:
+        fake = DockerPyFakeContainer(
+            exit_code=2,
+            stdout=None,
+            stderr=b"grep: trailing backslash (\\)",
+        )
+        result = _grep_fallback(fake, "pattern\\", "/path", 50)
+        assert result["status"] == "error"
+        assert "grep failed (exit 2):" in result["error"]
+        assert "grep: trailing backslash (\\)" in result["error"]
+        assert fake.exec_calls[0]["kwargs"].get("demux") is True
+
+    def test_search_structural_exit_2_demux_includes_stderr(self) -> None:
+        fake = DockerPyFakeContainer(
+            exit_code=2,
+            stdout=None,
+            stderr=b"ast-grep error: cannot parse pattern as AST node",
+        )
+        result = _search_structural(fake, "invalid($$$)", "/path", 50)
+        assert result["status"] == "error"
+        assert "ast-grep failed (exit 2):" in result["error"]
+        assert "cannot parse pattern as AST node" in result["error"]
+        assert fake.exec_calls[0]["kwargs"].get("demux") is True
+
+    def test_demux_handles_none_streams(self) -> None:
+        # docker-py hands back None for an empty stream when demux=True
+        # Exit 0 with None stdout and None stderr
+        fake_empty = DockerPyFakeContainer(exit_code=0, stdout=None, stderr=None)
+        result_empty = _search_lexical(fake_empty, "pattern", "/path", 50)
+        assert "error" not in result_empty
+        assert result_empty["matches"] == []
+
+        # Exit 2 with None stderr
+        fake_no_stderr = DockerPyFakeContainer(exit_code=2, stdout=None, stderr=None)
+        result_err = _search_lexical(fake_no_stderr, "pattern", "/path", 50)
+        assert result_err["status"] == "error"
+        assert result_err["error"] == "ripgrep failed (exit 2): "
+
+        # Structural exit 0 with None stdout
+        fake_sg_empty = DockerPyFakeContainer(exit_code=0, stdout=None, stderr=None)
+        result_sg = _search_structural(fake_sg_empty, "pattern", "/path", 50)
+        assert "error" not in result_sg
+        assert result_sg["matches"] == []
+
+    def test_grep_fallback_via_search_lexical_demux(self) -> None:
+        # When rg exits 127, _search_lexical falls back to grep which also uses demux=True
+        fake = DockerPyFakeContainer(
+            responses=[
+                (127, None, b"rg: not found"),
+                (2, None, b"grep: unrecognized option '--invalid'"),
+            ]
+        )
+        result = _search_lexical(fake, "pattern", "/path", 50)
+        assert result["status"] == "error"
+        assert "grep failed (exit 2):" in result["error"]
+        assert "unrecognized option '--invalid'" in result["error"]
+        assert len(fake.exec_calls) == 2
+        assert fake.exec_calls[0]["kwargs"].get("demux") is True
+        assert fake.exec_calls[1]["kwargs"].get("demux") is True
+

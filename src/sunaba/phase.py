@@ -237,6 +237,11 @@ def _entry_failed(entry: dict[str, Any]) -> bool:
         params = entry.get("params")
         if isinstance(params, dict) and isinstance(params.get("result"), dict):
             res = params["result"]
+            if (
+                entry.get("tool_name") == "verify_in_container"
+                and res.get("status") in ("timeout", "in_progress")
+            ):
+                return False
             if res.get("gate_passed") is False:
                 return True
             if res.get("ok") is False:

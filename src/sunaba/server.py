@@ -6,10 +6,14 @@ This module defines the FastMCP server and all tool handlers.
 from __future__ import annotations
 
 import argparse
+import functools
+import inspect
 import logging
 import os
 import threading
 import time
+from collections.abc import Callable
+from typing import Any
 
 from fastmcp import FastMCP
 
@@ -107,6 +111,29 @@ File copies: host->container only. Move work via checkpoint + publish from the o
 mcp = FastMCP("sunaba", instructions=SERVER_INSTRUCTIONS)
 
 
+def _hide_private_args(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Drop ``_``-prefixed parameters from the signature FastMCP publishes.
+
+    FastMCP 4 removed ``tool(exclude_args=...)``.  Server-internal keyword
+    arguments such as ``_container`` (injected by tests, never by clients)
+    are hidden by narrowing ``__signature__``; the docstring stays the
+    wrapped tool's own.
+    """
+    sig = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return fn(*args, **kwargs)
+
+    wrapper.__signature__ = sig.replace(  # type: ignore[attr-defined]
+        parameters=[p for n, p in sig.parameters.items() if not n.startswith("_")]
+    )
+    wrapper.__annotations__ = {
+        k: v for k, v in fn.__annotations__.items() if not k.startswith("_")
+    }
+    return wrapper
+
+
 sandbox_exec = docker_bound(sandbox_exec)
 sandbox_exec = mcp.tool()(sandbox_exec)
 sandbox_exec_background = docker_bound(sandbox_exec_background)
@@ -129,11 +156,14 @@ checkpoint_list = mcp.tool()(checkpoint_list)
 checkpoint_restore = docker_bound(checkpoint_restore)
 checkpoint_restore = mcp.tool()(checkpoint_restore)
 merge_base = docker_bound(merge_base)
-merge_base = mcp.tool(exclude_args=["_container"])(merge_base)
+merge_base = _hide_private_args(merge_base)
+merge_base = mcp.tool()(merge_base)
 merge_complete = docker_bound(merge_complete)
-merge_complete = mcp.tool(exclude_args=["_container"])(merge_complete)
+merge_complete = _hide_private_args(merge_complete)
+merge_complete = mcp.tool()(merge_complete)
 merge_abort = docker_bound(merge_abort)
-merge_abort = mcp.tool(exclude_args=["_container"])(merge_abort)
+merge_abort = _hide_private_args(merge_abort)
+merge_abort = mcp.tool()(merge_abort)
 secret_scan_override = docker_bound(secret_scan_override)
 secret_scan_override = mcp.tool()(secret_scan_override)
 

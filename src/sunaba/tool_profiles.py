@@ -36,8 +36,8 @@ import mcp.types as mt
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool
-from mcp.shared.exceptions import McpError
-from mcp.types import INVALID_PARAMS, ErrorData
+from mcp.shared.exceptions import MCPError
+from mcp.types import INVALID_PARAMS
 
 from .workflow_guide import _load_guide, _parse_phases
 
@@ -306,19 +306,17 @@ def lookup_tool_profile(name: str) -> ToolProfile:
         name: The ``profile`` query-parameter value.
 
     Raises:
-        McpError: If *name* is not a defined profile.
+        MCPError: If *name* is not a defined profile.
     """
     profile = TOOL_PROFILES.get(name)
     if profile is None:
         valid = ", ".join(valid_tool_profile_names())
-        raise McpError(
-            ErrorData(
-                code=INVALID_PARAMS,
-                message=(
-                    f"unknown tool profile {name!r}; valid profiles: {valid} "
-                    f"(omit ?{PROFILE_QUERY_PARAM}= for the full tool list)"
-                ),
-            )
+        raise MCPError(
+            code=INVALID_PARAMS,
+            message=(
+                f"unknown tool profile {name!r}; valid profiles: {valid} "
+                f"(omit ?{PROFILE_QUERY_PARAM}= for the full tool list)"
+            ),
         )
     return profile
 
@@ -333,7 +331,7 @@ def resolve_tool_profile() -> ToolProfile | None:
     slip, so it goes through the unknown-profile error instead.
 
     Raises:
-        McpError: If the request names a profile that does not exist.
+        MCPError: If the request names a profile that does not exist.
     """
     try:
         request = get_http_request()
@@ -365,7 +363,7 @@ def filter_tools(tools: Sequence[_T], tool_profile: str | ToolProfile) -> list[_
         tool_profile: A profile name or a resolved profile.
 
     Raises:
-        McpError: If a profile name is given and does not exist.
+        MCPError: If a profile name is given and does not exist.
     """
     profile = (
         tool_profile

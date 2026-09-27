@@ -8,7 +8,7 @@ import mcp.types as mt
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool, ToolResult
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 
 def compact_requested() -> bool:
@@ -19,10 +19,10 @@ def compact_requested() -> bool:
         return False
     value = request.query_params.get("response", "legacy")
     if value not in ("legacy", "compact"):
-        raise McpError(mt.ErrorData(
+        raise MCPError(
             code=mt.INVALID_PARAMS,
             message="Unknown response format; use response=legacy or response=compact",
-        ))
+        )
     return value == "compact"
 
 

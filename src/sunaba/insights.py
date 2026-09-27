@@ -118,12 +118,19 @@ def verify_failure_reasons(
     runs = filter_runs_by_period(state, from_ts=since, to_ts=None) if since is not None else state
     by_kind: dict[str, int] = {}
     total_failed = 0
+    timeout_count = 0
+    in_progress_count = 0
 
     for run in runs.values():
         vt = run.get("verify_timeline", [])
         for entry in vt:
             if entry.get("type") == "verify_outcome":
-                if not entry.get("passed", True):
+                status = entry.get("status")
+                if status == "timeout":
+                    timeout_count += 1
+                elif status == "in_progress":
+                    in_progress_count += 1
+                elif not entry.get("passed", True):
                     total_failed += 1
                     fail_kinds = entry.get("fail_kinds")
                     if not fail_kinds:
@@ -134,6 +141,8 @@ def verify_failure_reasons(
     return {
         "total_failed": total_failed,
         "by_kind": by_kind,
+        "timeout": timeout_count,
+        "in_progress": in_progress_count,
     }
 
 

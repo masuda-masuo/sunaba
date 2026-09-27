@@ -1073,6 +1073,7 @@ def _verify_in_container_guarded(
                 "status": "skipped",
                 "message": "precondition gate failed; tests not run",
             }
+            result["status"] = "ok" if result["gate_passed"] else "failed"
             _gate_capture()  # issue #870
             _record_verify_outcome(container_id, result)
             return json.dumps(result)
@@ -1272,6 +1273,7 @@ def _verify_in_container_guarded(
                 result["gate_fail_reasons"] = [
                     _test_failure_reason(affected_result, "affected tests")
                 ]
+            result["status"] = "ok" if result["gate_passed"] else "failed"
             _gate_capture()  # issue #870
             _record_verify_outcome(container_id, result)
             return json.dumps(result)
@@ -1299,6 +1301,7 @@ def _verify_in_container_guarded(
                         f"{filtered_result.get('failed', 0)} failed"
                     )
                 result["gate_fail_reasons"] = [msg]
+                result["status"] = "ok" if result["gate_passed"] else "failed"
                 _gate_capture()  # issue #870
                 _record_verify_outcome(container_id, result)
                 return json.dumps(result)
@@ -1321,6 +1324,7 @@ def _verify_in_container_guarded(
         result["tests"]["full"] = {"status": "no_tests", "error": "no languages detected"}
         result["gate_pass_reason"] = "no languages detected \u2014 gate passes"
         result["gate_passed"] = True
+        result["status"] = "ok" if result["gate_passed"] else "failed"
         # Before the success is recorded: a broken capture is exactly what
         # makes a project look language-less (issue #870).
         _gate_capture()

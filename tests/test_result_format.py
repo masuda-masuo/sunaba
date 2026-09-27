@@ -42,7 +42,7 @@ def _roundtrip(query: str):
                 async with Client(transport) as client:
                     tools = await client.list_tools()
                     response = await client.call_tool("sample", {})
-                    result = (tools[0].outputSchema, response, calls)
+                    result = (tools[0].output_schema, response, calls)
             except Exception as exc:
                 error = exc
         if error:

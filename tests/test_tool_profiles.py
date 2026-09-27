@@ -19,7 +19,7 @@ import httpx
 import pytest
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 from sunaba import server
 from sunaba.server import OBSERVABILITY_TOOLS_ENV
@@ -475,7 +475,7 @@ class TestFilterTools:
         assert "publish" not in {t.name for t in filter_tools(tools, "implement")}
 
     def test_unknown_profile_names_the_valid_ones(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             lookup_tool_profile("implementt")
         message = str(excinfo.value)
         assert "implementt" in message
@@ -514,7 +514,7 @@ class TestHttpSelection:
         assert all(q == f"{PROFILE_QUERY_PARAM}=issue" for q in posts), posts
 
     def test_unknown_profile_errors_instead_of_returning_everything(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             _http_tool_names(f"?{PROFILE_QUERY_PARAM}=implememt")
         message = str(excinfo.value)
         assert "implememt" in message
@@ -524,7 +524,7 @@ class TestHttpSelection:
     def test_empty_parameter_value_is_an_error(self) -> None:
         # A blank value is an unexpanded template in a client config, not a
         # request for the full list.
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             _http_tool_names(f"?{PROFILE_QUERY_PARAM}=")
 
 

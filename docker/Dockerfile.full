@@ -58,6 +58,15 @@ ENV RUSTUP_HOME=/home/sandbox/.rustup \
     CARGO_HOME=/home/sandbox/.cargo \
     PATH="/home/sandbox/.cargo/bin:${PATH}"
 
+# ── headless Chromium の実行時ライブラリ (root、#923) ─────────────
+# sandbox:full で Playwright の chromium-headless-shell が起動できるように、
+# その実行時ライブラリを apt で焼く（base には無く、非 root の sandbox ユーザー
+# は実行時に apt を叩けない）。ブラウザ本体は焼かない — バージョンが利用側の
+# playwright と対になるため、実行時に `playwright install` が取得する。
+# 詳細は install-browser-deps.sh のコメント参照。
+COPY docker/install-browser-deps.sh /tmp/install-browser-deps.sh
+RUN sh /tmp/install-browser-deps.sh && rm /tmp/install-browser-deps.sh
+
 # ── Python 開発ツール (sandbox ユーザ、base の永続 venv へ) ───────
 USER sandbox
 WORKDIR /workspace

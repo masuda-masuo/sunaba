@@ -27,6 +27,7 @@ on:
       - "docker/install-go.sh"
       - "docker/install-rust.sh"
       - "docker/install-js-tools.sh"
+      - "docker/install-browser-deps.sh"
   workflow_dispatch:
 
 permissions:

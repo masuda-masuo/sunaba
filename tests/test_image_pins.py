@@ -201,3 +201,63 @@ class TestJsImageHealthcheckCoversJsDispatchTools:
         healthcheck = _dockerfile_healthcheck_text("js")
         missing = [t for t in ("eslint", "tsc", "jest") if t not in healthcheck]
         assert not missing, f"docker/Dockerfile.js HEALTHCHECK is missing {missing}"
+
+
+# ===================================================================
+# headless Chromium runtime libraries (Issue #923)
+# ===================================================================
+#
+# sandbox:full には chromium-headless-shell の実行時ライブラリが無く、起動が
+# exit 127 で落ちる（ldd で not found 20 soname、実測）。非 root の sandbox
+# ユーザーは実行時に apt を叩けないので、ビルド時に root のまま
+# install-browser-deps.sh が焼く。ここでは「root 区間で実行されている」ことと
+# 「実測の欠落 soname が自己検査で全件チェックされる」ことを静的契約として
+# 固定する。
+
+# ldd で実測された "not found" 20 soname（issue #923）。install-browser-deps.sh
+# の自己検査一覧と一致しなければならない。
+_BROWSER_SONAMES = (
+    "libglib-2.0.so.0",
+    "libgobject-2.0.so.0",
+    "libnspr4.so",
+    "libnss3.so",
+    "libnssutil3.so",
+    "libgio-2.0.so.0",
+    "libatk-1.0.so.0",
+    "libatk-bridge-2.0.so.0",
+    "libdbus-1.so.3",
+    "libX11.so.6",
+    "libXcomposite.so.1",
+    "libXdamage.so.1",
+    "libXext.so.6",
+    "libXfixes.so.3",
+    "libXrandr.so.2",
+    "libgbm.so.1",
+    "libxcb.so.1",
+    "libxkbcommon.so.0",
+    "libasound.so.2",
+    "libatspi.so.0",
+)
+
+
+class TestFullImageRunsBrowserDepsAsRoot:
+    """#923: install-browser-deps.sh は root のまま実行されなければならない。"""
+
+    def test_browser_deps_run_before_user_sandbox(self) -> None:
+        dockerfile = (_REPO_ROOT / "docker" / "Dockerfile.full").read_text(encoding="utf-8")
+        user_sandbox = dockerfile.find("USER sandbox")
+        run_pos = dockerfile.find("RUN sh /tmp/install-browser-deps.sh")
+        assert run_pos != -1, "docker/Dockerfile.full does not run install-browser-deps.sh"
+        assert user_sandbox != -1, "docker/Dockerfile.full has no USER sandbox switch"
+        assert run_pos < user_sandbox, (
+            "install-browser-deps.sh must run while the effective USER is root, "
+            "i.e. before the USER sandbox switch (#923)"
+        )
+
+    def test_browser_deps_script_checks_every_measured_soname(self) -> None:
+        script = (_REPO_ROOT / "docker" / "install-browser-deps.sh").read_text(encoding="utf-8")
+        missing = [s for s in _BROWSER_SONAMES if s not in script]
+        assert not missing, (
+            "docker/install-browser-deps.sh is missing the measured soname(s) "
+            f"{missing} from its self-check list (#923)"
+        )

@@ -132,7 +132,7 @@ configuration changes.
 |---|---|
 | implement | explore / edit / verify / publish tooling: search + read, the file editors, exec, checkpoints, verify + lint + type, `package_install`, `run_python`, `diff_in_container`, `publish`, `secret_scan_override`, plus `sandbox_attach` (humans / orchestrators reconnecting by name or id; the worker already has `container_id` in the prompt and passes it to every sunaba tool — kusabi #413 / #416) and `issue_view` (the issue under work) |
 | review | inspection plus the review verdict: search + read, verify + lint + type, `diff_in_container`, `sandbox_pr_review_write`, plus the consumer-granted `sandbox_exec`, `sandbox_attach`, and `issue_view`. No file writes, no background exec, no checkpoints, no publish, no package installs |
-| issue | the minimal GitHub issue surface: `issue_view`, `sandbox_issue_write`, `sandbox_pr_review_write`, plus `read_file_range` for the issue body `issue_view` saves into the container. No editing, no exec, no verify, no publish — but a container is still required, as it is for every sunaba tool |
+| issue | the minimal GitHub issue surface: `issue_view`, `sandbox_issue_write`, `sandbox_pr_review_write`, plus `read_file_range` for the issue body `issue_view` saves into the container. A container is required for `issue_view` and for reading that saved body; the two write tools accept an omitted `container_id` for host-scoped GitHub writes, while a supplied ID only attributes the journal entry. No editing, no exec, no verify, no publish |
 
 Every profile also carries `get_workflow_guide`, so a filtered session can
 still recover the contract of the tools it does have.

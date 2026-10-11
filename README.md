@@ -30,7 +30,7 @@ This MCP routes all AI operations through **disposable Docker containers** with 
 | Guarantee | Mechanism |
 |---|---|
 | AI operations never touch the host | All file ops, package installs, and test runs happen inside the container. |
-| No network by default | `allow_network=True` must be explicitly set. AI can't accidentally call external APIs or push to remotes. |
+| No network by default | Bare initialization has no container network; `clone_repo`, `pr`, or `branch` auto-enable it. A bare container can set `allow_network=True` for package installation or other allowed network work. Container traffic remains subject to the egress allowlist. |
 | Non-root execution | Container runs as unprivileged user `sandbox`. No `sudo`, no system package modifications. |
 | VCS tokens stay host-side | The container never receives a `GITHUB_TOKEN`. Token values are masked in all output (`KEY=***`). |
 | Audit trail | Every operation is recorded in an append-only journal (`~/.sunaba/journal.log`). |
@@ -66,7 +66,7 @@ verify_in_container   # Lint + type-check, then runs tests → structured result
     ↓
 checkpoint            # Cheap in-container Git save point (no token, no gate)
     ↓
-publish               # Stage, squash checkpoints, push, and create PR (VCS token host-side)
+publish(create_pr=True)  # Stage, squash checkpoints, push, and create PR (VCS token host-side); default is push only, and pr_title alone does not create a PR
 ```
 
 The heavy data (repositories, full diffs, raw logs) lives and dies inside the container. The model only carries `run_id`s and structured summaries.
@@ -115,7 +115,7 @@ For client configurations (such as connecting Claude Desktop via `mcp-remote`) a
 
 *   **Docker daemon must be running**: `docker info` should succeed before you start.
 *   **The first initialization can take several minutes**: The first call to `sandbox_initialize` pulls the base sandbox images from GHCR. We recommend running Sunaba as a [systemd daemon](docs/daemon_setup.md) to handle long-running operations.
-*   **Network is off by default**: Anything that touches the network inside the container (e.g. `package_install`, `publish`) requires setting `allow_network=True` during initialization.
+*   **Container network is off by default**: Bare initialization has no network. `clone_repo`, `pr`, and `branch` enable it automatically; for a bare container that needs package installation or other allowed outbound access, set `allow_network=True`. The egress allowlist still applies. `publish` uses a host-side VCS token for GitHub operations.
 
 ### Troubleshooting
 
@@ -124,7 +124,7 @@ For client configurations (such as connecting Claude Desktop via `mcp-remote`) a
 | `Cannot connect to the Docker daemon` | Docker isn't running | Start Docker Desktop or `dockerd`. |
 | `permission denied` on `docker.sock` | `DOCKER_HOST` unset/wrong (rootless); user not in `docker` group (rootful) | Set `DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock` first; fallback `sudo usermod -aG docker $USER` (⚠️ root-equivalent — see [Daemon Setup](docs/daemon_setup.md)). |
 | `sandbox_initialize` times out | Pulling image from GHCR exceeds 60s client timeout | Switch to the systemd background daemon. |
-| `BLOCKED by egress proxy` | Host not allowlisted or `allow_network` is false | Pass `allow_network=True` or add the host to `SUNABA_ALLOWED_EGRESS_HOSTS`. |
+| `BLOCKED by egress proxy` | Container network is disabled or the destination host is not allowlisted | Enable container network access as needed and add the host to `SUNABA_ALLOWED_EGRESS_HOSTS`; `allow_network=True` does not bypass the allowlist. |
 
 ---
 

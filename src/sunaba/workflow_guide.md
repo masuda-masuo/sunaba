@@ -25,6 +25,14 @@ host-side fallbacks) and leave sunaba's tool contracts to this guide.
 - **Never reuse a container across repositories** -- the lint and type gates are silently
   skipped when the toolchain does not match.
 - **One PR per container.** See the base trap under `publish`.
+- If uv python install or uv sync --locked reports “No download found” / “No interpreter found” even with network enabled, the image's uv Python catalogue may be stale. For the 3.14.8 failure in [#928](https://github.com/masuda-masuo/sunaba/issues/928), upgrade uv in this container, then install the requested Python and retry the project's sync (or original command):
+
+      python -m pip install --upgrade uv
+      uv --version
+      uv python install 3.14.8
+      uv sync --locked
+
+  The sequence was verified here: the upgrade installed uv 0.13.0 and that version installed CPython 3.14.8. This updates only the current container; fresh digest-pinned containers may need the workaround until their image pin is refreshed. A newer uv catalogue does not guarantee every future Python release is available.
 
 ## phase: explore
 

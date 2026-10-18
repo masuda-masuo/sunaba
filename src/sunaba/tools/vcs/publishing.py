@@ -18,6 +18,7 @@ from sunaba.journal import record_boundary_crossing
 from sunaba.proxy_client import (
     ProxyAuthError,
     authorized_push_grant,
+    authorized_read_grant,
     proxy_configured,
 )
 from sunaba.security import NETWORK_LABEL
@@ -433,10 +434,8 @@ def _fetch_base_auto_include(
 # container's worktree byte-identical to the base tip while its merge-base
 # still holds the pre-merge bytes.
 
-#: Opens the guard probe's machine-readable block.  The probe shares one
-#: exec with the ``git fetch origin`` refresh, whose own chatter lands on the
-#: same combined stream, so the parser keys off this marker instead of
-#: trusting the whole output.
+#: Opens the guard probe's machine-readable block.  The parser keys off
+#: this marker instead of trusting any prior command chatter.
 _UPSTREAM_GUARD_MARK = "__sunaba_upstream_guard__"
 
 #: Opens each per-path section of the follow-up ``git log`` probe.
@@ -545,13 +544,12 @@ class UpstreamGuardReport(NamedTuple):
 def _upstream_guard_probe(
     base_ref: str, paths: list[str],
 ) -> tuple[str, dict[str, str]]:
-    """Build the combined refresh + merge-base probe and its environment.
+    """Build the read-only merge-base and blob probe and its environment.
 
-    The ``git fetch origin`` refresh (#818) still leads, because base *ref
-    resolution* for the commit's parents wants the freshest ref the clone
-    can have.  Nothing the guard decides depends on it any more: the probe
-    reads only the merge-base and its blobs, which are in the clone whether
-    the fetch worked, failed, or was never possible (#866).
+    The probe reads only the merge-base and its blobs from the clone (#866).
+    The ``git fetch origin`` refresh (#818, #932) is performed separately under
+    host authorization before this probe runs, so this probe is purely
+    read-only and does not touch remote tracking or the network.
 
     One exec, not one per path: everything the container side owes the
     decision is printed under :data:`_UPSTREAM_GUARD_MARK` as ``blob
@@ -565,16 +563,14 @@ def _upstream_guard_probe(
 
     The declared paths travel in the environment, never in the command
     text.  A manifest path is arbitrary caller input; keeping it out means
-    the command this exec runs is a fixed string that says "refresh and
-    read one ref", instead of a different string per publish that quotes
+    the command this exec runs is a fixed string that reads the merge-base
+    and declared paths, instead of a different string per publish that quotes
     user data into a shell loop.  Paths are reported back by index, so one
     containing whitespace cannot be misread as several fields.
     """
-    fetch = "git fetch origin 2>/dev/null || true"
     if not paths:
-        return fetch, {}
+        return ":", {}
     command = (
-        f"{fetch}; "
         f"_sb={shlex.quote(base_ref)}; "
         '_sm=$(git merge-base HEAD "$_sb" 2>/dev/null) || _sm=; '
         f"echo {shlex.quote(_UPSTREAM_GUARD_MARK)}; "
@@ -1357,22 +1353,69 @@ def publish(
                     auto_include_skipped = auto_result.skipped
                     auto_include_included = auto_result.included
 
-        # Refresh remote-tracking refs so base resolution does not
-        # work from a stale clone (#818).  Fetch failure must not
-        # hard-fail publish (offline test environments) -- and for a
-        # private repo it always fails, since no credential is inside
-        # the container.
-        #
-        # The same exec reads the upstream-overwrite guard's
-        # container-side half (#863): the manifest declares which files
-        # the worker changed, but staging them as whole snapshots also
-        # replaces whatever the base branch has now -- including commits
-        # that landed after this container was cloned, which is how a
-        # publish reverted a just-merged PR without a conflict or a
-        # warning.  Only the merge-base is read here; the base branch's
-        # real tip is read host-side below, because that is the side
-        # that holds the token (#866).  Both happen before anything is
-        # committed.
+        # Refresh remote-tracking refs under host authorization before
+        # commit preparation (#818, #932).  Fail closed: manifest mode must
+        # not build against a stale or offline base.
+        fetch_token = _resolve_vcs_token()
+        fetch_token_env = _push_token_env(fetch_token)
+        fetch_proxied = proxy_configured()
+        fetch_env = select_push_env(fetch_token_env, fetch_proxied)
+        if fetch_env and fetch_token:
+            fetch_env = dict(fetch_env)
+            fetch_env["GIT_CONFIG_PARAMETERS"] = (
+                "\'credential.helper=\' "
+                "\'credential.helper=!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f\'"
+            )
+        fetch_cmd = "git fetch origin"
+
+        def _redact_fetch_token(text: str) -> str:
+            if fetch_token and text:
+                return text.replace(fetch_token, "<redacted>")
+            return text
+
+        try:
+            with authorized_read_grant(repo, token=fetch_token or None):
+                fetch_ec, fetch_out, fetch_err = _run(fetch_cmd, env=fetch_env)
+        except ProxyAuthError as exc:
+            err_msg = _redact_fetch_token(str(exc))
+            record_boundary_crossing(
+                cid, "publish",
+                _redact_fetch_token(f"repo={repo} branch={branch} proxy_read_grant_failed"),
+                approved=False,
+            )
+            return finish_json({
+                "status": "error",
+                "step": "proxy_auth",
+                "error": err_msg,
+            }, verified)
+        except Exception as exc:
+            exc_msg = _redact_fetch_token(str(exc))
+            record_boundary_crossing(
+                cid, "publish",
+                _redact_fetch_token(f"repo={repo} branch={branch} read_grant_failed: {exc_msg}"),
+                approved=False,
+            )
+            return finish_json({
+                "status": "error",
+                "step": "fetch",
+                "error": f"Failed to open authorization grant for fetch: {exc_msg}",
+            }, verified)
+
+        if fetch_ec != 0:
+            fetch_detail = (fetch_err or fetch_out).strip() or f"exit code {fetch_ec}"
+            fetch_detail = _redact_fetch_token(fetch_detail)
+            record_boundary_crossing(
+                cid, "publish",
+                _redact_fetch_token(f"repo={repo} branch={branch} fetch_failed exit={fetch_ec}"),
+                approved=False,
+            )
+            return finish_json({
+                "status": "error",
+                "step": "fetch",
+                "error": f"git fetch origin failed (exit {fetch_ec}): {fetch_detail}",
+                "hint": "Ensure the remote is reachable and authorization is valid.",
+            }, verified)
+
         guard_base_ref = (
             f"origin/{base_branch}" if base_branch else "origin/HEAD"
         )

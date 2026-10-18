@@ -1383,6 +1383,7 @@ class TestUpstreamGuardDecision:
             {"shared.py": "base\nupstream feature\n"},
             message="upstream PR: extend shared.py",
         )
+        _git(clone, "fetch", "origin")
 
         # The container edits its (now stale) copy on a feature branch.
         _git(clone, "checkout", "-b", "feat/x")
@@ -2095,10 +2096,8 @@ class TestPublishUpstreamOverwriteGuard:
         )
 
         assert result["status"] == "error", result
-        assert result["step"] == "upstream_overwrite"
-        assert result["conflicting_paths"] == ["shared.py"]
-        # The comparison happened, so it is not undetermined either.
-        assert "upstream_guard_undetermined" not in result
+        assert result["step"] == "fetch"
+        assert "fetch" in result["error"].lower()
         assert _git(clone, "rev-parse", "HEAD").stdout.strip() == head_before
         assert _git(
             repo_setup["origin_dir"], "rev-parse", "--verify", "refs/heads/feat/x",
@@ -2335,6 +2334,25 @@ class TestPublishUpstreamOverwriteGuard:
         self._stale_container(repo_setup)
         _break_fetch(clone, repo_setup["origin_dir"])
 
+        # Directly verify _upstream_overwrite_error formatting when commits cannot be listed from stale ref
+        err = _upstream_overwrite_error(
+            "origin/main",
+            _git(clone, "rev-parse", "HEAD").stdout.strip(),
+            ["shared.py"],
+            {"shared.py": []},
+            base_tip="b" * 40,
+        )
+        assert err["status"] == "error"
+        assert err["step"] == "upstream_overwrite"
+        assert err["conflicting_paths"] == ["shared.py"]
+        assert err["upstream_commits"]["shared.py"] == []
+        assert "could not be listed" in err["error"]
+        assert "stale" in err["error"]
+        assert "host-side tip comparison" in err["error"]
+        assert "no upstream commits" not in err["error"]
+
+        # And verify that broken fetch in publish fails closed before commit prep (#932)
+        head_before = _git(clone, "rev-parse", "HEAD").stdout.strip()
         result, pr_mock = self._publish(
             clone,
             branch="feat/x",
@@ -2342,16 +2360,13 @@ class TestPublishUpstreamOverwriteGuard:
             files=["shared.py"],
             base_branch="main",
         )
-
         assert result["status"] == "error"
-        assert result["step"] == "upstream_overwrite"
-        assert result["conflicting_paths"] == ["shared.py"]
-        assert result["upstream_commits"]["shared.py"] == []
-        assert "could not be listed" in result["error"]
-        assert "stale" in result["error"]
-        assert "host-side tip comparison" in result["error"]
-        # Never an empty-history reading.
-        assert "no upstream commits" not in result["error"]
+        assert result["step"] == "fetch"
+        assert "fetch" in result["error"].lower()
+        assert _git(clone, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(
+            repo_setup["origin_dir"], "rev-parse", "--verify", "refs/heads/feat/x",
+        ).returncode != 0
         pr_mock.assert_not_called()
 
 

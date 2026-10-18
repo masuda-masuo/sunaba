@@ -1313,9 +1313,19 @@ def publish(
                 return text.replace(fetch_token, "<redacted>")
             return text
 
+        fetch_ec: int = 0
+        fetch_out: str = ""
+        fetch_err: str = ""
+        fetch_exec_err: Exception | None = None
+        grant_entered = False
+
         try:
             with authorized_read_grant(repo, token=fetch_token or None):
-                fetch_ec, fetch_out, fetch_err = _run(fetch_cmd, env=fetch_env)
+                grant_entered = True
+                try:
+                    fetch_ec, fetch_out, fetch_err = _run(fetch_cmd, env=fetch_env)
+                except Exception as exc:
+                    fetch_exec_err = exc
         except ProxyAuthError as exc:
             err_msg = _redact_fetch_token(str(exc))
             record_boundary_crossing(
@@ -1330,6 +1340,17 @@ def publish(
             }, verified)
         except Exception as exc:
             exc_msg = _redact_fetch_token(str(exc))
+            if grant_entered:
+                record_boundary_crossing(
+                    cid, "publish",
+                    _redact_fetch_token(f"repo={repo} branch={branch} read_grant_close_failed: {exc_msg}"),
+                    approved=False,
+                )
+                return finish_json({
+                    "status": "error",
+                    "step": "fetch",
+                    "error": f"Failed to close authorization grant for fetch: {exc_msg}",
+                }, verified)
             record_boundary_crossing(
                 cid, "publish",
                 _redact_fetch_token(f"repo={repo} branch={branch} read_grant_failed: {exc_msg}"),
@@ -1339,6 +1360,19 @@ def publish(
                 "status": "error",
                 "step": "fetch",
                 "error": f"Failed to open authorization grant for fetch: {exc_msg}",
+            }, verified)
+
+        if fetch_exec_err is not None:
+            exc_msg = _redact_fetch_token(str(fetch_exec_err))
+            record_boundary_crossing(
+                cid, "publish",
+                _redact_fetch_token(f"repo={repo} branch={branch} fetch_execution_failed: {exc_msg}"),
+                approved=False,
+            )
+            return finish_json({
+                "status": "error",
+                "step": "fetch",
+                "error": f"Failed to execute fetch: {exc_msg}",
             }, verified)
 
         if fetch_ec != 0:
@@ -1656,7 +1690,7 @@ def publish(
                 }, verified)
 
     try:
-        push_token = fetch_token if manifest else _resolve_vcs_token()
+        push_token = _resolve_vcs_token()
     except Exception:
         record_boundary_crossing(
             cid, "publish",

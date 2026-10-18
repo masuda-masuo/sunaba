@@ -3264,6 +3264,8 @@ class TestPublishFreshBaseAuthorization:
 
         assert result["status"] == "error"
         assert result["step"] == "fetch"
+        assert "Failed to open authorization grant for fetch:" in result["error"]
+        assert "Failed to execute fetch" not in result["error"]
         assert sentinel_token not in result["error"]
         assert "<redacted>" in result["error"]
         assert "credential <redacted>" in result["error"]
@@ -3273,6 +3275,7 @@ class TestPublishFreshBaseAuthorization:
             if len(call.args) > 2 and isinstance(call.args[2], str)
         ]
         assert any("read_grant_failed:" in entry for entry in log_entries)
+        assert not any("fetch_execution_failed:" in entry for entry in log_entries)
         for entry in log_entries:
             assert sentinel_token not in entry
             if "read_grant_failed:" in entry:
@@ -3317,6 +3320,8 @@ class TestPublishFreshBaseAuthorization:
 
         assert result["status"] == "error"
         assert result["step"] == "fetch"
+        assert "Failed to execute fetch:" in result["error"]
+        assert "Failed to open authorization grant" not in result["error"]
         assert sentinel_token not in result["error"]
         assert "<redacted>" in result["error"]
         assert "token <redacted>" in result["error"]
@@ -3325,10 +3330,70 @@ class TestPublishFreshBaseAuthorization:
             call.args[2] for call in mock_record.call_args_list
             if len(call.args) > 2 and isinstance(call.args[2], str)
         ]
-        assert any("read_grant_failed:" in entry for entry in log_entries)
+        assert any("fetch_execution_failed:" in entry for entry in log_entries)
+        assert not any("read_grant_failed:" in entry for entry in log_entries)
         for entry in log_entries:
             assert sentinel_token not in entry
-            if "read_grant_failed:" in entry:
+            if "fetch_execution_failed:" in entry:
+                assert "<redacted>" in entry
+
+        cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list if hasattr(c, "args")]
+        assert not any("commit" in cmd or "push" in cmd for cmd in cmds)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.authorized_read_grant")
+    def test_manifest_fetch_grant_exit_exception_redacts_sentinel_token(
+        self,
+        mock_read_grant: MagicMock,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Generic exception during authorized grant exit redacts sentinel token and describes close failure accurately."""
+        sentinel_token = "ghp_SENTINEL_FETCH_TOKEN_EXIT_456"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # git fetch origin
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        class FailingExitGrant:
+            def __enter__(self) -> None:
+                pass
+
+            def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+                raise RuntimeError(
+                    f"Failed to teardown grant socket with credential {sentinel_token}"
+                )
+
+        mock_read_grant.return_value = FailingExitGrant()
+
+        with patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value=sentinel_token):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "fetch"
+        assert "Failed to close authorization grant for fetch:" in result["error"]
+        assert "Failed to open authorization grant" not in result["error"]
+        assert sentinel_token not in result["error"]
+        assert "<redacted>" in result["error"]
+        assert "credential <redacted>" in result["error"]
+
+        log_entries = [
+            call.args[2] for call in mock_record.call_args_list
+            if len(call.args) > 2 and isinstance(call.args[2], str)
+        ]
+        assert any("read_grant_close_failed:" in entry for entry in log_entries)
+        assert not any("read_grant_failed:" in entry for entry in log_entries)
+        for entry in log_entries:
+            assert sentinel_token not in entry
+            if "read_grant_close_failed:" in entry:
                 assert "<redacted>" in entry
 
         cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list if hasattr(c, "args")]
@@ -3415,6 +3480,140 @@ class TestPublishFreshBaseAuthorization:
 
         cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list if hasattr(c, "args")]
         assert not any("commit" in cmd or "push" in cmd for cmd in cmds)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.authorized_read_grant")
+    @patch("sunaba.tools.vcs.publishing.authorized_push_grant")
+    def test_manifest_publish_resolves_distinct_fetch_and_push_tokens(
+        self,
+        mock_push_grant: MagicMock,
+        mock_read_grant: MagicMock,
+        mock_docker: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unconditionally resolve fresh token before push, asserting correct sentinel token at each boundary."""
+        monkeypatch.setenv("SUNABA_SECRETS_BASELINE", "false")
+        sentinel_fetch = "ghp_SENTINEL_FETCH_TOKEN_111"
+        sentinel_push = "ghp_SENTINEL_PUSH_TOKEN_222"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # git fetch origin (#818, #932)
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff", b""),  # git diff --cached
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # diff-tree
+            (0, b"", b""),  # git status
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.vcs.publishing._resolve_vcs_token",
+            side_effect=[sentinel_fetch, sentinel_push],
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "pushed"
+        mock_read_grant.assert_called_once_with("owner/repo", token=sentinel_fetch)
+        mock_push_grant.assert_called_once_with("owner/repo", token=sentinel_push)
+
+        calls = container.exec_run.call_args_list
+        fetch_calls = [c for c in calls if "fetch origin" in _exec_cmd(c)]
+        push_calls = [c for c in calls if "push" in _exec_cmd(c)]
+        assert len(fetch_calls) == 1
+        assert len(push_calls) == 1
+
+        fetch_env = fetch_calls[0].kwargs.get("environment") or {}
+        push_env = push_calls[0].kwargs.get("environment") or {}
+
+        assert fetch_env.get("GITHUB_TOKEN") == sentinel_fetch
+        assert fetch_env.get("GITHUB_TOKEN") != sentinel_push
+        assert push_env.get("GITHUB_TOKEN") == sentinel_push
+        assert push_env.get("GITHUB_TOKEN") != sentinel_fetch
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.authorized_read_grant")
+    @patch("sunaba.tools.vcs.publishing.authorized_push_grant")
+    def test_manifest_push_refresh_failure_returns_structured_error_and_no_remote_push(
+        self,
+        mock_push_grant: MagicMock,
+        mock_read_grant: MagicMock,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When push-refresh token resolution fails, return structured token_resolution error without raw exception or remote push."""
+        monkeypatch.setenv("SUNABA_SECRETS_BASELINE", "false")
+        sentinel_fetch = "ghp_SENTINEL_FETCH_TOKEN_111"
+        secret_leak = "ghs_SENSITIVE_APP_KEY_MATERIAL_push_refresh_xyz"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # git fetch origin (#818, #932)
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff", b""),  # git diff --cached
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # diff-tree
+            (0, b"", b""),  # git status
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.vcs.publishing._resolve_vcs_token",
+            side_effect=[
+                sentinel_fetch,
+                RuntimeError(f"GitHub App token refresh 503: {secret_leak}"),
+            ],
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "token_resolution"
+        assert secret_leak not in result["error"]
+        assert "Failed to resolve VCS token: token provider error" in result["error"]
+
+        log_entries = [
+            call.args[2] for call in mock_record.call_args_list
+            if len(call.args) > 2 and isinstance(call.args[2], str)
+        ]
+        assert any("token_resolution_failed" in entry for entry in log_entries)
+        for entry in log_entries:
+            assert secret_leak not in entry
+
+        # Assert no remote push was executed and push grant was never opened
+        mock_push_grant.assert_not_called()
+        cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list if hasattr(c, "args")]
+        assert not any("push" in cmd for cmd in cmds)
+
+        # Commit preparation already happened before push token refresh: do not claim worktree was untouched
+        assert any("commit" in cmd for cmd in cmds)
 
     def test_credential_helper_real_git_invocation_with_sentinel(self) -> None:
         """Exercise credential helper invocation with real Git credential fill and a sentinel.
@@ -3578,4 +3777,3 @@ class TestPublishFreshBaseAuthorization:
         assert result["status"] == "error"
         assert result["step"] == "fetch"
         assert "token" not in result.get("hint", "").lower()
-

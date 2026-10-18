@@ -1,8 +1,8 @@
 {
-  "neutral": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:36fe4d145a54d34242885dda417ea81b2c0fcb002873cf59b5b683659da09bd4",
-  "python": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:da59f3b59c33d563ea7c7a7eb5e0e90a321b0c29a40794a57f2c3f44be77b87f",
-  "go": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:f44ba24305e89b2aa82fff9a6fb8f3bf1508981528d359669338476b7c419b91",
-  "rust": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:40b0e8c0684768fc0453d5d3d52d65cd32db3dd5503668e6ff10b70c7cf291d9",
-  "full": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:d224775636dfa8e3c5ad403bf39ff495f78974125ce7e37878527fac7a641f81",
-  "js": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:05fdbcd4a4061f437acfdef8b780c36a8bbf3fa2943c3be3a26491669878a976"
+  "neutral": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:6388966324ed4b0043faf70b70a527059732dee5d5eaccebda91956a3a550636",
+  "python": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:0cbc37cc04c84bb2e9b84f3ac3c6fb63e7b9169f4f1eba8ab36bf938ecc610a5",
+  "go": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:dcc8c0d0c9a2a740d2e8b55f66ad4f5f3e08023f981ae7f25531f98d77a3200a",
+  "rust": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:3a8bafd39a4bc255161dad7336a10d0c6dfddc4ed4d0dd31838296195acc2dfa",
+  "full": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:4d6e157d219fe617dad181100d97ec9c89b0eb49a039858bfd3a1bc663b76adc",
+  "js": "ghcr.io/masuda-masuo/sunaba/sandbox@sha256:c6e2f398a3bb124feff6798f996c4554af0305b31d8b4665cd39650e19384aab"
 }

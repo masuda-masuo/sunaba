@@ -1388,6 +1388,17 @@ def publish(
                 "hint": hint_str,
             }, verified)
 
+        if outcome.failure is not None:
+            record_boundary_crossing(
+                cid, "publish", "authorized_fetch_failed_unrecognized",
+                approved=False,
+            )
+            return finish_json({
+                "status": "error",
+                "step": "fetch",
+                "error": "Authorized fetch failed with an unrecognized failure.",
+            }, verified)
+
         swept_untracked: list[str] = []
 
         # --- Merge detection and auto-include (issue #712/#711) ---

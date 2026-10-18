@@ -532,6 +532,13 @@ def _fetch_source_origin(
             step="carry_fetch",
             hint=hint_str,
         )
+    if outcome.failure is not None:
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error="Authorized fetch failed with an unrecognized failure.",
+            step="carry_fetch",
+            hint="Ensure the source container is running and healthy.",
+        )
     return None
 
 def _carry_worktree(

@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import asdict
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from sunaba.proxy_client import ProxyAuthError
 from sunaba.tools.container import lifecycle
+from sunaba.tools.vcs import publishing
+from sunaba.tools.vcs.authorized_fetch import FetchOutcome
 from sunaba.tools.vcs.publishing import publish
 from tests.conftest import _make_client_mock, _make_publish_container
 from tests.test_carry_fresh_origin import (
@@ -567,5 +570,112 @@ def test_public_initialize_execution_exception_and_grant_exit_failure_are_fail_c
     assert after == before
     assert not any(
         "merge-base" in command or "cherry-pick" in command
+        for command in old_c.fetch_commands
+    )
+
+
+
+def test_publish_unknown_shared_fetch_failure_is_complete_and_fail_closed(monkeypatch):
+    monkeypatch.setenv("SUNABA_ENABLE_EGRESS_PROXY", "false")
+    container = _make_publish_container([(0, b"", b"")])
+    commands = []
+    original_exec_run = container.exec_run
+
+    def track_exec_run(*args, **kwargs):
+        command = " ".join(
+            str(part) for part in (args[0] if args else kwargs.get("cmd", []))
+        )
+        commands.append(command)
+        return original_exec_run(*args, **kwargs)
+
+    container.exec_run = track_exec_run
+    unknown_outcome = FetchOutcome(
+        failure=cast(Any, "unrecognized private failure token"), error="token-secret raw detail",
+        token="token-secret",
+    )
+    with (
+        patch.object(publishing, "_docker", return_value=_make_client_mock(container)),
+        patch.object(publishing, "_resolve_vcs_token", return_value="token-secret"),
+        patch.object(publishing, "authorized_origin_fetch", return_value=unknown_outcome),
+    ):
+        response = json.loads(publish(
+            container_id="abc123def456", repo="owner/repo", branch="fix/x",
+            message="Fix", files=["declared.txt"],
+        ))
+
+    assert response == {
+        "status": "error",
+        "step": "fetch",
+        "error": "Authorized fetch failed with an unrecognized failure.",
+    }
+    serialized = json.dumps(response)
+    assert "unrecognized private failure token" not in serialized
+    assert "token-secret" not in serialized
+    assert "raw detail" not in serialized
+    assert not any(
+        "git add " in command
+        or "git commit " in command
+        or "git push" in command
+        or "gh pr create" in command
+        or "merge-base" in command
+        or "git apply" in command
+        or "cherry-pick" in command
+        for command in commands
+    )
+
+
+def test_public_initialize_unknown_shared_fetch_failure_stops_before_allocation(tmp_path, monkeypatch):
+    fixture = _make_normal_merge_fixture(tmp_path)
+    old_c = _CarryGitContainer(
+        fixture["source_dir"], cid="unknownold001", repo="owner/repo",
+        require_auth_for_fetch=True,
+    )
+    new_c = _CarryGitContainer(
+        fixture["dest_dir"], cid="unknownnew001", repo="owner/repo",
+        require_auth_for_fetch=False,
+    )
+    client = MagicMock()
+    client.containers.run.return_value = new_c
+    client.containers.get.side_effect = lambda cid: old_c if cid == old_c.id else new_c
+    monkeypatch.setattr(lifecycle.github_api, "_resolve_vcs_token", lambda: "token-secret")
+    monkeypatch.setattr(lifecycle, "_resolve_repo_from_container", lambda *_: "owner/repo")
+    monkeypatch.setattr(lifecycle.proxy_client, "proxy_configured", lambda: False)
+    monkeypatch.setattr(
+        lifecycle,
+        "authorized_origin_fetch",
+        lambda **_kwargs: FetchOutcome(
+            failure=cast(Any, "unrecognized private failure token"), error="token-secret raw detail",
+            token="token-secret",
+        ),
+    )
+
+    before = (
+        _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
+        _git(fixture["source_dir"], "status", "--porcelain").stdout,
+    )
+    with _patched(client):
+        result = lifecycle.sandbox_initialize(
+            clone_repo="owner/repo", apply_from_container=old_c.id, pip_extras=None
+        )
+
+    response = _parse_init_error(result)
+    assert response == {
+        "status": "error",
+        "step": "carry_fetch",
+        "error": "Authorized fetch failed with an unrecognized failure.",
+        "hint": "Ensure the source container is running and healthy.",
+    }
+    serialized = json.dumps(response)
+    assert "unrecognized private failure token" not in serialized
+    assert "token-secret" not in serialized
+    assert "raw detail" not in serialized
+    assert client.containers.run.call_count == 0
+    after = (
+        _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
+        _git(fixture["source_dir"], "status", "--porcelain").stdout,
+    )
+    assert after == before
+    assert not any(
+        "merge-base" in command or "cherry-pick" in command or "git apply" in command
         for command in old_c.fetch_commands
     )

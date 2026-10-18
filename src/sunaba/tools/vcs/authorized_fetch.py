@@ -115,7 +115,12 @@ def authorized_origin_fetch(
             token_missing=(not token and not proxied), network_off=network_off,
         )
 
-    assert result is not None
+    if result is None:
+        return FetchOutcome(
+            failure="execution", error="fetch execution returned no result",
+            token=token, repo=repo, proxied=proxied,
+            token_missing=(not token and not proxied), network_off=network_off,
+        )
     ec, out, err = result
     if ec != 0:
         detail = (err or out).strip() or f"exit code {ec}"

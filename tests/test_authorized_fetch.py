@@ -90,19 +90,27 @@ def test_token_resolution_failure_stops_before_repo_or_grant():
 
 
 def test_repo_resolution_error_is_redacted_before_environment():
-    events = []
+    push_token_env = Mock(return_value={"GITHUB_TOKEN": TOKEN})
+    proxy_configured = Mock(return_value=False)
+    select_push_env = Mock()
+    authorized_read_grant = Mock()
+    execute = Mock()
     outcome = authorized_origin_fetch(
         resolve_token=lambda: TOKEN,
         resolve_repo=lambda: (_ for _ in ()).throw(RuntimeError(f"bad {TOKEN}")),
-        push_token_env=lambda token: {"GITHUB_TOKEN": token},
-        proxy_configured=lambda: False,
-        select_push_env=lambda token_env, proxied: token_env,
-        authorized_read_grant=Mock(),
-        execute=Mock(),
+        push_token_env=push_token_env,
+        proxy_configured=proxy_configured,
+        select_push_env=select_push_env,
+        authorized_read_grant=authorized_read_grant,
+        execute=execute,
     )
     assert outcome.failure == "repo_resolution"
     assert outcome.error == "bad <redacted>"
-    assert events == []
+    push_token_env.assert_not_called()
+    proxy_configured.assert_not_called()
+    select_push_env.assert_not_called()
+    authorized_read_grant.assert_not_called()
+    execute.assert_not_called()
 
 
 @pytest.mark.parametrize("exc,kind", [
@@ -235,3 +243,43 @@ def test_publish_network_state_callback_runs_after_env_selection_before_grant():
     )
     assert outcome.network_off is True
     assert events == ["token_env", "proxy", "select", "network_off", "grant"]
+
+
+def test_suppressed_execution_failure_returns_explicit_execution_outcome():
+    import subprocess
+    import sys
+
+    code = '''
+from contextlib import contextmanager
+from sunaba.tools.vcs.authorized_fetch import authorized_origin_fetch
+
+@contextmanager
+def suppress_execution_error(*args, **kwargs):
+    try:
+        yield
+    except KeyboardInterrupt:
+        pass
+
+outcome = authorized_origin_fetch(
+    resolve_token=lambda: "token-secret",
+    resolve_repo=lambda: "owner/repo",
+    push_token_env=lambda token: {"GITHUB_TOKEN": token},
+    proxy_configured=lambda: True,
+    select_push_env=lambda env, proxy: None,
+    read_network_off=lambda: True,
+    authorized_read_grant=suppress_execution_error,
+    execute=lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()),
+)
+if (outcome.failure, outcome.error, outcome.token, outcome.repo,
+        outcome.proxied, outcome.token_missing, outcome.network_off) != (
+        "execution", "fetch execution returned no result", "token-secret",
+        "owner/repo", True, False, True):
+    raise SystemExit(1)
+'''
+    completed = subprocess.run(  # noqa: S603
+        [sys.executable, "-O", "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout

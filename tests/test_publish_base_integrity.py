@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shlex
 from pathlib import Path
 from typing import Any, Iterator
 from unittest.mock import patch
@@ -76,7 +77,13 @@ class _IntegrityGitContainer(_RealGitContainer):
             if len(argv) > 2 and argv[0] in ("/bin/sh", "sh")
             else " ".join(argv)
         )
-        if "git fetch" in cmd_str:
+        is_fetch = False
+        for part in cmd_str.split("&&"):
+            tokens = shlex.split(part.strip())
+            if tokens and tokens[0] == "git" and "fetch" in tokens:
+                is_fetch = True
+                break
+        if is_fetch:
             if self.force_fetch_error:
                 return self._reply(
                     128,
@@ -319,28 +326,12 @@ def test_manifest_publish_refuses_when_remote_fetch_fails(
         tip_read_override=tip_err,
     )
 
-    # Must refuse with status == "error"
+    # Must refuse with status == "error" and step == "fetch"
     assert result.get("status") == "error", f"Expected status error, got: {result}"
-
-    # Actionable error message
-    err_text = " ".join([
-        str(result.get("error", "")),
-        str(result.get("message", "")),
-        str(result.get("hint", "")),
-        str(result.get("step", "")),
-    ]).lower()
-    assert any(
-        kw in err_text
-        for kw in (
-            "fetch",
-            "remote",
-            "unreachable",
-            "network",
-            "fail",
-            "refuse",
-            "error",
-        )
-    ), f"Error message not actionable: {result}"
+    assert result.get("step") == "fetch", f"Expected step 'fetch', got: {result}"
+    assert "network unreachable" in str(result.get("error", "")), (
+        f"Injected stderr 'network unreachable' not found in error: {result}"
+    )
 
     # No push occurred
     pushed_ref = _git(

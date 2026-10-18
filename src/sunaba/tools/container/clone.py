@@ -281,7 +281,11 @@ def _manifest_probe_cmd(clone_dest: str) -> str:
 
 
 def _detect_manifests(container: Any, clone_dest: str) -> set[str]:
-    """Probe root manifests; distinguish absent files from failed probes."""
+    """Probe root manifests; raise when detection is uncertain.
+
+    Preparation fails closed on probe errors because an unknown root cannot
+    safely select uv versus pip, and must never trigger a pip fallback.
+    """
     probe = _manifest_probe_cmd(clone_dest)
     try:
         exit_code, output = container.exec_run(
@@ -415,13 +419,20 @@ def _install_repo_deps(
     allow_network: bool = True,
     pip_args: str | None = None,
 ) -> DepsResult:
-    """Install root project dependencies, using locked uv when applicable."""
-    from sunaba.verify_state import record_environment_state
+    """Install root dependencies, failing closed when manifest detection fails.
+
+    An uncertain root fails preparation rather than guessing a package manager;
+    unlike a transient verification probe error, it returns a failed install
+    result without recording a uv-specific state for an unknown root.
+    """
+    from sunaba.verify_state import invalidate_verify_success, record_environment_state
 
     try:
         manifests = _detect_manifests(container, clone_dest)
     except RuntimeError as exc:
-        # Do not mutate prior environment state when root identity is unknown.
+        # Root identity is unknown: keep preparation state but discard any
+        # prior verify result that may be stale for this checkout.
+        invalidate_verify_success(str(container.id))
         return DepsResult(f"deps: manifest detection failed: {exc}", True)
     has_uv = "pyproject.toml" in manifests and "uv.lock" in manifests
     if not has_uv:

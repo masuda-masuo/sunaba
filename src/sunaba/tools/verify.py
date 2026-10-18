@@ -956,12 +956,10 @@ def _verify_in_container_guarded(
         from sunaba.environment import probe_uv_project_root
         uv_project = probe_uv_project_root(container, working_dir)
     except Exception as exc:
-        from sunaba.verify_state import record_environment_state
+        from sunaba.verify_state import invalidate_verify_success
 
         reason = f"uv manifest probe failed: {str(exc)[:200]}"
-        record_environment_state(
-            container_id, "failed", reason=reason, command="root manifest probe"
-        )
+        invalidate_verify_success(container_id)
         result = {
             "status": "environment_setup_failed",
             "gate_passed": False,
@@ -982,7 +980,7 @@ def _verify_in_container_guarded(
         return json.dumps(result)
 
     if uv_project:
-        from sunaba.verify_state import get_environment_state, record_environment_state
+        from sunaba.verify_state import get_environment_state
 
         environment_state = get_environment_state(container_id)
         state_name = (environment_state or {}).get("status") or "not_prepared"
@@ -1013,13 +1011,10 @@ def _verify_in_container_guarded(
         try:
             python_toolchain = resolve_uv_python_tools(container, working_dir)
         except Exception as exc:
-            from sunaba.verify_state import record_environment_state
+            from sunaba.verify_state import invalidate_verify_success
 
             reason = f"uv tool resolution failed: {str(exc)[:180]}"
-            record_environment_state(
-                container_id, "failed", reason=reason,
-                command="uv verification prerequisite probe",
-            )
+            invalidate_verify_success(container_id)
             result = {
                 "status": "environment_setup_failed",
                 "gate_passed": False,
@@ -1053,10 +1048,9 @@ def _verify_in_container_guarded(
         if missing_tools:
             missing = ", ".join(missing_tools)
             reason = f"required verification tool unavailable: {missing}"
-            record_environment_state(
-                container_id, "failed", reason=reason,
-                command="uv verification prerequisite probe",
-            )
+            from sunaba.verify_state import invalidate_verify_success
+
+            invalidate_verify_success(container_id)
             result = {
                 "status": "environment_setup_failed",
                 "gate_passed": False,

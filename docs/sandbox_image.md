@@ -70,3 +70,12 @@ The external contract of the Sunaba server is versioned using [Semantic Versioni
 *   **Covered by Semver**: MCP tool names, argument names/types, return shapes, and environment variables. Breaking modifications (e.g. removing a tool or argument) require a minor version bump while in `0.x` (or major bump in `1.x+`).
 *   **NOT Covered by Semver**: The sandbox image contents, internal module layout, and digests. 
 *   **Image Pins**: Image digests are pinned inside `image_pins.json` (updated via `scripts/update_image_pins.py`). Any server release is guaranteed to work with the digests bundled in its release package. If you supply a custom image via `image=`, ensure the expected tools (e.g., `ruff`, `pyright`, `pytest`, `eslint`, `jest`, `go test`) are installed and behave compatibly with the server's edit/verify wrappers.
+
+### Updating Pinned Images (uv & Python Patch Releases)
+
+The catalogue of prebuilt Python releases available to `uv python install` is baked directly into the `uv` binary itself. Changing or upgrading `uv` inside a running container alone only alters that temporary container and does not update pinned images. When a repository requires a newer Python patch release that the current image's `uv` cannot provide:
+
+1. **Check / bump pinned `uv` version**: Verify if a newer `uv` release includes the required Python patch, and update `UV_VERSION` in `docker/Dockerfile.base`.
+2. **Rebuild base and dependent variants**: Trigger `.github/workflows/build-sandbox-variants.yml` to rebuild `base` and its dependent variants (`python`, `go`, `rust`, `full`, `js`), running all workflow healthchecks.
+3. **Verify desired Python availability**: Spawn a container from the rebuilt image and verify that the desired Python version appears in `uv python list --all-versions` and installs successfully.
+4. **Update `image_pins.json` and validate**: Update `src/sunaba/image_pins.json` to the actual resulting digests using `scripts/update_image_pins.py` and validate fresh containers.

@@ -62,7 +62,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
   && rm -rf /var/lib/apt/lists/*
 
 # ── uv (システムワイド) ─────────────────────────────────────────
-RUN curl -LsSf https://astral.sh/uv/install.sh \
+ARG UV_VERSION=0.13.1
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
   | env UV_INSTALL_DIR=/usr/local/bin sh
 
 # ── ast-grep (sg) と sd ─────────────────────────────────────────

@@ -101,6 +101,7 @@ class TestVerifyNudges:
             nl = "\n"
             mock_container.exec_run.side_effect = [
                 (0, (b"", b"")),  # git diff HEAD --numstat
+                (0, (b"", b"")),  # root manifest probe: no uv manifests
                 (0, (b"", b"")),  # git diff --cached --numstat
                 (0, (b"", b"")),  # git ls-files --others --exclude-standard
                 (0, (b"", b"")),  # src/tests dir probe
@@ -324,6 +325,7 @@ class TestVerifyRecordsSuccess:
         )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),  # src/tests dir probe

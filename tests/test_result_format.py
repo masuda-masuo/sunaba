@@ -100,3 +100,27 @@ def test_rich_or_native_results_untouched():
         mt.ImageContent(type="image", data="AA==", mimeType="image/png"),
     ], structured_content={"result": "text"})
     assert compact_result(rich) is rich
+
+
+
+def test_compact_summary_exposes_environment_setup_failure() -> None:
+    payload = {
+        "status": "environment_setup_failed",
+        "gate_passed": False,
+        "gate_fail_kinds": ["environment_setup"],
+        "environment_setup": {"status": "failed", "reason": "pytest unavailable"},
+        "tests": {"status": "skipped"},
+    }
+    raw = json.dumps(payload)
+    original = ToolResult(
+        content=[mt.TextContent(type="text", text=raw)],
+        structured_content={"result": raw},
+    )
+
+    converted = compact_result(original)
+
+    assert converted.structured_content == payload
+    summary = json.loads(converted.content[0].text.removeprefix("Result: "))
+    assert summary["status"] == "environment_setup_failed"
+    assert summary["gate_fail_kinds"] == ["environment_setup"]
+    assert summary["environment_setup"]["status"] == "failed"

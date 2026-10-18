@@ -1200,6 +1200,7 @@ def sandbox_initialize(
                 open_read_grant=open_read_grant,
                 pip_args=pip_args,
                 install_deps=False,
+                allow_network=allow_network,
             )
             repo_cloned = True
         except Exception as e:
@@ -1252,6 +1253,7 @@ def sandbox_initialize(
                     open_read_grant=open_read_grant,
                     pip_args=pip_args,
                     install_deps=False,
+                    allow_network=allow_network,
                 )
                 repo_cloned = True
             except Exception as e:
@@ -1863,6 +1865,7 @@ def run_container_and_exec(
                 authenticated=container_has_token,
                 open_read_grant=open_read_grant,
                 pip_args=pip_args,
+                allow_network=allow_network,
             )
         except Exception as e:
             logger.warning("Branch setup failed: %s", e)
@@ -1916,6 +1919,7 @@ def run_container_and_exec(
                     authenticated=container_has_token,
                     open_read_grant=open_read_grant,
                     pip_args=pip_args,
+                    allow_network=allow_network,
                 )
             except Exception as e:
                 logger.warning("PR branch setup failed: %s", e)

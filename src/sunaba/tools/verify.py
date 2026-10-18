@@ -451,6 +451,8 @@ def _classify_fail_reason(reason: str, full_status: str | None = None) -> str:
         return "lint"
     if reason.startswith("type_check (") or reason.startswith("type_check"):
         return "type_check"
+    if reason.startswith("environment_setup") or "uv environment" in reason or "uv manifest probe" in reason or "verification tool unavailable" in reason:
+        return "environment_setup"
     if reason.startswith("patch_targets"):
         return "patch_targets"
     if "collection error" in reason or reason.startswith("collection error"):
@@ -520,7 +522,11 @@ def _record_verify_outcome(container_id: str, result: dict) -> None:
         outcome["fails"] = 0
         outcome["collected"] = 0
         full_status = tests.get("status", "skipped")
+        if result.get("status") == "environment_setup_failed":
+            full_status = "environment_setup_failed"
         outcome["status"] = full_status
+        if result.get("environment_setup"):
+            outcome["environment_setup"] = result["environment_setup"]
     elif isinstance(full, list):
         outcome["status"] = "multi_lang"
     outcome["fail_kinds"] = _derive_fail_kinds(result, full_status=full_status)
@@ -810,6 +816,10 @@ def _verify_in_container_guarded(
     # simply its working directory (see resolve_git_root).
     working_dir = resolve_git_root(container, working_dir)
 
+    python_executable = "python3"
+    python_toolchain: dict = {}
+    uv_project = False
+
     # --- Language detection ---
     detected = detect_languages(container, path, language, working_dir=working_dir)
 
@@ -904,7 +914,7 @@ def _verify_in_container_guarded(
                 "ok": False, "selected": [], "widen_reason": None,
                 "selection_ms": 0, "error": f"cannot stage selector: {e}",
             }
-        cmd = f"python3 {shlex.quote(selector_path)} --root {shlex.quote(repo_root)}"
+        cmd = f"{shlex.quote(python_executable)} {shlex.quote(selector_path)} --root {shlex.quote(repo_root)}"
         for p in deleted_or_renamed:
             cmd += f" --deleted {shlex.quote(p)}"
         for p in changed:
@@ -936,14 +946,131 @@ def _verify_in_container_guarded(
             "selection_ms": selection_ms,
         }
 
-    # --- Get diff summary (structured JSON, issue #500, #687) ---
-    # The name-status half is chained into the same exec calls (split by
-    # _NS_MARKER) so the exec count per verify call is unchanged: deleted /
-    # renamed files are detectable for affected-scope selection (#781).
+    # --- Get diff summary and independently probe the selected root ---
     unstaged_ec, unstaged_raw, _ = _run(
         "git diff HEAD --numstat 2>/dev/null; "
         f"echo {_NS_MARKER}; git diff HEAD --name-status 2>/dev/null"
     )
+    unstaged_raw = unstaged_raw if unstaged_ec == 0 else ""
+    try:
+        from sunaba.environment import probe_uv_project_root
+        uv_project = probe_uv_project_root(container, working_dir)
+    except Exception as exc:
+        from sunaba.verify_state import invalidate_verify_success
+
+        reason = f"uv manifest probe failed: {str(exc)[:200]}"
+        invalidate_verify_success(container_id)
+        result = {
+            "status": "environment_setup_failed",
+            "gate_passed": False,
+            "gate_fail_kinds": ["environment_setup"],
+            "gate_fail_reasons": [reason],
+            "environment_setup": {
+                "status": "failed", "reason": reason,
+                "command": "root manifest probe",
+            },
+            "lint": {"status": "skipped", "reason": "root manifest probe failed"},
+            "types": {"status": "skipped", "reason": "root manifest probe failed"},
+            "patch_targets": {"status": "skipped", "reason": "root manifest probe failed"},
+            "tests": {"status": "skipped", "reason": "root manifest probe failed"},
+            "diff_hash": None,
+            "test_selection": _empty_test_selection(),
+        }
+        _record_verify_outcome(container_id, result)
+        return json.dumps(result)
+
+    if uv_project:
+        from sunaba.verify_state import get_environment_state
+
+        environment_state = get_environment_state(container_id)
+        state_name = (environment_state or {}).get("status") or "not_prepared"
+        if state_name != "ready":
+            reason = (environment_state or {}).get("reason") or "preparation state missing or not_prepared"
+            result = {
+                "status": "environment_setup_failed",
+                "gate_passed": False,
+                "gate_fail_kinds": ["environment_setup"],
+                "gate_fail_reasons": [f"uv environment {state_name}: {reason}"],
+                "environment_setup": {
+                    "status": state_name,
+                    "reason": reason,
+                    "command": (environment_state or {}).get("command"),
+                    "exit_code": (environment_state or {}).get("exit_code"),
+                },
+                "lint": {"status": "skipped", "reason": "uv environment is not ready"},
+                "types": {"status": "skipped", "reason": "uv environment is not ready"},
+                "patch_targets": {"status": "skipped", "reason": "uv environment is not ready"},
+                "tests": {"status": "skipped", "reason": "uv environment is not ready"},
+                "diff_hash": None,
+                "test_selection": _empty_test_selection(),
+            }
+            _record_verify_outcome(container_id, result)
+            return json.dumps(result)
+        from sunaba.environment import resolve_uv_python_tools
+
+        try:
+            python_toolchain = resolve_uv_python_tools(container, working_dir)
+        except Exception as exc:
+            from sunaba.verify_state import invalidate_verify_success
+
+            reason = f"uv tool resolution failed: {str(exc)[:180]}"
+            invalidate_verify_success(container_id)
+            result = {
+                "status": "environment_setup_failed",
+                "gate_passed": False,
+                "gate_fail_kinds": ["environment_setup"],
+                "gate_fail_reasons": [reason],
+                "environment_setup": {
+                    "status": "failed",
+                    "reason": reason,
+                    "command": "uv verification prerequisite probe",
+                },
+                "lint": {"status": "skipped", "reason": "uv tool resolution failed"},
+                "types": {"status": "skipped", "reason": "uv tool resolution failed"},
+                "patch_targets": {"status": "skipped", "reason": "uv tool resolution failed"},
+                "tests": {"status": "skipped", "reason": "uv tool resolution failed"},
+                "diff_hash": None,
+                "test_selection": _empty_test_selection(),
+            }
+            _record_verify_outcome(container_id, result)
+            return json.dumps(result)
+        python_path = python_toolchain.get("python", {}).get("path")
+        pytest_path = python_toolchain.get("pytest", {}).get("path")
+        missing_tools = []
+        if not python_path:
+            missing_tools.append("project .venv Python")
+        if not pytest_path:
+            missing_tools.append("project pytest")
+        if not skip_lint_gate and not python_toolchain.get("ruff", {}).get("path"):
+            missing_tools.append("Ruff")
+        if not skip_type_gate and not python_toolchain.get("pyright", {}).get("path"):
+            missing_tools.append("Pyright")
+        if missing_tools:
+            missing = ", ".join(missing_tools)
+            reason = f"required verification tool unavailable: {missing}"
+            from sunaba.verify_state import invalidate_verify_success
+
+            invalidate_verify_success(container_id)
+            result = {
+                "status": "environment_setup_failed",
+                "gate_passed": False,
+                "gate_fail_kinds": ["environment_setup"],
+                "gate_fail_reasons": [reason],
+                "environment_setup": {
+                    "status": "failed", "reason": reason,
+                    "command": "uv verification prerequisite probe",
+                    "tools": python_toolchain,
+                },
+                "lint": {"status": "skipped", "reason": "required uv tool unavailable"},
+                "types": {"status": "skipped", "reason": "required uv tool unavailable"},
+                "patch_targets": {"status": "skipped", "reason": "required uv tool unavailable"},
+                "tests": {"status": "skipped", "reason": "required uv tool unavailable"},
+                "diff_hash": None,
+                "test_selection": _empty_test_selection(),
+            }
+            _record_verify_outcome(container_id, result)
+            return json.dumps(result)
+        python_executable = python_path
     staged_ec, staged_raw, _ = _run(
         "git diff --cached --numstat 2>/dev/null; "
         f"echo {_NS_MARKER}; git diff --cached --name-status 2>/dev/null"
@@ -1030,6 +1157,8 @@ def _verify_in_container_guarded(
         "diff_hash": diff_hash,
         "test_selection": test_selection,
     }
+    if uv_project:
+        result["python_toolchain"] = python_toolchain
     if detected.reason:
         result["detection_warning"] = detected.reason
 
@@ -1061,6 +1190,7 @@ def _verify_in_container_guarded(
             gate_on_lint=not skip_lint_gate,
             gate_on_type=not skip_type_gate,
             gate_on_patch_targets=not skip_patch_targets_gate,
+            python_toolchain=python_toolchain if uv_project else None,
         )
         result["lint"] = lt_gate["lint"]
         result["types"] = lt_gate["types"]
@@ -1095,7 +1225,10 @@ def _verify_in_container_guarded(
         _junit_file = "/tmp/_pytest_report.xml"
         _raw_file = "/tmp/_pytest_raw.txt"
         target = targets if targets is not None else path
-        full_cmd = build_pytest_cmd(_junit_file, _raw_file, filter_args, target, _SANDBOX_ENV)
+        full_cmd = build_pytest_cmd(
+            _junit_file, _raw_file, filter_args, target, _SANDBOX_ENV,
+            python_executable=python_executable,
+        )
         ec, stdout_text, stderr_text = _run(full_cmd)
 
         if ec == 127:
@@ -1155,7 +1288,13 @@ def _verify_in_container_guarded(
             return {"status": "skipped", "error": f"no test runner for {lang}"}
 
         try:
-            vr = runner(container, test_path, workdir=working_dir)
+            if lang == "python" and uv_project:
+                vr = runner(
+                    container, test_path, workdir=working_dir,
+                    python_executable=python_executable,
+                )
+            else:
+                vr = runner(container, test_path, workdir=working_dir)
         except Exception as e:
             return {"status": "error", "error": str(e)}
 

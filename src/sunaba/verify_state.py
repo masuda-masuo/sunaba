@@ -9,11 +9,9 @@ contradicts the recorded state.  Journal analysis behind Issue #550 showed
 unconditional nudges are mostly noise, so nudges fire only on
 contradiction -- and they never block.
 
-The map is intentionally process-local and lost on a server restart:
-every consumer is advisory (a missing record produces a warning, never a
-block).  A record means "the full verify gate passed for this container
-at least once in this server session"; it is not invalidated by later
-edits (kept deliberately simple).
+The maps are intentionally process-local and lost on a server restart.
+Verification success remains process-local; uv preparation state is a
+separate hard prerequisite for verify and publish.
 """
 
 from __future__ import annotations
@@ -24,6 +22,55 @@ import threading
 #: completed with ``gate_passed=True`` (same keying as ``journal._run_map``).
 _verify_map: dict[str, bool] = {}
 _verify_map_lock: threading.Lock = threading.Lock()
+
+#: Per-container Python environment preparation for locked uv projects.
+_environment_state: dict[str, dict[str, str | int | None]] = {}
+_environment_state_lock: threading.Lock = threading.Lock()
+
+
+def record_environment_state(
+    container_id: str,
+    status: str,
+    *,
+    reason: str = "",
+    command: str = "",
+    exit_code: int | None = None,
+) -> None:
+    """Record uv preparation state and invalidate verify on failure."""
+    if status not in {"not_prepared", "ready", "failed"}:
+        raise ValueError(f"invalid environment state: {status}")
+    key = container_id[:12]
+    with _environment_state_lock:
+        _environment_state[key] = {
+            "status": status,
+            "reason": reason[:240],
+            "command": command[:240],
+            "exit_code": exit_code,
+        }
+    if status != "ready":
+        invalidate_verify_success(container_id)
+
+
+def clear_environment_state(container_id: str, *, invalidate_verify: bool = False) -> None:
+    """Forget stale uv preparation after a confirmed transition to a non-uv root."""
+    with _environment_state_lock:
+        _environment_state.pop(container_id[:12], None)
+    if invalidate_verify:
+        invalidate_verify_success(container_id)
+
+
+def get_environment_state(container_id: str) -> dict[str, str | int | None] | None:
+    """Return a copy of preparation state, or None when never recorded."""
+    with _environment_state_lock:
+        value = _environment_state.get(container_id[:12])
+        return dict(value) if value is not None else None
+
+
+def invalidate_verify_success(container_id: str) -> None:
+    """Forget a previous verify success after environment preparation fails."""
+    with _verify_map_lock:
+        _verify_map.pop(container_id[:12], None)
+
 
 
 def record_verify_success(container_id: str) -> None:

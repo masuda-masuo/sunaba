@@ -29,7 +29,10 @@ from .shell import _GO_ENV, _RUST_ENV, _SANDBOX_ENV, _exec_run, _quote_path
 
 
 def _run_pytest_verify(
-    container: Any, path: str, workdir: str | None = None
+    container: Any,
+    path: str,
+    workdir: str | None = None,
+    python_executable: str | None = None,
 ) -> VerifyResult:
     """Run pytest --junit-xml on *path*.  Returns VerifyResult envelope.
 
@@ -46,7 +49,34 @@ def _run_pytest_verify(
     )
     _junit_file = "/tmp/_pytest_report.xml"
     _raw_file = "/tmp/_pytest_raw.txt"
-    cmd = build_pytest_cmd(_junit_file, _raw_file, "", _quote_path(path), _SANDBOX_ENV)
+    root = workdir or "/workspace"
+    from sunaba.environment import (
+        probe_uv_project_root,
+        resolve_uv_python_tools,
+        uv_environment_block_reason,
+    )
+    try:
+        uv_root = probe_uv_project_root(container, root)
+    except Exception as exc:
+        return _envelope_error("pytest", f"uv root probe failed: {exc}", 1)
+    if uv_root:
+        blocked = uv_environment_block_reason(container, root)
+        if blocked:
+            return _envelope_error("pytest", blocked, 1)
+        if python_executable is None:
+            try:
+                toolchain = resolve_uv_python_tools(container, root)
+            except Exception as exc:
+                return _envelope_error(
+                    "pytest", f"uv tool resolution failed: {str(exc)[:180]}", 1
+                )
+            python_executable = toolchain.get("python", {}).get("path")
+        if not python_executable:
+            return _envelope_error("pytest", "project .venv Python unavailable", 1)
+    cmd = build_pytest_cmd(
+        _junit_file, _raw_file, "", _quote_path(path), _SANDBOX_ENV,
+        python_executable=python_executable or "python3",
+    )
     ec, stdout_text, stderr_text = _exec_run(
         container,
         ["/bin/sh", "-c", cmd],

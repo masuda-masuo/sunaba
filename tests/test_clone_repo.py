@@ -279,13 +279,18 @@ class TestInstallRepoDeps:
         return container
 
     def test_allow_network_false_skips_everything(self) -> None:
-        """allow_network=False: no exec at all, no note (like the pip path)."""
-        container = self._container([])
+        """No installer runs without network; uv detection still probes root manifests."""
+        container = self._container([(0, (b"", b""))])
         deps = _install_repo_deps(
             container, "owner/repo", "/tmp/repo", "[dev]", allow_network=False
         )
         assert deps == ("", False)
-        container.exec_run.assert_not_called()
+        container.exec_run.assert_called_once()
+        command = container.exec_run.call_args.args[0][-1]
+        assert "for f in pyproject.toml uv.lock" in command
+        assert "uv sync" not in command
+        assert "pip install" not in command
+        assert "npm install" not in command
 
     def test_pip_extras_none_skips_only_python(self) -> None:
         """pip_extras=None skips the pip step but npm still runs."""
@@ -298,7 +303,7 @@ class TestInstallRepoDeps:
         assert deps.note == "deps: pip skipped (pip_extras=None); npm install ok"
         cmds = [c.args[0][-1] for c in container.exec_run.call_args_list]
         assert cmds == [
-            "cd /tmp/repo && for f in pyproject.toml setup.py package.json "
+            "cd /tmp/repo && for f in pyproject.toml uv.lock setup.py package.json "
             "package-lock.json go.mod Cargo.toml; do [ -e \"$f\" ] && printf "
             "'%s\\n' \"$f\" || true; done",
             "cd /tmp/repo && npm install --no-package-lock",
@@ -327,14 +332,14 @@ class TestInstallRepoDeps:
         assert deps.failed is True
         assert deps.note == "deps: npm install failed (exit 1): npm ERR! code E404"
 
-    def test_probe_failure_treated_as_no_manifest(self) -> None:
-        """A failed probe degrades to the skip note, not an error."""
+    def test_probe_failure_is_reported_without_installing(self) -> None:
+        """A failed root probe is not trusted as an absent-manifest result."""
         container = self._container([
             (1, (b"", b"probe failed")),
         ])
         deps = _install_repo_deps(container, "owner/repo", "/tmp/repo", "[dev]")
-        assert deps.failed is False
-        assert deps.note == "deps: no manifest detected — skipped"
+        assert deps.failed is True
+        assert "manifest detection failed" in deps.note
         # No installer exec followed the failed probe.
         assert container.exec_run.call_count == 1
 

@@ -745,6 +745,7 @@ class TestRunContainerAndExecBranchParam:
             mock_container, "abc123def456", "owner/repo", "feature-x",
             "/workspace", "[dev]",
             authenticated=False, open_read_grant=False, pip_args=None,
+            allow_network=True,
         )
 
     @patch("sunaba.tools.container._docker")

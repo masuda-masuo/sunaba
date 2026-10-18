@@ -80,6 +80,7 @@ def _run_ruff_verify(
     workdir: str | None = None,
     extra_select: bool = True,
     fix: bool = False,
+    resolved_tool: dict[str, str | None] | None = None,
 ) -> VerifyResult:
     """Run ruff on *path*.  Returns VerifyResult envelope.
 
@@ -105,12 +106,32 @@ def _run_ruff_verify(
         else ""
     )
     fix_arg = "--fix " if fix else ""
+    tool_cmd = "ruff"
+    uv_root = False
+    if workdir:
+        from sunaba.environment import is_uv_project_root, resolve_uv_tool, uv_environment_block_reason
+
+        blocked = uv_environment_block_reason(container, workdir)
+        if blocked:
+            return _envelope_error("ruff", blocked, 1)
+        uv_root = is_uv_project_root(container, workdir)
+        if uv_root:
+            try:
+                executable = (
+                    resolved_tool.get("path") if resolved_tool is not None
+                    else resolve_uv_tool(container, workdir, "ruff")[0]
+                )
+            except Exception as exc:
+                return _envelope_error("ruff", f"uv tool resolution failed: {str(exc)[:180]}", 1)
+            if executable is None:
+                return _envelope_not_available("ruff", "ruff unavailable in project and image")
+            tool_cmd = shlex.quote(executable)
     ec, stdout_text, stderr_text = _exec_run(
         container,
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}ruff check --output-format json "
+            f"{_SANDBOX_ENV}{tool_cmd} check --output-format json "
             f"{fix_arg}"
             f"{security_args}"
             f"{_quote_path(path)}",
@@ -375,7 +396,11 @@ def _run_rust_type_verify(
 
 
 def _run_pyright_verify(
-    container: Any, path: str, workdir: str | None = None
+    container: Any,
+    path: str,
+    workdir: str | None = None,
+    resolved_tool: dict[str, str | None] | None = None,
+    resolved_python: str | None = None,
 ) -> VerifyResult:
     """Run pyright on *path*.  Returns VerifyResult envelope.
 
@@ -405,13 +430,34 @@ def _run_pyright_verify(
         if idx != -1:
             project_root = normalized[:idx]
     project_arg = f"--project {shlex.quote(project_root)} " if project_root else ""
+    tool_cmd = "pyright"
+    interpreter_arg = ""
+    if project_root and workdir:
+        from sunaba.environment import is_uv_project_root, resolve_uv_tool, uv_environment_block_reason
+
+        blocked = uv_environment_block_reason(container, workdir)
+        if blocked:
+            return _envelope_error("pyright", blocked, 1)
+        if is_uv_project_root(container, workdir):
+            try:
+                executable = (
+                    resolved_tool.get("path") if resolved_tool is not None
+                    else resolve_uv_tool(container, workdir, "pyright")[0]
+                )
+            except Exception as exc:
+                return _envelope_error("pyright", f"uv tool resolution failed: {str(exc)[:180]}", 1)
+            if executable is None:
+                return _envelope_not_available("pyright", "pyright unavailable in project and image")
+            tool_cmd = shlex.quote(executable)
+            interpreter = resolved_python or f"{workdir.rstrip('/')}/.venv/bin/python"
+            interpreter_arg = f"--pythonpath {shlex.quote(interpreter)} "
 
     ec, stdout_text, stderr_text = _exec_run(
         container,
         [
             "/bin/sh",
             "-c",
-            f"{_SANDBOX_ENV}pyright --outputjson {project_arg}{_quote_path(path)}",
+            f"{_SANDBOX_ENV}{tool_cmd} --outputjson {interpreter_arg}{project_arg}{_quote_path(path)}",
         ],
         workdir=workdir,
     )

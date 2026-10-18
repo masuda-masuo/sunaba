@@ -209,6 +209,23 @@ class TestDriftDetection:
         # them, but they are not tool parameters so no schema carries them.
         "output_id",                     # saved foreground output handle (#900)
         "cut_from",                      # publish: the ref the commit was cut from (#891)
+        "uv.lock",                       # root uv lock manifest
+        "pyproject.toml",                # root Python project manifest
+        "all-groups",                    # uv sync argument
+        "environment_setup_failed",      # verify result status
+        "failed",                        # environment preparation state
+        "not_prepared",                  # environment preparation state
+        "ready",                         # environment preparation state
+        "skip_verify_gate",              # publish bypass parameter
+        "sync",                          # uv subcommand
+        "all",                           # part of the uv sync command example
+        "groups",                        # part of the uv sync command example
+        "lock",                          # uv lock file
+        "locked",                        # uv locked-sync option
+        "pyproject",                     # pyproject.toml manifest
+        "toml",                          # pyproject.toml file format
+        "uv",                            # uv tool
+        "venv",                          # project virtual environment
     }
 
     def test_no_drift(self) -> None:

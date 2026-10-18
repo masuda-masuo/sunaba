@@ -38,6 +38,7 @@ import pytest
 from sunaba.tools.verify import verify_in_container
 
 _VERIFY_TIMEOUT_ENV = "SUNABA_VERIFY_TIMEOUT"
+_VERIFY_MARKER_ENV = "SUNABA_VERIFY_MARKER"
 
 _GATE_OK = {
     "gate_passed": True,
@@ -52,6 +53,12 @@ def _cmd_text(cmd: object) -> str:
     if isinstance(cmd, list):
         return " ".join(str(c) for c in cmd)
     return str(cmd)
+
+
+def _is_pytest_command(cmd: object) -> bool:
+    """Identify pytest execution, excluding temp paths containing 'pytest'."""
+    text = _cmd_text(cmd)
+    return "--junit-xml=" in text and " -m pytest " in text
 
 
 def _client_with(container: object) -> MagicMock:
@@ -185,6 +192,8 @@ class _ScriptedReapContainer:
 
     def exec_run(self, cmd: object, **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
         text = _cmd_text(cmd)
+        if "for f in pyproject.toml uv.lock" in text:
+            return 0, (b"", b"")
         if "pytest" in text:
             self.release.wait()
             return 0, (b"", b"")
@@ -290,7 +299,7 @@ class _LocalExecContainer:
         self.exec_calls.append((cmd, dict(kwargs)))
         if self.closed:
             raise RuntimeError("container closed after verify")
-        if self.test_run_script is not None and "pytest" in _cmd_text(cmd):
+        if self.test_run_script is not None and _is_pytest_command(cmd):
             argv = ["/bin/sh", "-c", self.test_run_script]
         elif isinstance(cmd, list):
             argv = cmd
@@ -310,7 +319,7 @@ class _LocalExecContainer:
             cwd=effective_cwd,
             env=env if isinstance(env, dict) else None,
         )
-        if self.ready_path is not None and self.test_run_script is not None and "pytest" in _cmd_text(cmd):
+        if self.ready_path is not None and self.test_run_script is not None and _is_pytest_command(cmd):
             ready_deadline = time.monotonic() + 15.0
             while time.monotonic() < ready_deadline and not self.ready_path.exists():
                 time.sleep(0.01)
@@ -362,7 +371,7 @@ class TestVerifyTimeoutReapsRealDescendants:
     CID = "910real0001"
 
     def test_timeout_reaps_setsid_detached_descendant(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     ) -> None:
         """The test run spawns a setsid-detached descendant that ignores
         SIGTERM (logging it) and loops.  When the deadline fires, the
@@ -394,21 +403,58 @@ class TestVerifyTimeoutReapsRealDescendants:
         deadline_s = 3.0
         monkeypatch.setenv(_VERIFY_TIMEOUT_ENV, str(deadline_s))
         box: dict = {}
-        t, _rec = _verify_in_thread(self.CID, fake, box)
+        t, _rec = _verify_in_thread(
+            self.CID, fake, box, working_dir=str(tmp_path)
+        )
         try:
             if not fake.tree_ready.wait(15.0):
                 error = box.get("error")
                 if error is not None:
                     _exc_type, exc_value, exc_tb = error
                     raise exc_value.with_traceback(exc_tb)
-                raise AssertionError("marked pytest command did not create its setsid child")
+                detail = "verify returned no terminal result"
+                if "value" in box:
+                    result = json.loads(box["value"])
+                    environment = result.get("environment_setup", {})
+                    detail = (
+                        f"verify status={result.get('status')!r}, "
+                        f"reason={environment.get('reason') or result.get('gate_fail_reasons')}"
+                    )
+                raise AssertionError(
+                    "marked pytest command was not reached before descendant spawn: "
+                    + detail
+                )
+            pytest_call = next(
+                (kwargs for cmd, kwargs in fake.exec_calls if _is_pytest_command(cmd)),
+                None,
+            )
+            assert pytest_call is not None, (
+                "the local exec adapter must record the real pytest command"
+            )
+            assert _VERIFY_MARKER_ENV in pytest_call.get("environment", {}), (
+                "the real pytest exec must inherit the verify marker for the reaper; "
+                f"call={next(((_cmd_text(cmd), kwargs) for cmd, kwargs in fake.exec_calls if _is_pytest_command(cmd)), None)!r}"
+            )
+            assert any(
+                "for f in pyproject.toml uv.lock" in _cmd_text(cmd)
+                for cmd, _kwargs in fake.exec_calls
+            ), "verify must execute the real root manifest probe"
+            assert not (tmp_path / "pyproject.toml").exists()
+            assert not (tmp_path / "uv.lock").exists()
             before_cleanup = _token_processes(token)
             assert len(before_cleanup) >= 2, (
                 "marked command and setsid descendant must both exist before timeout cleanup"
             )
-            _join_verify_thread(t, 25.0, "verify that must time out and reap", box)
+            try:
+                _join_verify_thread(t, 25.0, "verify that must time out and reap", box)
+            except BaseException as exc:
+                commands = [_cmd_text(cmd) for cmd, _kwargs in fake.exec_calls]
+                raise AssertionError(f"{exc}; exec calls: {commands}") from exc
             result = json.loads(box["value"])
             assert result["status"] == "timeout"
+            assert any(_is_pytest_command(cmd) for cmd, _kwargs in fake.exec_calls), (
+                "timeout must be observed only after the real pytest command is reached"
+            )
             assert result["timeout"]["reap"] == "ok"
             assert result["timeout"]["deadline_s"] == deadline_s
 

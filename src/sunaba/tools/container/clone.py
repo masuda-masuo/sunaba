@@ -253,6 +253,7 @@ def _run_pip_install(
 
 _MANIFEST_FILES: tuple[str, ...] = (
     "pyproject.toml",
+    "uv.lock",
     "setup.py",
     "package.json",
     "package-lock.json",
@@ -280,12 +281,10 @@ def _manifest_probe_cmd(clone_dest: str) -> str:
 
 
 def _detect_manifests(container: Any, clone_dest: str) -> set[str]:
-    """Probe *clone_dest* for dependency manifests with one in-container exec.
+    """Probe root manifests; raise when detection is uncertain.
 
-    Returns the set of manifest file names present.  A failed probe is
-    treated as "no manifests": dependency install is non-fatal and must
-    never take init down, so detection failures degrade to a skip note
-    rather than an error.
+    Preparation fails closed on probe errors because an unknown root cannot
+    safely select uv versus pip, and must never trigger a pip fallback.
     """
     probe = _manifest_probe_cmd(clone_dest)
     try:
@@ -296,13 +295,19 @@ def _detect_manifests(container: Any, clone_dest: str) -> set[str]:
             demux=True,
         )
     except Exception as e:
-        logger.warning("Manifest detection failed for %s: %s", clone_dest, e)
-        return set()
+        raise RuntimeError(f"manifest detection failed: {str(e)[:200]}") from e
     if exit_code != 0:
-        return set()
-    stdout_part, _ = output or (b"", b"")
+        raise RuntimeError(f"manifest detection failed (exit {exit_code})")
+    stdout_part, stderr_part = output or (b"", b"")
     text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-    return {line.strip() for line in text.splitlines() if line.strip()}
+    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+    if stderr_text.strip():
+        raise RuntimeError(f"manifest detection returned stderr: {stderr_text.strip()[:160]}")
+    manifests = {line.strip() for line in text.splitlines() if line.strip()}
+    invalid = manifests - set(_MANIFEST_FILES)
+    if invalid:
+        raise RuntimeError(f"manifest detection returned malformed output: {sorted(invalid)!r}")
+    return manifests
 
 
 def _npm_install_cmd(clone_dest: str, lockfile: bool) -> str:
@@ -414,64 +419,125 @@ def _install_repo_deps(
     allow_network: bool = True,
     pip_args: str | None = None,
 ) -> DepsResult:
-    """Manifest-aware dependency install after a successful clone/checkout.
+    """Install root dependencies, failing closed when manifest detection fails.
 
-    The dispatcher all four post-clone install sites go through
-    (sandbox_initialize, run_container_and_exec, _setup_branch and
-    _setup_pr_branch): it probes *clone_dest* for manifests and runs every
-    applicable installer -- the existing pip path for python projects
-    (``pyproject.toml``/``setup.py``) and ``npm ci``/``npm install`` for JS
-    projects (``package.json``).  go/rust manifests are fetch-on-build
-    toolchains: noted, never installed.  Multi-language repos run both the
-    python and npm installers.
-
-    *pip_extras* ``None`` skips only the python step (its historical
-    meaning: "None skips pip install"); the npm step still runs when
-    ``package.json`` is present.  *allow_network* ``False`` skips every
-    install (no hang), exactly like the pip path.
-
-    Returns:
-        DepsResult(note, failed): *note* describes what ran, was skipped,
-        or failed (empty when nothing applies, e.g. no network); *failed*
-        is True when an installer reported an error.
+    An uncertain root fails preparation rather than guessing a package manager;
+    unlike a transient verification probe error, it returns a failed install
+    result without recording a uv-specific state for an unknown root.
     """
-    if not allow_network:
+    from sunaba.verify_state import invalidate_verify_success, record_environment_state
+
+    try:
+        manifests = _detect_manifests(container, clone_dest)
+    except RuntimeError as exc:
+        # Root identity is unknown: keep preparation state but discard any
+        # prior verify result that may be stale for this checkout.
+        invalidate_verify_success(str(container.id))
+        return DepsResult(f"deps: manifest detection failed: {exc}", True)
+    has_uv = "pyproject.toml" in manifests and "uv.lock" in manifests
+    if not has_uv:
+        from sunaba.verify_state import clear_environment_state, get_environment_state
+
+        prior = get_environment_state(str(container.id))
+        if prior is not None:
+            clear_environment_state(str(container.id), invalidate_verify=True)
+    has_py = "pyproject.toml" in manifests or "setup.py" in manifests
+    has_js = "package.json" in manifests
+    has_go = "go.mod" in manifests
+    has_cargo = "Cargo.toml" in manifests
+    notes: list[str] = []
+    errors: list[str] = []
+
+    if not allow_network and not has_uv:
         logger.info(
             "Skipping deps install for %s: container has no network access",
             clone_repo,
         )
         return DepsResult("", False)
-    manifests = _detect_manifests(container, clone_dest)
-    has_py = "pyproject.toml" in manifests or "setup.py" in manifests
-    has_js = "package.json" in manifests
-    has_go = "go.mod" in manifests
-    has_cargo = "Cargo.toml" in manifests
 
-    notes: list[str] = []
-    errors: list[str] = []
+    if has_uv:
+        if not allow_network:
+            reason = "network_disabled"
+            record_environment_state(
+                container.id, "failed", reason=reason,
+                command="uv sync --locked --all-groups",
+            )
+            errors.append(f"uv preparation failed: {reason}")
+        elif pip_extras is None:
+            record_environment_state(container.id, "not_prepared", reason="pip_extras=None")
+            notes.append("uv not_prepared (pip_extras=None)")
+        elif _normalize_pip_extras(pip_extras) != "[dev]" or (pip_args or "").strip():
+            reason = "unsupported_uv_arguments"
+            record_environment_state(
+                container.id, "failed", reason=reason,
+                command="uv sync --locked --all-groups",
+            )
+            errors.append(f"uv preparation failed: {reason}")
+        else:
+            command = "uv sync --locked --all-groups"
+            record_environment_state(
+                container.id, "not_prepared", reason="uv sync in progress",
+                command=command,
+            )
+            _record_deps_progress(container, "deps: " + command)
+            try:
+                exit_code, output = container.exec_run(
+                    ["/bin/sh", "-c", f"cd {shlex.quote(clone_dest)} && {command}"],
+                    stdout=True,
+                    stderr=True,
+                    demux=True,
+                )
+                stdout_part, stderr_part = output or (b"", b"")
+                stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+                stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+                if exit_code == 0:
+                    record_environment_state(container.id, "ready", command=command, exit_code=0)
+                    notes.append("uv sync --locked --all-groups ok")
+                else:
+                    diagnostic = (stderr_text or stdout_text).strip()
+                    diagnostic = re.sub(r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", diagnostic)
+                    diagnostic = re.sub(r"https?://[^\s/@]+:[^\s/@]+@", "https://[REDACTED]@", diagnostic)
+                    diagnostic = diagnostic[:240]
+                    reason = f"sync_failed: {diagnostic}"
+                    record_environment_state(
+                        container.id, "failed", reason=reason,
+                        command=command, exit_code=exit_code,
+                    )
+                    suffix = f": {diagnostic}" if diagnostic else ""
+                    errors.append(f"uv sync --locked --all-groups failed (exit {exit_code}){suffix}")
+            except Exception as exc:
+                diagnostic = re.sub(r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", str(exc))[:240]
+                record_environment_state(
+                    container.id, "failed", reason=f"sync_error: {diagnostic}",
+                    command=command,
+                )
+                errors.append(f"uv sync --locked --all-groups failed: {diagnostic}")
 
-    if has_py:
+    elif has_py:
         if pip_extras is None:
             notes.append("pip skipped (pip_extras=None)")
         else:
             _record_deps_progress(container, "deps: pip install")
             err = _run_pip_install(
-                container, clone_repo, clone_dest, pip_extras, True, pip_args
+                container, clone_repo, clone_dest, pip_extras, allow_network, pip_args
             )
             if err is not None:
                 errors.append(err)
             else:
                 notes.append("pip install ok")
-    if has_js:
+
+    if has_js and allow_network:
         lockfile = "package-lock.json" in manifests
         _record_deps_progress(
             container, "deps: npm ci" if lockfile else "deps: npm install"
         )
-        err = _run_npm_install(container, clone_repo, clone_dest, True, lockfile)
+        err = _run_npm_install(container, clone_repo, clone_dest, allow_network, lockfile)
         if err is not None:
             errors.append(err)
         else:
             notes.append("npm ci ok" if lockfile else "npm install ok")
+    elif has_js and not allow_network:
+        notes.append("npm skipped (network disabled)")
     if has_go and not has_py and not has_js:
         notes.append("go.mod detected — delegated to fetch-on-build")
     if has_cargo and not has_py and not has_js:
@@ -479,11 +545,7 @@ def _install_repo_deps(
     if not has_py and not has_js and not has_go and not has_cargo:
         notes.append("no manifest detected — skipped")
 
-    if not notes and not errors:
-        # Unreachable in practice (the no-manifest branch above), kept so
-        # the composition below is total.
-        return DepsResult("", False)
-    return DepsResult(f"deps: {'; '.join(notes + errors)}", bool(errors))
+    return DepsResult(f"deps: {'; '.join(notes + errors)}" if notes or errors else "", bool(errors))
 
 
 def _try_clone_into_container(
@@ -601,6 +663,7 @@ def _setup_pr_branch(
     open_read_grant: bool = False,
     pip_args: str | None = None,
     install_deps: bool = True,
+    allow_network: bool = True,
 ) -> str:
     """Clone repo and check out PR branch inside the container.
 
@@ -778,7 +841,10 @@ def _setup_pr_branch(
     # carry so a carried change is already in the tree), this step is skipped.
     deps_msg = ""
     if install_deps:
-        deps = _install_repo_deps(container, repo, clone_dest, pip_extras, pip_args=pip_args)
+        deps = _install_repo_deps(
+            container, repo, clone_dest, pip_extras,
+            allow_network=allow_network, pip_args=pip_args,
+        )
         deps_msg = f" ({deps.note})" if deps.note else ""
 
     _write_clone_meta(container, clone_dest, base_branch=base_ref)
@@ -864,6 +930,7 @@ def _setup_branch(
     open_read_grant: bool = False,
     pip_args: str | None = None,
     install_deps: bool = True,
+    allow_network: bool = True,
 ) -> str:
     """Clone repo and check out a named branch inside the container.
 
@@ -1032,7 +1099,10 @@ def _setup_branch(
     # skipped.
     deps_msg = ""
     if install_deps:
-        deps = _install_repo_deps(container, repo, clone_dest, pip_extras, pip_args=pip_args)
+        deps = _install_repo_deps(
+            container, repo, clone_dest, pip_extras,
+            allow_network=allow_network, pip_args=pip_args,
+        )
         deps_msg = f" ({deps.note})" if deps.note else ""
 
     record_copy(

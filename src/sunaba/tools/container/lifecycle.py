@@ -47,7 +47,6 @@ from sunaba.output_control import (
     truncate_by_tokens,
     truncate_output,
 )
-from sunaba.proxy_client import ProxyAuthError
 from sunaba.security import (
     CREATED_AT_LABEL,
     MANAGED_LABEL,
@@ -74,6 +73,7 @@ from sunaba.tools.vcs import (
     checkpoint_list,
     resolve_git_root,
 )
+from sunaba.tools.vcs.authorized_fetch import authorized_origin_fetch
 from sunaba.tools.vcs.merge_base import _resolve_repo_from_container
 
 from .clone import (
@@ -448,16 +448,7 @@ def _fetch_source_origin(
     container: Any,
     repo_root: str,
 ) -> _CarryReport | None:
-    """Refresh the source container's origin remote under host authorization.
-
-    Runs before merge-base calculation in :func:`_carry_worktree` (Issue #935).
-    Token is resolved host-side and passed via ephemeral environment variables
-    for native transport; proxied transport leaves the container token-free while
-    the host holds the read grant.
-
-    Returns ``None`` on success, or a failed ``_CarryReport`` with step="carry_fetch"
-    and diagnostics with secrets redacted.
-    """
+    """Refresh the source container origin under host authorization."""
     def _decode(b: Any) -> str:
         if b is None:
             return ""
@@ -465,124 +456,90 @@ def _fetch_source_origin(
             return b
         return b.decode("utf-8", errors="replace")
 
-    # 1. Resolve VCS token host-side. Fail closed if token provider fails.
-    try:
-        fetch_token = github_api._resolve_vcs_token()
-    except Exception:
+    def _execute_fetch(command: str, env: Any) -> tuple[int, str, str]:
+        full_cmd = f"cd {shlex.quote(repo_root)} && {command}"
+        res = container.exec_run(
+            ["/bin/sh", "-c", full_cmd],
+            environment=env,
+            stdout=True,
+            stderr=True,
+        )
+        if isinstance(res, tuple):
+            ec, raw_out = res[0], res[1]
+            if isinstance(raw_out, tuple):
+                return ec, _decode(raw_out[0]), _decode(raw_out[1])
+            return ec, _decode(raw_out), ""
+        return getattr(res, "exit_code", 0), _decode(getattr(res, "output", "")), ""
+
+    outcome = authorized_origin_fetch(
+        resolve_token=github_api._resolve_vcs_token,
+        resolve_repo=lambda: _resolve_repo_from_container(container, repo_root),
+        push_token_env=_push_token_env,
+        proxy_configured=proxy_client.proxy_configured,
+        select_push_env=select_push_env,
+        authorized_read_grant=proxy_client.authorized_read_grant,
+        execute=_execute_fetch,
+    )
+    if outcome.failure == "token_resolution":
         return _CarryReport(
             files=[], applied=[], conflicts=[], untracked=[],
             error="Failed to resolve VCS token: token provider error",
             step="carry_fetch",
             hint="Ensure VCS token is configured in environment or token provider.",
         )
-
-    def _redact(text: str) -> str:
-        if fetch_token and text:
-            return text.replace(fetch_token, "<redacted>")
-        return text
-
-    # 2. Identify and validate source repository for authorization grant.
-    try:
-        repo = _resolve_repo_from_container(container, repo_root)
-    except Exception as exc:
-        err_msg = _redact(str(exc))
+    if outcome.failure == "repo_resolution":
         return _CarryReport(
             files=[], applied=[], conflicts=[], untracked=[],
-            error=f"Cannot resolve origin repository for fetch: {err_msg}",
+            error=f"Cannot resolve origin repository for fetch: {outcome.error}",
             step="carry_fetch",
             hint="Ensure origin remote is configured and points to a GitHub repository.",
         )
-
-    # 3. Build fetch command and ephemeral environment.
-    fetch_token_env = _push_token_env(fetch_token)
-    fetch_proxied = proxy_client.proxy_configured()
-    fetch_env = select_push_env(fetch_token_env, fetch_proxied)
-    fetch_cmd = (
-        "git -c credential.helper= "
-        "-c credential.helper='!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f' "
-        "fetch origin"
-    )
-    full_cmd = f"cd {shlex.quote(repo_root)} && {fetch_cmd}"
-
-    fetch_ec: int = 0
-    fetch_out: str = ""
-    fetch_err: str = ""
-    fetch_exec_err: Exception | None = None
-    grant_entered = False
-
-    try:
-        with proxy_client.authorized_read_grant(repo, token=fetch_token or None):
-            grant_entered = True
-            try:
-                res = container.exec_run(
-                    ["/bin/sh", "-c", full_cmd],
-                    environment=fetch_env,
-                    stdout=True,
-                    stderr=True,
-                )
-                if isinstance(res, tuple):
-                    fetch_ec = res[0]
-                    raw_out = res[1]
-                    if isinstance(raw_out, tuple):
-                        fetch_out = _decode(raw_out[0])
-                        fetch_err = _decode(raw_out[1])
-                    else:
-                        fetch_out = _decode(raw_out)
-                        fetch_err = ""
-                else:
-                    fetch_ec = getattr(res, "exit_code", 0)
-                    fetch_out = _decode(getattr(res, "output", ""))
-            except Exception as exc:
-                fetch_exec_err = exc
-    except ProxyAuthError as exc:
-        err_msg = _redact(str(exc))
+    if outcome.failure == "proxy_auth":
         return _CarryReport(
             files=[], applied=[], conflicts=[], untracked=[],
-            error=f"Proxy authorization failed for fetch: {err_msg}",
+            error=f"Proxy authorization failed for fetch: {outcome.error}",
             step="carry_fetch",
             hint="Check egress proxy authentication and configuration.",
         )
-    except Exception as exc:
-        exc_msg = _redact(str(exc))
-        if grant_entered:
-            return _CarryReport(
-                files=[], applied=[], conflicts=[], untracked=[],
-                error=f"Failed to close authorization grant for fetch: {exc_msg}",
-                step="carry_fetch",
-                hint="Check egress proxy connection and authorization grant cleanup.",
-            )
+    if outcome.failure == "grant_close":
         return _CarryReport(
             files=[], applied=[], conflicts=[], untracked=[],
-            error=f"Failed to open authorization grant for fetch: {exc_msg}",
+            error=f"Failed to close authorization grant for fetch: {outcome.error}",
+            step="carry_fetch",
+            hint="Check egress proxy connection and authorization grant cleanup.",
+        )
+    if outcome.failure == "grant_open":
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error=f"Failed to open authorization grant for fetch: {outcome.error}",
             step="carry_fetch",
             hint="Ensure the remote repository exists and credentials are valid.",
         )
-
-    if fetch_exec_err is not None:
-        exc_msg = _redact(str(fetch_exec_err))
+    if outcome.failure == "execution":
         return _CarryReport(
             files=[], applied=[], conflicts=[], untracked=[],
-            error=f"Failed to execute fetch in container: {exc_msg}",
+            error=f"Failed to execute fetch in container: {outcome.error}",
             step="carry_fetch",
             hint="Ensure the source container is running and healthy.",
         )
-
-    if fetch_ec != 0:
-        fetch_detail = (fetch_err or fetch_out).strip() or f"exit code {fetch_ec}"
-        fetch_detail = _redact(fetch_detail)
+    if outcome.failure == "exit":
         network_off = getattr(container, "labels", {}).get(NETWORK_LABEL) == "false"
-        token_missing = (not fetch_token) and (not fetch_proxied)
-        hints = push_failure_hints(network_off, token_missing)
+        hints = push_failure_hints(network_off, outcome.token_missing)
         hint_str = " ".join(hints) if hints else "Ensure the remote is reachable and authorization is valid."
         return _CarryReport(
             files=[], applied=[], conflicts=[], untracked=[],
-            error=f"git fetch origin failed (exit {fetch_ec}): {fetch_detail}",
+            error=f"git fetch origin failed (exit {outcome.exit_code}): {outcome.error}",
             step="carry_fetch",
             hint=hint_str,
         )
-
+    if outcome.failure is not None:
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error="Authorized fetch failed with an unrecognized failure.",
+            step="carry_fetch",
+            hint="Ensure the source container is running and healthy.",
+        )
     return None
-
 
 def _carry_worktree(
     client: Any,

@@ -43,6 +43,7 @@ from sunaba.tools.publish_planner import (
     verify_gate_error,
 )
 from sunaba.tools.vcs.gitroot import resolve_git_root
+from sunaba.tools.vcs.authorized_fetch import authorized_origin_fetch
 from sunaba.verify_state import has_verify_success
 
 logger = logging.getLogger(__name__)
@@ -1298,9 +1299,18 @@ def publish(
         # Refresh remote-tracking refs under host authorization before
         # merge detection and commit preparation (#818, #932).  Fail closed:
         # manifest mode must not build against a stale or offline base.
-        try:
-            fetch_token = _resolve_vcs_token()
-        except Exception:
+        outcome = authorized_origin_fetch(
+            resolve_token=_resolve_vcs_token,
+            resolve_repo=lambda: repo,
+            push_token_env=_push_token_env,
+            proxy_configured=proxy_configured,
+            select_push_env=select_push_env,
+            authorized_read_grant=authorized_read_grant,
+            execute=lambda command, env: _run(command, env=env),
+            read_network_off=lambda: container.labels.get(NETWORK_LABEL) == "false",
+        )
+        fetch_token = outcome.token or ""
+        if outcome.failure == "token_resolution":
             record_boundary_crossing(
                 cid, "publish",
                 f"repo={repo} branch={branch} token_resolution_failed",
@@ -1312,37 +1322,11 @@ def publish(
                 "error": "Failed to resolve VCS token: token provider error",
             }, verified)
 
-        fetch_token_env = _push_token_env(fetch_token)
-        fetch_proxied = proxy_configured()
-        fetch_env = select_push_env(fetch_token_env, fetch_proxied)
-        network_off = container.labels.get(NETWORK_LABEL) == "false"
-        token_missing = (not fetch_token) and (not fetch_proxied)
-        fetch_cmd = (
-            "git -c credential.helper= "
-            "-c credential.helper='!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f' "
-            "fetch origin"
-        )
+        def _redact_fetch_token(value: str) -> str:
+            return outcome.redact(value)
 
-        def _redact_fetch_token(text: str) -> str:
-            if fetch_token and text:
-                return text.replace(fetch_token, "<redacted>")
-            return text
-
-        fetch_ec: int = 0
-        fetch_out: str = ""
-        fetch_err: str = ""
-        fetch_exec_err: Exception | None = None
-        grant_entered = False
-
-        try:
-            with authorized_read_grant(repo, token=fetch_token or None):
-                grant_entered = True
-                try:
-                    fetch_ec, fetch_out, fetch_err = _run(fetch_cmd, env=fetch_env)
-                except Exception as exc:
-                    fetch_exec_err = exc
-        except ProxyAuthError as exc:
-            err_msg = _redact_fetch_token(str(exc))
+        if outcome.failure == "proxy_auth":
+            err_msg = outcome.error
             record_boundary_crossing(
                 cid, "publish",
                 _redact_fetch_token(f"repo={repo} branch={branch} proxy_read_grant_failed"),
@@ -1353,9 +1337,9 @@ def publish(
                 "step": "proxy_auth",
                 "error": err_msg,
             }, verified)
-        except Exception as exc:
-            exc_msg = _redact_fetch_token(str(exc))
-            if grant_entered:
+        if outcome.failure in {"grant_open", "grant_close"}:
+            exc_msg = outcome.error
+            if outcome.failure == "grant_close":
                 record_boundary_crossing(
                     cid, "publish",
                     _redact_fetch_token(f"repo={repo} branch={branch} read_grant_close_failed: {exc_msg}"),
@@ -1376,9 +1360,8 @@ def publish(
                 "step": "fetch",
                 "error": f"Failed to open authorization grant for fetch: {exc_msg}",
             }, verified)
-
-        if fetch_exec_err is not None:
-            exc_msg = _redact_fetch_token(str(fetch_exec_err))
+        if outcome.failure == "execution":
+            exc_msg = outcome.error
             record_boundary_crossing(
                 cid, "publish",
                 _redact_fetch_token(f"repo={repo} branch={branch} fetch_execution_failed: {exc_msg}"),
@@ -1389,22 +1372,31 @@ def publish(
                 "step": "fetch",
                 "error": f"Failed to execute fetch: {exc_msg}",
             }, verified)
-
-        if fetch_ec != 0:
-            fetch_detail = (fetch_err or fetch_out).strip() or f"exit code {fetch_ec}"
-            fetch_detail = _redact_fetch_token(fetch_detail)
+        if outcome.failure == "exit":
+            fetch_detail = outcome.error
             record_boundary_crossing(
                 cid, "publish",
-                _redact_fetch_token(f"repo={repo} branch={branch} fetch_failed exit={fetch_ec}"),
+                _redact_fetch_token(f"repo={repo} branch={branch} fetch_failed exit={outcome.exit_code}"),
                 approved=False,
             )
-            hints = push_failure_hints(network_off, token_missing)
+            hints = push_failure_hints(outcome.network_off, outcome.token_missing)
             hint_str = " ".join(hints) if hints else "Ensure the remote is reachable and authorization is valid."
             return finish_json({
                 "status": "error",
                 "step": "fetch",
-                "error": f"git fetch origin failed (exit {fetch_ec}): {fetch_detail}",
+                "error": f"git fetch origin failed (exit {outcome.exit_code}): {fetch_detail}",
                 "hint": hint_str,
+            }, verified)
+
+        if outcome.failure is not None:
+            record_boundary_crossing(
+                cid, "publish", "authorized_fetch_failed_unrecognized",
+                approved=False,
+            )
+            return finish_json({
+                "status": "error",
+                "step": "fetch",
+                "error": "Authorized fetch failed with an unrecognized failure.",
             }, verified)
 
         swept_untracked: list[str] = []

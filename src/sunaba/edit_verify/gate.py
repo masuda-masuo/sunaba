@@ -70,12 +70,19 @@ _GATE_SENTINEL_RULES = ("no-linter", "no-typechecker", "error")
 
 
 def _gate_lint_runner(
-    container: Any, path: str | Sequence[str], lang: str, workdir: str | None
+    container: Any,
+    path: str | Sequence[str],
+    lang: str,
+    workdir: str | None,
+    python_toolchain: dict[str, dict[str, str | None]] | None = None,
 ) -> VerifyResult:
     """Lint runner for the gate.  Python ruff runs WITHOUT the security
     extend-select so the gate matches CI's plain ``ruff check`` exactly."""
     if lang == "python":
-        return _run_ruff_verify(container, path, workdir=workdir, extra_select=False)
+        return _run_ruff_verify(
+            container, path, workdir=workdir, extra_select=False,
+            resolved_tool=(python_toolchain or {}).get("ruff"),
+        )
     if lang in ("js", "ts"):
         return _run_eslint_verify(container, path, workdir=workdir)
     if lang == "go":
@@ -86,11 +93,19 @@ def _gate_lint_runner(
 
 
 def _gate_type_runner(
-    container: Any, path: str, lang: str, workdir: str | None
+    container: Any,
+    path: str,
+    lang: str,
+    workdir: str | None,
+    python_toolchain: dict[str, dict[str, str | None]] | None = None,
 ) -> VerifyResult:
     """Type-check runner for the gate."""
     if lang == "python":
-        return _run_pyright_verify(container, path, workdir=workdir)
+        return _run_pyright_verify(
+            container, path, workdir=workdir,
+            resolved_tool=(python_toolchain or {}).get("pyright"),
+            resolved_python=((python_toolchain or {}).get("python") or {}).get("path"),
+        )
     if lang == "ts":
         return _run_tsc_verify(container, path, workdir=workdir)
     if lang == "rust":
@@ -159,6 +174,7 @@ def run_lint_type_gate(
     gate_on_lint: bool = True,
     gate_on_type: bool = True,
     gate_on_patch_targets: bool = False,
+    python_toolchain: dict[str, dict[str, str | None]] | None = None,
 ) -> dict[str, Any]:
     """Run lint + type-check as a pre-test gate over *scope* (Issue #293).
 
@@ -210,10 +226,16 @@ def run_lint_type_gate(
     for lang in sorted(detected.languages):
         if gate_on_lint:
             lint_results.append(
-                _gate_lint_runner(container, effective_lint_scope, lang, working_dir)
+                _gate_lint_runner(
+                    container, effective_lint_scope, lang, working_dir,
+                    python_toolchain=python_toolchain,
+                )
             )
         if gate_on_type:
-            type_results.append(_gate_type_runner(container, scope, lang, working_dir))
+            type_results.append(_gate_type_runner(
+                container, scope, lang, working_dir,
+                python_toolchain=python_toolchain,
+            ))
 
     gate_fail_reasons: list[str] = []
     _all_gate_results = [*lint_results, *type_results]

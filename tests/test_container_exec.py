@@ -27,7 +27,12 @@ class TestRunContainerAndExecCloneRepo:
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"test output", b""))
+        def _exec_with_empty_manifest_probe(cmd, **kwargs):
+            command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "for f in pyproject.toml uv.lock" in command:
+                return 0, (b"", b"")
+            return 0, (b"test output", b"")
+        mock_container.exec_run.side_effect = _exec_with_empty_manifest_probe
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -57,7 +62,12 @@ class TestRunContainerAndExecCloneRepo:
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"test output", b""))
+        def _exec_with_empty_manifest_probe(cmd, **kwargs):
+            command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "for f in pyproject.toml uv.lock" in command:
+                return 0, (b"", b"")
+            return 0, (b"test output", b"")
+        mock_container.exec_run.side_effect = _exec_with_empty_manifest_probe
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -84,7 +94,12 @@ class TestRunContainerAndExecCloneRepo:
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"test output", b""))
+        def _exec_with_empty_manifest_probe(cmd, **kwargs):
+            command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "for f in pyproject.toml uv.lock" in command:
+                return 0, (b"", b"")
+            return 0, (b"test output", b"")
+        mock_container.exec_run.side_effect = _exec_with_empty_manifest_probe
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -112,7 +127,12 @@ class TestRunContainerAndExecCloneRepo:
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"test output", b""))
+        def _exec_with_empty_manifest_probe(cmd, **kwargs):
+            command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "for f in pyproject.toml uv.lock" in command:
+                return 0, (b"", b"")
+            return 0, (b"test output", b"")
+        mock_container.exec_run.side_effect = _exec_with_empty_manifest_probe
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -137,7 +157,12 @@ class TestRunContainerAndExecCloneRepo:
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"test output", b""))
+        def _exec_with_empty_manifest_probe(cmd, **kwargs):
+            command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "for f in pyproject.toml uv.lock" in command:
+                return 0, (b"", b"")
+            return 0, (b"test output", b"")
+        mock_container.exec_run.side_effect = _exec_with_empty_manifest_probe
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
@@ -172,7 +197,12 @@ class TestRunContainerAndExecPipExtras:
     ) -> None:
         mock_container = MagicMock()
         mock_container.id = "abc123def456"
-        mock_container.exec_run.return_value = (0, (b"output", b""))
+        def _exec_with_empty_manifest_probe(cmd, **kwargs):
+            command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "for f in pyproject.toml uv.lock" in command:
+                return 0, (b"", b"")
+            return 0, (b"output", b"")
+        mock_container.exec_run.side_effect = _exec_with_empty_manifest_probe
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client

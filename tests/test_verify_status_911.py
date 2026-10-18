@@ -39,7 +39,14 @@ class TestVerifyEarlyReturnStatus911:
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_container.exec_run.return_value = (0, (b"src\ntests\n", b""))
+        def _exec_with_non_uv_root(cmd, **kwargs):
+            command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "for f in pyproject.toml uv.lock" in command:
+                return 0, (b"", b"")
+            if "for d in src tests" in command:
+                return 0, (b"src\ntests\n", b"")
+            return 0, (b"", b"")
+        mock_container.exec_run.side_effect = _exec_with_non_uv_root
 
         gate_ret = {
             "gate_passed": False,
@@ -97,6 +104,7 @@ class TestVerifyEarlyReturnStatus911:
 
         mock_container.exec_run.side_effect = [
             (0, (changed_unstaged, b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (empty_staged, b"")),
             (0, (b"", b"")),  # git ls-files
             (0, (selector_ok, b"")),
@@ -147,6 +155,7 @@ class TestVerifyEarlyReturnStatus911:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # unstaged
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # staged
             (0, (b"", b"")),  # ls-files
             (1, (failed_report, b"")),  # filtered pytest run
@@ -185,6 +194,7 @@ class TestVerifyEarlyReturnStatus911:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # unstaged
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # staged
             (0, (b"", b"")),  # ls-files
         ]
@@ -230,6 +240,7 @@ class TestVerifyEarlyReturnStatus911:
         )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # unstaged
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # staged
             (0, (b"", b"")),  # ls-files
             (0, (green_report, b"")),  # full pytest run
@@ -276,6 +287,7 @@ class TestVerifyEarlyReturnStatus911:
         )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # unstaged
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # staged
             (0, (b"", b"")),  # ls-files
             (1, (failed_report, b"")),  # full pytest run

@@ -49,7 +49,8 @@ def compact_result(result: ToolResult) -> ToolResult:
     # Text-only clients should use legacy mode. The payload occurs once on
     # the compact wire, in structuredContent; this is just a short summary.
     summary = {key: payload[key] for key in (
-        "status", "gate_passed", "busy", "shown", "total_lines", "truncated",
+        "status", "gate_passed", "gate_fail_kinds", "environment_setup",
+        "busy", "shown", "total_lines", "truncated",
         "next_offset", "has_more", "output_id", "output_unavailable",
     ) if key in payload}
     label = json.dumps(summary, ensure_ascii=False) if summary else "See structuredContent."

@@ -465,7 +465,12 @@ class TestLintFileAutofix:
         from sunaba.edit_verify import lint_file
 
         mock_container = MagicMock()
-        mock_container.exec_run.return_value = (0, (b"[]", b""))
+        def _exec_with_empty_non_uv_probe(cmd, **kwargs):
+            command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "for f in pyproject.toml uv.lock" in command:
+                return 0, (b"", b"")
+            return 0, (b"[]", b"")
+        mock_container.exec_run.side_effect = _exec_with_empty_non_uv_probe
         client = self._client_with(mock_container)
 
         result = lint_file(client, "abc123", "/tmp/f.py", fix=True)
@@ -506,20 +511,29 @@ class TestLintFileAutofix:
         from sunaba.edit_verify import lint_file
 
         mock_container = MagicMock()
-        # First call (single file) → clean, triggers scope phase.
-        mock_container.exec_run.return_value = (0, (b"[]", b""))
+        # Return a valid empty root probe; all linter commands are clean.
+        def _exec_with_empty_non_uv_probe(cmd, **kwargs):
+            command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "for f in pyproject.toml uv.lock" in command:
+                return 0, (b"", b"")
+            return 0, (b"[]", b"")
+        mock_container.exec_run.side_effect = _exec_with_empty_non_uv_probe
         client = self._client_with(mock_container)
 
         lint_file(
             client, "abc123", "src/foo.py", scope_workdir=("src", "."), fix=True
         )
 
-        # Two exec_run calls: single-file (with --fix) then scope (read-only).
-        assert mock_container.exec_run.call_count == 2
-        single_cmd = mock_container.exec_run.call_args_list[0][0][0][2]
-        scope_cmd = mock_container.exec_run.call_args_list[1][0][0][2]
-        assert "--fix" in single_cmd
-        assert "--fix" not in scope_cmd
+        # Each Python layer probes the selected root for uv manifests, then
+        # runs the file and read-only scope commands.
+        commands = [
+            entry[0][0][2]
+            for entry in mock_container.exec_run.call_args_list
+        ]
+        ruff_commands = [command for command in commands if "ruff check" in command]
+        assert len(ruff_commands) == 2
+        assert "--fix" in ruff_commands[0]
+        assert "--fix" not in ruff_commands[1]
 
 
 # ===================================================================
@@ -804,6 +818,7 @@ class TestVerifyInContainer:
         mock_docker.return_value = mock_client
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"src\ntests\n", b"")),  # src/tests existence probe
@@ -843,6 +858,7 @@ class TestVerifyInContainer:
         mock_docker.return_value = mock_client
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),  # src/tests existence probe: neither exists
@@ -880,6 +896,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -921,6 +938,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -962,6 +980,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1009,6 +1028,7 @@ class TestVerifyInContainer:
         )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1050,6 +1070,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1093,6 +1114,7 @@ class TestVerifyInContainer:
         # Exit code 1 + "No module named pytest" in raw output
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1138,6 +1160,7 @@ class TestVerifyInContainer:
         # Exit code 1 + "No module named pytest" in raw output
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1201,6 +1224,7 @@ class TestVerifyInContainer:
         )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1254,6 +1278,7 @@ class TestVerifyInContainer:
         # pytest exits 4 (usage error) and writes no XML report.
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1306,6 +1331,7 @@ class TestVerifyInContainer:
         # Exit 3 (internal error), no XML, no recognizable tool-absence marker.
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1346,6 +1372,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"new_file.py\ndirty.txt\n", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),  # src/tests dir probe
@@ -1386,6 +1413,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"", b"")),  # git ls-files --others --exclude-standard (empty)
             (0, (b"", b"")),  # src/tests dir probe
@@ -1429,6 +1457,7 @@ class TestVerifyInContainer:
         calls: list[str] = []
         ls_files_reply: list[tuple[int, tuple[bytes, bytes]]] = [
             (0, (b"", b"")),   # numstat1 (fallback)
+            (0, (b"", b"")),   # successful empty uv-root probe (non-uv)
             (0, (b"", b"")),   # numstat2 (fallback)
             (0, (b"", b"")),   # the ls-files reply
             (0, (b"", b"")),   # dir probe
@@ -2352,6 +2381,7 @@ class TestVerifyAffectedScope:
     def _base_effects(self) -> list[tuple[int, tuple[bytes, bytes]]]:
         return [
             (0, (self.CHANGED_UNSTAGED, b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (self.EMPTY_STAGED, b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
         ]
@@ -2563,6 +2593,7 @@ class TestVerifyAffectedScope:
         """No changed files -> widen to a genuine full run."""
         effects = [
             (0, (b"", b"")),
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (self.GREEN_REPORT, b"")),

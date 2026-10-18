@@ -431,7 +431,7 @@ class TestRunLintTypeGate:
         from src.sunaba.edit_verify import _gate_lint_runner
         captured = {}
 
-        def _fake_ruff(container, path, workdir=None, extra_select=True):
+        def _fake_ruff(container, path, workdir=None, extra_select=True, resolved_tool=None):
             captured["extra_select"] = extra_select
             from src.sunaba.edit_verify import VerifyResult
             return VerifyResult(tool="ruff", status="ok", findings=[], exit_code=0)
@@ -449,11 +449,11 @@ class TestRunLintTypeGate:
         self._patch_detect(monkeypatch)
         seen = {}
 
-        def _fake_lint(container, path, lang, workdir):
+        def _fake_lint(container, path, lang, workdir, python_toolchain=None):
             seen["lint_path"] = path
             return self._vr("ok")
 
-        def _fake_type(container, path, lang, workdir):
+        def _fake_type(container, path, lang, workdir, python_toolchain=None):
             seen["type_path"] = path
             return self._vr("ok", tool="pyright")
 
@@ -476,7 +476,7 @@ class TestRunLintTypeGate:
         self._patch_detect(monkeypatch)
         seen = {}
 
-        def _fake_lint(container, path, lang, workdir):
+        def _fake_lint(container, path, lang, workdir, python_toolchain=None):
             seen["lint_path"] = path
             return self._vr("ok")
 

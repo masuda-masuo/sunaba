@@ -458,6 +458,7 @@ def _incorporate(run: dict[str, Any], entry: dict[str, Any]) -> None:
                 "collected": result_info.get("collected", 0),
                 "status": result_info.get("status", "unknown"),
                 "fail_kinds": result_info.get("fail_kinds", []),
+                "environment_setup": result_info.get("environment_setup"),
             })
         else:
             run["verify_timeline"].append({

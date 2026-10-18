@@ -90,11 +90,8 @@ type check in one call.
   When the filtered subset passes, the full suite runs automatically.
 - The lint and type gates run as preconditions. A failure there is a real error;
   `skip_type_gate` is not a routine flag.
-- **A green `gate_passed` alongside a set `lint_type_incomplete` means "not measured", not
-  "passed".** A missing toolchain is not treated as a failure, so a container whose image
-  does not match the repository skips lint and type entirely and still reports a green
-  gate. Read both fields. This is the concrete cost of reusing a container across
-  repositories -- it once let two pyright errors through to a pushed branch.
+- **A missing required verification tool fails the gate as unavailable.** It is never a green
+  pass. Optional layers may be marked incomplete, which still means "not measured".
 - `diff_summary` is structured JSON (`{unstaged, staged, untracked}`), not `git diff --stat`.
 
 ### Timeout and retry contract (issue #910)
@@ -216,6 +213,15 @@ Pass `worktree=True` to see only uncommitted changes (`git diff HEAD`); the `bas
 - `path`: hunks for that file only, disclosed progressively (`offset` / `limit`)
 - `raw=True`: full unified diff, an escape hatch for when nothing else will do
 
+### Locked uv project preparation
+
+A selected project root uses uv only when that directory itself contains both `pyproject.toml` and `uv.lock`. Preparation runs `uv sync --locked --all-groups`; lock mismatches fail and the lock is never rewritten. A lock file alone, a parent project, or a child project does not select uv.
+
+Preparation state is process-local. For uv projects, verify requires state `ready`; missing, `not_prepared`, and `failed` states return `environment_setup_failed` before lint, type, patch-target checks, or tests. A preparation failure clears any prior verify success, and publish's normal gate checks preparation state as well as the verify result. Preparation success alone does not pass the verify gate. An explicit human `skip_verify_gate=True` remains an escape hatch. After a server restart, preparation state is unknown; recover by preparing and verifying again, or use a new container.
+
+For prepared uv projects, Python checks use the project `.venv` interpreter and installed pytest, Ruff, and Pyright where available. Image tool fallback is only for absent Ruff or Pyright; pytest must be available in the project environment. Pyright receives the project interpreter explicitly. Non-uv projects retain their existing pip and runner selection.
+
+
 ## phase: publish
 
     publish(container_id, repo, branch, message, files=[...], create_pr=True, pr_title=...)
@@ -305,3 +311,4 @@ pushed through with `secret_scan_override`.
 `sandbox_stop(container_id)`. Idle containers are reaped by `SUNABA_CONTAINER_TTL_SECONDS`
 anyway. Enumerate strays with `sandbox_list_containers` (label-filtered JSON) rather than raw
 `docker ps`; reconnect with `sandbox_attach`.
+

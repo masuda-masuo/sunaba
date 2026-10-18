@@ -30,6 +30,7 @@ def build_pytest_cmd(
     filter_args: str,
     path: str | list[str],
     sandbox_env: str = "",
+    python_executable: str = "python3",
 ) -> str:
     """Build a pytest --junit-xml command that emits XML + raw tail.
 
@@ -72,9 +73,9 @@ def build_pytest_cmd(
     else:
         quoted_path = shlex.quote(path)
     return (
-        f"{sandbox_env}python3 -c 'import xdist.plugin' >/dev/null 2>&1 "
+        f"{sandbox_env}{shlex.quote(python_executable)} -c 'import xdist.plugin' >/dev/null 2>&1 "
         f"&& _np='-n auto' || _np=''; "
-        f"{sandbox_env}python3 -m pytest --junit-xml={junit_file} "
+        f"{sandbox_env}{shlex.quote(python_executable)} -m pytest --junit-xml={junit_file} "
         f"-o junit_family=xunit1 "
         f"$_np -q{filter_args} "
         f"{quoted_path} >{raw_file} 2>&1; "

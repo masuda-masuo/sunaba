@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from sunaba.tools.container.lifecycle import _carry_worktree, sandbox_initialize
 from tests.test_publish_ops_gitrepo import (
     _git,
@@ -571,7 +573,7 @@ def test_fallback_base_reported_when_origin_head_missing():
 
 def test_carry_fetch_token_provider_failure_fails_closed_and_cleans_up():
     """Token provider exception fails closed, returns structured error without
-    leaking unknown secret material, removes destination container, and records stop."""
+    leaking unknown secret material, and avoids allocating destination container."""
     secret = "secret_provider_material_99999"
     old = _make_container(OLD_CID)
     old.status = "running"
@@ -599,13 +601,14 @@ def test_carry_fetch_token_provider_failure_fails_closed_and_cleans_up():
     assert data["error"]
     assert data["hint"]
     assert secret not in result
-    assert new.remove.called
-    assert mock_stop.called
+    client.containers.run.assert_not_called()
+    assert not new.remove.called
+    assert not mock_stop.called
 
 
 def test_carry_fetch_grant_entry_exception_distinguished_and_redacted():
     """Failure opening authorization grant distinguishes grant entry, redacts
-    resolved token, tears down new container, and records stop."""
+    resolved token, and avoids allocating destination container."""
     token = "ghp_entry_secret_token_11111"
     old = _make_container(OLD_CID)
     old.status = "running"
@@ -637,13 +640,14 @@ def test_carry_fetch_grant_entry_exception_distinguished_and_redacted():
     assert data["hint"]
     assert token not in data["error"]
     assert "<redacted>" in data["error"]
-    assert new.remove.called
-    assert mock_stop.called
+    client.containers.run.assert_not_called()
+    assert not new.remove.called
+    assert not mock_stop.called
 
 
 def test_carry_fetch_grant_close_exception_distinguished_and_redacted():
     """Failure closing authorization grant distinguishes grant close/cleanup,
-    redacts resolved token, tears down new container, and records stop."""
+    redacts resolved token, and avoids allocating destination container."""
     token = "ghp_close_secret_token_22222"
     old = _make_container(OLD_CID)
     old.status = "running"
@@ -680,13 +684,14 @@ def test_carry_fetch_grant_close_exception_distinguished_and_redacted():
     assert data["hint"]
     assert token not in data["error"]
     assert "<redacted>" in data["error"]
-    assert new.remove.called
-    assert mock_stop.called
+    client.containers.run.assert_not_called()
+    assert not new.remove.called
+    assert not mock_stop.called
 
 
 def test_carry_fetch_exec_exception_distinguished_and_redacted():
     """Docker API or subprocess exception during fetch distinguishes execution failure,
-    redacts sensitive token, tears down new container, and records stop."""
+    redacts sensitive token, and avoids allocating destination container."""
     token = "ghp_exec_secret_token_33333"
     old = _make_container(OLD_CID)
     old.status = "running"
@@ -723,8 +728,9 @@ def test_carry_fetch_exec_exception_distinguished_and_redacted():
     assert data["hint"]
     assert token not in data["error"]
     assert "<redacted>" in data["error"]
-    assert new.remove.called
-    assert mock_stop.called
+    client.containers.run.assert_not_called()
+    assert not new.remove.called
+    assert not mock_stop.called
 
 
 def test_carry_fetch_proxy_token_isolation_and_correct_repo():
@@ -921,3 +927,301 @@ def test_real_git_stale_patch_conflicts_and_fresh_patch_clean(tmp_path: Path):
     assert conflicts_fresh.stdout.strip() == ""
     _git(dest_dir, "reset", "-q")
     assert (Path(dest_dir) / "app.py").read_text() == uncommitted_content
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage for Issue #937 review follow-up:
+# Preflight source fetch before destination allocation & single fetch order
+# ---------------------------------------------------------------------------
+
+
+def test_carry_fetch_failure_never_allocates_destination_nor_clones():
+    """On source fetch failure in sandbox_initialize:
+    - Structured JSON is returned (step="carry_fetch")
+    - Destination container is never allocated (containers.run not called)
+    - Destination clone/checkout is never executed."""
+    old = _make_container(OLD_CID)
+    old.status = "running"
+    new = _make_container(NEW_CID)
+    fake = _fake_exec_factory(b"", fetch_error=True)
+    old.exec_run.side_effect = fake
+    new.exec_run.side_effect = fake
+    client = _make_client(old, new)
+
+    with _patched(client):
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container=OLD_CID,
+            pip_extras=None,
+        )
+
+    assert not result.startswith("Error:"), result
+    data = json.loads(result)
+    assert data["status"] == "error"
+    assert data["step"] in ("carry_fetch", "fetch")
+    assert "fatal: network error" in data["error"]
+    assert data["hint"]
+
+    # Destination container was never allocated nor cloned
+    client.containers.run.assert_not_called()
+    assert not new.remove.called
+    assert len(new.exec_run.call_args_list) == 0
+
+
+@pytest.mark.parametrize(
+    "patch_target",
+    [
+        "sunaba.tools.container.lifecycle.resolve_git_root",
+        "sunaba.tools.container.lifecycle._fetch_source_origin",
+    ],
+)
+def test_carry_preflight_unexpected_exception_no_sentinel_exposure_and_no_allocation(
+    patch_target: str,
+):
+    """Preflight unexpected exception (resolve_git_root or _fetch_source_origin) containing sentinel:
+    - Sentinel is absent from serialized JSON result
+    - Returns nonempty stable generic error and hint
+    - Returns step="carry_fetch"
+    - Destination container is never allocated (containers.run not called)
+    - Destination clone/checkout is never executed."""
+    sentinel = "FAKE_SECRET_PREFLIGHT_ONLY"
+    old = _make_container(OLD_CID)
+    old.status = "running"
+    new = _make_container(NEW_CID)
+    fake = _fake_exec_factory(b"")
+    old.exec_run.side_effect = fake
+    new.exec_run.side_effect = fake
+    client = _make_client(old, new)
+
+    with _patched(client), patch(
+        patch_target,
+        side_effect=RuntimeError(f"internal failure containing {sentinel}"),
+    ):
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container=OLD_CID,
+            pip_extras=None,
+        )
+
+    assert not result.startswith("Error:"), result
+    data = json.loads(result)
+    assert data["status"] == "error"
+    assert data["step"] in ("carry_fetch", "fetch")
+    assert data["step"] == "carry_fetch"
+    assert "Failed to preflight fetch in source container" in data["error"]
+    assert data["error"]
+    assert data["hint"]
+    assert sentinel not in result
+
+    # Destination container was never allocated nor cloned
+    client.containers.run.assert_not_called()
+    assert not new.remove.called
+    assert len(new.exec_run.call_args_list) == 0
+
+
+def test_carry_success_single_fetch_before_allocation_on_clone_path():
+    """On clone_repo carry path:
+    - Exactly one authenticated source fetch runs BEFORE destination allocation
+    - Carry applies after checkout and before deps
+    - Single fetch per public carry contract is upheld."""
+    events: list[str] = []
+
+    old = _make_container(OLD_CID)
+    old.status = "running"
+    new = _make_container(NEW_CID)
+
+    base_fake = _fake_exec_factory(
+        patch_bytes=b"diff --git a/src/a.py b/src/a.py\n+line_a\n",
+        changed=b"src/a.py\n",
+        manifest=b"pyproject.toml\n",
+    )
+
+    def _old_exec(cmd, *args, **kwargs):
+        c = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "fetch origin" in c:
+            events.append("source_fetch")
+        return base_fake(cmd, *args, **kwargs)
+
+    def _new_exec(cmd, *args, **kwargs):
+        c = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "git clone" in c:
+            events.append("clone")
+        elif "git apply" in c:
+            events.append("apply")
+        elif "pip install" in c:
+            events.append("install")
+        return base_fake(cmd, *args, **kwargs)
+
+    old.exec_run.side_effect = _old_exec
+    new.exec_run.side_effect = _new_exec
+    client = _make_client(old, new)
+
+    def _spy_run(*args, **kwargs):
+        events.append("destination_run")
+        return new
+
+    client.containers.run.side_effect = _spy_run
+
+    with _patched(client):
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container=OLD_CID,
+            pip_extras="[dev]",
+        )
+
+    assert not result.startswith("Error:"), result
+    assert "carried 1 file(s)" in result, result
+    assert events.count("source_fetch") == 1
+    assert "destination_run" in events
+    assert "apply" in events
+    assert "install" in events
+
+    fetch_idx = events.index("source_fetch")
+    run_idx = events.index("destination_run")
+    apply_idx = events.index("apply")
+    install_idx = events.index("install")
+
+    assert fetch_idx < run_idx, f"Source fetch must run before allocation: {events}"
+    assert run_idx < apply_idx, f"Allocation must run before carry: {events}"
+    assert apply_idx < install_idx, f"Carry must run before dep install: {events}"
+
+
+def test_carry_success_single_fetch_before_allocation_on_branch_path():
+    """On branch checkout carry path:
+    - Exactly one authenticated source fetch runs BEFORE destination allocation
+    - Branch checkout runs after destination allocation and before carry
+    - Carry applies before dependency install."""
+    events: list[str] = []
+
+    old = _make_container(OLD_CID)
+    old.status = "running"
+    new = _make_container(NEW_CID)
+
+    base_fake = _fake_exec_factory(
+        patch_bytes=b"diff --git a/pyproject.toml b/pyproject.toml\n+dep\n",
+        changed=b"pyproject.toml\n",
+        manifest=b"pyproject.toml\n",
+        revparse_branch=b"feat\n",
+    )
+
+    def _old_exec(cmd, *args, **kwargs):
+        c = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "fetch origin" in c:
+            events.append("source_fetch")
+        return base_fake(cmd, *args, **kwargs)
+
+    def _new_exec(cmd, *args, **kwargs):
+        c = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "git checkout" in c or "branch" in c:
+            events.append("branch_checkout")
+        elif "git apply" in c:
+            events.append("apply")
+        elif "pip install" in c:
+            events.append("install")
+        return base_fake(cmd, *args, **kwargs)
+
+    old.exec_run.side_effect = _old_exec
+    new.exec_run.side_effect = _new_exec
+    client = _make_client(old, new)
+
+    def _spy_run(*args, **kwargs):
+        events.append("destination_run")
+        return new
+
+    client.containers.run.side_effect = _spy_run
+
+    with _patched(client):
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            branch="feat",
+            apply_from_container=OLD_CID,
+            pip_extras="[dev]",
+        )
+
+    assert not result.startswith("Error:"), result
+    assert "carried 1 file(s)" in result, result
+    assert events.count("source_fetch") == 1
+    assert "destination_run" in events
+    assert "apply" in events
+    assert "install" in events
+
+    fetch_idx = events.index("source_fetch")
+    run_idx = events.index("destination_run")
+    apply_idx = events.index("apply")
+    install_idx = events.index("install")
+
+    assert fetch_idx < run_idx, f"Source fetch must run before allocation: {events}"
+    assert run_idx < apply_idx, f"Allocation must run before carry: {events}"
+    assert apply_idx < install_idx, f"Carry must run before dep install: {events}"
+
+
+def test_carry_success_single_fetch_before_allocation_on_pr_path():
+    """On PR checkout carry path:
+    - Exactly one authenticated source fetch runs BEFORE destination allocation
+    - PR setup runs after destination allocation and before carry
+    - Carry applies before dependency install."""
+    events: list[str] = []
+
+    old = _make_container(OLD_CID)
+    old.status = "running"
+    new = _make_container(NEW_CID)
+
+    base_fake = _fake_exec_factory(
+        patch_bytes=b"diff --git a/pyproject.toml b/pyproject.toml\n+dep\n",
+        changed=b"pyproject.toml\n",
+        manifest=b"pyproject.toml\n",
+        revparse_branch=b"pr-42\n",
+    )
+
+    def _old_exec(cmd, *args, **kwargs):
+        c = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "fetch origin" in c:
+            events.append("source_fetch")
+        return base_fake(cmd, *args, **kwargs)
+
+    def _new_exec(cmd, *args, **kwargs):
+        c = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "pr" in c or "pull" in c:
+            events.append("pr_setup")
+        elif "git apply" in c:
+            events.append("apply")
+        elif "pip install" in c:
+            events.append("install")
+        return base_fake(cmd, *args, **kwargs)
+
+    old.exec_run.side_effect = _old_exec
+    new.exec_run.side_effect = _new_exec
+    client = _make_client(old, new)
+
+    def _spy_run(*args, **kwargs):
+        events.append("destination_run")
+        return new
+
+    client.containers.run.side_effect = _spy_run
+
+    with _patched(client), patch(
+        "sunaba.tools.container.clone._resolve_pr_head_ref",
+        return_value=("owner:feature-branch", "main"),
+    ):
+        result = sandbox_initialize(
+            repo="owner/repo",
+            pr=42,
+            apply_from_container=OLD_CID,
+            pip_extras="[dev]",
+        )
+
+    assert not result.startswith("Error:"), result
+    assert "carried 1 file(s)" in result, result
+    assert events.count("source_fetch") == 1
+    assert "destination_run" in events
+    assert "apply" in events
+    assert "install" in events
+
+    fetch_idx = events.index("source_fetch")
+    run_idx = events.index("destination_run")
+    apply_idx = events.index("apply")
+    install_idx = events.index("install")
+
+    assert fetch_idx < run_idx, f"Source fetch must run before allocation: {events}"
+    assert run_idx < apply_idx, f"Allocation must run before carry: {events}"
+    assert apply_idx < install_idx, f"Carry must run before dep install: {events}"

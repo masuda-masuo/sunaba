@@ -588,6 +588,8 @@ def _carry_worktree(
     client: Any,
     old_cid: str,
     new_container: Any,
+    *,
+    _source_fetched: bool = False,
 ) -> _CarryReport:
     """Carry an old container's uncommitted tracked work into a fresh clone.
 
@@ -651,9 +653,11 @@ def _carry_worktree(
     # 1a. Refresh origin in source container under host authorized_read_grant (Issue #935).
     #     Must run BEFORE merge-base calculation so commits already merged into
     #     upstream main are excluded from the carry patch.
-    fetch_report = _fetch_source_origin(old_container, src_root)
-    if fetch_report is not None:
-        return fetch_report
+    #     If already prefetched before destination allocation, skip to avoid fetching twice.
+    if not _source_fetched:
+        fetch_report = _fetch_source_origin(old_container, src_root)
+        if fetch_report is not None:
+            return fetch_report
 
     src_git = _git_at(old_container, src_root)
     dst_git = _git_at(new_container, dst_root)
@@ -874,7 +878,13 @@ def sandbox_initialize(
                container whose uncommitted tracked changes are re-applied
                into this fresh clone (Issue #889).  Requires ``clone_repo``
                / ``pr`` / ``branch``; untracked files are not carried and
-               conflicts are not an error.
+               conflicts are not an error.  The source container must have
+               network access (``allow_network=True``); offline source
+               support is tracked in #939.  Source origin is refreshed
+               under host authorization as a preflight before creating or
+               cloning the destination container.  If source fetch fails,
+               initialization fails closed and returns structured JSON
+               (step="carry_fetch") without allocating the destination.
 
     The image must be pulled locally before use: docker pull <image>
 
@@ -1068,6 +1078,45 @@ def sandbox_initialize(
     if proxy_runtime is not None:
         run_kwargs = proxy_lifecycle.apply_network(run_kwargs, proxy_runtime)
 
+    # Source preflight for carry (Issue #937 review follow-up):
+    # Fetch origin in source container BEFORE creating/cloning the destination container.
+    # This avoids wasted destination allocation, clone, and teardown on fetch failure.
+    source_fetched = False
+    if apply_from_container is not None:
+        try:
+            source_c = client.containers.get(apply_from_container)
+        except Exception:
+            source_c = None
+
+        if source_c is not None:
+            try:
+                source_c.reload()
+            except Exception:
+                pass
+            if getattr(source_c, "status", "running") == "running":
+                try:
+                    src_root = resolve_git_root(source_c)
+                    fetch_report = _fetch_source_origin(source_c, src_root)
+                except Exception:
+                    err_payload = {
+                        "status": "error",
+                        "step": "carry_fetch",
+                        "error": "Failed to preflight fetch in source container",
+                        "hint": "Ensure the source container is running and healthy.",
+                    }
+                    return json.dumps(err_payload)
+                if fetch_report is not None:
+                    if fetch_report.step:
+                        err_payload = {
+                            "status": "error",
+                            "step": fetch_report.step,
+                            "error": fetch_report.error,
+                            "hint": fetch_report.hint or "",
+                        }
+                        return json.dumps(err_payload)
+                    return f"Error: {fetch_report.error}"
+                source_fetched = True
+
     try:
         _ensure_image(resolved)
         container = client.containers.run(resolved, **run_kwargs)
@@ -1217,7 +1266,12 @@ def sandbox_initialize(
     # same way other init failures do (no half-initialised container left).
     carry_msg = ""
     if apply_from_container is not None and repo_cloned:
-        report = _carry_worktree(client, apply_from_container, container)
+        report = _carry_worktree(
+            client,
+            apply_from_container,
+            container,
+            _source_fetched=source_fetched,
+        )
         if report.error is not None:
             try:
                 container.remove(force=True)

@@ -15,11 +15,51 @@ Manage the lifecycle of disposable Docker sandbox containers.
 
 | Tool Name | Parameters | Description |
 |---|---|---|
-| `sandbox_initialize` | `image` (opt), `allow_network` (opt), `clone_repo` (opt), `clone_dest` (opt), `repo` (opt), `pr` (opt), `branch` (opt), `pip_extras` (opt), `pip_args` (opt), `mem_limit` (opt), `cpus` (opt), `name` (opt), `session_label` (opt), `apply_from_container` (opt) | Spawns a sandbox container. Returns a 12-character `container_id`. `clone_repo="owner/name"` clones in the same call; `repo` + `pr=N` checks out a PR branch instead. After a clone, deps are auto-installed per manifest: pip for `pyproject.toml`/`setup.py`, `npm ci`/`npm install` for `package.json` (go/rust are fetch-on-build). `apply_from_container=<old_id>` (requires `clone_repo`/`pr`/`branch`) re-applies an old container's tracked worktree changes — including any local (checkpointed) commits made on top of its clone base — into the fresh clone — the single-init-arg remedy for an `upstream_overwrite` publish refusal: in the old container `git merge-base HEAD origin/HEAD` is computed (falling back to `HEAD` when `origin/HEAD` is absent) and `git diff --binary <base>` captures both committed and uncommitted tracked changes; the patch is copied in via the `copy_file` mechanism and applied with `git apply --3way` (then `git reset -q` so only the worktree carries the change). The carry runs after the clone/checkout and before the dependency install on every path (clone, pr, branch); a carried change to `pyproject.toml` / lock files is therefore what `pip install` sees. Conflicts leave markers in the new worktree and are not an error (resolve with `edit_file`); untracked files in the old container are reported, not carried. |
+| `sandbox_initialize` | `image` (opt), `allow_network` (opt), `clone_repo` (opt), `clone_dest` (opt), `repo` (opt), `pr` (opt), `branch` (opt), `pip_extras` (opt), `pip_args` (opt), `mem_limit` (opt), `cpus` (opt), `name` (opt), `session_label` (opt), `apply_from_container` (opt) | Spawns a sandbox container. Returns a 12-character `container_id`. `clone_repo="owner/name"` clones in the same call; `repo` + `pr=N` checks out a PR branch instead. After a clone, deps are auto-installed per manifest: pip for `pyproject.toml`/`setup.py`, `npm ci`/`npm install` for `package.json` (go/rust are fetch-on-build). `apply_from_container=<old_id>` (requires `clone_repo`/`pr`/`branch`) re-applies an old container's tracked worktree changes — including any local (checkpointed) commits made on top of its clone base — into the fresh clone — the single-init-arg remedy for an `upstream_overwrite` publish refusal: source origin is refreshed under host authorization (`git fetch origin`) as a preflight before creating or cloning the destination container (avoiding wasted destination allocation, clone, and teardown on fetch failure; source must have network access enabled `allow_network=True`, failing closed with structured JSON error `step="carry_fetch"` if fetch fails; offline source support is tracked in #939; shared authorized fetch in #940) and `git merge-base HEAD origin/HEAD` is computed (falling back to `HEAD` when `origin/HEAD` is absent); `git diff --binary <base>` captures both committed and uncommitted tracked changes; the patch is copied in via the `copy_file` mechanism and applied with `git apply --3way` (then `git reset -q` so only the worktree carries the change). The carry runs after the clone/checkout and before the dependency install on every path (clone, pr, branch); a carried change to `pyproject.toml` / lock files is therefore what `pip install` sees. Conflicts leave markers in the new worktree and are not an error (resolve with `edit_file`); untracked files in the old container are reported, not carried. |
 | `sandbox_stop` | `container_id`, `force` (opt), `working_dir` (opt) | Stops and removes the sandbox container. |
 | `run_container_and_exec` | `image` (opt), `commands` (opt), `verbose` (opt), `max_lines` (opt), `offset` (opt), `limit` (opt), `allow_network` (opt), `clone_repo` (opt), `clone_dest` (opt), `repo` (opt), `pr` (opt), `branch` (opt), `pip_extras` (opt), `pip_args` (opt), `timeout` (opt), `max_output_tokens` (opt), `session_label` (opt) | One-shot execution: creates a container, runs the commands sequentially, and tears it down. |
 | `sandbox_list_containers`| — | Lists all currently active and managed containers along with `idle_seconds`. |
 | `sandbox_attach` | `name_or_id`, `session_label` (opt) | Connects a client session to an existing running container by name (from `sandbox_initialize(name=...)`) or ID prefix. |
+
+### Carry Preflight, Network Requirement, and Error Response Shapes
+
+When `apply_from_container=<source_cid>` is specified in `sandbox_initialize`:
+- **Source Network Requirement**: The source container must have network access enabled (`allow_network=True`). An `allow_network=False` source cannot carry because refreshing origin (`git fetch origin`) requires contacting GitHub and fails closed. Offline source carry support is tracked separately in #939; common authorized fetch abstraction is tracked in #940.
+- **Preflight Fetch Before Destination Allocation**: Source origin is refreshed host-side under host authorization before creating/running or cloning the destination container. If the source fetch fails, destination container allocation and checkout are skipped entirely (no `containers.run` or clone), avoiding wasted resource allocation, network operations, and teardown. Exactly one authenticated source fetch is performed per public carry.
+- **Error Response Formats (Structured JSON vs. Legacy `Error:` Strings)**:
+  `sandbox_initialize` returns two distinct error forms depending on the failure stage:
+  1. **Carry Fetch Failure (`step="carry_fetch"`)**: Returns a plain structured JSON object:
+     ```json
+     {
+       "status": "error",
+       "step": "carry_fetch",
+       "error": "git fetch origin failed (exit 128): fatal: repository 'origin' does not exist",
+       "hint": "Network access is disabled for this container. Pass allow_network=True to sandbox_initialize or verify network profile."
+     }
+     ```
+  2. **Legacy Initialization & Carry Errors**: All other initialization errors (parameter validation, name collision, resource caps, missing/stopped source container, fatal patch apply) return plain-text strings prefixed with `Error: `:
+     - Unknown or stopped source container: `Error: old container <cid> not found or not running`
+     - Parameter errors: `Error: apply_from_container requires clone_repo (or pr/branch) to be set; ...`, `Error: branch and pr are mutually exclusive; ...`
+     - Patch application fatal errors: `Error: git apply failed: ...`
+- **Caller Handling**:
+  Callers should inspect the response prefix to distinguish structured JSON carry fetch failures from legacy `Error:` strings:
+  ```python
+  result = sandbox_initialize(clone_repo="owner/repo", apply_from_container=old_cid)
+  if result.startswith("{"):
+      payload = json.loads(result)
+      if payload.get("status") == "error":
+          # Structured carry fetch failure
+          step = payload["step"]
+          error = payload["error"]
+          hint = payload.get("hint", "")
+  elif result.startswith("Error:"):
+      # Legacy error string
+      handle_error(result)
+  else:
+      # Success: 12-char container ID and messages
+      cid = result.split()[0]
+  ```
+  Repository test and caller references: See `_parse_init_error(result)` and `result.startswith("Error:")` in `tests/test_carry_fresh_origin.py` and `tests/test_init_apply_from_container.py`.
 
 ---
 

@@ -19,7 +19,7 @@ from docker.errors import APIError, NotFound
 from fastmcp import Context
 from pydantic import BeforeValidator
 
-from sunaba import capture_health, proxy_lifecycle
+from sunaba import capture_health, proxy_client, proxy_lifecycle
 from sunaba.journal import (
     _run_map,
     _run_map_lock,
@@ -47,10 +47,12 @@ from sunaba.output_control import (
     truncate_by_tokens,
     truncate_output,
 )
+from sunaba.proxy_client import ProxyAuthError
 from sunaba.security import (
     CREATED_AT_LABEL,
     MANAGED_LABEL,
     NAME_LABEL,
+    NETWORK_LABEL,
     RUN_ID_LABEL,
     SESSION_LABEL,
     _detect_host_resources,
@@ -59,16 +61,20 @@ from sunaba.security import (
     get_default_profile,
     validate_image_ref,
 )
+from sunaba.tools import github_api
 from sunaba.tools.common import (
     RECOVERY_DOCKER_TIMEOUT,
     WORKSPACE,
     _coerce_list_arg,
     _docker_client_timeout_scope,
 )
+from sunaba.tools.github_api import _push_token_env
+from sunaba.tools.publish_planner import push_failure_hints, select_push_env
 from sunaba.tools.vcs import (
     checkpoint_list,
     resolve_git_root,
 )
+from sunaba.tools.vcs.merge_base import _resolve_repo_from_container
 
 from .clone import (
     _install_repo_deps,
@@ -415,6 +421,8 @@ class _CarryReport:
     error: str | None
     checkpointed_commits: int = 0
     fallback_base: bool = False
+    step: str | None = None
+    hint: str | None = None
 
 
 def _git_at(container, repo_root):
@@ -436,10 +444,152 @@ def _git_at(container, repo_root):
     return _git
 
 
+def _fetch_source_origin(
+    container: Any,
+    repo_root: str,
+) -> _CarryReport | None:
+    """Refresh the source container's origin remote under host authorization.
+
+    Runs before merge-base calculation in :func:`_carry_worktree` (Issue #935).
+    Token is resolved host-side and passed via ephemeral environment variables
+    for native transport; proxied transport leaves the container token-free while
+    the host holds the read grant.
+
+    Returns ``None`` on success, or a failed ``_CarryReport`` with step="carry_fetch"
+    and diagnostics with secrets redacted.
+    """
+    def _decode(b: Any) -> str:
+        if b is None:
+            return ""
+        if isinstance(b, str):
+            return b
+        return b.decode("utf-8", errors="replace")
+
+    # 1. Resolve VCS token host-side. Fail closed if token provider fails.
+    try:
+        fetch_token = github_api._resolve_vcs_token()
+    except Exception:
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error="Failed to resolve VCS token: token provider error",
+            step="carry_fetch",
+            hint="Ensure VCS token is configured in environment or token provider.",
+        )
+
+    def _redact(text: str) -> str:
+        if fetch_token and text:
+            return text.replace(fetch_token, "<redacted>")
+        return text
+
+    # 2. Identify and validate source repository for authorization grant.
+    try:
+        repo = _resolve_repo_from_container(container, repo_root)
+    except Exception as exc:
+        err_msg = _redact(str(exc))
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error=f"Cannot resolve origin repository for fetch: {err_msg}",
+            step="carry_fetch",
+            hint="Ensure origin remote is configured and points to a GitHub repository.",
+        )
+
+    # 3. Build fetch command and ephemeral environment.
+    fetch_token_env = _push_token_env(fetch_token)
+    fetch_proxied = proxy_client.proxy_configured()
+    fetch_env = select_push_env(fetch_token_env, fetch_proxied)
+    fetch_cmd = (
+        "git -c credential.helper= "
+        "-c credential.helper='!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f' "
+        "fetch origin"
+    )
+    full_cmd = f"cd {shlex.quote(repo_root)} && {fetch_cmd}"
+
+    fetch_ec: int = 0
+    fetch_out: str = ""
+    fetch_err: str = ""
+    fetch_exec_err: Exception | None = None
+    grant_entered = False
+
+    try:
+        with proxy_client.authorized_read_grant(repo, token=fetch_token or None):
+            grant_entered = True
+            try:
+                res = container.exec_run(
+                    ["/bin/sh", "-c", full_cmd],
+                    environment=fetch_env,
+                    stdout=True,
+                    stderr=True,
+                )
+                if isinstance(res, tuple):
+                    fetch_ec = res[0]
+                    raw_out = res[1]
+                    if isinstance(raw_out, tuple):
+                        fetch_out = _decode(raw_out[0])
+                        fetch_err = _decode(raw_out[1])
+                    else:
+                        fetch_out = _decode(raw_out)
+                        fetch_err = ""
+                else:
+                    fetch_ec = getattr(res, "exit_code", 0)
+                    fetch_out = _decode(getattr(res, "output", ""))
+            except Exception as exc:
+                fetch_exec_err = exc
+    except ProxyAuthError as exc:
+        err_msg = _redact(str(exc))
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error=f"Proxy authorization failed for fetch: {err_msg}",
+            step="carry_fetch",
+            hint="Check egress proxy authentication and configuration.",
+        )
+    except Exception as exc:
+        exc_msg = _redact(str(exc))
+        if grant_entered:
+            return _CarryReport(
+                files=[], applied=[], conflicts=[], untracked=[],
+                error=f"Failed to close authorization grant for fetch: {exc_msg}",
+                step="carry_fetch",
+                hint="Check egress proxy connection and authorization grant cleanup.",
+            )
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error=f"Failed to open authorization grant for fetch: {exc_msg}",
+            step="carry_fetch",
+            hint="Ensure the remote repository exists and credentials are valid.",
+        )
+
+    if fetch_exec_err is not None:
+        exc_msg = _redact(str(fetch_exec_err))
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error=f"Failed to execute fetch in container: {exc_msg}",
+            step="carry_fetch",
+            hint="Ensure the source container is running and healthy.",
+        )
+
+    if fetch_ec != 0:
+        fetch_detail = (fetch_err or fetch_out).strip() or f"exit code {fetch_ec}"
+        fetch_detail = _redact(fetch_detail)
+        network_off = getattr(container, "labels", {}).get(NETWORK_LABEL) == "false"
+        token_missing = (not fetch_token) and (not fetch_proxied)
+        hints = push_failure_hints(network_off, token_missing)
+        hint_str = " ".join(hints) if hints else "Ensure the remote is reachable and authorization is valid."
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error=f"git fetch origin failed (exit {fetch_ec}): {fetch_detail}",
+            step="carry_fetch",
+            hint=hint_str,
+        )
+
+    return None
+
+
 def _carry_worktree(
     client: Any,
     old_cid: str,
     new_container: Any,
+    *,
+    _source_fetched: bool = False,
 ) -> _CarryReport:
     """Carry an old container's uncommitted tracked work into a fresh clone.
 
@@ -452,7 +602,8 @@ def _carry_worktree(
 
     Sequence:
 
-    * ``git diff --binary HEAD`` in the old container (tracked changes only),
+    * ``git fetch origin`` in the old container under host authorization (Issue #935),
+    * ``git diff --binary <base>`` in the old container (tracked changes only),
     * write the patch to a host temp file and copy it into the new container
       via the same mechanism as :func:`copy_file`,
     * ``git apply --3way`` in the new container, then ``git reset -q`` so the
@@ -496,8 +647,20 @@ def _carry_worktree(
     #    shared cd prefix -- guarantee every git command lands in the right
     #    directory even when the source and destination clone_dest differ
     #    (Issue #889 finding 3).
-    src_git = _git_at(old_container, resolve_git_root(old_container))
-    dst_git = _git_at(new_container, resolve_git_root(new_container))
+    src_root = resolve_git_root(old_container)
+    dst_root = resolve_git_root(new_container)
+
+    # 1a. Refresh origin in source container under host authorized_read_grant (Issue #935).
+    #     Must run BEFORE merge-base calculation so commits already merged into
+    #     upstream main are excluded from the carry patch.
+    #     If already prefetched before destination allocation, skip to avoid fetching twice.
+    if not _source_fetched:
+        fetch_report = _fetch_source_origin(old_container, src_root)
+        if fetch_report is not None:
+            return fetch_report
+
+    src_git = _git_at(old_container, src_root)
+    dst_git = _git_at(new_container, dst_root)
 
     base_ec, base_out = src_git("merge-base", "HEAD", "origin/HEAD")
     base = _decode(base_out).strip() if (base_ec == 0 and base_out) else ""
@@ -715,7 +878,13 @@ def sandbox_initialize(
                container whose uncommitted tracked changes are re-applied
                into this fresh clone (Issue #889).  Requires ``clone_repo``
                / ``pr`` / ``branch``; untracked files are not carried and
-               conflicts are not an error.
+               conflicts are not an error.  The source container must have
+               network access (``allow_network=True``); offline source
+               support is tracked in #939.  Source origin is refreshed
+               under host authorization as a preflight before creating or
+               cloning the destination container.  If source fetch fails,
+               initialization fails closed and returns structured JSON
+               (step="carry_fetch") without allocating the destination.
 
     The image must be pulled locally before use: docker pull <image>
 
@@ -909,6 +1078,45 @@ def sandbox_initialize(
     if proxy_runtime is not None:
         run_kwargs = proxy_lifecycle.apply_network(run_kwargs, proxy_runtime)
 
+    # Source preflight for carry (Issue #937 review follow-up):
+    # Fetch origin in source container BEFORE creating/cloning the destination container.
+    # This avoids wasted destination allocation, clone, and teardown on fetch failure.
+    source_fetched = False
+    if apply_from_container is not None:
+        try:
+            source_c = client.containers.get(apply_from_container)
+        except Exception:
+            source_c = None
+
+        if source_c is not None:
+            try:
+                source_c.reload()
+            except Exception:
+                pass
+            if getattr(source_c, "status", "running") == "running":
+                try:
+                    src_root = resolve_git_root(source_c)
+                    fetch_report = _fetch_source_origin(source_c, src_root)
+                except Exception:
+                    err_payload = {
+                        "status": "error",
+                        "step": "carry_fetch",
+                        "error": "Failed to preflight fetch in source container",
+                        "hint": "Ensure the source container is running and healthy.",
+                    }
+                    return json.dumps(err_payload)
+                if fetch_report is not None:
+                    if fetch_report.step:
+                        err_payload = {
+                            "status": "error",
+                            "step": fetch_report.step,
+                            "error": fetch_report.error,
+                            "hint": fetch_report.hint or "",
+                        }
+                        return json.dumps(err_payload)
+                    return f"Error: {fetch_report.error}"
+                source_fetched = True
+
     try:
         _ensure_image(resolved)
         container = client.containers.run(resolved, **run_kwargs)
@@ -1058,13 +1266,26 @@ def sandbox_initialize(
     # same way other init failures do (no half-initialised container left).
     carry_msg = ""
     if apply_from_container is not None and repo_cloned:
-        report = _carry_worktree(client, apply_from_container, container)
+        report = _carry_worktree(
+            client,
+            apply_from_container,
+            container,
+            _source_fetched=source_fetched,
+        )
         if report.error is not None:
             try:
                 container.remove(force=True)
             except Exception:
                 pass
             record_stop(cid)
+            if report.step:
+                err_payload = {
+                    "status": "error",
+                    "step": report.step,
+                    "error": report.error,
+                    "hint": report.hint or "",
+                }
+                return json.dumps(err_payload)
             return f"Error: {report.error}"
         carry_msg = _format_carry_report(report, apply_from_container)
 

@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sunaba.proxy_client import CONTROL_SECRET_ENV, CONTROL_URL_ENV
+from sunaba.proxy_client import CONTROL_SECRET_ENV, CONTROL_URL_ENV, ProxyAuthError
 from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProxyError
+from sunaba.security import NETWORK_LABEL
 from sunaba.tools.vcs import _create_pr_via_api, publish
 from sunaba.tools.vcs.publishing import AutoIncludeResult
 from tests.conftest import _decode, _exec_cmd, _make_client_mock, _make_publish_container
@@ -705,8 +707,9 @@ class TestPublishManifest:
         """
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # New path: resolve remote base
@@ -757,8 +760,9 @@ class TestPublishManifest:
         """The publish result names the ref the commit was cut from."""
         container = _make_publish_container([
             (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2
-            (0, b"", b""),  # git fetch origin
+            (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x
@@ -795,8 +799,9 @@ class TestPublishManifest:
         """base_branch=feat/existing cuts from that ref, not origin/HEAD."""
         container = _make_publish_container([
             (0, b"", b""),  # test -f 'stacked.txt'
+            (0, b"", b""),  # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2
-            (0, b"", b""),  # git fetch origin
+            (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/feat/new
@@ -838,8 +843,9 @@ class TestPublishManifest:
         """Unknown base_branch names the ref, makes no commit and no push."""
         container = _make_publish_container([
             (0, b"", b""),  # test -f 'x.txt'
+            (0, b"", b""),  # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2
-            (0, b"", b""),  # git fetch origin
+            (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/feat/new
@@ -887,8 +893,9 @@ class TestPublishManifest:
         )
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -936,8 +943,9 @@ class TestPublishManifest:
         """
         container = _make_publish_container([(0, b"", b""),  # test -f 'newfile.py' (exists)
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # New path: resolve remote base
@@ -980,8 +988,9 @@ class TestPublishManifest:
         commit against the remote base (origin/HEAD)."""
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # Resolve base: origin/fix/x does NOT exist on remote
@@ -1214,8 +1223,9 @@ class TestPublishManifest:
             (1, b"", b""),  # test -f 'deleted.txt' -> not a regular file
             (1, b"", b""),  # test -d 'deleted.txt' -> not a directory either
             (0, b"deleted.txt\0", b""),  # git ls-files -z --error-unmatch ':(literal)deleted.txt' -> tracked, first entry is the path itself
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (NOT merge)
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b feat/del
             (1, b"", b""),  # rev-parse --verify origin/feat/del (not on remote)
@@ -1265,8 +1275,9 @@ class TestPublishManifest:
             (1, b"", b""),  # test -d 'deleted.txt' -> not a directory either
             (1, b"", b""),  # git ls-files -z --error-unmatch ':(literal)deleted.txt' -> NOT in index (git rm staged)
             (0, b"100644 blob abc1234\tdeleted.txt\n", b""),  # git ls-tree HEAD ':(literal)deleted.txt' -> tracked as a file (blob) in HEAD
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (NOT merge)
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b feat/del
             (1, b"", b""),  # rev-parse --verify origin/feat/del (not on remote)
@@ -1364,8 +1375,9 @@ class TestPublishManifest:
         """
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             # Resolve base - branch does NOT exist on remote yet
@@ -1429,8 +1441,9 @@ class TestPublishManifest:
         """
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b / checkout existing
             # Resolve base: origin/fix/x DOES exist on remote
@@ -1493,8 +1506,9 @@ class TestPublishManifest:
         """When origin/HEAD is absent, fallback to origin/main succeeds."""
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -1542,8 +1556,9 @@ class TestPublishManifest:
         origin/master succeeds."""
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -1593,8 +1608,9 @@ class TestPublishManifest:
         the reset."""
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
@@ -1838,8 +1854,9 @@ class TestPublishSecretScanIntegration:
 
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -1889,8 +1906,9 @@ class TestPublishSecretScanIntegration:
 
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x
@@ -1948,8 +1966,9 @@ class TestPublishSecretScanIntegration:
             (1, b"", b""),                       # test -f 'deleted.txt' -> absent
             (1, b"", b""),                       # test -d 'deleted.txt' -> not a dir
             (0, b"deleted.txt\0", b""),          # git ls-files ':(literal)deleted.txt' -> tracked
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),                       # rev-parse --verify HEAD^2 (not a merge)
-            (0, b"", b""),                        # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),                 # MERGE_HEAD check
             (0, b"", b""),                        # checkout -b fix/x
             (1, b"", b""),                        # rev-parse --verify origin/fix/x
@@ -2013,8 +2032,9 @@ class TestPublishSecretScanIntegration:
             (1, b"", b""),                       # test -f 'deleted.txt' -> absent
             (1, b"", b""),                       # test -d 'deleted.txt' -> not a dir
             (0, b"deleted.txt\0", b""),          # git ls-files ':(literal)deleted.txt' -> tracked
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),                       # rev-parse --verify HEAD^2 (not a merge)
-            (0, b"", b""),                        # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),                 # MERGE_HEAD check
             (0, b"", b""),                        # checkout -b feat/del
             (1, b"", b""),                        # rev-parse --verify origin/feat/del
@@ -2126,8 +2146,9 @@ class TestPublishSecretScanIntegration:
         container = _make_publish_container([
             (0, b"", b""),   # test -f 'changed.txt'
             (0, b"", b""),   # test -f 'unchanged.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),   # rev-parse --verify HEAD^2 (not a merge)
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),   # checkout -b
             (1, b"", b""),   # rev-parse --verify origin/fix/x (not on remote)
@@ -2174,8 +2195,9 @@ class TestPublishSecretScanIntegration:
         """
         container = _make_publish_container([
             (0, b"", b""),   # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),   # rev-parse --verify HEAD^2 (not a merge)
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),   # checkout -b
             (1, b"", b""),   # rev-parse --verify origin/fix/x (not on remote)
@@ -2241,13 +2263,14 @@ class TestPublishBaseAutoInclude:
         # is entered and _fetch_base_auto_include is invoked.
         container = _make_publish_container([
             (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
             # Merge info capture (issue #711):
             (0, b"merge1234def5678\n", b""),  # rev-parse HEAD (merge SHA)
             (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
             (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
             (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (P2, #819 default-base fallback)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
@@ -2338,13 +2361,14 @@ class TestPublishBaseAutoInclude:
 
         container = _make_publish_container([
             (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
             # Merge info capture (issue #711):
             (0, b"merge1234def5678\n", b""),  # rev-parse HEAD (merge SHA)
             (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
             (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
             (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"freshbase1234\n", b""),  # rev-parse origin/main (P2, after fetch)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
@@ -2409,7 +2433,7 @@ class TestPublishBaseAutoInclude:
             _exec_cmd(c) for c in container.exec_run.call_args_list
         ]
         fetch_idx = next(
-            i for i, c in enumerate(cmds) if "git fetch origin" in c
+            i for i, c in enumerate(cmds) if "fetch origin" in c
         )
         p2_idx = next(
             i for i, c in enumerate(cmds)
@@ -2449,12 +2473,13 @@ class TestPublishBaseAutoInclude:
 
         container = _make_publish_container([
             (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
             (0, b"merge1234def5678\n", b""),  # rev-parse HEAD (merge SHA)
             (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
             (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
             (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
-            (0, b"", b""),                # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"freshbase1234\n", b""),  # rev-parse origin/HEAD (P2 fallback)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
@@ -2507,7 +2532,7 @@ class TestPublishBaseAutoInclude:
             _exec_cmd(c) for c in container.exec_run.call_args_list
         ]
         fetch_idx = next(
-            i for i, c in enumerate(cmds) if "git fetch origin" in c
+            i for i, c in enumerate(cmds) if "fetch origin" in c
         )
         p2_idx = next(
             i for i, c in enumerate(cmds)
@@ -2526,8 +2551,9 @@ class TestPublishBaseAutoInclude:
         is never called."""
         container = _make_publish_container([
             (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (1, b"", b""),                # rev-parse --verify HEAD^2 (NOT merge)
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
             (1, b"", b""),                # rev-parse --verify origin/fix/x
@@ -2582,13 +2608,14 @@ class TestPublishBaseAutoInclude:
         # path (checkpoint.txt) is neither → AC 4 set.
         container = _make_publish_container([
             (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
             # Merge info capture
             (0, b"mrg0000111aaaa\n", b""),   # rev-parse HEAD
             (0, b"p1aaaa1111bbb\n", b""),    # rev-parse HEAD^1
             (0, b"p2bbbb2222ccc\n", b""),    # rev-parse HEAD^2
             (0, b"declared.txt\nbase_advance.txt\ncheckpoint.txt\n", b""),  # diff HEAD^1 HEAD
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (P2, #819 default-base fallback)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
@@ -2660,13 +2687,14 @@ class TestPublishBaseAutoInclude:
 
         container = _make_publish_container([
             (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
             # Merge info capture
             (0, b"mrg0000111aaaa\n", b""),   # rev-parse HEAD
             (0, b"p1aaaa1111bbb\n", b""),    # rev-parse HEAD^1
             (0, b"p2bbbb2222ccc\n", b""),    # rev-parse HEAD^2
             (0, b"good.txt\nrenamed.txt\nnoencoding.txt\ndeclared.txt\n", b""),
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (P2, #819 default-base fallback)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
@@ -2733,13 +2761,14 @@ class TestPublishBaseAutoInclude:
 
         container = _make_publish_container([
             (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
             (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
             # Merge info capture
             (0, b"mrg0000111aaaa\n", b""),   # rev-parse HEAD
             (0, b"p1aaaa1111bbb\n", b""),    # rev-parse HEAD^1
             (0, b"p2bbbb2222ccc\n", b""),    # rev-parse HEAD^2
             (0, b"base.txt\ndeclared.txt\n", b""),
-            (0, b"", b""),   # git fetch origin (#818)
+            (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
             (0, b"basetip1234\n", b""),  # rev-parse origin/HEAD (P2, #819 default-base fallback)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
@@ -2804,9 +2833,10 @@ class TestPublishBaseAutoInclude:
         container = _make_publish_container(
             [
                 (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
                 (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE commit at HEAD)
                 # ancestor check exits 0 -> upstream merge commit
-                (0, b"", b""),                # git fetch origin (#863 guard probe)
+                (0, b"", b""),                # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),          # MERGE_HEAD check
                 (0, b"", b""),                # checkout -b
                 (1, b"", b""),                # rev-parse --verify origin/fix/x
@@ -2871,12 +2901,13 @@ class TestPublishBaseAutoInclude:
         container = _make_publish_container(
             [
                 (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
                 (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
                 (0, b"merge1234def5678\n", b""),  # rev-parse HEAD
                 (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
                 (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
                 (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
-                (0, b"", b""),                # git fetch origin (#818)
+                (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"freshbase1234\n", b""), # rev-parse origin/main (P2)
                 (0, b"none\n", b""),          # MERGE_HEAD check
                 (0, b"", b""),                # checkout -b
@@ -2939,12 +2970,13 @@ class TestPublishBaseAutoInclude:
         container = _make_publish_container(
             [
                 (0, b"", b""),                # test -f 'declared.txt'
+            (0, b"", b""),   # git fetch origin (#818, #932)
                 (0, b"abc123\n", b""),        # rev-parse --verify HEAD^2 (MERGE!)
                 (0, b"merge1234def5678\n", b""),  # rev-parse HEAD
                 (0, b"parent1111aaaa\n", b""),    # rev-parse HEAD^1
                 (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
                 (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
-                (0, b"", b""),                # git fetch origin (#818)
+                (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"freshbase1234\n", b""), # rev-parse origin/main (P2)
                 (0, b"none\n", b""),          # MERGE_HEAD check
                 (0, b"", b""),                # checkout -b
@@ -2993,3 +3025,755 @@ class TestPublishBaseAutoInclude:
         assert "merge_detection_note" in result
         assert "ancestor check failed" in result["merge_detection_note"]
         assert "128" in result["merge_detection_note"]
+
+class TestPublishFreshBaseAuthorization:
+    """Targeted unit tests for #932: authorized fresh base fetch boundary."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_egress_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENABLE_EGRESS_PROXY_ENV, "false")
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_fetch_failure_returns_actionable_error(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Fetch failure during manifest publish refuses with step='fetch' and actionable message."""
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (128, b"", b"fatal: unable to access \'https://github.com/owner/repo.git\': Could not resolve host\n"),  # git fetch origin
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "fetch"
+        assert "git fetch origin failed" in result["error"]
+        assert "could not resolve host" in result["error"].lower()
+        assert "hint" in result
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.authorized_read_grant")
+    def test_manifest_proxy_auth_failure_returns_proxy_auth_error(
+        self,
+        mock_read_grant: MagicMock,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When opening authorized_read_grant raises ProxyAuthError, publish fails with step='proxy_auth'."""
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+        mock_read_grant.side_effect = ProxyAuthError("Proxy authentication rejected: token expired")
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "proxy_auth"
+        assert "Proxy authentication rejected" in result["error"]
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_native_fetch_uses_credential_helper_and_ephemeral_env(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When not proxied and token is present, fetch exec env carries ephemeral GITHUB_TOKEN and uses -c credential.helper (no GIT_CONFIG_PARAMETERS)."""
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # git fetch origin (#818, #932)
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff", b""),  # git diff --cached
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # diff-tree
+            (0, b"", b""),  # git status
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value="ghp_secret_token_123"),
+            patch("sunaba.tools.vcs.publishing.proxy_configured", return_value=False),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "pushed"
+        calls = container.exec_run.call_args_list
+        fetch_calls = [c for c in calls if "fetch origin" in _exec_cmd(c)]
+        assert len(fetch_calls) == 1
+        fetch_cmd = _exec_cmd(fetch_calls[0])
+        assert "credential.helper" in fetch_cmd
+        assert "ghp_secret_token_123" not in fetch_cmd
+        env = fetch_calls[0].kwargs.get("environment") or {}
+        assert "GIT_CONFIG_PARAMETERS" not in env
+        assert env.get("GITHUB_TOKEN") == "ghp_secret_token_123"
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_proxied_fetch_leaves_container_env_empty(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When proxied, fetch exec env is None (no token in container environment)."""
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # git fetch origin (#818, #932)
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff", b""),  # git diff --cached
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # diff-tree
+            (0, b"", b""),  # git status
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value="ghp_secret_token_123"),
+            patch("sunaba.tools.vcs.publishing.proxy_configured", return_value=True),
+            patch("sunaba.tools.vcs.publishing.authorized_read_grant") as mock_grant,
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "pushed"
+        mock_grant.assert_called_once_with("owner/repo", token="ghp_secret_token_123")
+        calls = container.exec_run.call_args_list
+        fetch_calls = [c for c in calls if "fetch origin" in _exec_cmd(c)]
+        assert len(fetch_calls) == 1
+        assert fetch_calls[0].kwargs.get("environment") is None
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.authorized_read_grant")
+    def test_manifest_fetch_proxy_auth_error_redacts_sentinel_token(
+        self,
+        mock_read_grant: MagicMock,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """ProxyAuthError containing resolved fetch token is redacted in returned diagnostics."""
+        sentinel_token = "ghp_SENTINEL_FETCH_TOKEN_PROXY_123"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+        mock_read_grant.side_effect = ProxyAuthError(
+            f"Proxy authentication rejected for token {sentinel_token}: invalid claims"
+        )
+
+        with patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value=sentinel_token):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "proxy_auth"
+        assert sentinel_token not in result["error"]
+        assert "<redacted>" in result["error"]
+        assert "Proxy authentication rejected for token <redacted>: invalid claims" in result["error"]
+
+        for call in mock_record.call_args_list:
+            for arg in call.args:
+                if isinstance(arg, str):
+                    assert sentinel_token not in arg
+            for v in call.kwargs.values():
+                if isinstance(v, str):
+                    assert sentinel_token not in v
+
+        cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list]
+        assert not any("commit" in cmd or "push" in cmd for cmd in cmds)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.authorized_read_grant")
+    def test_manifest_fetch_generic_grant_exception_redacts_sentinel_token(
+        self,
+        mock_read_grant: MagicMock,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Generic exception during authorized grant redacts sentinel token in returned and logged diagnostics."""
+        sentinel_token = "ghp_SENTINEL_FETCH_TOKEN_GRANT_456"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+        mock_read_grant.side_effect = RuntimeError(
+            f"Failed to establish grant socket with credential {sentinel_token}"
+        )
+
+        with patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value=sentinel_token):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "fetch"
+        assert "Failed to open authorization grant for fetch:" in result["error"]
+        assert "Failed to execute fetch" not in result["error"]
+        assert sentinel_token not in result["error"]
+        assert "<redacted>" in result["error"]
+        assert "credential <redacted>" in result["error"]
+
+        log_entries = [
+            call.args[2] for call in mock_record.call_args_list
+            if len(call.args) > 2 and isinstance(call.args[2], str)
+        ]
+        assert any("read_grant_failed:" in entry for entry in log_entries)
+        assert not any("fetch_execution_failed:" in entry for entry in log_entries)
+        for entry in log_entries:
+            assert sentinel_token not in entry
+            if "read_grant_failed:" in entry:
+                assert "<redacted>" in entry
+
+        cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list]
+        assert not any("commit" in cmd or "push" in cmd for cmd in cmds)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_fetch_exec_exception_redacts_sentinel_token(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Generic exception during fetch container execution redacts sentinel token in returned and logged diagnostics."""
+        sentinel_token = "ghp_SENTINEL_FETCH_TOKEN_EXEC_789"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+        ])
+        orig_side_effect = container.exec_run.side_effect
+
+        def custom_side_effect(*args: object, **kwargs: object) -> object:
+            cmd = args[0] if args else kwargs.get("cmd", [])
+            cmd_str = " ".join(str(c) for c in (cmd if isinstance(cmd, list) else []))
+            if "fetch origin" in cmd_str:
+                raise OSError(f"Transport error executing fetch with token {sentinel_token}")
+            return orig_side_effect(*args, **kwargs)
+
+        container.exec_run.side_effect = custom_side_effect
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value=sentinel_token):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "fetch"
+        assert "Failed to execute fetch:" in result["error"]
+        assert "Failed to open authorization grant" not in result["error"]
+        assert sentinel_token not in result["error"]
+        assert "<redacted>" in result["error"]
+        assert "token <redacted>" in result["error"]
+
+        log_entries = [
+            call.args[2] for call in mock_record.call_args_list
+            if len(call.args) > 2 and isinstance(call.args[2], str)
+        ]
+        assert any("fetch_execution_failed:" in entry for entry in log_entries)
+        assert not any("read_grant_failed:" in entry for entry in log_entries)
+        for entry in log_entries:
+            assert sentinel_token not in entry
+            if "fetch_execution_failed:" in entry:
+                assert "<redacted>" in entry
+
+        cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list if hasattr(c, "args")]
+        assert not any("commit" in cmd or "push" in cmd for cmd in cmds)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.authorized_read_grant")
+    def test_manifest_fetch_grant_exit_exception_redacts_sentinel_token(
+        self,
+        mock_read_grant: MagicMock,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Generic exception during authorized grant exit redacts sentinel token and describes close failure accurately."""
+        sentinel_token = "ghp_SENTINEL_FETCH_TOKEN_EXIT_456"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # git fetch origin
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        class FailingExitGrant:
+            def __enter__(self) -> None:
+                pass
+
+            def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+                raise RuntimeError(
+                    f"Failed to teardown grant socket with credential {sentinel_token}"
+                )
+
+        mock_read_grant.return_value = FailingExitGrant()
+
+        with patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value=sentinel_token):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "fetch"
+        assert "Failed to close authorization grant for fetch:" in result["error"]
+        assert "Failed to open authorization grant" not in result["error"]
+        assert sentinel_token not in result["error"]
+        assert "<redacted>" in result["error"]
+        assert "credential <redacted>" in result["error"]
+
+        log_entries = [
+            call.args[2] for call in mock_record.call_args_list
+            if len(call.args) > 2 and isinstance(call.args[2], str)
+        ]
+        assert any("read_grant_close_failed:" in entry for entry in log_entries)
+        assert not any("read_grant_failed:" in entry for entry in log_entries)
+        for entry in log_entries:
+            assert sentinel_token not in entry
+            if "read_grant_close_failed:" in entry:
+                assert "<redacted>" in entry
+
+        cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list if hasattr(c, "args")]
+        assert not any("commit" in cmd or "push" in cmd for cmd in cmds)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_manifest_fetch_nonzero_exit_redacts_sentinel_token(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Nonzero fetch exit containing resolved fetch token is redacted in returned diagnostics."""
+        sentinel_token = "ghp_SENTINEL_FETCH_TOKEN_EXIT_999"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (128, b"", f"fatal: authentication failed for https://{sentinel_token}@github.com/owner/repo.git\n".encode("utf-8")),
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value=sentinel_token):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "fetch"
+        assert sentinel_token not in result["error"]
+        assert "<redacted>" in result["error"]
+        assert "https://<redacted>@github.com" in result["error"]
+
+        for call in mock_record.call_args_list:
+            for arg in call.args:
+                if isinstance(arg, str):
+                    assert sentinel_token not in arg
+
+        cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list]
+        assert not any("commit" in cmd or "push" in cmd for cmd in cmds)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_token_provider_runtime_error_returns_structured_error_without_credential_leak(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When _resolve_vcs_token raises RuntimeError on token provider failure,
+        publish refuses with status='error', step='token_resolution', and no raw
+        exception text or secret material in error diagnostics (#933 review item 1)."""
+        secret_leak = "ghs_SENSITIVE_APP_KEY_MATERIAL_xyz789"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.vcs.publishing._resolve_vcs_token",
+            side_effect=RuntimeError(f"GitHub App token provider API 503: {secret_leak}"),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "token_resolution"
+        assert secret_leak not in result["error"]
+        assert "Failed to resolve VCS token" in result["error"]
+
+        log_entries = [
+            call.args[2] for call in mock_record.call_args_list
+            if len(call.args) > 2 and isinstance(call.args[2], str)
+        ]
+        assert any("token_resolution_failed" in entry for entry in log_entries)
+        for entry in log_entries:
+            assert secret_leak not in entry
+
+        cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list if hasattr(c, "args")]
+        assert not any("commit" in cmd or "push" in cmd for cmd in cmds)
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.authorized_read_grant")
+    @patch("sunaba.tools.vcs.publishing.authorized_push_grant")
+    def test_manifest_publish_resolves_distinct_fetch_and_push_tokens(
+        self,
+        mock_push_grant: MagicMock,
+        mock_read_grant: MagicMock,
+        mock_docker: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unconditionally resolve fresh token before push, asserting correct sentinel token at each boundary."""
+        monkeypatch.setenv("SUNABA_SECRETS_BASELINE", "false")
+        sentinel_fetch = "ghp_SENTINEL_FETCH_TOKEN_111"
+        sentinel_push = "ghp_SENTINEL_PUSH_TOKEN_222"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # git fetch origin (#818, #932)
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff", b""),  # git diff --cached
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # diff-tree
+            (0, b"", b""),  # git status
+            (0, b"pushed", b""),  # push
+            (0, b"abc1234def5678", b""),  # rev-parse HEAD
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.vcs.publishing._resolve_vcs_token",
+            side_effect=[sentinel_fetch, sentinel_push],
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "pushed"
+        mock_read_grant.assert_called_once_with("owner/repo", token=sentinel_fetch)
+        mock_push_grant.assert_called_once_with("owner/repo", token=sentinel_push)
+
+        calls = container.exec_run.call_args_list
+        fetch_calls = [c for c in calls if "fetch origin" in _exec_cmd(c)]
+        push_calls = [c for c in calls if "push" in _exec_cmd(c)]
+        assert len(fetch_calls) == 1
+        assert len(push_calls) == 1
+
+        fetch_env = fetch_calls[0].kwargs.get("environment") or {}
+        push_env = push_calls[0].kwargs.get("environment") or {}
+
+        assert fetch_env.get("GITHUB_TOKEN") == sentinel_fetch
+        assert fetch_env.get("GITHUB_TOKEN") != sentinel_push
+        assert push_env.get("GITHUB_TOKEN") == sentinel_push
+        assert push_env.get("GITHUB_TOKEN") != sentinel_fetch
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    @patch("sunaba.tools.vcs.publishing.authorized_read_grant")
+    @patch("sunaba.tools.vcs.publishing.authorized_push_grant")
+    def test_manifest_push_refresh_failure_returns_structured_error_and_no_remote_push(
+        self,
+        mock_push_grant: MagicMock,
+        mock_read_grant: MagicMock,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When push-refresh token resolution fails, return structured token_resolution error without raw exception or remote push."""
+        monkeypatch.setenv("SUNABA_SECRETS_BASELINE", "false")
+        sentinel_fetch = "ghp_SENTINEL_FETCH_TOKEN_111"
+        secret_leak = "ghs_SENSITIVE_APP_KEY_MATERIAL_push_refresh_xyz"
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (0, b"", b""),  # git fetch origin (#818, #932)
+            (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge)
+            (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
+            (0, b"none\n", b""),  # MERGE_HEAD check
+            (0, b"", b""),  # checkout -b
+            (1, b"", b""),  # rev-parse --verify origin/fix/x
+            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git add -- 'declared.txt'
+            (1, b"diff", b""),  # git diff --cached
+            (0, b"[fix/x abc1234] Fix", b""),  # commit
+            (0, b"declared.txt\n", b""),  # diff-tree
+            (0, b"", b""),  # git status
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch(
+            "sunaba.tools.vcs.publishing._resolve_vcs_token",
+            side_effect=[
+                sentinel_fetch,
+                RuntimeError(f"GitHub App token refresh 503: {secret_leak}"),
+            ],
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "token_resolution"
+        assert secret_leak not in result["error"]
+        assert "Failed to resolve VCS token: token provider error" in result["error"]
+
+        log_entries = [
+            call.args[2] for call in mock_record.call_args_list
+            if len(call.args) > 2 and isinstance(call.args[2], str)
+        ]
+        assert any("token_resolution_failed" in entry for entry in log_entries)
+        for entry in log_entries:
+            assert secret_leak not in entry
+
+        # Assert no remote push was executed and push grant was never opened
+        mock_push_grant.assert_not_called()
+        cmds = [_exec_cmd(c) for c in container.exec_run.call_args_list if hasattr(c, "args")]
+        assert not any("push" in cmd for cmd in cmds)
+
+        # Commit preparation already happened before push token refresh: do not claim worktree was untouched
+        assert any("commit" in cmd for cmd in cmds)
+
+    def test_credential_helper_real_git_invocation_with_sentinel(self) -> None:
+        """Exercise credential helper invocation with real Git credential fill and a sentinel.
+        Proves Git successfully parses the helper options and resolves credentials without
+        network access (#933 review item 2)."""
+        import shutil
+        import subprocess
+        sentinel_token = "ghp_SENTINEL_CREDENTIAL_FILL_TOKEN_987"
+        fill_input = "protocol=https\nhost=github.com\n\n"
+        env = dict(os.environ)
+        env["GITHUB_TOKEN"] = sentinel_token
+        git_bin = shutil.which("git") or "/usr/bin/git"
+
+        proc = subprocess.run(  # noqa: S603
+            [
+                git_bin,
+                "-c", "credential.helper=",
+                "-c", "credential.helper=!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f",
+                "credential", "fill",
+            ],
+            input=fill_input,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert proc.returncode == 0, f"git credential fill failed: {proc.stderr}"
+        assert "username=x-access-token" in proc.stdout
+        assert f"password={sentinel_token}" in proc.stdout
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_fetch_ordering_before_merge_detection_observable_decision(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """Prove that fetch precedes merge detection using an observable decision:
+        when fetch runs first and refreshes the remote-tracking ref, the ancestor
+        check observes the refreshed ref and classifies HEAD as an ancestor of
+        the base (is_local_merge=False), so merge_discarded_sha is NOT in the response.
+        If fetch ran after line 1308, ancestor check would see stale ref (not ancestor)
+        and populate merge_discarded_sha (#933 review item 3)."""
+        fetch_called = False
+        container = MagicMock()
+
+        def custom_side_effect(*args: object, **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
+            nonlocal fetch_called
+            cmd = args[0] if args else kwargs.get("cmd", [])
+            cmd_str = " ".join(str(c) for c in (cmd if isinstance(cmd, list) else []))
+
+            if "test -f" in cmd_str:
+                return (0, (b"", b""))
+            if "fetch origin" in cmd_str:
+                fetch_called = True
+                return (0, (b"", b""))
+            if "rev-parse --verify HEAD^2" in cmd_str:
+                return (0, (b"parent2_sha\n", b""))
+            if "git merge-base --is-ancestor HEAD" in cmd_str:
+                return (0 if fetch_called else 1, (b"", b""))
+            if "upstream guard probe" in cmd_str or "__sunaba_upstream_guard__" in cmd_str:
+                return (0, (b"", b""))
+            if "MERGE_HEAD" in cmd_str:
+                return (0, (b"none\n", b""))
+            if "checkout -b" in cmd_str:
+                return (0, (b"", b""))
+            if "rev-parse --verify origin/fix/x" in cmd_str:
+                return (1, (b"", b""))
+            if "rev-parse --verify origin/HEAD" in cmd_str or "rev-parse origin/HEAD" in cmd_str:
+                return (0, (b"basetip1234\n", b""))
+            if "reset --mixed" in cmd_str:
+                return (0, (b"", b""))
+            if "git add" in cmd_str:
+                return (0, (b"", b""))
+            if "diff --cached" in cmd_str:
+                return (1, (b"diff --git a/f b/f\n", b""))
+            if "commit" in cmd_str:
+                return (0, (b"[fix/x abc1234] Fix\n", b""))
+            if "diff-tree" in cmd_str:
+                return (0, (b"declared.txt\n", b""))
+            if "status --porcelain" in cmd_str:
+                return (0, (b"", b""))
+            if "push origin" in cmd_str:
+                return (0, (b"pushed", b""))
+            if "rev-parse HEAD" in cmd_str:
+                return (0, (b"abc1234def5678", b""))
+            return (0, (b"", b""))
+
+        container.exec_run.side_effect = custom_side_effect
+        mock_docker.return_value = _make_client_mock(container)
+
+        with patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value="ghp_test"):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "pushed"
+        assert fetch_called is True
+        assert "merge_discarded_sha" not in result
+        assert "merge_parents" not in result
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_fetch_failure_diagnostics_network_disabled(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When container network is disabled (sunaba.network=false), fetch failure
+        diagnostic hint specifically mentions allow_network=False (#933 review item 4)."""
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (128, b"", b"fatal: unable to access remote: Network is unreachable\n"),
+        ])
+        container.labels = {NETWORK_LABEL: "false"}
+        mock_docker.return_value = _make_client_mock(container)
+
+        result = _decode(publish(
+            container_id="abc123def456",
+            repo="owner/repo",
+            branch="fix/x",
+            message="Fix",
+            files=["declared.txt"],
+        ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "fetch"
+        assert "allow_network=false" in result["hint"].lower()
+
+    @patch("sunaba.tools.vcs.publishing._docker")
+    @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
+    def test_fetch_failure_diagnostics_proxied_never_presents_missing_token_as_error(
+        self,
+        mock_record: MagicMock,
+        mock_docker: MagicMock,
+    ) -> None:
+        """When egress proxy is configured, a fetch failure must never present missing
+        token as an error or hint, even when host token is empty (#933 review item 4)."""
+        container = _make_publish_container([
+            (0, b"", b""),  # test -f 'declared.txt'
+            (128, b"", b"fatal: unable to access remote: connection reset\n"),
+        ])
+        mock_docker.return_value = _make_client_mock(container)
+
+        with (
+            patch("sunaba.tools.vcs.publishing._resolve_vcs_token", return_value=""),
+            patch("sunaba.tools.vcs.publishing.proxy_configured", return_value=True),
+            patch("sunaba.tools.vcs.publishing.authorized_read_grant"),
+        ):
+            result = _decode(publish(
+                container_id="abc123def456",
+                repo="owner/repo",
+                branch="fix/x",
+                message="Fix",
+                files=["declared.txt"],
+            ))
+
+        assert result["status"] == "error"
+        assert result["step"] == "fetch"
+        assert "token" not in result.get("hint", "").lower()

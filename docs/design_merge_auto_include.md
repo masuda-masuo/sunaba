@@ -305,9 +305,10 @@ the security decision depends on, independently of anything in the container.
 
 ### Where the reset happens, and when
 
-Before resolving the base ref, manifest mode calls `git fetch origin` to refresh
-remote-tracking refs (#818).  A fetch failure is not fatal — publish continues with
-existing refs (the same behaviour as when a clone is offline).  The reset
+Before resolving the base ref, manifest mode refreshes remote-tracking refs from
+origin under host authorization (`authorized_read_grant`, #818, #932).  A fetch
+failure is fatal and fails closed (`status: "error"`, `step: "fetch"`) before commit
+preparation — manifest publish refuses to build or publish against a stale or offline base.  The reset
 (`git reset --mixed <base_ref>`) **always** runs in manifest mode (when
 `files=[...]` is non-empty). There is no skip-the-reset branch — the entire
 merge-preservation logic that existed in #675/PR#695 was removed by PR#713.

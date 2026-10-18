@@ -236,8 +236,9 @@ class TestPublishSecretScanReal:
         container = _make_publish_container(
             [(0, b"", b""),  # test -f 'declared.txt'
 
+                (0, b"", b""),  # git fetch origin (#818, #932)
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-                (0, b"", b""),  # git fetch origin (#818)
+                (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -527,8 +528,9 @@ class TestPublishSecretScanReal:
         container = _make_publish_container_for_scan_test(
             [(0, b"", b""),  # test -f 'declared.txt'
 
+                (0, b"", b""),  # git fetch origin (#818, #932)
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-                (0, b"", b""),  # git fetch origin (#818)
+                (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -603,8 +605,9 @@ class TestPublishSecretScanReal:
         container = _make_publish_container_for_scan_test(
             [(0, b"", b""),  # test -f 'secret.txt'
 
+                (0, b"", b""),  # git fetch origin (#818, #932)
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-                (0, b"", b""),  # git fetch origin (#818)
+                (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -664,8 +667,9 @@ class TestPublishSecretScanReal:
         container = _make_publish_container_for_scan_test(
             [(0, b"", b""),  # test -f 'declared.txt'
 
+                (0, b"", b""),  # git fetch origin (#818, #932)
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-                (0, b"", b""),  # git fetch origin (#818)
+                (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -842,8 +846,9 @@ class TestPublishSecretScanReal:
         # consume from this list -- do not add entries for them.
         container = self._make_baseline_container(
             [
+                (0, b"", b""),  # git fetch origin (#818, #932)
                 (0, b"", b""),  # rev-parse --verify HEAD^2 (empty -> not a merge)
-                (0, b"", b""),  # git fetch origin (#818)
+                (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (0, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -974,8 +979,9 @@ class TestPublishSecretScanReal:
         # consume from this list -- do not add entries for them.
         container = self._make_baseline_container(
             [
+                (0, b"", b""),  # git fetch origin (#818, #932)
                 (0, b"", b""),  # rev-parse --verify HEAD^2 (empty -> not a merge)
-                (0, b"", b""),  # git fetch origin (#818)
+                (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (0, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -1160,8 +1166,9 @@ class TestPublishHostSideBaseline:
         container = _make_publish_container(
             [(0, b"", b""),  # test -f 'declared.txt'
 
+                (0, b"", b""),  # git fetch origin (#818, #932)
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-                (0, b"", b""),  # git fetch origin (#818)
+                (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -1251,8 +1258,9 @@ class TestPublishHostSideBaseline:
         container = _make_publish_container_for_scan_test(
             [(0, b"", b""),  # test -f 'declared.txt'
 
+                (0, b"", b""),  # git fetch origin (#818, #932)
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-                (0, b"", b""),  # git fetch origin (#818)
+                (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -1408,8 +1416,9 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
         container = _make_publish_container(
             [(0, b"", b""),  # test -f 'declared.txt'
 
+                (0, b"", b""),  # git fetch origin (#818, #932)
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-                (0, b"", b""),  # git fetch origin (#818)
+                (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)
@@ -1501,8 +1510,9 @@ class TestPublishSuccessEnvelopeSuppressionInfo:
         container = _make_publish_container(
             [(0, b"", b""),  # test -f 'declared.txt'
 
+                (0, b"", b""),  # git fetch origin (#818, #932)
                 (1, b"", b""),  # rev-parse --verify HEAD^2 (not a merge) [issue #712]
-                (0, b"", b""),  # git fetch origin (#818)
+                (0, b"", b""),  # upstream guard probe (merge-base / blobs) (#863)
                 (0, b"none\n", b""),  # MERGE_HEAD check
                 (0, b"", b""),  # checkout -b
                 (1, b"", b""),  # rev-parse --verify origin/fix/x (absent)

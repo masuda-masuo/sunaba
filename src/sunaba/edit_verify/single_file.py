@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 from typing import Any
 
 from .lint_runners import (
@@ -11,7 +12,7 @@ from .lint_runners import (
     _run_tsc_verify,
 )
 from .parsers import _parse_pylint_output
-from .paths import ScopeWorkdir, _get_extension
+from .paths import ScopeWorkdir, _determine_scope, _get_extension
 from .shell import _SANDBOX_ENV, _exec_run, _quote_path
 
 
@@ -57,12 +58,21 @@ def lint_file(
         return [{"file": file_path, "line": 0, "rule": "error", "message": str(e)}]
 
     ext = _get_extension(file_path)
-    workdir = scope_workdir[1] if scope_workdir else None
+    try:
+        workdir, lint_path, scope_path = _resolve_lint_context(
+            container, file_path, scope_workdir
+        )
+    except Exception as e:
+        return [{
+            "file": file_path,
+            "line": 0,
+            "rule": "error",
+            "message": f"lint path resolution failed: {str(e)[:180]}",
+        }]
 
     if ext in (".py",):
-        findings = _run_python_linter(container, file_path, fix=fix, workdir=workdir)
-        if not findings and scope_workdir:
-            scope_path, workdir = scope_workdir
+        findings = _run_python_linter(container, lint_path, fix=fix, workdir=workdir)
+        if not findings and scope_path is not None:
             # Scope phase is always read-only: a single-file fix must
             # never mutate the project-wide scope (Issue #284).
             scope_r = _run_ruff_verify(container, scope_path, workdir=workdir, fix=False)
@@ -72,9 +82,8 @@ def lint_file(
                 return scope_r.findings
         return findings
     elif ext in (".js", ".ts", ".jsx", ".tsx"):
-        findings = _run_js_linter(container, file_path, fix=fix, workdir=workdir)
-        if not findings and scope_workdir:
-            scope_path, workdir = scope_workdir
+        findings = _run_js_linter(container, lint_path, fix=fix, workdir=workdir)
+        if not findings and scope_path is not None:
             # Scope phase is always read-only: a single-file fix must
             # never mutate the project-wide scope (Issue #284).
             scope_r = _run_eslint_verify(container, scope_path, workdir=workdir, fix=False)
@@ -92,6 +101,141 @@ def lint_file(
                 "message": f"No linter configured for {ext} files",
             }
         ]
+
+
+def _resolve_lint_context(
+    container: Any,
+    file_path: str,
+    scope_workdir: ScopeWorkdir | None,
+) -> tuple[str | None, str, str | None]:
+    """Resolve file and optional lint scope against one project-root cwd."""
+    attrs = getattr(container, "attrs", None)
+    config = attrs.get("Config") or {} if isinstance(attrs, dict) else {}
+    configured_workdir = config.get("WorkingDir") if isinstance(config, dict) else None
+    if not isinstance(configured_workdir, str) or not configured_workdir:
+        configured_workdir = None
+
+    # A real Docker attrs dict with empty/missing WorkingDir means cwd '/'.
+    # Scope anchors must not retarget relative files from that known cwd.
+    cwd_is_known = isinstance(attrs, dict)
+    base_workdir = configured_workdir or "/"
+    # Preserve the legacy caller anchor only when Docker metadata is unavailable.
+    if (
+        not cwd_is_known
+        and scope_workdir
+        and scope_workdir[1].startswith("/")
+    ):
+        base_workdir = posixpath.normpath(scope_workdir[1])
+
+    absolute_file = (
+        posixpath.normpath(file_path)
+        if file_path.startswith("/")
+        else posixpath.normpath(posixpath.join(base_workdir, file_path))
+    )
+    if cwd_is_known:
+        project_root = _project_root_for_absolute_path(
+            container, absolute_file, base_workdir
+        )
+        # An absolute target outside every marked project belongs to its own
+        # directory. Do not inherit an unrelated Docker WORKDIR (for example,
+        # an unprepared uv project elsewhere in the container).
+        workdir = project_root or (
+            posixpath.dirname(absolute_file)
+            if file_path.startswith("/")
+            else base_workdir
+        )
+    else:
+        workdir = (
+            base_workdir
+            if scope_workdir and scope_workdir[1].startswith("/")
+            else None
+        )
+
+    # Preserve paths relative to the container's configured cwd when no
+    # project marker was found. Once a project is found, express both target
+    # and scope relative to that same project root.
+    if not cwd_is_known and not file_path.startswith("/"):
+        lint_path = posixpath.normpath(file_path)
+    elif file_path.startswith("/"):
+        lint_path = (
+            posixpath.relpath(absolute_file, workdir)
+            if workdir and (
+                absolute_file == workdir
+                or absolute_file.startswith(workdir.rstrip("/") + "/")
+            )
+            else absolute_file
+        )
+    elif workdir != base_workdir:
+        lint_path = posixpath.relpath(absolute_file, workdir)
+    else:
+        lint_path = posixpath.normpath(file_path)
+
+    scope_path: str | None = None
+    if scope_workdir is not None:
+        scope = posixpath.normpath(scope_workdir[0].replace("\\", "/"))
+        anchor = posixpath.normpath(scope_workdir[1].replace("\\", "/"))
+        # Only _determine_scope's repeated input-parent fallback is
+        # already relative to Docker WORKDIR: ("tests", "tests") must
+        # not become tests/tests. All other relative scopes use their
+        # supplied anchor, even ("src", "src") for src/src/clean.py or
+        # an explicit ("checks", "checks") for a file elsewhere.
+        input_parent = posixpath.normpath(
+            posixpath.dirname(file_path.replace("\\", "/")) or "."
+        )
+        is_parent_fallback = (
+            scope_workdir == _determine_scope(file_path)
+            and scope == anchor == input_parent
+        )
+        if not scope.startswith("/") and not is_parent_fallback:
+            scope = posixpath.join(anchor, scope)
+        if workdir is None and not scope.startswith("/"):
+            scope_path = posixpath.normpath(scope)
+        else:
+            absolute_scope = posixpath.normpath(
+                posixpath.join(base_workdir, scope)
+            )
+            if workdir and (
+                absolute_scope == workdir
+                or absolute_scope.startswith(workdir.rstrip("/") + "/")
+            ):
+                scope_path = posixpath.relpath(absolute_scope, workdir)
+            else:
+                scope_path = absolute_scope
+    return workdir, lint_path, scope_path
+
+
+def _project_root_for_absolute_path(
+    container: Any,
+    file_path: str,
+    fallback_workdir: str | None,
+) -> str | None:
+    """Find the nearest marked project ancestor of an absolute file path."""
+    # Docker uses / when Config.WorkingDir is empty.
+    fallback_workdir = fallback_workdir or "/"
+    parent = posixpath.dirname(file_path)
+    script = (
+        "d=" + _quote_path(parent) + "; "
+        "while :; do "
+        "for f in pyproject.toml uv.lock setup.py setup.cfg tox.ini package.json; do "
+        "if [ -f \"$d/$f\" ]; then "
+        "printf '__SUNABA_PROJECT_ROOT__%s\\n' \"$d\"; exit 0; fi; done; "
+        "if [ -d \"$d/.git\" ] || [ -f \"$d/.git\" ]; then "
+        "printf '__SUNABA_PROJECT_ROOT__%s\\n' \"$d\"; exit 0; fi; "
+        "[ \"$d\" = / ] && break; "
+        "d=$(dirname \"$d\"); "
+        "done; printf '__SUNABA_PROJECT_ROOT__\\n'"
+    )
+    ec, stdout, stderr = _exec_run(container, ["/bin/sh", "-c", script], workdir=fallback_workdir)
+    if ec != 0:
+        raise RuntimeError(stderr.strip() or f"project ancestor probe exited {ec}")
+    sentinel = "__SUNABA_PROJECT_ROOT__"
+    lines = stdout.splitlines()
+    if len(lines) != 1 or not lines[0].startswith(sentinel):
+        raise RuntimeError("project ancestor probe returned malformed output")
+    root = lines[0][len(sentinel):]
+    if root and not root.startswith("/"):
+        raise RuntimeError("project ancestor probe returned malformed output")
+    return posixpath.normpath(root) if root else None
 
 
 def _error_findings(result: Any, file_path: str, tool: str) -> list[dict[str, Any]]:
@@ -123,7 +267,7 @@ def _run_python_linter(
         return result.findings
 
     # Only a genuinely absent ruff permits the pylint fallback.
-    pylint_result = _run_pylint(container, file_path)
+    pylint_result = _run_pylint(container, file_path, workdir=workdir)
     if pylint_result is not None:
         return pylint_result
 
@@ -280,7 +424,9 @@ def _run_ts_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
+def _run_pylint(
+    container: Any, file_path: str, workdir: str | None = None
+) -> list[dict[str, Any]] | None:
     """Run ``pylint --output-format json``. Returns None if pylint is not installed."""
     exit_code, stdout_text, _ = _exec_run(
         container,
@@ -289,6 +435,7 @@ def _run_pylint(container: Any, file_path: str) -> list[dict[str, Any]] | None:
             "-c",
             f"{_SANDBOX_ENV}pylint --output-format json {_quote_path(file_path)} 2>/dev/null || true",
         ],
+        workdir=workdir,
     )
     if exit_code == 127:
         return None

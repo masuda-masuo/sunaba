@@ -6,6 +6,7 @@ import json
 import re
 import shlex
 from collections.abc import Sequence
+from contextlib import nullcontext
 
 from docker.errors import NotFound
 
@@ -296,14 +297,27 @@ def _diff_in_container_impl(
                     stderr.decode("utf-8", errors="replace") if stderr else "",
                 )
 
+            # Snapshot the proxy state once so token, repo, environment and
+            # grant decisions all follow the same native/proxy branch.
+            proxied = proxy_client.proxy_configured()
             try:
                 fetch_outcome = authorized_origin_fetch(
-                    resolve_token=github_api._resolve_vcs_token,
-                    resolve_repo=lambda: _resolve_diff_repo(container, working_dir),
+                    resolve_token=(
+                        github_api._resolve_vcs_token if proxied else lambda: None
+                    ),
+                    resolve_repo=(
+                        (lambda: _resolve_diff_repo(container, working_dir))
+                        if proxied
+                        else (lambda: "native")
+                    ),
                     push_token_env=github_api._push_token_env,
-                    proxy_configured=proxy_client.proxy_configured,
+                    proxy_configured=lambda: proxied,
                     select_push_env=select_push_env,
-                    authorized_read_grant=proxy_client.authorized_read_grant,
+                    authorized_read_grant=(
+                        proxy_client.authorized_read_grant
+                        if proxied
+                        else lambda *_args, **_kwargs: nullcontext()
+                    ),
                     execute=execute_fetch,
                 )
             except Exception:

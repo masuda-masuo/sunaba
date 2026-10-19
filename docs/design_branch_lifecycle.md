@@ -239,14 +239,18 @@ theoretical.
 
 One thing does refresh it as a side effect: a successful diff fetch-once retry updates every
 remote-tracking ref, so a `diff_in_container` call against an unresolvable base moves
-`origin/*` for `publish` too. Authorized fetch-once retry requires a GitHub owner/name
-origin; unsupported or local origins return a repository-resolution error, while a locally
-resolved diff still works without origin access or network. A failed authorization, grant, or fetch is reported separately
-and is not described as a missing remote ref. Only after a successful fetch still leaves no
-merge base does diff report a possibly absent ref or unrelated history. That direction is harmless — publish then builds on a *newer*
-base rather than a staler one — but it means the base a container publishes against is not
+`origin/*` for `publish` too. That direction is harmless: publish then builds on a *newer*
+base rather than a staler one, but it means the base a container publishes against is not
 strictly fixed at initialization. Do not rely on the init snapshot as an invariant; rely on
 starting a fresh container.
+
+The fetch-once retry requires a GitHub owner/name origin only when the egress proxy is
+configured, because that path resolves host credentials and opens a repository read grant.
+Authorization, grant, and fetch failures are reported separately; they are not described as
+missing remote refs. Without the proxy, the native retry is token-free and does not parse the
+origin as a GitHub repository, so local and other non-GitHub origins remain supported. A
+locally resolved diff needs no origin access or network. Only after a successful fetch still
+leaves no merge base does diff report a possibly absent ref or unrelated history.
 
 **Reusing an existing remote branch name can discard your worktree edits.** Working around
 the first trap by editing in a fresh container and force-pushing to the same branch name

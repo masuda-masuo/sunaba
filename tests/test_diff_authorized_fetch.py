@@ -210,6 +210,9 @@ def test_unknown_or_raised_helper_outcome_fails_closed_and_redacts(helper_result
 def test_real_helper_uses_proxy_or_native_environment_without_token_leaks(proxied, caplog):
     container, calls = _container(base_is_local=False)
     grant_calls = []
+    token_resolver = MagicMock(return_value=TOKEN)
+    repo_resolver = MagicMock(return_value="owner/repo")
+    proxy_state = MagicMock(return_value=proxied)
 
     @contextmanager
     def grant(repo, *, token):
@@ -220,9 +223,9 @@ def test_real_helper_uses_proxy_or_native_environment_without_token_leaks(proxie
         _docker_patch(container),
         patch("sunaba.tools.diff.resolve_git_root", return_value="/repo"),
         patch("sunaba.tools.diff.record_tool_use"),
-        patch("sunaba.tools.github_api._resolve_vcs_token", return_value=TOKEN),
-        patch("sunaba.tools.container.lifecycle._resolve_repo_from_container", return_value="owner/repo"),
-        patch("sunaba.proxy_client.proxy_configured", return_value=proxied),
+        patch("sunaba.tools.github_api._resolve_vcs_token", token_resolver),
+        patch("sunaba.tools.container.lifecycle._resolve_repo_from_container", repo_resolver),
+        patch("sunaba.proxy_client.proxy_configured", proxy_state),
         patch("sunaba.proxy_client.authorized_read_grant", grant),
     ):
         response = json.loads(diff_in_container("abc123def456", base="origin/topic"))
@@ -230,11 +233,17 @@ def test_real_helper_uses_proxy_or_native_environment_without_token_leaks(proxie
     fetch_command, fetch_kwargs = next(
         (command, kwargs) for command, kwargs in calls if "fetch" in command
     )
-    assert grant_calls == [("owner/repo", TOKEN)]
+    proxy_state.assert_called_once()
     if proxied:
+        token_resolver.assert_called_once()
+        repo_resolver.assert_called_once()
+        assert grant_calls == [("owner/repo", TOKEN)]
         assert fetch_kwargs["environment"] is None
     else:
-        assert fetch_kwargs["environment"]["GITHUB_TOKEN"] == TOKEN
+        token_resolver.assert_not_called()
+        repo_resolver.assert_not_called()
+        assert grant_calls == []
+        assert fetch_kwargs["environment"] is None
     assert TOKEN not in fetch_command
     assert TOKEN not in json.dumps(response) + caplog.text
 

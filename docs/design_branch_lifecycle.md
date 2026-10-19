@@ -67,9 +67,10 @@ Two consequences that are easy to assume wrongly:
 1. **A base branch that existed at clone time needs no fetch.** `base="origin/v2"` works
    without any network round trip.
 2. **A branch created after the container started is not fetched automatically.**
-   `diff_in_container` fetches once when a named base does not resolve locally: only
-   remote-tracking refs move, HEAD and the working tree are unchanged. After that single
-   fetch the branch is reachable.
+   `diff_in_container` makes one host-authorized `git fetch origin` attempt when a named
+   base does not resolve locally. The shared VCS fetch helper resolves host credentials
+   and opens the proxy read grant; only remote-tracking refs move, while HEAD and the
+   working tree stay unchanged. A successful fetch is followed by one merge-base retry.
 
 `origin/HEAD` is normally present, but it is not guaranteed — some initialization paths can
 leave it unset, and that is precisely when the fallback ladder below stops being academic.
@@ -236,9 +237,13 @@ pre-merge base: the commit reads as a fresh file addition and the PR goes `CONFL
 Measured: 80 containers published more than once, so this is reached in practice, not
 theoretical.
 
-One thing does refresh it as a side effect: the diff fetch-once retry updates every
+One thing does refresh it as a side effect: a successful diff fetch-once retry updates every
 remote-tracking ref, so a `diff_in_container` call against an unresolvable base moves
-`origin/*` for `publish` too. That direction is harmless — publish then builds on a *newer*
+`origin/*` for `publish` too. Authorized fetch-once retry requires a GitHub owner/name
+origin; unsupported or local origins return a repository-resolution error, while a locally
+resolved diff still works without origin access or network. A failed authorization, grant, or fetch is reported separately
+and is not described as a missing remote ref. Only after a successful fetch still leaves no
+merge base does diff report a possibly absent ref or unrelated history. That direction is harmless — publish then builds on a *newer*
 base rather than a staler one — but it means the base a container publishes against is not
 strictly fixed at initialization. Do not rely on the init snapshot as an invariant; rely on
 starting a fresh container.

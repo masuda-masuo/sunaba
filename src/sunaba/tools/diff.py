@@ -9,7 +9,8 @@ from collections.abc import Sequence
 
 from docker.errors import NotFound
 
-from sunaba import capture_health
+import sunaba.tools.github_api as github_api
+from sunaba import capture_health, proxy_client
 from sunaba.journal import record_tool_use
 from sunaba.tools.common import (
     META_PATH,
@@ -17,14 +18,22 @@ from sunaba.tools.common import (
     _parse_numstat,
     container_not_found_error,
 )
+from sunaba.tools.publish_planner import select_push_env
 from sunaba.tools.vcs import resolve_git_root
-from sunaba.tools.vcs.fetch import git_fetch_origin
+from sunaba.tools.vcs.authorized_fetch import authorized_origin_fetch
 from sunaba.tools.vcs.merge_base import _resolve_base_branch
 
 #: Path inside the container for clone/PR metadata (also referenced by
 #: ``resolve_git_root`` in ``vcs.py`` and ``_write_clone_meta`` in
 #: ``container.py``).
 _META_PATH = META_PATH
+
+
+def _resolve_diff_repo(container, working_dir: str) -> str:
+    """Resolve the remote repo lazily to avoid the lifecycle import cycle."""
+    from sunaba.tools.container.lifecycle import _resolve_repo_from_container
+
+    return _resolve_repo_from_container(container, working_dir)
 
 
 class _CaptureProbe:
@@ -265,21 +274,89 @@ def _diff_in_container_impl(
             container, safe_wd, actual_base, probe=probe,
         )
 
-        # Fetch-once retry: when the base does not resolve locally it may be a
-        # branch that was created after the container started.  Run `git fetch
-        # origin` once to refresh remote-tracking refs and retry.  Only
-        # remote-tracking refs move; HEAD and the working tree are unchanged.
-        fetch_attempted = False
+        # Fetch-once retry: only a locally unresolved base needs network access.
+        # The shared helper resolves host credentials and holds the read grant
+        # only around this all-branches fetch. Fetch updates remote-tracking refs;
+        # it does not move HEAD or modify the worktree.
+        fetch_outcome = None
         if merge_base_sha is None:
-            fetch_attempted = git_fetch_origin(container, working_dir)
-            if fetch_attempted:
+            def execute_fetch(command, env):
+                fetch_cmd = f"cd {safe_wd} && {command} 2>&1"
+                result = container.exec_run(
+                    ["/bin/sh", "-c", fetch_cmd],
+                    stdout=True,
+                    stderr=True,
+                    environment=env,
+                )
+                ec, output = result
+                stdout, stderr = output if isinstance(output, tuple) else (output, b"")
+                return (
+                    ec,
+                    stdout.decode("utf-8", errors="replace") if stdout else "",
+                    stderr.decode("utf-8", errors="replace") if stderr else "",
+                )
+
+            try:
+                fetch_outcome = authorized_origin_fetch(
+                    resolve_token=github_api._resolve_vcs_token,
+                    resolve_repo=lambda: _resolve_diff_repo(container, working_dir),
+                    push_token_env=github_api._push_token_env,
+                    proxy_configured=proxy_client.proxy_configured,
+                    select_push_env=select_push_env,
+                    authorized_read_grant=proxy_client.authorized_read_grant,
+                    execute=execute_fetch,
+                )
+            except Exception:
+                probe.gate()
+                return json.dumps({
+                    "status": "error",
+                    "step": "merge_base",
+                    "error": (
+                        f"Authorized origin fetch failed unexpectedly for "
+                        f"base {actual_base!r}."
+                    ),
+                })
+            if not hasattr(fetch_outcome, "failure"):
+                probe.gate()
+                return json.dumps({
+                    "status": "error",
+                    "step": "merge_base",
+                    "error": (
+                        f"Authorized origin fetch returned an unknown outcome "
+                        f"for base {actual_base!r}."
+                    ),
+                })
+            if fetch_outcome.failure is None:
+                fetch_happened = True
                 merge_base_sha = _resolve_merge_base(
                     container, safe_wd, actual_base, probe=probe,
                 )
-                if merge_base_sha is not None:
-                    fetch_happened = True
 
         if merge_base_sha is None:
+            if fetch_outcome is not None and fetch_outcome.failure is not None:
+                probe.gate()
+                failure_messages = {
+                    "token_resolution": "Could not resolve host VCS credentials for fetch.",
+                    "repo_resolution": "Could not resolve repository for authorized fetch.",
+                    "proxy_auth": "Proxy read authorization failed during fetch.",
+                    "grant_open": "Could not open proxy read authorization grant for fetch.",
+                    "grant_close": "Proxy read authorization grant failed while closing after fetch.",
+                    "execution": "Origin fetch could not execute or capture its result.",
+                    "exit": "Origin fetch failed before the base ref could be checked.",
+                }
+                failure = fetch_outcome.failure
+                reason = (
+                    failure_messages.get(failure)
+                    if isinstance(failure, str)
+                    else None
+                ) or "Origin fetch returned an unknown authorization outcome."
+                detail = fetch_outcome.redact(fetch_outcome.error)
+                suffix = f" {detail}" if detail else ""
+                return json.dumps({
+                    "status": "error",
+                    "step": "merge_base",
+                    "error": f"{reason} Base {actual_base!r}.{suffix}",
+                })
             # "No merge base" is the exact wrong answer a broken capture
             # produces (the first symptom of #852: an empty merge-base
             # decode reads as "git found none"), so the guard gets the
@@ -288,8 +365,8 @@ def _diff_in_container_impl(
             # Say that the fetch already ran, so the caller does not go off
             # and retry it by hand expecting a different answer.
             tried = (
-                " A fetch was already attempted."
-                if fetch_attempted
+                " A successful fetch was already attempted."
+                if fetch_happened
                 else " The remote could not be reached to look for it."
             )
             return json.dumps({

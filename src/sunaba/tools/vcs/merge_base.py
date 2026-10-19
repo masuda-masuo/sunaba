@@ -21,19 +21,23 @@ import json
 import logging
 import re
 import shlex
+import sys
 from typing import Any
 from urllib.parse import urlsplit
 
 from docker.errors import NotFound
 
-from sunaba.journal import record_boundary_crossing
-from sunaba.proxy_client import authorized_read_grant
+import sunaba.journal as journal
+import sunaba.proxy_client as proxy_client
+import sunaba.tools.github_api as github_api
 from sunaba.tools.common import (
     META_PATH,
     _docker,
     container_not_found_error,
 )
-from sunaba.tools.github_api import _resolve_vcs_token
+from sunaba.tools.github_api import _push_token_env
+from sunaba.tools.publish_planner import select_push_env
+from sunaba.tools.vcs.authorized_fetch import authorized_origin_fetch
 from sunaba.tools.vcs.gitroot import resolve_git_root
 
 logger = logging.getLogger(__name__)
@@ -322,44 +326,102 @@ def merge_base(
     has_token = _container_has_token(container)
     grant_open = proxied and not has_token
 
-    anon_token: str | None = None
-    if grant_open:
-        try:
-            anon_token = _resolve_vcs_token() or None
-        except Exception:
-            anon_token = None
+    grant_state: dict[str, Any] = {}
 
-    grant = (
-        authorized_read_grant(repo, token=anon_token)
-        if grant_open
-        else contextlib.nullcontext()
-    )
+    @contextlib.contextmanager
+    def grant_scope():
+        try:
+            yield
+        finally:
+            grant_cm = grant_state.get("context")
+            if grant_cm is not None:
+                grant_cm.__exit__(*sys.exc_info())
+
+    @contextlib.contextmanager
+    def helper_read_grant(grant_repo, *, token):
+        if not grant_open:
+            with contextlib.nullcontext():
+                yield
+            return
+        grant_cm = proxy_client.authorized_read_grant(grant_repo, token=token)
+        grant_cm.__enter__()
+        grant_state["context"] = grant_cm
+        try:
+            yield
+        finally:
+            # The caller keeps the grant through merge and journal below.
+            pass
+
+    def resolve_merge_token():
+        if not grant_open:
+            return None
+        try:
+            return github_api._resolve_vcs_token()
+        except Exception:
+            # merge_base historically allows public/token-free fetches to
+            # continue when the host credential provider is unavailable.
+            return None
+
+    grant = grant_scope()
     journal_detail_base = (
         f"repo={repo} base={resolved_base} container={cid}"
         f" proxy_read_grant={grant_open}"
     )
 
-    # Step 1: Fetch the base branch from origin
+    # Step 1: Fetch only this base branch through the shared authorized helper.
     safe_base = shlex.quote(resolved_base)
-    fetch_cmd = (
-        f"cd {safe_wd} && git fetch origin {safe_base} 2>&1"
-    )
 
+    def execute_fetch(command, env):
+        # Keep merge_base's historical single-ref fetch scope. The shared
+        # helper owns authorization and credential setup; the caller supplies
+        # its safely quoted ref as the final fetch argument.
+        fetch_command = f"{command} {safe_base}"
+        result = container.exec_run(
+            ["/bin/sh", "-c", f"cd {safe_wd} && {fetch_command} 2>&1"],
+            stdout=True,
+            stderr=True,
+            environment=env,
+        )
+        ec, output = result
+        stdout, stderr = output if isinstance(output, tuple) else (output, b"")
+        return (
+            ec,
+            stdout.decode("utf-8", errors="replace") if stdout else "",
+            stderr.decode("utf-8", errors="replace") if stderr else "",
+        )
+
+    fetch_outcome = None
+    fetch_call_started = False
     try:
         with grant:
-            fetch_ec, fetch_out = container.exec_run(
-                ["/bin/sh", "-c", fetch_cmd],
-                stdout=True,
-                stderr=True,
+            fetch_call_started = True
+            fetch_outcome = authorized_origin_fetch(
+                resolve_token=resolve_merge_token,
+                resolve_repo=lambda: repo,
+                push_token_env=_push_token_env,
+                proxy_configured=lambda: proxied,
+                select_push_env=select_push_env,
+                authorized_read_grant=helper_read_grant,
+                execute=execute_fetch,
             )
-            f_stdout, f_stderr = (fetch_out if isinstance(fetch_out, tuple) else (fetch_out, b""))
+            if not hasattr(fetch_outcome, "failure"):
+                raise RuntimeError("authorized origin fetch returned an unknown outcome")
+            if fetch_outcome.failure not in (None, "exit"):
+                raise RuntimeError(fetch_outcome.redact(fetch_outcome.error) or fetch_outcome.failure)
+
+            fetch_ec = fetch_outcome.exit_code
+            fetch_out = (
+                fetch_outcome.redact(fetch_outcome.error).encode("utf-8"),
+                b"",
+            )
+            f_stdout, f_stderr = fetch_out
             f_stdout_text = f_stdout.decode("utf-8", errors="replace") if f_stdout else ""
             f_stderr_text = f_stderr.decode("utf-8", errors="replace") if f_stderr else ""
 
             if fetch_ec != 0:
                 detail = (f_stderr_text or f_stdout_text).strip()
                 if grant_open:
-                    record_boundary_crossing(
+                    journal.record_boundary_crossing(
                         cid, "merge_base_fetch",
                         f"{journal_detail_base} step=fetch outcome=failed",
                         approved=False,
@@ -388,12 +450,12 @@ def merge_base(
             m_stdout, m_stderr = (merge_out if isinstance(merge_out, tuple) else (merge_out, b""))
             m_stdout_text = m_stdout.decode("utf-8", errors="replace") if m_stdout else ""
             m_stderr_text = m_stderr.decode("utf-8", errors="replace") if m_stderr else ""
-            merge_output = (m_stderr_text or m_stdout_text).strip()
+            merge_output = fetch_outcome.redact((m_stderr_text or m_stdout_text).strip())
 
             if merge_ec == 0:
                 # Clean merge
                 if grant_open:
-                    record_boundary_crossing(
+                    journal.record_boundary_crossing(
                         cid, "merge_base",
                         f"{journal_detail_base} step=merge outcome=clean",
                         approved=True,
@@ -433,7 +495,7 @@ def merge_base(
                 ]
 
                 if grant_open:
-                    record_boundary_crossing(
+                    journal.record_boundary_crossing(
                         cid, "merge_base",
                         f"{journal_detail_base} step=merge outcome=conflicts",
                         approved=False,
@@ -458,7 +520,7 @@ def merge_base(
             # Fallthrough: merge failed for a non-conflict reason (e.g.
             # unrelated histories without --allow-unrelated-histories)
             if grant_open:
-                record_boundary_crossing(
+                journal.record_boundary_crossing(
                     cid, "merge_base",
                     f"{journal_detail_base} step=merge outcome=failed exit={merge_ec}",
                     approved=False,
@@ -473,16 +535,22 @@ def merge_base(
             })
 
     except Exception as e:
+        if fetch_outcome is not None and hasattr(fetch_outcome, "redact"):
+            error = fetch_outcome.redact(str(e))
+        elif fetch_call_started:
+            error = "authorized origin fetch failed unexpectedly"
+        else:
+            error = str(e)
         if grant_open:
-            record_boundary_crossing(
+            journal.record_boundary_crossing(
                 cid, "merge_base",
-                f"{journal_detail_base} step=exception error={e}",
+                f"{journal_detail_base} step=exception error={error}",
                 approved=False,
             )
         return json.dumps({
             "status": "error",
             "step": "merge",
-            "error": f"Unexpected error during merge: {e}",
+            "error": f"Unexpected error during merge: {error}",
         })
 
 
@@ -635,7 +703,7 @@ def merge_complete(
     sh_stdout, _ = (sh_out if isinstance(sh_out, tuple) else (sh_out, b""))
     sha = sh_stdout.decode("utf-8", errors="replace").strip() if sh_stdout else ""
 
-    record_boundary_crossing(
+    journal.record_boundary_crossing(
         cid,
         "merge_complete",
         f"container={cid} sha={sha}",
@@ -728,7 +796,7 @@ def merge_abort(
             "error": (ab_err_text or ab_out_text).strip(),
         })
 
-    record_boundary_crossing(
+    journal.record_boundary_crossing(
         cid,
         "merge_abort",
         f"container={cid}",

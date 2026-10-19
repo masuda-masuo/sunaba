@@ -1642,6 +1642,10 @@ class TestDiffInContainer:
             return_value="/repo",
         ), patch(
             "sunaba.tools.diff.record_tool_use",
+        ), patch(
+            "sunaba.tools.diff._resolve_diff_repo", return_value="owner/repo",
+        ), patch(
+            "sunaba.tools.github_api._resolve_vcs_token", return_value=None,
         ):
             result = json.loads(
                 diff_in_container("abc123def456", base="origin/v2")
@@ -1657,7 +1661,7 @@ class TestDiffInContainer:
             f"Expected exactly one fetch, got {len(seen_fetch_cmds)}"
         )
         fetch_cmd = seen_fetch_cmds[0]
-        assert "git fetch origin" in fetch_cmd, (
+        assert "fetch origin" in fetch_cmd, (
             f"Fetch command should be 'git fetch origin': {fetch_cmd}"
         )
         assert "pull" not in fetch_cmd, (
@@ -1741,6 +1745,10 @@ class TestDiffInContainer:
             return_value="/repo",
         ), patch(
             "sunaba.tools.diff.record_tool_use",
+        ), patch(
+            "sunaba.tools.diff._resolve_diff_repo", return_value="owner/repo",
+        ), patch(
+            "sunaba.tools.github_api._resolve_vcs_token", return_value=None,
         ):
             result = json.loads(
                 diff_in_container("abc123def456", base="no-such-branch")
@@ -1754,11 +1762,3 @@ class TestDiffInContainer:
         # do it by hand expecting a different answer.
         assert "already attempted" in result["error"], result["error"]
 
-
-class TestFetchHelperImport:
-    """Verify the shared fetch helper is importable."""
-
-    def test_git_fetch_origin_importable(self):
-        from sunaba.tools.vcs.fetch import git_fetch_origin
-
-        assert callable(git_fetch_origin)

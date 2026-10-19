@@ -57,25 +57,30 @@ def lint_file(
         return [{"file": file_path, "line": 0, "rule": "error", "message": str(e)}]
 
     ext = _get_extension(file_path)
+    workdir = scope_workdir[1] if scope_workdir else None
 
     if ext in (".py",):
-        findings = _run_python_linter(container, file_path, fix=fix)
+        findings = _run_python_linter(container, file_path, fix=fix, workdir=workdir)
         if not findings and scope_workdir:
             scope_path, workdir = scope_workdir
             # Scope phase is always read-only: a single-file fix must
             # never mutate the project-wide scope (Issue #284).
             scope_r = _run_ruff_verify(container, scope_path, workdir=workdir, fix=False)
-            if scope_r.status not in ("not_available", "error"):
+            if scope_r.status == "error":
+                return _error_findings(scope_r, file_path, "ruff")
+            if scope_r.status != "not_available":
                 return scope_r.findings
         return findings
     elif ext in (".js", ".ts", ".jsx", ".tsx"):
-        findings = _run_js_linter(container, file_path, fix=fix)
+        findings = _run_js_linter(container, file_path, fix=fix, workdir=workdir)
         if not findings and scope_workdir:
             scope_path, workdir = scope_workdir
             # Scope phase is always read-only: a single-file fix must
             # never mutate the project-wide scope (Issue #284).
             scope_r = _run_eslint_verify(container, scope_path, workdir=workdir, fix=False)
-            if scope_r.status not in ("not_available", "error"):
+            if scope_r.status == "error":
+                return _error_findings(scope_r, file_path, "eslint")
+            if scope_r.status != "not_available":
                 return scope_r.findings
         return findings
     else:
@@ -89,8 +94,21 @@ def lint_file(
         ]
 
 
+def _error_findings(result: Any, file_path: str, tool: str) -> list[dict[str, Any]]:
+    """Keep any diagnostics and make runner execution failures visible."""
+    findings = list(result.findings or [])
+    detail = (result.detail or "").strip()
+    findings.append({
+        "file": file_path,
+        "line": 0,
+        "rule": "error",
+        "message": f"{tool} could not run: {detail or 'unknown error'}",
+    })
+    return findings
+
+
 def _run_python_linter(
-    container: Any, file_path: str, fix: bool = False
+    container: Any, file_path: str, fix: bool = False, workdir: str | None = None
 ) -> list[dict[str, Any]]:
     """Try ruff, fall back to pylint. Report tool absence clearly.
 
@@ -98,11 +116,13 @@ def _run_python_linter(
     *file_path* in place (Issue #284).  The pylint fallback has no
     autofix capability, so *fix* is a no-op on that path.
     """
-    result = _run_ruff_verify(container, file_path, fix=fix)
-    if result.status not in ("not_available", "error"):
+    result = _run_ruff_verify(container, file_path, workdir=workdir, fix=fix)
+    if result.status == "error":
+        return _error_findings(result, file_path, "ruff")
+    if result.status != "not_available":
         return result.findings
 
-    # ruff not available, try pylint (no autofix support)
+    # Only a genuinely absent ruff permits the pylint fallback.
     pylint_result = _run_pylint(container, file_path)
     if pylint_result is not None:
         return pylint_result
@@ -122,33 +142,21 @@ def _run_python_linter(
 
 
 def _run_js_linter(
-    container: Any, file_path: str, fix: bool = False
+    container: Any, file_path: str, fix: bool = False, workdir: str | None = None
 ) -> list[dict[str, Any]]:
     """Try eslint.
 
     When *fix* is ``True`` eslint applies ``--fix`` autofixes to
     *file_path* in place (Issue #284).
     """
-    result = _run_eslint_verify(container, file_path, fix=fix)
-    if result.status not in ("not_available", "error"):
-        return result.findings
-
+    result = _run_eslint_verify(container, file_path, workdir=workdir, fix=fix)
     if result.status == "error":
         # eslint is installed but the run itself failed -- most often a
-        # missing or broken eslint.config.*  Telling the caller to install
-        # eslint would send them the wrong way, so report the reason
-        # (Issue #740).
-        return [
-            {
-                "file": file_path,
-                "line": 0,
-                "rule": "error",
-                "message": (
-                    "eslint could not run: "
-                    + (result.detail.strip() or "unknown error")
-                ),
-            }
-        ]
+        # missing or broken eslint.config.*. Preserve the established
+        # user-facing error message while retaining any parsed findings.
+        return _error_findings(result, file_path, "eslint")
+    if result.status != "not_available":
+        return result.findings
 
     return [
         {

@@ -67,9 +67,10 @@ Two consequences that are easy to assume wrongly:
 1. **A base branch that existed at clone time needs no fetch.** `base="origin/v2"` works
    without any network round trip.
 2. **A branch created after the container started is not fetched automatically.**
-   `diff_in_container` fetches once when a named base does not resolve locally: only
-   remote-tracking refs move, HEAD and the working tree are unchanged. After that single
-   fetch the branch is reachable.
+   `diff_in_container` makes one host-authorized `git fetch origin` attempt when a named
+   base does not resolve locally. The shared VCS fetch helper resolves host credentials
+   and opens the proxy read grant; only remote-tracking refs move, while HEAD and the
+   working tree stay unchanged. A successful fetch is followed by one merge-base retry.
 
 `origin/HEAD` is normally present, but it is not guaranteed — some initialization paths can
 leave it unset, and that is precisely when the fallback ladder below stops being academic.
@@ -236,12 +237,20 @@ pre-merge base: the commit reads as a fresh file addition and the PR goes `CONFL
 Measured: 80 containers published more than once, so this is reached in practice, not
 theoretical.
 
-One thing does refresh it as a side effect: the diff fetch-once retry updates every
+One thing does refresh it as a side effect: a successful diff fetch-once retry updates every
 remote-tracking ref, so a `diff_in_container` call against an unresolvable base moves
-`origin/*` for `publish` too. That direction is harmless — publish then builds on a *newer*
-base rather than a staler one — but it means the base a container publishes against is not
+`origin/*` for `publish` too. That direction is harmless: publish then builds on a *newer*
+base rather than a staler one, but it means the base a container publishes against is not
 strictly fixed at initialization. Do not rely on the init snapshot as an invariant; rely on
 starting a fresh container.
+
+The fetch-once retry requires a GitHub owner/name origin only when the egress proxy is
+configured, because that path resolves host credentials and opens a repository read grant.
+Authorization, grant, and fetch failures are reported separately; they are not described as
+missing remote refs. Without the proxy, the native retry is token-free and does not parse the
+origin as a GitHub repository, so local and other non-GitHub origins remain supported. A
+locally resolved diff needs no origin access or network. Only after a successful fetch still
+leaves no merge base does diff report a possibly absent ref or unrelated history.
 
 **Reusing an existing remote branch name can discard your worktree edits.** Working around
 the first trap by editing in a fresh container and force-pushing to the same branch name

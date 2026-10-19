@@ -332,7 +332,7 @@ def test_merge_base_clean_merge():
     container.exec_map = {
         "git remote get-url origin": (0, b"https://github.com/owner/repo.git\n", b""),
         "git symbolic-ref refs/remotes/origin/HEAD": (0, b"refs/remotes/origin/main\n", b""),
-        "git fetch origin main": (0, b"", b""),
+        "fetch origin": (0, b"", b""),
         "git merge origin/main --no-edit": (0, b"Already up to date.\n", b""),
     }
 
@@ -352,7 +352,7 @@ def test_merge_base_with_conflicts():
     container.exec_map = {
         "git remote get-url origin": (0, b"https://github.com/owner/repo.git\n", b""),
         "git symbolic-ref refs/remotes/origin/HEAD": (0, b"refs/remotes/origin/main\n", b""),
-        "git fetch origin main": (0, b"", b""),
+        "fetch origin": (0, b"", b""),
         # 2>&1 merges stderr into stdout, so conflict output comes via stdout
         "git merge origin/main --no-edit": (
             1, b"CONFLICT (content): Merge conflict in src/foo.py\nAuto-merging src/bar.py\n", b""
@@ -376,7 +376,7 @@ def test_merge_base_fetch_fails():
         "git remote get-url origin": (0, b"https://github.com/owner/repo.git\n", b""),
         "git symbolic-ref refs/remotes/origin/HEAD": (0, b"refs/remotes/origin/main\n", b""),
         # 2>&1 redirects stderr to stdout, so error text appears in stdout
-        "git fetch origin main": (128, b"fatal: could not read Username", b""),
+        "fetch origin": (128, b"fatal: could not read Username", b""),
     }
 
     result = json.loads(merge_base(

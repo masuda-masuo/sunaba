@@ -132,7 +132,12 @@ def _source_commit(ctx: _PublishContext) -> tuple[str, str]:
 
 def _advance_remote(ctx: _PublishContext, ref: str, parent: str) -> str:
     tree = _sha(ctx.origin, f"{parent}^{{tree}}")
-    result = _git(ctx.origin, "commit-tree", tree, "-p", parent, "-m", "remote advance")
+    result = _git(
+        ctx.origin,
+        "-c", "user.name=fixture",
+        "-c", "user.email=fixture@example.com",
+        "commit-tree", tree, "-p", parent, "-m", "remote advance",
+    )
     assert result.returncode == 0, result.stderr
     tip = result.stdout.strip()
     update = _git(ctx.origin, "update-ref", ref, tip)

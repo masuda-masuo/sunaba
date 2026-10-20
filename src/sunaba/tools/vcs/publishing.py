@@ -85,7 +85,7 @@ _BRANCH_RE = re.compile(
 # ---------------------------------------------------------------------------
 
 _SANDBOX_CREATE_PR_SCRIPT = '''
-import base64, json, os, shlex, subprocess, sys, tempfile
+import base64, json, os, re, shlex, subprocess, sys, tempfile
 
 
 def _run(cmd):
@@ -93,21 +93,26 @@ def _run(cmd):
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
 
-def _gh_api(method, path, body):
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(body, f)
-        tmpfile = f.name
+def _gh_api(method, path, body=None):
+    args = ["gh", "api", "-X", method, path]
+    tmpfile = None
     try:
-        r = subprocess.run(
-            ["gh", "api", "-X", method, path, "--input", tmpfile],
-            capture_output=True,
-            text=True,
-        )
+        if body is not None:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                json.dump(body, f)
+                tmpfile = f.name
+            args += ["--input", tmpfile]
+        r = subprocess.run(args, capture_output=True, text=True)
         if r.returncode != 0:
-            raise RuntimeError(r.stderr or r.stdout or f"(exit code {r.returncode}, no output)")
-        return json.loads(r.stdout)
+            detail = (r.stderr or r.stdout or f"(exit code {r.returncode}, no output)").strip()
+            match = re.search(r"HTTP\\s+(\\d{3})", detail, re.IGNORECASE)
+            status = int(match.group(1)) if match else None
+            label = f"HTTP {status}" if status is not None else "request failed"
+            raise RuntimeError(f"GitHub API {method} {path} returned {label}: {detail}")
+        return json.loads(r.stdout) if r.stdout.strip() else {}
     finally:
-        os.unlink(tmpfile)
+        if tmpfile:
+            os.unlink(tmpfile)
 
 
 def _read_blob(rev, path):
@@ -177,6 +182,7 @@ def _raw_commit_metadata(rev):
 
 repo, branch, working_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 source_sha = sys.argv[4] if len(sys.argv) > 4 else ""
+api_force = sys.argv[5].lower() == "true" if len(sys.argv) > 5 else not bool(source_sha)
 os.chdir(working_dir)
 
 # 1. Resolve the source object.  A verified manifest source is pinned by SHA;
@@ -285,19 +291,48 @@ elif parent_sha:
 commit = _gh_api("POST", f"repos/{repo}/git/commits", commit_body)
 new_sha = commit["sha"]
 
-# 7. Create or update branch ref
+# 7. Select create/update from an explicit existence read.  Only a
+#    confirmed 404 permits POST; every other lookup/PATCH error is returned.
+ref_path = f"repos/{repo}/git/ref/heads/{branch}"
 try:
-    _gh_api(
-        "PATCH",
-        f"repos/{repo}/git/refs/heads/{branch}",
-        {"sha": new_sha, "force": True},
-    )
-except RuntimeError:
-    _gh_api(
-        "POST",
-        f"repos/{repo}/git/refs",
-        {"ref": f"refs/heads/{branch}", "sha": new_sha},
-    )
+    _gh_api("GET", ref_path)
+    ref_exists = True
+except RuntimeError as error:
+    if re.search(r"returned HTTP 404:", str(error), re.IGNORECASE):
+        ref_exists = False
+    else:
+        print(json.dumps({"status": "error", "error": str(error)}))
+        sys.exit(1)
+
+if ref_exists:
+    try:
+        _gh_api(
+            "PATCH",
+            f"repos/{repo}/git/refs/heads/{branch}",
+            {"sha": new_sha, "force": api_force},
+        )
+    except RuntimeError as error:
+        text = str(error)
+        is_non_fast_forward = (
+            "HTTP 422" in text
+            and re.search(r"not a fast[- ]forward", text, re.IGNORECASE) is not None
+        )
+        print(json.dumps({
+            "status": "error",
+            "error": text,
+            "classification": "non_fast_forward" if is_non_fast_forward else "api_rejection",
+        }))
+        sys.exit(1)
+else:
+    try:
+        _gh_api(
+            "POST",
+            f"repos/{repo}/git/refs",
+            {"ref": f"refs/heads/{branch}", "sha": new_sha},
+        )
+    except RuntimeError as error:
+        print(json.dumps({"status": "error", "error": str(error), "classification": "api_rejection"}))
+        sys.exit(1)
 
 print(json.dumps({"sha": new_sha, "tree_sha": tree["sha"], "parent_sha": parent_sha, "parents": pinned_parents or ([parent_sha] if parent_sha else [])}))'''
 
@@ -2445,6 +2480,7 @@ def publish(
                 try_api_push=lambda: _try_api_push(
                     container, cid, repo, branch, working_dir, env=push_env,
                     verified_sha=verified_sha,
+                    allow_force_push=allow_force_push,
                 ),
                 record_crossing=_record_crossing,
             )
@@ -2566,6 +2602,7 @@ def _try_api_push(
     working_dir: str,
     env: dict[str, str] | None = None,
     verified_sha: str = "",
+    allow_force_push: bool = False,
 ) -> dict[str, str]:
     """Push HEAD via GitHub Objects API (blob->tree->commit->ref).
 
@@ -2581,8 +2618,9 @@ def _try_api_push(
     *verified_sha* pins the API commit to the object the #948 guard
     validated.  The script then builds the tree, message, author, and
     ordered parents from that object instead of a later ``HEAD``/branch ref.
-    When omitted (legacy publishes) the historical HEAD-driven behaviour is
-    kept.
+    In pinned mode API force updates require explicit *allow_force_push=True*.
+    When omitted (legacy publishes), historical HEAD-driven and force-update
+    behavior is kept.
     """
     script_b64 = base64.b64encode(
         _SANDBOX_CREATE_PR_SCRIPT.encode("utf-8")
@@ -2609,14 +2647,25 @@ def _try_api_push(
     script_args = (
         f"{shlex.quote(repo)} {shlex.quote(branch)} {shlex.quote(working_dir)}"
     )
-    if verified_sha:
-        script_args += f" {shlex.quote(verified_sha)}"
+    script_args += (
+        f" {shlex.quote(verified_sha)}"
+        f" {shlex.quote(str(bool(allow_force_push if verified_sha else True)).lower())}"
+    )
     ec, out, err = _run(
         f"trap 'rm -f /tmp/_sandbox_create_pr.py' EXIT"
         f" && python3 /tmp/_sandbox_create_pr.py {script_args}",
         exec_env=env,
     )
     if ec != 0:
+        try:
+            failure = json.loads(out)
+        except json.JSONDecodeError:
+            return {"status": "error", "error": err or out}
+        if isinstance(failure, dict) and failure.get("error"):
+            result = {"status": "error", "error": str(failure["error"])}
+            if failure.get("classification"):
+                result["classification"] = str(failure["classification"])
+            return result
         return {"status": "error", "error": err or out}
 
     try:
@@ -2625,6 +2674,10 @@ def _try_api_push(
         return {"status": "error", "error": out or err}
 
     if "error" in push_result:
-        return {"status": "error", "error": push_result["error"]}
+        failure = {"status": "error", "error": str(push_result["error"])}
+        classification = push_result.get("classification")
+        if classification:
+            failure["classification"] = str(classification)
+        return failure
 
     return {"status": "ok", "sha": push_result.get("sha", "unknown")[:7]}

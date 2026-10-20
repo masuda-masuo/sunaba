@@ -998,7 +998,19 @@ env.update({
     ),
 })
 
-if kind == "blobs":
+if method == "GET" and "ref" in parts:
+    head = parts.index("heads")
+    ref = "refs/heads/" + "/".join(parts[head + 1:])
+    result = subprocess.run(
+        ["git", "-C", origin, "rev-parse", "--verify", ref],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        sys.stderr.write("gh: Not Found (HTTP 404)\\n")
+        sys.exit(1)
+    print(json.dumps({"object": {"sha": result.stdout.strip()}}))
+    sys.exit(0)
+elif kind == "blobs":
     content = base64.b64decode(body["content"])
     result = subprocess.run(
         ["git", "-C", origin, "hash-object", "-w", "--stdin"],

@@ -237,6 +237,11 @@ resolved host-side and never enters the container.
 - **Without `create_pr=True` this only pushes.** `pr_title` alone does not open a PR.
 - **To add commits to an existing PR, reuse the branch name and omit `create_pr`.** The
   commit is built on `origin/<branch>` and earlier commits are preserved.
+- In pinned manifest mode, the API fallback updates an existing ref without force by
+  default. If the remote advances after the host reads its parents, GitHub rejects the
+  update; rerun publish so the source can be validated against the current remote state.
+  `allow_force_push=True` explicitly authorizes an API history rewrite as well as a native
+  forced push. A missing branch is created only after a confirmed not-found ref lookup.
 - A repository with no test suite needs `skip_verify_gate=True`. **Skipping the gate is not
   the same as being unverified** -- run whatever checks do exist once, by hand, first.
 

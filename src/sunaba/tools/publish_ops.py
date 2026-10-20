@@ -743,6 +743,21 @@ def git_push_with_fallback(
                 "error": push_err or push_out,
                 "sha": sha,
             }
+            api_error = push_result.get("error")
+            if api_error:
+                payload["api_error"] = api_error
+            if push_result.get("classification"):
+                payload["api_error_classification"] = push_result["classification"]
+            api_error_text = str(api_error or "").lower().replace("-", " ")
+            is_non_fast_forward = (
+                push_result.get("classification") == "non_fast_forward"
+                or ("http 422" in api_error_text and "not a fast forward" in api_error_text)
+            )
+            if is_non_fast_forward:
+                hints.append(
+                    "The remote branch may have advanced between the host ref read "
+                    "and this push; rerun publish to validate against its current state."
+                )
             if hints:
                 payload["hint"] = " ".join(hints)
             return (payload, sha, transport)

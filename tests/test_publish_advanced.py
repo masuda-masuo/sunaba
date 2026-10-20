@@ -535,9 +535,9 @@ class TestApiPushBlobReading:
         from sunaba.tools.vcs.publishing import _SANDBOX_CREATE_PR_SCRIPT
 
         # --- Extract the real _read_blob function from the script ---
-        fn_marker = "def _read_blob(path):"
+        fn_marker = "def _read_blob(rev, path):"
         fn_start = _SANDBOX_CREATE_PR_SCRIPT.index(fn_marker)
-        end_marker = "\n\nrepo, branch, working_dir"
+        end_marker = "\n\ndef _raw_parents(rev):"
         fn_end = _SANDBOX_CREATE_PR_SCRIPT.index(end_marker, fn_start)
         read_blob_code = _SANDBOX_CREATE_PR_SCRIPT[fn_start:fn_end]
 
@@ -549,7 +549,7 @@ class TestApiPushBlobReading:
             "\n"
             "path = sys.argv[1]\n"
             "try:\n"
-            "    result = _read_blob(path)\n"
+            "    result = _read_blob('HEAD', path)\n"
             "except OSError as e:\n"
             "    sys.stderr.write(str(e))\n"
             "    sys.exit(1)\n"

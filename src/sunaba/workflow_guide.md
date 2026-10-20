@@ -277,6 +277,28 @@ Both of these caused real damage on 2026-07-22 (tracked as issue #727).
    with its own base (measured: 6 files). A base ref that cannot be resolved is now an
    error — never a silent reset to the default. The result reports `cut_from`, the ref the
    commit was actually cut from; **check it rather than assuming**.
+4. **Since #948 publish verifies what it actually cut from.** After the commit exists and
+   before any push, the host reads the remote branch tips from GitHub and compares them with
+   the created commit's *raw* parent headers. The object is captured by SHA and read with
+   git --no-replace-objects cat-file -p, so a refs/replace/* ref or a .git/info/grafts
+   entry cannot make `HEAD^1`/`HEAD^2` report a different parent than the commit has. The
+   expected parent is the remote publish branch tip when that branch already exists,
+   otherwise the tip of `base_branch` (or the repository default when no base was named).
+   Only a structured HTTP 404 for the publish branch allows the base fallback; any other API
+   error, missing branch metadata, unreadable local parent, or malformed SHA fails closed
+   with no push. A `cut_parent_mismatch` error names the expected and actual full SHA, the
+   ref, and the parent number: fetch, check what moved the branch, and re-run — never force
+   the push to make it go away. Re-running may resolve a branch that genuinely advanced
+   between the fetch and the host read, but a stale or default-renamed remote-tracking ref
+   may need a fresh container (or manual ref repair); the error does not promise that a plain
+   re-run will succeed. The native push sends the captured SHA. The GitHub Objects API fallback reads that
+   captured object's raw tree and ordered parents, so later local ref moves cannot change the
+   published source content or ancestry. API commit reconstruction may produce a different
+   SHA; the response reports the actual API SHA. The container's remote-tracking refs are not
+   trusted for this check.
+   Caveat: publish_ops may fall back to the local base branch when `origin/<base_branch>`
+   is absent; that fallback stays usable only while its SHA matches the host-read remote
+   tip, so a stale local base is refused rather than silently published.
 
 ### When the secret scan blocks you
 

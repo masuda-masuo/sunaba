@@ -26,6 +26,49 @@ GITLEAKS_VERSION_OUTPUT = b"8.30.1\n"
 #: ``run_secret_scan`` treats as an error (#704).
 GITLEAKS_CLEAN_REPORT = b"[]"
 
+#: Fixed host-side parent SHA used by the #948 guard fixture below.  Mocked
+#: publish tests script the container's parent probe to report the same value,
+#: so the guard's comparison runs (and passes) without a network read.
+FAKE_CUT_PARENT_SHA = "a" * 40
+
+#: Canned raw commit-object output for publish's post-commit parent probe
+#: (#948).  The probe now emits the marker + shape, the created commit's
+#: object name, then the object's raw header (see
+#: ``publishing._parse_captured_commit``).  Both parents are the same full SHA
+#: because the mocked commit's objects are not real.
+FAKE_CUT_PARENT_PROBE = (
+    "__sunaba_cut_parents__ single\n"
+    f"{FAKE_CUT_PARENT_SHA}\n"
+    f"tree {FAKE_CUT_PARENT_SHA}\n"
+    f"parent {FAKE_CUT_PARENT_SHA}\n"
+    "author fixture <fixture@example.com> 0 +0000\n"
+    "committer fixture <fixture@example.com> 0 +0000\n"
+    "\n"
+    "mocked commit\n"
+)
+
+#: Merge-shaped probe answer: a #819 rebuild has two raw parents.
+FAKE_CUT_PARENT_MERGE_PROBE = (
+    "__sunaba_cut_parents__ merge\n"
+    f"{FAKE_CUT_PARENT_SHA}\n"
+    f"tree {FAKE_CUT_PARENT_SHA}\n"
+    f"parent {FAKE_CUT_PARENT_SHA}\n"
+    f"parent {FAKE_CUT_PARENT_SHA}\n"
+    "author fixture <fixture@example.com> 0 +0000\n"
+    "committer fixture <fixture@example.com> 0 +0000\n"
+    "\n"
+    "mocked merge\n"
+)
+
+
+def _cut_parent_probe_reply(cmd_str: str) -> bytes | None:
+    """Return the canned #948 probe answer for *cmd_str*, if it is the probe."""
+    if "__sunaba_cut_parents__ merge" in cmd_str:
+        return FAKE_CUT_PARENT_MERGE_PROBE.encode()
+    if "__sunaba_cut_parents__ single" in cmd_str:
+        return FAKE_CUT_PARENT_PROBE.encode()
+    return None
+
 
 def gitleaks_exit_for(report: bytes) -> int:
     """Return the exit code real gitleaks gives for *report*.
@@ -321,6 +364,13 @@ def _make_publish_container(
             cmd = []
         cmd_str = " ".join(str(c) for c in cmd)
 
+        # --- Post-commit cut-parent probe (#948) ---
+        # Answer it without consuming a positional entry: the guard itself
+        # still runs and compares this output with the host fixture's SHA.
+        probe_reply = _cut_parent_probe_reply(cmd_str)
+        if probe_reply is not None:
+            return (0, (probe_reply, b""))
+
         # --- Secret scan: gitleaks version ---
         if cmd == ["gitleaks", "version"]:
             return (0, (GITLEAKS_VERSION_OUTPUT, b""))
@@ -425,6 +475,13 @@ def _make_publish_container_for_scan_test(
             cmd = []
         cmd_str = " ".join(str(c) for c in cmd)
 
+        # --- Post-commit cut-parent probe (#948) ---
+        # Answer it without consuming a positional entry: the guard itself
+        # still runs and compares this output with the host fixture's SHA.
+        probe_reply = _cut_parent_probe_reply(cmd_str)
+        if probe_reply is not None:
+            return (0, (probe_reply, b""))
+
         # --- Secret scan: gitleaks version ---
         if cmd == ["gitleaks", "version"]:
             return (_gl_version_ec, (_gl_version_out, b""))
@@ -469,6 +526,35 @@ def _decode(result):
     if inspect.iscoroutine(result):
         result = asyncio.run(result)
     return json.loads(result)
+
+
+@pytest.fixture
+def cut_parent_host_stub():
+    """Deterministic host answers for the #948 cut-parent guard.
+
+    Mocked publish tests cannot hold a real GitHub API conversation, and
+    their scripted commits do not have real objects behind ``HEAD^1``.  This
+    stubs the *host read seam* (not the guard itself): the fixture SHA is
+    what the scripted parent probe in ``_make_publish_container`` reports,
+    so ``_validate_cut_parents`` still parses and compares both values.
+    Tests that exercise the guard's failure paths patch these functions
+    themselves or use the real-git harness in test_publish_cut_parent.py.
+    """
+    from sunaba.tools.vcs.publishing import HostRefRead
+
+    with (
+        patch(
+            "sunaba.tools.vcs.publishing._host_read_branch_ref",
+            side_effect=lambda repo, token, branch: HostRefRead(
+                FAKE_CUT_PARENT_SHA, False, "",
+            ),
+        ),
+        patch(
+            "sunaba.tools.vcs.publishing._host_read_default_branch",
+            side_effect=lambda repo, token: ("main", ""),
+        ),
+    ):
+        yield FAKE_CUT_PARENT_SHA
 
 
 # -------------------------------------------------------------------

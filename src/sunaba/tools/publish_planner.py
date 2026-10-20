@@ -49,17 +49,28 @@ def pr_body_validation_error(create_pr: bool, pr_body: str) -> dict | None:
     return None
 
 
-def build_push_command(branch: str, allow_force_push: bool) -> str:
+def build_push_command(
+    branch: str,
+    allow_force_push: bool,
+    source_sha: str = "",
+) -> str:
     """Build the git push command string with credential helper.
 
     Matches the original command construction in ``publish`` (lines 1170–1176).
     The returned string uses ``$GITHUB_TOKEN`` from the exec environment.
+    *source_sha* pins the pushed object explicitly
+    (``<sha>:refs/heads/<branch>``).  When it is omitted the historical
+    ``push origin <branch>`` form is kept, so legacy (unvalidated) publishes
+    and existing callers behave exactly as before.
     """
     force_flag = " --force" if allow_force_push else ""
+    refspec = (
+        f"{source_sha}:refs/heads/{branch}" if source_sha else branch
+    )
     return (
         f"git -c credential.helper= "
         f"-c credential.helper='!f() {{ echo username=x-access-token; echo password=$GITHUB_TOKEN; }}; f' "
-        f"push origin {shlex.quote(branch)}{force_flag}"
+        f"push origin {shlex.quote(refspec)}{force_flag}"
     )
 
 

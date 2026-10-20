@@ -110,48 +110,119 @@ def _gh_api(method, path, body):
         os.unlink(tmpfile)
 
 
-def _read_blob(path):
-    \"\"\"Read blob content from git (binary-safe): returns bytes of what git
-    committed for *path* at HEAD.  Git stores symlink targets as their
-    target-path string, so this is safe for symlinks too (open() follows
-    symlinks and reads the target file instead).\"\"\"
+def _read_blob(rev, path):
     r = subprocess.run(
-        [\"git\", \"cat-file\", \"blob\", f\"HEAD:{path}\"],
+        ["git", "--no-replace-objects", "cat-file", "blob", f"{rev}:{path}"],
         capture_output=True,
     )
     if r.returncode != 0:
         raise OSError(
-            r.stderr.decode(errors=\"replace\").strip()
-            or f\"git cat-file blob HEAD:{path} failed (exit {r.returncode})\"
+            r.stderr.decode(errors="replace").strip()
+            or f"git cat-file blob {rev}:{path} failed (exit {r.returncode})"
         )
     return r.stdout
 
 
+def _raw_commit(rev):
+    r = subprocess.run(
+        ["git", "--no-replace-objects", "cat-file", "-p", rev],
+        capture_output=True,
+    )
+    if r.returncode != 0:
+        raise OSError(
+            r.stderr.decode(errors="replace").strip()
+            or f"git cat-file -p {rev} failed (exit {r.returncode})"
+        )
+    return r.stdout
+
+
+def _raw_parents(rev):
+    header = _raw_commit(rev).partition(bytes([10, 10]))[0]
+    parents = []
+    for line in header.decode("utf-8", errors="strict").splitlines():
+        if line.startswith("parent "):
+            parents.append(line[len("parent "):].strip())
+    return parents
+
+
+def _raw_commit_metadata(rev):
+    from datetime import datetime, timedelta, timezone
+    import re
+
+    raw = _raw_commit(rev)
+    header, separator, message = raw.partition(bytes([10, 10]))
+    if not separator:
+        raise ValueError("raw commit has no header/message separator")
+    fields = {}
+    for line in header.decode("utf-8", errors="strict").splitlines():
+        if line.startswith(("author ", "committer ")):
+            key, value = line.split(" ", 1)
+            match = re.fullmatch(r"(.*) <([^>]*)> (-?[0-9]+) ([+-])([0-9]{2})([0-9]{2})", value)
+            if not match:
+                raise ValueError(f"malformed raw {key} header")
+            name, email, epoch, sign, hours, minutes = match.groups()
+            offset = (1 if sign == "+" else -1) * (
+                int(hours) * 60 + int(minutes)
+            )
+            zone = timezone(timedelta(minutes=offset))
+            date = datetime.fromtimestamp(int(epoch), zone).isoformat(
+                timespec="seconds"
+            )
+            fields[key] = {"name": name, "email": email, "date": date}
+    if "author" not in fields or "committer" not in fields:
+        raise ValueError("raw commit lacks author or committer header")
+    fields["message"] = message.decode("utf-8", errors="strict").rstrip(chr(10))
+    return fields
+
+
 repo, branch, working_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+source_sha = sys.argv[4] if len(sys.argv) > 4 else ""
 os.chdir(working_dir)
 
-# 1. Collect local commit info
-ec, head_sha, _ = _run("git rev-parse HEAD")
-if ec != 0:
-    print(json.dumps({"status": "error", "error": "git rev-parse HEAD failed", "detail": head_sha}))
+# 1. Resolve the source object.  A verified manifest source is pinned by SHA;
+#    legacy callers keep HEAD.
+source_rev = source_sha or "HEAD"
+ec, head_sha, _ = _run(f"git rev-parse --verify {shlex.quote(source_rev)}")
+if ec != 0 or not head_sha:
+    print(json.dumps({"status": "error", "error": "git rev-parse of the source commit failed", "detail": head_sha}))
     sys.exit(1)
 
-ec_log, commit_msg, _ = _run("git log -1 --format=%B")
-if ec_log != 0 or not commit_msg:
-    commit_msg = "(no commit message)"
-_, author_name, _ = _run("git log -1 --format=%an")
-_, author_email, _ = _run("git log -1 --format=%ae")
+if source_sha:
+    try:
+        metadata = _raw_commit_metadata(head_sha)
+    except (OSError, UnicodeError, ValueError) as e:
+        print(json.dumps({"status": "error", "error": f"read source commit metadata: {e}"}))
+        sys.exit(1)
+    commit_msg = metadata["message"]
+    author = metadata["author"]
+    committer = metadata["committer"]
+else:
+    ec_log, commit_msg, _ = _run(f"git log -1 --format=%B {shlex.quote(head_sha)}")
+    if ec_log != 0 or not commit_msg:
+        commit_msg = "(no commit message)"
+    _, author_name, _ = _run(f"git log -1 --format=%an {shlex.quote(head_sha)}")
+    _, author_email, _ = _run(f"git log -1 --format=%ae {shlex.quote(head_sha)}")
+    _, author_date, _ = _run(f"git log -1 --format=%aI {shlex.quote(head_sha)}")
+    _, committer_name, _ = _run(f"git log -1 --format=%cn {shlex.quote(head_sha)}")
+    _, committer_email, _ = _run(f"git log -1 --format=%ce {shlex.quote(head_sha)}")
+    _, committer_date, _ = _run(f"git log -1 --format=%cI {shlex.quote(head_sha)}")
+    author = {"name": author_name, "email": author_email, "date": author_date}
+    committer = {
+        "name": committer_name,
+        "email": committer_email,
+        "date": committer_date,
+    }
 
-# 2. Get all files in HEAD
-_, files_out, _ = _run("git ls-tree -r --name-only HEAD")
+# 2. Get all files in the source commit's tree
+_, files_out, _ = _run(f"git --no-replace-objects ls-tree -r --name-only {shlex.quote(head_sha)}")
 files = [f for f in files_out.split("\\n") if f]
 
 # 3. Create blobs
 tree_items = []
 for filepath in files:
-    _, mode_line, _ = _run(f"git ls-tree HEAD -- {shlex.quote(filepath)}")
+    _, mode_line, _ = _run(f"git --no-replace-objects ls-tree {shlex.quote(head_sha)} -- {shlex.quote(filepath)}")
     if not mode_line.strip():
-        print(json.dumps({"status": "error", "error": f"git ls-tree HEAD -- {filepath}: empty output"}))
+        print(json.dumps({"status": "error", "error": f"git ls-tree {head_sha} -- {filepath}: empty output"}))
         sys.exit(1)
     parts = mode_line.split()
     if len(parts) < 3:
@@ -159,7 +230,7 @@ for filepath in files:
         sys.exit(1)
     mode = parts[0]
     try:
-        raw = _read_blob(filepath)
+        raw = _read_blob(head_sha, filepath)
         file_content = base64.b64encode(raw).decode()
     except OSError as e:
         print(json.dumps({"status": "error", "error": f"read {filepath}: {e}"}))
@@ -176,24 +247,40 @@ for filepath in files:
 # 4. Create tree
 tree = _gh_api("POST", f"repos/{repo}/git/trees", {"tree": tree_items})
 
-# 5. Resolve parent SHA on GitHub (existing branch > main > master)
+# 5. Parent selection.  A pinned source publishes the exact raw parent list
+#    that was validated; the later HEAD/branch is never consulted.
 parent_sha = None
-for ref_name in [f"heads/{branch}", "heads/main", "heads/master"]:
-    ec2, ref_out, _ = _run(f"gh api repos/{shlex.quote(repo)}/git/ref/{shlex.quote(ref_name)} 2>/dev/null")
-    if ec2 == 0:
-        try:
-            parent_sha = json.loads(ref_out)["object"]["sha"]
-            break
-        except Exception:
-            continue
+pinned_parents = []
+if source_sha:
+    try:
+        pinned_parents = _raw_parents(head_sha)
+    except OSError as e:
+        print(json.dumps({"status": "error", "error": f"read source parents: {e}"}))
+        sys.exit(1)
+    if not pinned_parents:
+        print(json.dumps({"status": "error", "error": "the verified source commit has no parents"}))
+        sys.exit(1)
+else:
+    for ref_name in [f"heads/{branch}", "heads/main", "heads/master"]:
+        ec2, ref_out, _ = _run(f"gh api repos/{shlex.quote(repo)}/git/ref/{shlex.quote(ref_name)} 2>/dev/null")
+        if ec2 == 0:
+            try:
+                parent_sha = json.loads(ref_out)["object"]["sha"]
+                break
+            except Exception:
+                continue
 
 # 6. Create commit
 commit_body = {
     "message": commit_msg,
     "tree": tree["sha"],
-    "author": {"name": author_name, "email": author_email},
+    "author": author,
+    "committer": committer,
 }
-if parent_sha:
+if pinned_parents:
+    commit_body["parents"] = pinned_parents
+    parent_sha = pinned_parents[0]
+elif parent_sha:
     commit_body["parents"] = [parent_sha]
 commit = _gh_api("POST", f"repos/{repo}/git/commits", commit_body)
 new_sha = commit["sha"]
@@ -212,8 +299,7 @@ except RuntimeError:
         {"ref": f"refs/heads/{branch}", "sha": new_sha},
     )
 
-print(json.dumps({"sha": new_sha, "tree_sha": tree["sha"], "parent_sha": parent_sha}))
-'''
+print(json.dumps({"sha": new_sha, "tree_sha": tree["sha"], "parent_sha": parent_sha, "parents": pinned_parents or ([parent_sha] if parent_sha else [])}))'''
 
 
 # ---------------------------------------------------------------------------
@@ -1039,6 +1125,587 @@ def _validate_manifest_path(run: RunFunc, f: str, classification: dict[str, str]
     return None
 
 
+# ---------------------------------------------------------------------------
+# Host-authorized cut-parent validation (#948)
+# ---------------------------------------------------------------------------
+#
+# The #934 investigation found three container-controlled routes by which a
+# forged remote-tracking ref became the parent of the *public* commit:
+#
+# * a non-symbolic ``refs/remotes/origin/HEAD`` survives ``git fetch`` and is
+#   used when ``base_branch`` is omitted;
+# * an ``origin/<branch>`` ref for a branch that does not exist on the remote
+#   survives the fetch (which does not prune) and is preferred over
+#   ``base_branch``;
+# * refs can be rewritten after the authorized fetch but before
+#   ``git_prepare_commit`` reads them.
+#
+# The fix is deliberately *not* a tree comparison (proposal B in #932).  It
+# captures the object name of the commit the container just created, reads
+# that object's raw header with ``git --no-replace-objects cat-file -p`` (so
+# ``refs/replace`` and ``.git/info/grafts`` cannot rewrite the parents it
+# reports), and compares the ordered parents with the branch tips the *host*
+# reads from GitHub.  The container's ``cut_from`` ref string and its parent2
+# resolution are diagnostics, never the expected value: the host ref is the
+# authority.  The verified object name is then pinned into both push
+# transports, so a branch ref that moves after the guard cannot redirect the
+# push to a different commit.
+#
+# Only a genuine HTTP 404 for the *publish branch* means "the branch does not
+# exist yet", allowing the base-branch fallback.  Every other API failure --
+# including a 500 whose body happens to mention 404 -- fails closed.  This is
+# intentionally stricter than ``_fetch_base_auto_include`` (which returns
+# ``None`` on any error); that helper's tolerant policy is independent and is
+# not changed here.
+
+#: Machine-readable marker opening the post-commit parent probe's output.
+#: The marker line also carries the expected shape (``single`` or ``merge``).
+_CUT_PARENT_MARK = "__sunaba_cut_parents__"
+
+#: Emitted when the created commit's object name cannot be resolved.
+_CUT_PARENT_MISSING = "__sunaba_cut_parent_missing__"
+
+#: Probe shapes.  A non-merge rebuild must have exactly one parent; a merge
+#: rebuild may legitimately degenerate to one (#819), so it allows one or two.
+_CUT_PARENT_MODE_SINGLE = "single"
+_CUT_PARENT_MODE_MERGE = "merge"
+
+#: A full git object name.  Truthiness is not enough: the value is compared
+#: with real parent SHAs, so a truncated or non-hex answer is a failure.
+_CUT_PARENT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+class HostRefRead(NamedTuple):
+    """One host-side read of a remote branch tip.
+
+    Attributes
+    ----------
+    sha:
+        The full 40-hex commit SHA, or ``""`` when absent/unreadable.
+    absent:
+        True only for a structured HTTP 404 from the ref endpoint.
+    error:
+        Empty on success (including a 404, which sets ``absent``).  Non-empty
+        means the read failed for a reason other than absence.
+    """
+
+    sha: str
+    absent: bool
+    error: str
+
+
+class ExpectedCutParents(NamedTuple):
+    """The parents the public commit must have, read host-side.
+
+    ``parent2``/``parent2_ref`` are empty for an ordinary single-parent
+    publish.  ``parent1_ref`` and ``parent2_ref`` are the remote refs the
+    expected SHAs came from, reported verbatim on a mismatch.
+    """
+
+    parent1: str
+    parent1_ref: str
+    parent2: str
+    parent2_ref: str
+
+
+def _http_cause_status(exc: BaseException) -> int | None:
+    """Return the HTTP status carried by a ``_github_api_request`` failure.
+
+    ``_github_api_request`` raises ``RuntimeError(...) from HTTPError``, so the
+    structured status lives on ``__cause__``.  Matching on the message text
+    would let a 500 whose body contains "HTTP 404" masquerade as absence.
+    """
+    status = getattr(exc.__cause__, "code", None)
+    return status if isinstance(status, int) else None
+
+
+def _host_read_branch_ref(repo: str, token: str, branch: str) -> HostRefRead:
+    """Read ``refs/heads/<branch>`` from GitHub, host-side (#948).
+
+    The branch name is URL-quoted as a single path segment.  A 404 is
+    reported as ``absent``; any other API failure is an ``error``.  The
+    returned SHA must be a full object name -- a malformed or missing
+    ``object.sha`` is an error, not an empty answer.
+    """
+    from sunaba.tools.github_api import _github_api_request
+
+    if not branch:
+        return HostRefRead("", False, "no branch name was given")
+    try:
+        info = _github_api_request(
+            f"/repos/{repo}/git/ref/heads/{quote(branch, safe='')}",
+            token,
+        )
+    except Exception as exc:
+        status = _http_cause_status(exc)
+        if status == 404:
+            return HostRefRead("", True, "")
+        detail = f"HTTP {status}" if status is not None else "request failed"
+        return HostRefRead(
+            "", False, f"could not read refs/heads/{branch} ({detail})",
+        )
+
+    ref_obj = info.get("object") if isinstance(info, dict) else None
+    sha = ref_obj.get("sha") if isinstance(ref_obj, dict) else None
+    if not isinstance(sha, str) or not _CUT_PARENT_SHA_RE.match(sha.strip()):
+        return HostRefRead(
+            "", False,
+            f"refs/heads/{branch} returned no valid commit SHA",
+        )
+    return HostRefRead(sha.strip().lower(), False, "")
+
+
+def _host_read_default_branch(repo: str, token: str) -> tuple[str, str]:
+    """Read the repository's default branch name from GitHub (#948).
+
+    Returns ``(branch, error)``.  Unlike the tolerant auto-include helper,
+    a failure here is fatal for the omitted-base path: without the default
+    branch there is no trustworthy expected parent.
+    """
+    from sunaba.tools.github_api import _github_api_request
+
+    try:
+        info = _github_api_request(f"/repos/{repo}", token)
+    except Exception as exc:
+        status = _http_cause_status(exc)
+        detail = f"HTTP {status}" if status is not None else "request failed"
+        return "", f"could not read /repos/{repo} metadata ({detail})"
+    if not isinstance(info, dict):
+        return "", f"/repos/{repo} returned no repository metadata"
+    branch = info.get("default_branch")
+    if not isinstance(branch, str) or not branch.strip():
+        return "", f"/repos/{repo} reports no default branch"
+    return branch.strip(), ""
+
+
+def _cut_parent_host_error(detail: str, ref: str) -> dict[str, Any]:
+    """Build the fail-closed payload for an unreadable required host ref."""
+    return {
+        "status": "error",
+        "step": "cut_parent_host_read",
+        "error": (
+            "publish refused: could not verify the created commit's parent "
+            f"against GitHub: {detail}. No push was attempted."
+        ),
+        "ref": ref,
+    }
+
+
+def _cut_parent_read_error(parent: int, detail: str) -> dict[str, Any]:
+    """Build the fail-closed payload for an unreadable created-commit parent."""
+    return {
+        "status": "error",
+        "step": "cut_parent_read",
+        "error": (
+            "publish refused: the created commit's parent could not be read "
+            f"reliably ({detail}). No push was attempted."
+        ),
+        "parent": parent,
+    }
+
+
+def _cut_parent_mismatch_error(
+    expected: str,
+    actual: str,
+    ref: str,
+    parent: int,
+    branch: str,
+    cut_from_ref: str = "",
+) -> dict[str, Any]:
+    """Build the refusal for a public commit cut from the wrong parent.
+
+    The payload carries both full SHAs, the compared ref, and the parent
+    number so a caller can branch on data instead of parsing prose.  The
+    hint names the fetch/host-read window: the remote can advance between
+    the in-container ``git fetch`` and this host-side read, and rerunning
+    publish resolves that by fetching again.
+    """
+    payload: dict[str, Any] = {
+        "status": "error",
+        "step": "cut_parent_mismatch",
+        "error": (
+            "publish refused: the created commit's parent "
+            f"{parent} is {actual}, but the remote {ref} the commit was "
+            f"supposed to be cut from is {expected} (read host-side).  The "
+            "container's remote-tracking refs are writable inside the "
+            "sandbox, and the remote can advance between the authorized "
+            "fetch and this host read, so the public commit would have a "
+            "parent that does not exist on that ref.  No push was attempted."
+        ),
+        "expected_sha": expected,
+        "actual_sha": actual,
+        "ref": ref,
+        "parent": parent,
+        "branch": branch,
+        "hint": (
+            "Rerun publish; it performs a fresh authorized fetch.  That MAY "
+            "resolve a mismatch caused by the remote advancing between the "
+            "in-container fetch and the host read.  It cannot repair a stale "
+            "or default-renamed remote-tracking ref by itself: if the "
+            "container's refs no longer match the remote, start a fresh "
+            "container (or repair the ref) before rerunning."
+        ),
+    }
+    if cut_from_ref:
+        payload["cut_from"] = cut_from_ref
+    return payload
+
+
+def _resolve_expected_cut_parents(
+    repo: str,
+    token: str,
+    branch: str,
+    base_branch: str,
+    merge_is_merge: bool,
+) -> tuple[ExpectedCutParents | None, dict[str, Any] | None]:
+    """Determine the parent SHAs the public commit must have, host-side.
+
+    Selection mirrors ``git_prepare_commit``'s *intended* behaviour, but from
+    host reads only:
+
+    * parent1 is the remote publish branch tip when that branch exists;
+      otherwise the explicit ``base_branch`` tip, or the repository default
+      branch tip when ``base_branch`` is omitted;
+    * a merge rebuild additionally expects parent2 to be that same base tip,
+      even when parent1 is an existing feature branch.
+
+    Only a structured 404 on the *publish branch* allows the base fallback.
+    A 404 for a required base, a metadata failure, or any other API error is
+    returned as an error payload (fail closed).
+    """
+    publish_read = _host_read_branch_ref(repo, token, branch)
+    if publish_read.error:
+        return None, _cut_parent_host_error(
+            publish_read.error, f"refs/heads/{branch}",
+        )
+
+    base_name = ""
+    base_read: HostRefRead | None = None
+
+    def _required_base() -> tuple[HostRefRead | None, dict[str, Any] | None]:
+        """Resolve and read the base branch once, failing closed."""
+        nonlocal base_name, base_read
+        if base_read is not None:
+            return base_read, None
+        if base_branch:
+            base_name = base_branch
+        else:
+            name, err = _host_read_default_branch(repo, token)
+            if err:
+                return None, _cut_parent_host_error(err, f"/repos/{repo}")
+            base_name = name
+        base_read = _host_read_branch_ref(repo, token, base_name)
+        if base_read.error:
+            return None, _cut_parent_host_error(
+                base_read.error, f"refs/heads/{base_name}",
+            )
+        if base_read.absent:
+            return None, _cut_parent_host_error(
+                f"required base refs/heads/{base_name} does not exist on "
+                "the remote",
+                f"refs/heads/{base_name}",
+            )
+        return base_read, None
+
+    if publish_read.sha:
+        parent1 = publish_read.sha
+        parent1_ref = f"refs/heads/{branch}"
+    else:
+        base, base_err = _required_base()
+        if base_err is not None or base is None:
+            return None, base_err
+        parent1 = base.sha
+        parent1_ref = f"refs/heads/{base_name}"
+
+    parent2 = ""
+    parent2_ref = ""
+    if merge_is_merge:
+        base, base_err = _required_base()
+        if base_err is not None or base is None:
+            return None, base_err
+        parent2 = base.sha
+        parent2_ref = f"refs/heads/{base_name}"
+
+    return ExpectedCutParents(
+        parent1=parent1,
+        parent1_ref=parent1_ref,
+        parent2=parent2,
+        parent2_ref=parent2_ref,
+    ), None
+
+
+def _parse_captured_commit(
+    output: str,
+    mode: str,
+) -> tuple[str, list[str], str]:
+    """Parse the post-commit probe output into (commit SHA, raw parents).
+
+    The probe emits::
+
+        __sunaba_cut_parents__ <mode>
+        <created commit SHA>
+        <raw commit object from cat-file -p>
+
+    Only the commit's header (everything before the first blank line) is
+    inspected.  ``parent`` lines are taken verbatim and in order; file names
+    or commit-message text that happen to spell "parent ..." are never
+    considered.  The tree header and every parent must be full 40-hex object
+    names, and the parent count must match *mode*:
+    ``single`` exactly one, ``merge`` one or two (a valid degenerate rebuild
+    has one).  Anything else is a refusal, not an optimistic parse.
+
+    Returns ``(sha, parents, error)``; on error both value fields are empty.
+    """
+    if _CUT_PARENT_MARK not in output:
+        return "", [], "probe produced no machine-readable output"
+
+    tail = output.split(_CUT_PARENT_MARK, 1)[1]
+    lines = tail.splitlines()
+    if not lines:
+        return "", [], "probe produced no machine-readable output"
+
+    reported_mode = lines[0].strip()
+    if reported_mode != mode:
+        return "", [], (
+            f"probe reported shape {reported_mode!r}, expected {mode!r}"
+        )
+    if len(lines) < 2:
+        return "", [], "probe did not report the created commit object name"
+
+    commit_sha = lines[1].strip()
+    if not _CUT_PARENT_SHA_RE.match(commit_sha):
+        return "", [], (
+            "the created commit object name is missing or not a full SHA"
+        )
+
+    header = lines[2:]
+    if not header or not header[0].startswith("tree "):
+        return "", [], "the raw commit object has no tree header"
+    tree_sha = header[0][len("tree "):].strip()
+    if not _CUT_PARENT_SHA_RE.match(tree_sha):
+        return "", [], "the raw commit object has a malformed tree header"
+
+    parents: list[str] = []
+    for line in header[1:]:
+        if not line.strip():
+            # End of the commit header: the message starts here and is not
+            # allowed to contribute parent lines.
+            break
+        if not line.startswith("parent "):
+            continue
+        parent = line[len("parent "):].strip()
+        if not _CUT_PARENT_SHA_RE.match(parent):
+            return "", [], (
+                f"the raw commit object has a malformed parent header: {line!r}"
+            )
+        parents.append(parent.lower())
+
+    if not parents:
+        return "", [], "the raw commit object has no parent header"
+    if mode == _CUT_PARENT_MODE_SINGLE and len(parents) != 1:
+        return "", [], (
+            f"the raw commit object has {len(parents)} parents; a single-parent "
+            "publish must have exactly 1"
+        )
+    if mode == _CUT_PARENT_MODE_MERGE and len(parents) not in (1, 2):
+        return "", [], (
+            f"the raw commit object has {len(parents)} parents; a merge rebuild "
+            "must have 1 or 2"
+        )
+
+    return commit_sha.lower(), parents, ""
+
+
+def _read_commit_parents(
+    run: RunFunc,
+    mode: str = _CUT_PARENT_MODE_SINGLE,
+) -> tuple[str, list[str], dict[str, Any] | None]:
+    """Read the just-created commit's *raw* parents (#948).
+
+    ``git rev-parse HEAD^1`` is not good enough: it follows ``refs/replace``
+    and ``.git/info/grafts``, both writable inside the container.  A
+    post-commit hook can point ``HEAD^1`` at a legitimate parent while the
+    object git actually pushes still carries a forged one.
+
+    The probe therefore captures the created commit's object name first and
+    reads the object itself with ``git --no-replace-objects cat-file -p``.
+    That shows the raw header regardless of replacement or graft state.
+    ``rev-parse --no-replace-objects HEAD^1`` alone is not sufficient: the
+    ``--no-replace-objects`` flag does not disable grafts.
+
+    Returns ``(commit_sha, ordered_parents, error)``.  Any unreadable,
+    malformed, or shape-inconsistent answer fails closed.
+    """
+    command = (
+        f"printf '%s %s\\n' {_CUT_PARENT_MARK} {mode}; "
+        "sha=$(git rev-parse --verify HEAD 2>/dev/null) || "
+        f"{{ printf '%s\\n' {_CUT_PARENT_MISSING}; exit 4; }}; "
+        "printf '%s\\n' \"$sha\"; "
+        "git --no-replace-objects cat-file -p \"$sha\""
+    )
+    ec, out, err = run(command)
+    if ec != 0:
+        detail = (err or out).strip() or f"exit {ec}"
+        return "", [], _cut_parent_read_error(1, f"probe failed: {detail}")
+
+    commit_sha, parents, parse_err = _parse_captured_commit(out, mode)
+    if parse_err:
+        return "", [], _cut_parent_read_error(1, parse_err)
+    return commit_sha, parents, None
+
+
+def _cut_parent_degenerate_mismatch_error(
+    expected: str,
+    resolved: str,
+    ref: str,
+    branch: str,
+    cut_from_ref: str = "",
+) -> dict[str, Any]:
+    """Build the refusal for a degenerate rebuild with a wrong second parent.
+
+    The container reported a single-parent rebuild because the
+    second-parent candidate it resolved is already contained in ``HEAD^1``.
+    That candidate is container-resolved, so it is compared with the host's
+    base tip: pointing ``origin/<base>`` at the feature tip (or an older
+    ancestor of it) forces the degenerate path and drops ``HEAD^2`` while
+    the real base still diverges.  The payload keeps the mismatch shape
+    (both SHAs, ref, rerun hint) and names the candidate it compared.
+    """
+    payload = _cut_parent_mismatch_error(
+        expected, resolved, ref, 2, branch, cut_from_ref,
+    )
+    payload["error"] = (
+        "publish refused: the merge rebuild dropped HEAD^2 because its "
+        f"container-resolved second parent {resolved} is already contained "
+        f"in HEAD^1, but the remote {ref} that second parent must be is "
+        f"{expected} (read host-side).  The container's remote-tracking "
+        "refs are writable inside the sandbox, and the remote can advance "
+        "between the authorized fetch and this host read, so the public "
+        "commit would silently lose the merge lineage against a base that "
+        "does not match.  No push was attempted."
+    )
+    payload["resolved_second_parent"] = resolved
+    payload["degenerate_rebuild"] = True
+    return payload
+
+
+def _verify_cut_parents(
+    run: RunFunc,
+    *,
+    repo: str,
+    token: str,
+    branch: str,
+    base_branch: str,
+    merge_is_merge: bool,
+    merge_info: dict,
+    cut_from_ref: str = "",
+    merge_parent_sha: str = "",
+) -> tuple[str, dict[str, Any] | None]:
+    """Verify the public commit's real parents against host-read remote tips.
+
+    Runs immediately after a successful manifest ``git_prepare_commit`` and
+    before any push.  Returns ``(captured_commit_sha, error_payload)``.  On
+    success the SHA is the full object name whose raw parents were verified;
+    the caller must push exactly that object rather than re-resolving the
+    mutable branch ref.  On any mismatch or unreadable required datum the SHA
+    is empty and the payload explains the refusal.
+
+    ``merge_parent_sha`` is the second-parent candidate ``publish`` resolved
+    from the container's refs for the #819 rebuild.  It matters when the
+    rebuild degenerated to a single-parent commit: "parent2 is contained in
+    parent1" is decided from container-controlled refs, so the candidate is
+    compared with the host's base tip rather than trusted (a rewritten
+    ``origin/<base>`` can force the degenerate path on its own).
+    """
+    expected, host_err = _resolve_expected_cut_parents(
+        repo, token, branch, base_branch, merge_is_merge,
+    )
+    if host_err is not None:
+        return "", host_err
+    if expected is None:
+        # Fail closed even if a future change makes the resolver return
+        # (None, None): without an expected parent there is nothing to verify.
+        return "", _cut_parent_read_error(
+            1, "host-authorized expected parent is unavailable",
+        )
+
+    mode = (
+        _CUT_PARENT_MODE_MERGE if merge_is_merge else _CUT_PARENT_MODE_SINGLE
+    )
+    commit_sha, parents, read_err = _read_commit_parents(run, mode)
+    if read_err is not None:
+        return "", read_err
+    if not commit_sha or not parents:
+        return "", _cut_parent_read_error(
+            1, "the created commit object yielded no verifiable parent",
+        )
+    parent1 = parents[0]
+    parent2 = parents[1] if len(parents) > 1 else ""
+
+    if parent1 != expected.parent1:
+        return "", _cut_parent_mismatch_error(
+            expected.parent1, parent1, expected.parent1_ref, 1, branch,
+            cut_from_ref,
+        )
+
+    if merge_is_merge:
+        # A detected merge whose container-side parent2 could not be resolved
+        # degraded to a single-parent commit.  That is exactly the case this
+        # guard must not wave through: the public commit would silently lose
+        # the #819 merge lineage.
+        if merge_info.get("merge_second_parent_unresolved"):
+            return "", _cut_parent_read_error(
+                2,
+                "the merge rebuild required a second parent but the "
+                "container could not resolve the base ref",
+            )
+        # An actual second parent is checked whenever it is present.  The
+        # ``merge_degenerate`` flag is written by the sandbox, so it cannot
+        # excuse an unexpected HEAD^2.
+        if parent2:
+            if parent2 != expected.parent2:
+                return "", _cut_parent_mismatch_error(
+                    expected.parent2, parent2, expected.parent2_ref, 2,
+                    branch, cut_from_ref,
+                )
+        elif merge_info.get("merge_degenerate"):
+            # A legitimate degenerate rebuild (the resolved parent2 is
+            # already contained in parent1) intentionally produces a
+            # single-parent commit.  The containment test used container
+            # refs, so accepting the flag alone lets a rewritten
+            # ``origin/<base>`` force the degenerate path while the real base
+            # still diverges.  Compare the resolved candidate with the
+            # host-read base tip instead of trusting the flag.
+            resolved = (merge_parent_sha or "").strip().lower()
+            if not _CUT_PARENT_SHA_RE.match(resolved):
+                return "", _cut_parent_read_error(
+                    2,
+                    "the merge rebuild reported a degenerate single-parent "
+                    "commit but its resolved second-parent candidate is "
+                    "missing or malformed",
+                )
+            if resolved != expected.parent2:
+                return "", _cut_parent_degenerate_mismatch_error(
+                    expected.parent2, resolved, expected.parent2_ref,
+                    branch, cut_from_ref,
+                )
+        else:
+            return "", _cut_parent_read_error(
+                2, "the created merge commit has no HEAD^2",
+            )
+
+    return commit_sha, None
+
+
+def _validate_cut_parents(
+    run: RunFunc,
+    **kwargs: Any,
+) -> dict[str, Any] | None:
+    """Error-only view of :func:`_verify_cut_parents` (test/debug seam)."""
+    _commit_sha, err = _verify_cut_parents(run, **kwargs)
+    return err
+
+
 # The single exit tool (docs/design.md section 11.1).  Two transports: git
 # push with credential helper, then GitHub Objects API
 # (blob->tree->commit->ref) as automatic fallback.  Host-side token
@@ -1248,6 +1915,11 @@ def publish(
 
     merge_info: dict = {}  # populated by git_prepare_commit (merge mode)
     cut_from: dict = {}  # populated by git_prepare_commit (manifest mode)
+    # The full object name whose raw parents the #948 guard verified.  Empty
+    # in legacy mode (no manifest commit to validate) and on a refusal.  When
+    # set, both push transports are pinned to this object instead of the
+    # mutable branch ref.
+    verified_sha = ""
     # Upstream-overwrite guard state (#863).  Manifest mode only -- the
     # guard compares declared paths, so a stage-all publish has nothing to
     # declare; the defaults keep the result-building code below branch-free.
@@ -1560,6 +2232,41 @@ def publish(
         if commit_err:
             return finish_json(commit_err, verified)
 
+        # --- Host-authorized cut-parent validation (#948) ---
+        # The commit was cut from refs the container controls, and the
+        # manifest secret scan above ran *before* the commit (#676: secrets
+        # must not enter local history).  This guard therefore sits where it
+        # can: immediately after the public commit exists and before any
+        # push or PR.  It captures the created commit's object name, reads its
+        # raw header (never HEAD^1 through replace/grafts), and compares the
+        # ordered parents with the remote branch tips the host reads from
+        # GitHub; forged remote-tracking refs, a post-fetch ref rewrite, and a
+        # mismatching local base fallback all stop here.
+        verified_sha, cut_parent_err = _verify_cut_parents(
+            _run,
+            repo=repo,
+            token=fetch_token,
+            branch=branch,
+            base_branch=base_branch,
+            merge_is_merge=merge_is_merge,
+            merge_info=merge_info,
+            cut_from_ref=cut_from.get("ref", ""),
+            # The #819 rebuild's container-resolved second parent.  Required
+            # when the rebuild degenerated (see _verify_cut_parents): the
+            # degenerate decision used container refs, so the candidate is
+            # compared with the host base rather than trusted.
+            merge_parent_sha=merge_parent_sha or "",
+        )
+        if cut_parent_err is not None:
+            record_boundary_crossing(
+                cid, "publish",
+                "cut_parent refused step="
+                f"{cut_parent_err.get('step', '')} "
+                f"branch={branch} ref={cut_parent_err.get('ref', '')}",
+                approved=False,
+            )
+            return finish_json(cut_parent_err, verified)
+
         # Compute AC-4 set: paths the merge touched that are explained
         # by neither the manifest nor the base's auto-include.
         # These are the "real accident" candidates (issue #711).
@@ -1714,7 +2421,13 @@ def publish(
     push_env = select_push_env(token_env, proxied)
     network_off = container.labels.get(NETWORK_LABEL) == "false"
     token_missing = not push_token
-    push_cmd = build_push_command(branch, allow_force_push)
+    # Pin the native push source to the verified object when the manifest
+    # guard ran.  ``push origin <branch>`` re-resolves a ref that can move
+    # after the guard; ``<sha>:refs/heads/<branch>`` cannot.  Legacy mode has
+    # no verified object and keeps the historical command shape.
+    push_cmd = build_push_command(
+        branch, allow_force_push, source_sha=verified_sha,
+    )
 
     sha = ""
 
@@ -1728,8 +2441,10 @@ def publish(
                 repo=repo, branch=branch, cid=cid,
                 push_cmd=push_cmd, push_env=push_env,
                 network_off=network_off, token_missing=token_missing,
+                verified_sha=verified_sha,
                 try_api_push=lambda: _try_api_push(
                     container, cid, repo, branch, working_dir, env=push_env,
+                    verified_sha=verified_sha,
                 ),
                 record_crossing=_record_crossing,
             )
@@ -1850,6 +2565,7 @@ def _try_api_push(
     branch: str,
     working_dir: str,
     env: dict[str, str] | None = None,
+    verified_sha: str = "",
 ) -> dict[str, str]:
     """Push HEAD via GitHub Objects API (blob->tree->commit->ref).
 
@@ -1861,6 +2577,12 @@ def _try_api_push(
     reads ``GITHUB_TOKEN`` from its environment to authenticate — so a
     container that carries no VCS token of its own can still push via this
     fallback transport.
+
+    *verified_sha* pins the API commit to the object the #948 guard
+    validated.  The script then builds the tree, message, author, and
+    ordered parents from that object instead of a later ``HEAD``/branch ref.
+    When omitted (legacy publishes) the historical HEAD-driven behaviour is
+    kept.
     """
     script_b64 = base64.b64encode(
         _SANDBOX_CREATE_PR_SCRIPT.encode("utf-8")
@@ -1884,9 +2606,14 @@ def _try_api_push(
 
     _run(f"echo {shlex.quote(script_b64)} | base64 -d > /tmp/_sandbox_create_pr.py")
 
+    script_args = (
+        f"{shlex.quote(repo)} {shlex.quote(branch)} {shlex.quote(working_dir)}"
+    )
+    if verified_sha:
+        script_args += f" {shlex.quote(verified_sha)}"
     ec, out, err = _run(
         f"trap 'rm -f /tmp/_sandbox_create_pr.py' EXIT"
-        f" && python3 /tmp/_sandbox_create_pr.py {shlex.quote(repo)} {shlex.quote(branch)} {shlex.quote(working_dir)}",
+        f" && python3 /tmp/_sandbox_create_pr.py {script_args}",
         exec_env=env,
     )
     if ec != 0:

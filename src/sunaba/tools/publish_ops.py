@@ -665,6 +665,7 @@ def git_push_with_fallback(
     token_missing: bool,
     try_api_push: Callable[[], dict[str, str]],
     record_crossing: Callable[[str, bool], None],
+    verified_sha: str = "",
 ) -> tuple[dict | None, str, str]:
     """Push with transport fallback to GitHub Objects API.
 
@@ -672,6 +673,12 @@ def git_push_with_fallback(
     (injected by the caller so this function stays Docker-free).
     ``record_crossing(reason, approved)`` records a boundary-crossing
     journal entry.
+
+    ``verified_sha`` is the full object name the caller already validated
+    (the #948 cut-parent guard).  When supplied it is the reported source
+    SHA on success and failure, never a later ``git rev-parse HEAD``: the
+    branch ref can move after validation.  When omitted the historical
+    behaviour (report ``HEAD``) is preserved for legacy publishes.
 
     Returns ``(error_payload_or_None, sha, transport)``.  On success
     ``error_payload`` is ``None``, ``sha`` is the pushed commit SHA
@@ -682,11 +689,13 @@ def git_push_with_fallback(
     """
     push_ec, push_out, push_err = run(push_cmd, env=push_env)
 
-    # Get the SHA of the pushed commit
-    sha = ""
-    sha_ec, sha_out, _ = run("git rev-parse HEAD")
-    if sha_ec == 0:
-        sha = sha_out.strip()[:7]
+    # Get the SHA of the pushed commit.  A verified object name is preferred:
+    # re-reading HEAD here would report a ref that can move after the guard.
+    sha = verified_sha.strip()[:7] if verified_sha.strip() else ""
+    if not sha:
+        sha_ec, sha_out, _ = run("git rev-parse HEAD")
+        if sha_ec == 0:
+            sha = sha_out.strip()[:7]
 
     transport = ""
 

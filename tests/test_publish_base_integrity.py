@@ -24,6 +24,7 @@ from tests.conftest import _FakeClient
 from tests.test_publish_ops_gitrepo import (
     _advance_upstream,
     _git,
+    _origin_host_ref_read,
     _origin_tip_blobs,
     _RealGitContainer,
 )
@@ -179,6 +180,15 @@ def _run_publish(
         patch(
             "sunaba.tools.vcs.publishing._fetch_base_tip_blobs",
             side_effect=tip_read_fn,
+        ),
+        # #948: the parent guard's host read, answered from the bare origin.
+        patch(
+            "sunaba.tools.vcs.publishing._host_read_branch_ref",
+            side_effect=_origin_host_ref_read(repo_setup["origin_dir"]),
+        ),
+        patch(
+            "sunaba.tools.vcs.publishing._host_read_default_branch",
+            side_effect=lambda repo, token: ("main", ""),
         ),
         patch("sunaba.tools.secret_scan._baseline_enabled", return_value=False),
         patch.object(

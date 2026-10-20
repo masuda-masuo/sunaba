@@ -209,6 +209,7 @@ class TestDriftDetection:
         # them, but they are not tool parameters so no schema carries them.
         "output_id",                     # saved foreground output handle (#900)
         "cut_from",                      # publish: the ref the commit was cut from (#891)
+        "cut_parent_mismatch",           # publish: cut-parent refusal step (#948)
         "uv.lock",                       # root uv lock manifest
         "pyproject.toml",                # root Python project manifest
         "all-groups",                    # uv sync argument

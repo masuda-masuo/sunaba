@@ -22,6 +22,7 @@ from sunaba.tools.publish_ops import git_prepare_commit
 from sunaba.tools.vcs.publishing import (
     _BLOB_ABSENT,
     _BLOB_UNREADABLE,
+    HostRefRead,
     UpstreamMergeBaseBlobs,
     UpstreamTipRead,
     _fetch_base_tip_blobs,
@@ -1935,6 +1936,22 @@ class TestUpstreamOverwriteRefusalMessage:
         assert "predates the upstream commits above" in err["hint"]
 
 
+def _origin_host_ref_read(origin_dir: str):
+    """Answer the #948 host ref read from the bare origin.
+
+    The bare origin is the closest hermetic stand-in for "the host reads the
+    real remote": the container's tracking refs are never consulted.
+    """
+
+    def _read(repo: str, token: str, branch: str) -> HostRefRead:
+        result = _git(origin_dir, "rev-parse", "--verify", f"refs/heads/{branch}")
+        if result.returncode != 0:
+            return HostRefRead("", True, "")
+        return HostRefRead(result.stdout.strip(), False, "")
+
+    return _read
+
+
 class TestPublishUpstreamOverwriteGuard:
     """publish() itself against a real clone + bare origin (#863, #866).
 
@@ -1977,6 +1994,15 @@ class TestPublishUpstreamOverwriteGuard:
                         repo_setup["origin_dir"], base_branch or "main", paths,
                     )
                 ),
+            ),
+            # #948: the host reads the real branch tips from the bare origin.
+            patch(
+                "sunaba.tools.vcs.publishing._host_read_branch_ref",
+                side_effect=_origin_host_ref_read(repo_setup["origin_dir"]),
+            ),
+            patch(
+                "sunaba.tools.vcs.publishing._host_read_default_branch",
+                side_effect=lambda repo, token: ("main", ""),
             ),
             # The baseline is a REST read too (#708); off keeps the test
             # hermetic without changing what the guard sees.

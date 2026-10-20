@@ -14,7 +14,13 @@ from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV, EgressProxyError
 from sunaba.security import NETWORK_LABEL
 from sunaba.tools.vcs import _create_pr_via_api, publish
 from sunaba.tools.vcs.publishing import AutoIncludeResult
-from tests.conftest import _decode, _exec_cmd, _make_client_mock, _make_publish_container
+from tests.conftest import (
+    _cut_parent_probe_reply,
+    _decode,
+    _exec_cmd,
+    _make_client_mock,
+    _make_publish_container,
+)
 
 # Standard execute exec sequence shared by the one-shot non-manifest push
 # tests.  Order matches publish()'s actual exec flow: git ls-files (capture
@@ -31,6 +37,16 @@ _PUSH_SEQUENCE = [
     (0, b"pushed", b""),  # git push
     (0, b"abc1234def5678", b""),  # git rev-parse HEAD
 ]
+
+
+@pytest.fixture(autouse=True)
+def _cut_parent_host(cut_parent_host_stub):
+    """Answer the #948 host reads deterministically for this module.
+
+    The fixture stubs only the host side; the guard's comparison still runs
+    against the container probe that ``_make_publish_container`` scripts.
+    """
+    return cut_parent_host_stub
 
 
 class TestPublish:
@@ -3664,6 +3680,9 @@ class TestPublishFreshBaseAuthorization:
             cmd = args[0] if args else kwargs.get("cmd", [])
             cmd_str = " ".join(str(c) for c in (cmd if isinstance(cmd, list) else []))
 
+            probe_reply = _cut_parent_probe_reply(cmd_str)
+            if probe_reply is not None:
+                return (0, (probe_reply, b""))
             if "test -f" in cmd_str:
                 return (0, (b"", b""))
             if "fetch origin" in cmd_str:

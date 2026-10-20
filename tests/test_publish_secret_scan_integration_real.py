@@ -27,6 +27,19 @@ from tests.conftest import (
     _make_publish_container_for_scan_test,
 )
 
+
+@pytest.fixture(autouse=True)
+def _cut_parent_host(cut_parent_host_stub):
+    """Answer the #948 host reads without a network call in this module.
+
+    These tests are about the real secret scan, not the parent guard, but
+    their successful publishes still pass through it.  The guard itself is
+    left running against the container probe ``_make_publish_container``
+    scripts.
+    """
+    return cut_parent_host_stub
+
+
 # ============================================================================
 # Helpers: build fixture data at runtime (no literal secrets)
 # ============================================================================

@@ -591,8 +591,9 @@ class TestCallerInitializationPlumbing:
 
         assert "deps: uv sync" in result
         assert "timeout" in result
-        assert "deps failed" in result.lower() or "[deps failed" in result.lower() or "error" in result.lower(), (
-            f"sandbox_initialize must visibly report failed deps and error indicator: {result!r}"
+        assert "[deps failed]" in result
+        assert result.startswith(
+            f"Container {mock_container.id[:12]} is running; dependency preparation failed: {mock_install_deps.return_value.note}"
         )
 
     @patch("sunaba.tools.container.lifecycle._install_repo_deps")

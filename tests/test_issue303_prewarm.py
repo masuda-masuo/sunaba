@@ -40,7 +40,7 @@ class TestMonotonicProgress:
             return "cid1234567890"
 
         with patch(
-            "sunaba.tools.container.lifecycle.sandbox_initialize", side_effect=_slow
+            "sunaba.tools.container.lifecycle._sandbox_initialize", side_effect=_slow
         ), patch("sunaba.tools.container.lifecycle._PROGRESS_INTERVAL_SECONDS", 0.05):
             result = asyncio.run(sandbox_initialize_tool(image=_IMAGE, ctx=ctx))
 

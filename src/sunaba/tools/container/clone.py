@@ -237,6 +237,28 @@ def _normalize_pip_extras(pip_extras: str | None) -> str | None:
     return pip_extras
 
 
+def _exec_run_with_deadline(
+    container: Any,
+    cmd: list[str],
+    *,
+    stdout: bool = True,
+    stderr: bool = True,
+    demux: bool = True,
+) -> tuple[int, Any]:
+    """Execute command in container enforcing any active foreground deadline."""
+    marker_env = foreground_marker_environment()
+    exec_kwargs: dict[str, object] = {
+        "stdout": stdout,
+        "stderr": stderr,
+        "demux": demux,
+    }
+    if marker_env is not None:
+        exec_kwargs["environment"] = marker_env
+    return run_exec_under_foreground_deadline(
+        lambda: container.exec_run(cmd, **exec_kwargs)
+    )
+
+
 def _run_pip_install(
     container: Any,
     clone_repo: str,
@@ -270,20 +292,9 @@ def _run_pip_install(
     safe_dest = shlex.quote(clone_dest)
     local_pip_args = pip_args or ""
     install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
-    marker_env = foreground_marker_environment()
-    exec_kwargs: dict[str, Any] = {
-        "stdout": True,
-        "stderr": True,
-        "demux": True,
-    }
-    if marker_env is not None:
-        exec_kwargs["environment"] = marker_env
-
-    exit_code, output = run_exec_under_foreground_deadline(
-        lambda: container.exec_run(
-            ["/bin/sh", "-c", install_cmd],
-            **exec_kwargs,
-        )
+    exit_code, output = _exec_run_with_deadline(
+        container,
+        ["/bin/sh", "-c", install_cmd],
     )
 
     stdout_part, stderr_part = output or (b"", b"")
@@ -337,21 +348,10 @@ def _detect_manifests(container: Any, clone_dest: str) -> set[str]:
     safely select uv versus pip, and must never trigger a pip fallback.
     """
     probe = _manifest_probe_cmd(clone_dest)
-    marker_env = foreground_marker_environment()
-    exec_kwargs: dict[str, Any] = {
-        "stdout": True,
-        "stderr": True,
-        "demux": True,
-    }
-    if marker_env is not None:
-        exec_kwargs["environment"] = marker_env
-
     try:
-        exit_code, output = run_exec_under_foreground_deadline(
-            lambda: container.exec_run(
-                ["/bin/sh", "-c", probe],
-                **exec_kwargs,
-            )
+        exit_code, output = _exec_run_with_deadline(
+            container,
+            ["/bin/sh", "-c", probe],
         )
     except ForegroundTreeTimeout:
         raise
@@ -417,20 +417,9 @@ def _run_npm_install(
         )
         return None
     install_cmd = _npm_install_cmd(clone_dest, lockfile)
-    marker_env = foreground_marker_environment()
-    exec_kwargs: dict[str, Any] = {
-        "stdout": True,
-        "stderr": True,
-        "demux": True,
-    }
-    if marker_env is not None:
-        exec_kwargs["environment"] = marker_env
-
-    exit_code, output = run_exec_under_foreground_deadline(
-        lambda: container.exec_run(
-            ["/bin/sh", "-c", install_cmd],
-            **exec_kwargs,
-        )
+    exit_code, output = _exec_run_with_deadline(
+        container,
+        ["/bin/sh", "-c", install_cmd],
     )
 
     stdout_part, stderr_part = output or (b"", b"")
@@ -566,20 +555,10 @@ def _install_repo_deps(
                     command=command,
                 )
                 _record_deps_progress(container, "deps: " + command)
-                marker_env = foreground_marker_environment()
-                exec_kwargs: dict[str, Any] = {
-                    "stdout": True,
-                    "stderr": True,
-                    "demux": True,
-                }
-                if marker_env is not None:
-                    exec_kwargs["environment"] = marker_env
                 try:
-                    exit_code, output = run_exec_under_foreground_deadline(
-                        lambda: container.exec_run(
-                            ["/bin/sh", "-c", f"cd {shlex.quote(clone_dest)} && {command}"],
-                            **exec_kwargs,
-                        )
+                    exit_code, output = _exec_run_with_deadline(
+                        container,
+                        ["/bin/sh", "-c", f"cd {shlex.quote(clone_dest)} && {command}"],
                     )
                     stdout_part, stderr_part = output or (b"", b"")
                     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""

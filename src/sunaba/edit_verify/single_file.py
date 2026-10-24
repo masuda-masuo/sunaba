@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import posixpath
-from typing import Any
+from typing import Any, NamedTuple
 
 from .lint_runners import (
     _run_eslint_verify,
@@ -59,8 +59,11 @@ def lint_file(
 
     ext = _get_extension(file_path)
     try:
-        workdir, lint_path, scope_path = _resolve_lint_context(
-            container, file_path, scope_workdir
+        context = _resolve_single_file_context(container, file_path, scope_workdir)
+        workdir, lint_path, scope_path = (
+            context.workdir,
+            context.target_path,
+            context.scope_path,
         )
     except Exception as e:
         return [{
@@ -103,23 +106,37 @@ def lint_file(
         ]
 
 
-def _resolve_lint_context(
+class SingleFileContext(NamedTuple):
+    """Resolved execution context shared by single-file lint and type checks."""
+
+    workdir: str | None
+    target_path: str
+    scope_path: str | None
+
+
+def _resolve_single_file_context(
     container: Any,
     file_path: str,
     scope_workdir: ScopeWorkdir | None,
-) -> tuple[str | None, str, str | None]:
-    """Resolve file and optional lint scope against one project-root cwd."""
+) -> SingleFileContext:
+    """Resolve a target and optional lexical scope against one execution root.
+
+    _determine_scope supplies a lexical scope plus the anchor from which that
+    scope was inferred. Docker WORKDIR establishes the base for relative
+    target inputs. When Docker metadata is available, the nearest marked
+    project ancestor of the resolved target becomes the execution root.
+    """
+    normalized_file = file_path.replace("\\", "/")
     attrs = getattr(container, "attrs", None)
     config = attrs.get("Config") or {} if isinstance(attrs, dict) else {}
     configured_workdir = config.get("WorkingDir") if isinstance(config, dict) else None
     if not isinstance(configured_workdir, str) or not configured_workdir:
         configured_workdir = None
 
-    # A real Docker attrs dict with empty/missing WorkingDir means cwd '/'.
-    # Scope anchors must not retarget relative files from that known cwd.
+    # A present attrs mapping with empty/missing WorkingDir means cwd '/'.
+    # Missing Docker metadata keeps the historical fallback behavior.
     cwd_is_known = isinstance(attrs, dict)
     base_workdir = configured_workdir or "/"
-    # Preserve the legacy caller anchor only when Docker metadata is unavailable.
     if (
         not cwd_is_known
         and scope_workdir
@@ -127,22 +144,21 @@ def _resolve_lint_context(
     ):
         base_workdir = posixpath.normpath(scope_workdir[1])
 
+    is_absolute_file = normalized_file.startswith("/")
     absolute_file = (
-        posixpath.normpath(file_path)
-        if file_path.startswith("/")
-        else posixpath.normpath(posixpath.join(base_workdir, file_path))
+        posixpath.normpath(normalized_file)
+        if is_absolute_file
+        else posixpath.normpath(posixpath.join(base_workdir, normalized_file))
     )
+
     if cwd_is_known:
         project_root = _project_root_for_absolute_path(
             container, absolute_file, base_workdir
         )
-        # An absolute target outside every marked project belongs to its own
-        # directory. Do not inherit an unrelated Docker WORKDIR (for example,
-        # an unprepared uv project elsewhere in the container).
+        # A standalone absolute target belongs to its own directory; do not
+        # inherit an unrelated project rooted at the Docker WORKDIR.
         workdir = project_root or (
-            posixpath.dirname(absolute_file)
-            if file_path.startswith("/")
-            else base_workdir
+            posixpath.dirname(absolute_file) if is_absolute_file else base_workdir
         )
     else:
         workdir = (
@@ -151,36 +167,33 @@ def _resolve_lint_context(
             else None
         )
 
-    # Preserve paths relative to the container's configured cwd when no
-    # project marker was found. Once a project is found, express both target
-    # and scope relative to that same project root.
-    if not cwd_is_known and not file_path.startswith("/"):
-        lint_path = posixpath.normpath(file_path)
-    elif file_path.startswith("/"):
-        lint_path = (
+    if not cwd_is_known and not is_absolute_file:
+        target_path = posixpath.normpath(normalized_file)
+    elif is_absolute_file:
+        target_path = (
             posixpath.relpath(absolute_file, workdir)
-            if workdir and (
+            if workdir
+            and (
                 absolute_file == workdir
                 or absolute_file.startswith(workdir.rstrip("/") + "/")
             )
             else absolute_file
         )
     elif workdir != base_workdir:
-        lint_path = posixpath.relpath(absolute_file, workdir)
+        target_path = posixpath.relpath(absolute_file, workdir)
     else:
-        lint_path = posixpath.normpath(file_path)
+        target_path = posixpath.normpath(normalized_file)
 
     scope_path: str | None = None
     if scope_workdir is not None:
         scope = posixpath.normpath(scope_workdir[0].replace("\\", "/"))
         anchor = posixpath.normpath(scope_workdir[1].replace("\\", "/"))
-        # Only _determine_scope's repeated input-parent fallback is
-        # already relative to Docker WORKDIR: ("tests", "tests") must
-        # not become tests/tests. All other relative scopes use their
-        # supplied anchor, even ("src", "src") for src/src/clean.py or
-        # an explicit ("checks", "checks") for a file elsewhere.
+
+        # _determine_scope's parent fallback repeats the input parent in both
+        # tuple fields. Only here do we recognize that the scope is already
+        # relative to Docker WORKDIR; callers otherwise preserve its anchor.
         input_parent = posixpath.normpath(
-            posixpath.dirname(file_path.replace("\\", "/")) or "."
+            posixpath.dirname(normalized_file) or "."
         )
         is_parent_fallback = (
             scope_workdir == _determine_scope(file_path)
@@ -188,11 +201,12 @@ def _resolve_lint_context(
         )
         if not scope.startswith("/") and not is_parent_fallback:
             scope = posixpath.join(anchor, scope)
+
         if workdir is None and not scope.startswith("/"):
             scope_path = posixpath.normpath(scope)
         else:
             absolute_scope = posixpath.normpath(
-                posixpath.join(base_workdir, scope)
+                scope if scope.startswith("/") else posixpath.join(base_workdir, scope)
             )
             if workdir and (
                 absolute_scope == workdir
@@ -201,7 +215,18 @@ def _resolve_lint_context(
                 scope_path = posixpath.relpath(absolute_scope, workdir)
             else:
                 scope_path = absolute_scope
-    return workdir, lint_path, scope_path
+
+    return SingleFileContext(workdir, target_path, scope_path)
+
+
+def _resolve_lint_context(
+    container: Any,
+    file_path: str,
+    scope_workdir: ScopeWorkdir | None,
+) -> tuple[str | None, str, str | None]:
+    """Compatibility wrapper for the shared single-file context resolver."""
+    context = _resolve_single_file_context(container, file_path, scope_workdir)
+    return context.workdir, context.target_path, context.scope_path
 
 
 def _project_root_for_absolute_path(
@@ -209,7 +234,12 @@ def _project_root_for_absolute_path(
     file_path: str,
     fallback_workdir: str | None,
 ) -> str | None:
-    """Find the nearest marked project ancestor of an absolute file path."""
+    """Find the nearest project marker in the container filesystem.
+
+    This probes real directories from the resolved target parent upward; it
+    is separate from the lexical scope/anchor inferred by _determine_scope.
+    Docker WORKDIR is used only as the probe cwd and fallback boundary.
+    """
     # Docker uses / when Config.WorkingDir is empty.
     fallback_workdir = fallback_workdir or "/"
     parent = posixpath.dirname(file_path)
@@ -342,22 +372,40 @@ def type_check_file(
         return [{"file": file_path, "line": 0, "rule": "error", "message": str(e)}]
 
     ext = _get_extension(file_path)
+    try:
+        context = _resolve_single_file_context(container, file_path, scope_workdir)
+    except Exception as e:
+        return [{
+            "file": file_path,
+            "line": 0,
+            "rule": "error",
+            "message": f"type_check path resolution failed: {str(e)[:180]}",
+        }]
 
-    if ext in (".py",):
-        workdir = scope_workdir.workdir if scope_workdir else None
-        findings = _run_python_typecheck(container, file_path, workdir=workdir)
-        if not findings and scope_workdir:
-            scope_path, workdir = scope_workdir
+    workdir = context.workdir
+    target_path = context.target_path
+    scope_path = context.scope_path
+
+    if ext == ".py":
+        findings = _run_python_typecheck(
+            container, target_path, workdir=workdir, original_file_path=file_path
+        )
+        if not findings and scope_path is not None:
             scope_r = _run_pyright_verify(container, scope_path, workdir=workdir)
-            if scope_r.status not in ("not_available", "error"):
+            if scope_r.status == "error":
+                return _error_findings(scope_r, file_path, "pyright")
+            if scope_r.status != "not_available":
                 return scope_r.findings
         return findings
     elif ext in (".ts", ".tsx"):
-        findings = _run_ts_typecheck(container, file_path)
-        if not findings and scope_workdir:
-            scope_path, workdir = scope_workdir
+        findings = _run_ts_typecheck(
+            container, target_path, workdir=workdir, original_file_path=file_path
+        )
+        if not findings and scope_path is not None:
             scope_r = _run_tsc_verify(container, scope_path, workdir=workdir)
-            if scope_r.status not in ("not_available", "error"):
+            if scope_r.status == "error":
+                return _error_findings(scope_r, file_path, "tsc")
+            if scope_r.status != "not_available":
                 return scope_r.findings
         return findings
     else:
@@ -372,7 +420,10 @@ def type_check_file(
 
 
 def _run_python_typecheck(
-    container: Any, file_path: str, workdir: str | None = None
+    container: Any,
+    file_path: str,
+    workdir: str | None = None,
+    original_file_path: str | None = None,
 ) -> list[dict[str, Any]]:
     """Try pyright for Python type checking.
 
@@ -381,13 +432,16 @@ def _run_python_typecheck(
     (Issue #747).  When *workdir* is ``None`` the runner falls back
     to deriving the project root from the file path.
     """
+    result_path = original_file_path or file_path
     pyright_result = _run_pyright_verify(container, file_path, workdir=workdir)
-    if pyright_result.status not in ("not_available", "error"):
+    if pyright_result.status == "error":
+        return _error_findings(pyright_result, result_path, "pyright")
+    if pyright_result.status != "not_available":
         return pyright_result.findings
 
     return [
         {
-            "file": file_path,
+            "file": result_path,
             "line": 0,
             "rule": "no-typechecker",
             "message": (
@@ -399,15 +453,23 @@ def _run_python_typecheck(
     ]
 
 
-def _run_ts_typecheck(container: Any, file_path: str) -> list[dict[str, Any]]:
+def _run_ts_typecheck(
+    container: Any,
+    file_path: str,
+    workdir: str | None = None,
+    original_file_path: str | None = None,
+) -> list[dict[str, Any]]:
     """Try tsc. Uses unified runner."""
-    tsc_result = _run_tsc_verify(container, file_path)
-    if tsc_result.status not in ("not_available", "error"):
+    result_path = original_file_path or file_path
+    tsc_result = _run_tsc_verify(container, file_path, workdir=workdir)
+    if tsc_result.status == "error":
+        return _error_findings(tsc_result, result_path, "tsc")
+    if tsc_result.status != "not_available":
         return tsc_result.findings
 
     return [
         {
-            "file": file_path,
+            "file": result_path,
             "line": 0,
             "rule": "no-typechecker",
             "message": (

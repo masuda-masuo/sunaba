@@ -15,8 +15,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
+import mcp.types as mt
 from docker.errors import APIError, NotFound
 from fastmcp import Context
+from fastmcp.tools import ToolResult
 from pydantic import BeforeValidator
 
 from sunaba import capture_health, proxy_client, proxy_lifecycle
@@ -1270,7 +1272,7 @@ def sandbox_initialize(
             pip_args=pip_args,
         )
         if deps.note:
-            deps_note = f" ({deps.note})"
+            deps_note = f" ({deps.note}) [deps failed]" if deps.failed else f" ({deps.note})"
             # PR setup built its message without the deps note; append there.
             # Plain clone and branch both live in clone_msg.
             if pr is not None:
@@ -1384,15 +1386,26 @@ async def sandbox_initialize_tool(
             apply_from_container=apply_from_container,
         )
 
+    def _wrap_result(res: str) -> Any:
+        if isinstance(res, str) and ("[deps failed]" in res or res.startswith("Error:")):
+            return ToolResult(
+                content=[mt.TextContent(type="text", text=res)],
+                structured_content={"result": res},
+                is_error=True,
+            )
+        return res
+
     if ctx is None:
-        return _work()
+        return _wrap_result(_work())
 
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(None, _work)
     start = time.monotonic()
     while not future.done():
         try:
-            await asyncio.wait_for(asyncio.shield(future), timeout=_PROGRESS_INTERVAL_SECONDS)
+            await asyncio.wait_for(
+                asyncio.shield(future), timeout=_PROGRESS_INTERVAL_SECONDS
+            )
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - start
             try:
@@ -1401,7 +1414,7 @@ async def sandbox_initialize_tool(
                 )
             except Exception as e:
                 logger.warning("report_progress failed: %s", e)
-    return await future
+    return _wrap_result(await future)
 
 
 #: sandbox_stop(force=False) refusal when the unpushed-checkpoint guard
@@ -1806,10 +1819,13 @@ def run_container_and_exec(
     # Manifest-aware deps outcome (pip/npm steps) for the clone_repo path;
     # carried in result["deps"] on success (failures land in clone_warning).
     deps_note: str = ""
+    deps_error: str = ""
+    deps_failed: bool = False
     # Same ground truth as sandbox_initialize: a proxied container holds no
     # token (#356), so the network clone must go anonymous (#403 fallout).
     container_has_token = "GITHUB_TOKEN" in env or "GH_TOKEN" in env
     open_read_grant = proxied and not container_has_token
+    repo_cloned = False
     if clone_repo and branch:
         try:
             _setup_branch(
@@ -1822,8 +1838,10 @@ def run_container_and_exec(
                 authenticated=container_has_token,
                 open_read_grant=open_read_grant,
                 pip_args=pip_args,
+                install_deps=False,
                 allow_network=allow_network,
             )
+            repo_cloned = True
         except Exception as e:
             logger.warning("Branch setup failed: %s", e)
             clone_error = str(e)
@@ -1837,18 +1855,7 @@ def run_container_and_exec(
             open_read_grant=open_read_grant,
         )
         if clone_error is None:
-            deps = _install_repo_deps(
-                container,
-                clone_repo,
-                clone_dest,
-                pip_extras,
-                allow_network=allow_network,
-                pip_args=pip_args,
-            )
-            if deps.failed:
-                clone_error = deps.note
-            else:
-                deps_note = deps.note
+            repo_cloned = True
     elif clone_repo and pr is not None:
         logger.info(
             "Skipping clone_repo=%s (pr=%s handles its own clone)",
@@ -1876,11 +1883,35 @@ def run_container_and_exec(
                     authenticated=container_has_token,
                     open_read_grant=open_read_grant,
                     pip_args=pip_args,
+                    install_deps=False,
                     allow_network=allow_network,
                 )
+                repo_cloned = True
             except Exception as e:
                 logger.warning("PR branch setup failed: %s", e)
                 pr_error = str(e)
+
+    # --- Dev dependency install (Issue #146, #949) ---
+    if repo_cloned and (clone_repo is not None or repo is not None):
+        install_repo = repo if pr is not None else (clone_repo if clone_repo is not None else repo)
+        assert install_repo is not None
+        deps = _install_repo_deps(
+            container,
+            install_repo,
+            clone_dest,
+            pip_extras,
+            allow_network=allow_network,
+            pip_args=pip_args,
+        )
+        if deps.failed:
+            if pr is not None:
+                pr_error = deps.note
+            else:
+                clone_error = deps.note
+            deps_error = deps.note
+            deps_failed = True
+        else:
+            deps_note = deps.note
 
     # --- Execute commands ---
     try:
@@ -2002,6 +2033,9 @@ def run_container_and_exec(
         result["stderr"] = stderr_text
     if clone_error:
         result["clone_warning"] = clone_error
+    if deps_failed:
+        result["deps_error"] = deps_error
+        result["deps_failed"] = True
     if deps_note:
         result["deps"] = deps_note
     if pr_error:

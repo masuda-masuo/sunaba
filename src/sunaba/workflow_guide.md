@@ -25,6 +25,13 @@ host-side fallbacks) and leave sunaba's tool contracts to this guide.
 - **Never reuse a container across repositories** -- the lint and type gates are silently
   skipped when the toolchain does not match.
 - **One PR per container.** See the base trap under `publish`.
+- **Dependency preparation deadline (issue #949).** Repository dependency preparation
+  during container initialization runs under `SUNABA_DEPS_TIMEOUT=180` seconds by default
+  (`0` disables it; a positive value overrides it; invalid or negative values fall back
+  to 180). This single shared budget covers manifest detection, uv sync, pip install,
+  and npm ci/install. It leaves ~120s nominal headroom for clone, cleanup, and response
+  within the client's ~300s wait. At expiry, all marked processes are reaped using the
+  foreground reaper, deps failure is reported, and any prior verify success is invalidated.
 - If uv python install or uv sync --locked reports “No download found” / “No interpreter found” even with network enabled, the image's uv Python catalogue may be stale. For the 3.14.8 failure in [#928](https://github.com/masuda-masuo/sunaba/issues/928), upgrade uv in this container, then install the requested Python and retry the project's sync (or original command):
 
       python -m pip install --upgrade uv

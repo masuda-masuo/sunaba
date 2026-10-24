@@ -77,6 +77,8 @@ Run commands and manage packages inside the container.
 
 `sandbox_exec`, `run_python`, and `package_install` run under a server-side foreground deadline (`SUNABA_FOREGROUND_TIMEOUT`, default 270s, `0` disables, invalid/negative fall back to 270). On expiry the whole command tree, including setsid-detached children, is reaped and the call returns `status: "timeout"`, `exit_code: 124`, and `timeout: {deadline_s, reap, elapsed_s}`. An explicit `timeout` on `sandbox_exec` takes precedence and also reaps descendants. `sandbox_exec_background` is not subject to the deadline; `package_install` has no per-call override, so run heavy installs in the background. The tree is found by an environment marker: a descendant that clears its environment escapes the reap.
 
+Repository dependency preparation during clone (`sandbox_initialize`, `run_container_and_exec`, `_setup_branch`, `_setup_pr_branch`) runs under a server-side foreground deadline budget (`SUNABA_DEPS_TIMEOUT`, default 180s, `0` disables, invalid/negative fall back to 180). This covers manifest detection, `uv sync`, `pip install`, and `npm ci`/`npm install`. A 180s default leaves ~120s nominal headroom for repository clone, cleanup, and response serialization within the client's ~300s tool-call boundary (this is a dependency preparation budget, not a new guarantee bounding arbitrary clone durations). On expiry all marked processes are reaped, `DepsResult.failed` is reported, prior verify success is invalidated, interrupted `uv sync` records failed environment state, and callers visibly propagate the failure.
+
 ---
 
 ## 3. File Operations

@@ -1288,7 +1288,7 @@ def _sandbox_initialize(
             deps_failed = True
             deps_note_str = deps.note or "dependency preparation failed"
         if deps.note:
-            deps_note = f" ({deps.note}) [deps failed]" if deps.failed else f" ({deps.note})"
+            deps_note = " [deps failed]" if deps.failed else f" ({deps.note})"
             # PR setup built its message without the deps note; append there.
             # Plain clone and branch both live in clone_msg.
             if pr is not None:
@@ -1435,7 +1435,13 @@ def sandbox_initialize(
         If *pr* is specified, a message about the PR branch setup
         is appended.
         If *branch* is specified, a message about the branch checkout
-        is appended.
+        is appended. If dependency preparation fails after the container
+        starts, the text begins with exactly
+        ``Container <id> is running; dependency preparation failed: <note>: ``
+        followed by the normal body, which includes ``[deps failed]``.
+        This function still returns a string; the async
+        ``sandbox_initialize_tool`` wrapper returns a ToolResult with
+        ``is_error=True`` when dependency preparation fails.
 
     """
     return _sandbox_initialize(
@@ -1506,6 +1512,8 @@ async def sandbox_initialize_tool(
 
     Returns:
         Container ID prefix plus clone/checkout/network summary.
+        If dependency preparation fails, the returned ToolResult has
+        ``is_error=True``.
     """
     def _work() -> Any:
         return _sandbox_initialize(

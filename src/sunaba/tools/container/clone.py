@@ -5,10 +5,20 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import re
 import shlex
 from typing import Any, NamedTuple
 
+from sunaba.edit_verify.shell import (
+    ForegroundTreeTimeout,
+    _active_foreground_scope,
+    close_foreground_deadline,
+    foreground_marker_environment,
+    new_foreground_marker,
+    open_foreground_deadline,
+    run_exec_under_foreground_deadline,
+)
 from sunaba.journal import (
     record_boundary_crossing,
     record_copy,
@@ -25,6 +35,34 @@ from sunaba.tools.vcs import (
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+#: Environment variable resolving the dependency preparation deadline (seconds).
+#: ``0`` disables the deadline; a positive numeric value overrides the default;
+#: invalid or negative values fall back to the default (only ``0`` disables --
+#: a misconfiguration must not silently turn the deadline off).
+_DEPS_TIMEOUT_ENV: str = "SUNABA_DEPS_TIMEOUT"
+_DEFAULT_DEPS_TIMEOUT: float = 180.0
+
+
+def resolve_deps_deadline() -> float:
+    """Resolve the dependency preparation deadline from ``SUNABA_DEPS_TIMEOUT``.
+
+    Contract: default 180.0s when unset; a positive numeric override is used as-is;
+    exactly ``0`` disables the deadline; invalid or negative values fall
+    back to the default (only ``0`` disables -- a misconfiguration must not
+    silently turn the deadline off).
+    """
+    raw = os.environ.get(_DEPS_TIMEOUT_ENV, "").strip()
+    if raw == "":
+        return _DEFAULT_DEPS_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_DEPS_TIMEOUT
+    if value < 0:
+        return _DEFAULT_DEPS_TIMEOUT
+    return value
+
 
 _CLONE_REPO_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9._-]+$")
 
@@ -72,9 +110,11 @@ def _write_clone_meta(container: Any, clone_path: str, base_branch: str | None =
         safe_meta = shlex.quote(meta_json)
         meta_dir = META_PATH.rsplit("/", 1)[0]
         container.exec_run(
-            ["/bin/sh", "-c",
-             f"mkdir -p {shlex.quote(meta_dir)} "
-             f"&& printf '%s' {safe_meta} > {shlex.quote(META_PATH)}"],
+            [
+                "/bin/sh",
+                "-c",
+                f"mkdir -p {shlex.quote(meta_dir)} && printf '%s' {safe_meta} > {shlex.quote(META_PATH)}",
+            ],
         )
     except Exception as e:
         logger.warning("Failed to write clone meta: %s", e)
@@ -197,6 +237,28 @@ def _normalize_pip_extras(pip_extras: str | None) -> str | None:
     return pip_extras
 
 
+def _exec_run_with_deadline(
+    container: Any,
+    cmd: list[str],
+    *,
+    stdout: bool = True,
+    stderr: bool = True,
+    demux: bool = True,
+) -> tuple[int, Any]:
+    """Execute command in container enforcing any active foreground deadline."""
+    marker_env = foreground_marker_environment()
+    exec_kwargs: dict[str, object] = {
+        "stdout": stdout,
+        "stderr": stderr,
+        "demux": demux,
+    }
+    if marker_env is not None:
+        exec_kwargs["environment"] = marker_env
+    return run_exec_under_foreground_deadline(
+        lambda: container.exec_run(cmd, **exec_kwargs)
+    )
+
+
 def _run_pip_install(
     container: Any,
     clone_repo: str,
@@ -230,12 +292,11 @@ def _run_pip_install(
     safe_dest = shlex.quote(clone_dest)
     local_pip_args = pip_args or ""
     install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_run_with_deadline(
+        container,
         ["/bin/sh", "-c", install_cmd],
-        stdout=True,
-        stderr=True,
-        demux=True,
     )
+
     stdout_part, stderr_part = output or (b"", b"")
     install_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -288,12 +349,12 @@ def _detect_manifests(container: Any, clone_dest: str) -> set[str]:
     """
     probe = _manifest_probe_cmd(clone_dest)
     try:
-        exit_code, output = container.exec_run(
+        exit_code, output = _exec_run_with_deadline(
+            container,
             ["/bin/sh", "-c", probe],
-            stdout=True,
-            stderr=True,
-            demux=True,
         )
+    except ForegroundTreeTimeout:
+        raise
     except Exception as e:
         raise RuntimeError(f"manifest detection failed: {str(e)[:200]}") from e
     if exit_code != 0:
@@ -356,12 +417,11 @@ def _run_npm_install(
         )
         return None
     install_cmd = _npm_install_cmd(clone_dest, lockfile)
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_run_with_deadline(
+        container,
         ["/bin/sh", "-c", install_cmd],
-        stdout=True,
-        stderr=True,
-        demux=True,
     )
+
     stdout_part, stderr_part = output or (b"", b"")
     install_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
@@ -427,125 +487,162 @@ def _install_repo_deps(
     """
     from sunaba.verify_state import invalidate_verify_success, record_environment_state
 
+    active_step = "manifest detection"
+    owned_scope = False
+    if _active_foreground_scope() is None:
+        deadline_s = resolve_deps_deadline()
+        open_foreground_deadline(container, deadline_s, new_foreground_marker())
+        owned_scope = _active_foreground_scope() is not None
+
     try:
-        manifests = _detect_manifests(container, clone_dest)
-    except RuntimeError as exc:
-        # Root identity is unknown: keep preparation state but discard any
-        # prior verify result that may be stale for this checkout.
-        invalidate_verify_success(str(container.id))
-        return DepsResult(f"deps: manifest detection failed: {exc}", True)
-    has_uv = "pyproject.toml" in manifests and "uv.lock" in manifests
-    if not has_uv:
-        from sunaba.verify_state import clear_environment_state, get_environment_state
+        try:
+            manifests = _detect_manifests(container, clone_dest)
+        except RuntimeError as exc:
+            # Root identity is unknown: keep preparation state but discard any
+            # prior verify result that may be stale for this checkout.
+            invalidate_verify_success(str(container.id))
+            return DepsResult(f"deps: manifest detection failed: {exc}", True)
+        has_uv = "pyproject.toml" in manifests and "uv.lock" in manifests
+        if not has_uv:
+            from sunaba.verify_state import clear_environment_state, get_environment_state
 
-        prior = get_environment_state(str(container.id))
-        if prior is not None:
-            clear_environment_state(str(container.id), invalidate_verify=True)
-    has_py = "pyproject.toml" in manifests or "setup.py" in manifests
-    has_js = "package.json" in manifests
-    has_go = "go.mod" in manifests
-    has_cargo = "Cargo.toml" in manifests
-    notes: list[str] = []
-    errors: list[str] = []
+            prior = get_environment_state(str(container.id))
+            if prior is not None:
+                clear_environment_state(str(container.id), invalidate_verify=True)
+        has_py = "pyproject.toml" in manifests or "setup.py" in manifests
+        has_js = "package.json" in manifests
+        has_go = "go.mod" in manifests
+        has_cargo = "Cargo.toml" in manifests
+        notes: list[str] = []
+        errors: list[str] = []
 
-    if not allow_network and not has_uv:
-        logger.info(
-            "Skipping deps install for %s: container has no network access",
-            clone_repo,
-        )
-        return DepsResult("", False)
+        if not allow_network and not has_uv:
+            logger.info(
+                "Skipping deps install for %s: container has no network access",
+                clone_repo,
+            )
+            return DepsResult("", False)
 
-    if has_uv:
-        if not allow_network:
-            reason = "network_disabled"
-            record_environment_state(
-                container.id, "failed", reason=reason,
-                command="uv sync --locked --all-groups",
-            )
-            errors.append(f"uv preparation failed: {reason}")
-        elif pip_extras is None:
-            record_environment_state(container.id, "not_prepared", reason="pip_extras=None")
-            notes.append("uv not_prepared (pip_extras=None)")
-        elif _normalize_pip_extras(pip_extras) != "[dev]" or (pip_args or "").strip():
-            reason = "unsupported_uv_arguments"
-            record_environment_state(
-                container.id, "failed", reason=reason,
-                command="uv sync --locked --all-groups",
-            )
-            errors.append(f"uv preparation failed: {reason}")
-        else:
-            command = "uv sync --locked --all-groups"
-            record_environment_state(
-                container.id, "not_prepared", reason="uv sync in progress",
-                command=command,
-            )
-            _record_deps_progress(container, "deps: " + command)
-            try:
-                exit_code, output = container.exec_run(
-                    ["/bin/sh", "-c", f"cd {shlex.quote(clone_dest)} && {command}"],
-                    stdout=True,
-                    stderr=True,
-                    demux=True,
-                )
-                stdout_part, stderr_part = output or (b"", b"")
-                stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-                stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-                if exit_code == 0:
-                    record_environment_state(container.id, "ready", command=command, exit_code=0)
-                    notes.append("uv sync --locked --all-groups ok")
-                else:
-                    diagnostic = (stderr_text or stdout_text).strip()
-                    diagnostic = re.sub(r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", diagnostic)
-                    diagnostic = re.sub(r"https?://[^\s/@]+:[^\s/@]+@", "https://[REDACTED]@", diagnostic)
-                    diagnostic = diagnostic[:240]
-                    reason = f"sync_failed: {diagnostic}"
-                    record_environment_state(
-                        container.id, "failed", reason=reason,
-                        command=command, exit_code=exit_code,
-                    )
-                    suffix = f": {diagnostic}" if diagnostic else ""
-                    errors.append(f"uv sync --locked --all-groups failed (exit {exit_code}){suffix}")
-            except Exception as exc:
-                diagnostic = re.sub(r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", str(exc))[:240]
+        if has_uv:
+            if not allow_network:
+                reason = "network_disabled"
                 record_environment_state(
-                    container.id, "failed", reason=f"sync_error: {diagnostic}",
+                    container.id,
+                    "failed",
+                    reason=reason,
+                    command="uv sync --locked --all-groups",
+                )
+                errors.append(f"uv preparation failed: {reason}")
+            elif pip_extras is None:
+                record_environment_state(container.id, "not_prepared", reason="pip_extras=None")
+                notes.append("uv not_prepared (pip_extras=None)")
+            elif _normalize_pip_extras(pip_extras) != "[dev]" or (pip_args or "").strip():
+                reason = "unsupported_uv_arguments"
+                record_environment_state(
+                    container.id,
+                    "failed",
+                    reason=reason,
+                    command="uv sync --locked --all-groups",
+                )
+                errors.append(f"uv preparation failed: {reason}")
+            else:
+                active_step = "uv sync"
+                command = "uv sync --locked --all-groups"
+                record_environment_state(
+                    container.id,
+                    "not_prepared",
+                    reason="uv sync in progress",
                     command=command,
                 )
-                errors.append(f"uv sync --locked --all-groups failed: {diagnostic}")
+                _record_deps_progress(container, "deps: " + command)
+                try:
+                    exit_code, output = _exec_run_with_deadline(
+                        container,
+                        ["/bin/sh", "-c", f"cd {shlex.quote(clone_dest)} && {command}"],
+                    )
+                    stdout_part, stderr_part = output or (b"", b"")
+                    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+                    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+                    if exit_code == 0:
+                        record_environment_state(container.id, "ready", command=command, exit_code=0)
+                        notes.append("uv sync --locked --all-groups ok")
+                    else:
+                        diagnostic = (stderr_text or stdout_text).strip()
+                        diagnostic = re.sub(
+                            r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", diagnostic
+                        )
+                        diagnostic = re.sub(r"https?://[^\s/@]+:[^\s/@]+@", "https://[REDACTED]@", diagnostic)
+                        diagnostic = diagnostic[:240]
+                        reason = f"sync_failed: {diagnostic}"
+                        record_environment_state(
+                            container.id,
+                            "failed",
+                            reason=reason,
+                            command=command,
+                            exit_code=exit_code,
+                        )
+                        suffix = f": {diagnostic}" if diagnostic else ""
+                        errors.append(f"uv sync --locked --all-groups failed (exit {exit_code}){suffix}")
+                except ForegroundTreeTimeout:
+                    raise
+                except Exception as exc:
+                    diagnostic = re.sub(
+                        r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", str(exc)
+                    )[:240]
+                    record_environment_state(
+                        container.id,
+                        "failed",
+                        reason=f"sync_error: {diagnostic}",
+                        command=command,
+                    )
+                    errors.append(f"uv sync --locked --all-groups failed: {diagnostic}")
 
-    elif has_py:
-        if pip_extras is None:
-            notes.append("pip skipped (pip_extras=None)")
-        else:
-            _record_deps_progress(container, "deps: pip install")
-            err = _run_pip_install(
-                container, clone_repo, clone_dest, pip_extras, allow_network, pip_args
-            )
+        elif has_py:
+            if pip_extras is None:
+                notes.append("pip skipped (pip_extras=None)")
+            else:
+                active_step = "pip install"
+                _record_deps_progress(container, "deps: pip install")
+                err = _run_pip_install(container, clone_repo, clone_dest, pip_extras, allow_network, pip_args)
+                if err is not None:
+                    errors.append(err)
+                else:
+                    notes.append("pip install ok")
+
+        if has_js and allow_network:
+            lockfile = "package-lock.json" in manifests
+            active_step = "npm ci" if lockfile else "npm install"
+            _record_deps_progress(container, "deps: " + active_step)
+            err = _run_npm_install(container, clone_repo, clone_dest, allow_network, lockfile)
             if err is not None:
                 errors.append(err)
             else:
-                notes.append("pip install ok")
+                notes.append("npm ci ok" if lockfile else "npm install ok")
+        elif has_js and not allow_network:
+            notes.append("npm skipped (network disabled)")
+        if has_go and not has_py and not has_js:
+            notes.append("go.mod detected — delegated to fetch-on-build")
+        if has_cargo and not has_py and not has_js:
+            notes.append("Cargo.toml detected — delegated to fetch-on-build")
+        if not has_py and not has_js and not has_go and not has_cargo:
+            notes.append("no manifest detected — skipped")
 
-    if has_js and allow_network:
-        lockfile = "package-lock.json" in manifests
-        _record_deps_progress(
-            container, "deps: npm ci" if lockfile else "deps: npm install"
-        )
-        err = _run_npm_install(container, clone_repo, clone_dest, allow_network, lockfile)
-        if err is not None:
-            errors.append(err)
-        else:
-            notes.append("npm ci ok" if lockfile else "npm install ok")
-    elif has_js and not allow_network:
-        notes.append("npm skipped (network disabled)")
-    if has_go and not has_py and not has_js:
-        notes.append("go.mod detected — delegated to fetch-on-build")
-    if has_cargo and not has_py and not has_js:
-        notes.append("Cargo.toml detected — delegated to fetch-on-build")
-    if not has_py and not has_js and not has_go and not has_cargo:
-        notes.append("no manifest detected — skipped")
-
-    return DepsResult(f"deps: {'; '.join(notes + errors)}" if notes or errors else "", bool(errors))
+        return DepsResult(f"deps: {'; '.join(notes + errors)}" if notes or errors else "", bool(errors))
+    except ForegroundTreeTimeout as exc:
+        invalidate_verify_success(str(container.id))
+        if active_step == "uv sync":
+            record_environment_state(
+                container.id,
+                "failed",
+                reason=f"deps_timeout: {exc}",
+                command="uv sync --locked --all-groups",
+            )
+        reap_verdict = exc.reap or "incomplete"
+        note = f"deps: {active_step} timeout (deadline_s={exc.deadline_s:g}s, reap={reap_verdict})"
+        return DepsResult(note, True)
+    finally:
+        if owned_scope:
+            close_foreground_deadline()
 
 
 def _try_clone_into_container(
@@ -631,23 +728,16 @@ def _resolve_pr_head_ref(repo: str, pr_number: int, *, token: str | None = None)
                 " capped at 60/h per IP; configuring a host token raises it)"
             )
         raise RuntimeError(
-            f"Failed to resolve head ref for PR #{pr_number} in {repo}:"
-            f" GitHub API returned HTTP {e.code}{hint}"
+            f"Failed to resolve head ref for PR #{pr_number} in {repo}: GitHub API returned HTTP {e.code}{hint}"
         ) from e
     except urllib.error.URLError as e:
-        raise RuntimeError(
-            f"Failed to resolve head ref for PR #{pr_number} in {repo}: {e.reason}"
-        ) from e
+        raise RuntimeError(f"Failed to resolve head ref for PR #{pr_number} in {repo}: {e.reason}") from e
     head_ref = (data.get("head") or {}).get("ref") or ""
     base_ref = (data.get("base") or {}).get("ref") or ""
     if not head_ref:
-        raise RuntimeError(
-            f"GitHub API returned no head ref for PR #{pr_number} in {repo}"
-        )
+        raise RuntimeError(f"GitHub API returned no head ref for PR #{pr_number} in {repo}")
     if not base_ref:
-        raise RuntimeError(
-            f"GitHub API returned no base ref for PR #{pr_number} in {repo}"
-        )
+        raise RuntimeError(f"GitHub API returned no base ref for PR #{pr_number} in {repo}")
     return head_ref, base_ref
 
 
@@ -769,11 +859,7 @@ def _setup_pr_branch(
     # nullcontext otherwise so the authenticated/public-repo paths are
     # unaffected.
     grant_open = open_read_grant and not authenticated
-    grant = (
-        authorized_read_grant(repo, token=anon_token or None)
-        if grant_open
-        else contextlib.nullcontext()
-    )
+    grant = authorized_read_grant(repo, token=anon_token or None) if grant_open else contextlib.nullcontext()
     journal_detail = f"repo={repo} pr=#{pr_number} dest={safe_dest} proxy_read_grant=True"
     try:
         with grant:
@@ -842,10 +928,15 @@ def _setup_pr_branch(
     deps_msg = ""
     if install_deps:
         deps = _install_repo_deps(
-            container, repo, clone_dest, pip_extras,
-            allow_network=allow_network, pip_args=pip_args,
+            container,
+            repo,
+            clone_dest,
+            pip_extras,
+            allow_network=allow_network,
+            pip_args=pip_args,
         )
-        deps_msg = f" ({deps.note})" if deps.note else ""
+        if deps.note:
+            deps_msg = f" ({deps.note}) [deps failed]" if deps.failed else f" ({deps.note})"
 
     _write_clone_meta(container, clone_dest, base_branch=base_ref)
 
@@ -903,18 +994,13 @@ def _resolve_default_branch(repo: str, *, token: str | None = None) -> str:
                 " capped at 60/h per IP; configuring a host token raises it)"
             )
         raise RuntimeError(
-            f"Failed to resolve default branch for {repo}:"
-            f" GitHub API returned HTTP {e.code}{hint}"
+            f"Failed to resolve default branch for {repo}: GitHub API returned HTTP {e.code}{hint}"
         ) from e
     except urllib.error.URLError as e:
-        raise RuntimeError(
-            f"Failed to resolve default branch for {repo}: {e.reason}"
-        ) from e
+        raise RuntimeError(f"Failed to resolve default branch for {repo}: {e.reason}") from e
     default_branch = data.get("default_branch", "")
     if not default_branch:
-        raise RuntimeError(
-            f"GitHub API returned no default_branch for {repo}"
-        )
+        raise RuntimeError(f"GitHub API returned no default_branch for {repo}")
     return default_branch
 
 
@@ -986,20 +1072,16 @@ def _setup_branch(
     # Build the clone command with branch parameter.
     # _build_clone_command already handles -b <branch> for both auth paths.
     clone_cmd = _build_clone_command(
-        repo, clone_dest, branch=branch_name, authenticated=authenticated,
+        repo,
+        clone_dest,
+        branch=branch_name,
+        authenticated=authenticated,
     )
 
     # Open read-authorization grant for private repos under the proxy (#419).
     grant_open = open_read_grant and not authenticated
-    grant = (
-        authorized_read_grant(repo, token=anon_token or None)
-        if grant_open
-        else contextlib.nullcontext()
-    )
-    journal_detail = (
-        f"repo={repo} branch={branch_name} dest={clone_dest}"
-        f" proxy_read_grant=True"
-    )
+    grant = authorized_read_grant(repo, token=anon_token or None) if grant_open else contextlib.nullcontext()
+    journal_detail = f"repo={repo} branch={branch_name} dest={clone_dest} proxy_read_grant=True"
 
     try:
         with grant:
@@ -1010,14 +1092,8 @@ def _setup_branch(
                 demux=True,
             )
             stdout_part, stderr_part = output or (b"", b"")
-            clone_output = (
-                stdout_part.decode("utf-8", errors="replace")
-                if stdout_part else ""
-            )
-            stderr_text = (
-                stderr_part.decode("utf-8", errors="replace")
-                if stderr_part else ""
-            )
+            clone_output = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+            stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
 
             if exit_code != 0:
                 hint = (
@@ -1031,8 +1107,7 @@ def _setup_branch(
                     )
                 )
                 raise RuntimeError(
-                    f"Failed to clone repo {repo} on branch {branch_name}:"
-                    f" {stderr_text or clone_output}{hint}"
+                    f"Failed to clone repo {repo} on branch {branch_name}: {stderr_text or clone_output}{hint}"
                 )
 
             logger.info(
@@ -1045,12 +1120,18 @@ def _setup_branch(
     except Exception:
         if grant_open:
             record_boundary_crossing(
-                cid, "setup_branch", journal_detail, approved=False,
+                cid,
+                "setup_branch",
+                journal_detail,
+                approved=False,
             )
         raise
     if grant_open:
         record_boundary_crossing(
-            cid, "setup_branch", journal_detail, approved=True,
+            cid,
+            "setup_branch",
+            journal_detail,
+            approved=True,
         )
 
     # Verify the working tree is on the requested branch.
@@ -1064,10 +1145,7 @@ def _setup_branch(
         demux=True,
     )
     stdout_part, _ = output or (b"", b"")
-    actual_branch = (
-        stdout_part.decode("utf-8", errors="replace").strip()
-        if stdout_part else ""
-    )
+    actual_branch = stdout_part.decode("utf-8", errors="replace").strip() if stdout_part else ""
 
     if exit_code != 0 or actual_branch != branch_name:
         raise RuntimeError(
@@ -1083,11 +1161,15 @@ def _setup_branch(
         base_branch = _resolve_default_branch(repo, token=anon_token or None)
     except Exception:
         logger.warning(
-            "Failed to resolve default branch for %s", repo, exc_info=True,
+            "Failed to resolve default branch for %s",
+            repo,
+            exc_info=True,
         )
 
     _write_clone_meta(
-        container, clone_dest, base_branch=base_branch or None,
+        container,
+        clone_dest,
+        base_branch=base_branch or None,
     )
 
     # Install dev dependencies (non-fatal).  Manifest-aware: pip for python
@@ -1100,10 +1182,15 @@ def _setup_branch(
     deps_msg = ""
     if install_deps:
         deps = _install_repo_deps(
-            container, repo, clone_dest, pip_extras,
-            allow_network=allow_network, pip_args=pip_args,
+            container,
+            repo,
+            clone_dest,
+            pip_extras,
+            allow_network=allow_network,
+            pip_args=pip_args,
         )
-        deps_msg = f" ({deps.note})" if deps.note else ""
+        if deps.note:
+            deps_msg = f" ({deps.note}) [deps failed]" if deps.failed else f" ({deps.note})"
 
     record_copy(
         cid,
@@ -1112,6 +1199,4 @@ def _setup_branch(
         safe_dest,
     )
 
-    return (
-        f"Branch {branch_name} → {clone_dest} in container {cid}{deps_msg}"
-    )
+    return f"Branch {branch_name} → {clone_dest} in container {cid}{deps_msg}"

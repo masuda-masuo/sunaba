@@ -123,19 +123,13 @@ def test_lifecycle_callers_forward_effective_network_to_each_downstream_helper(
     elif pathway == "branch":
         setup_branch.assert_called_once()
         assert setup_branch.call_args.kwargs["allow_network"] is True
-        if mode == "initialize":
-            install.assert_called_once()
-            assert install.call_args.kwargs["allow_network"] is True
-        else:
-            install.assert_not_called()
+        install.assert_called_once()
+        assert install.call_args.kwargs["allow_network"] is True
     elif pathway == "pr":
         setup_pr.assert_called_once()
         assert setup_pr.call_args.kwargs["allow_network"] is True
-        if mode == "initialize":
-            install.assert_called_once()
-            assert install.call_args.kwargs["allow_network"] is True
-        else:
-            install.assert_not_called()
+        install.assert_called_once()
+        assert install.call_args.kwargs["allow_network"] is True
     else:
         setup_branch.assert_not_called()
         setup_pr.assert_not_called()

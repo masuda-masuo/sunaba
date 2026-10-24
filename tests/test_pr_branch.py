@@ -616,6 +616,7 @@ class TestRunContainerAndExecPrParam:
         mock_setup.assert_called_once_with(
             mock_container, "abc123def456", "owner/repo", 136, "/workspace", "[dev]",
             authenticated=False, open_read_grant=False, pip_args=None,
+            install_deps=False,
             allow_network=True,
         )
 

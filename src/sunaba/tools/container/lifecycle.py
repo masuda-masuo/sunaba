@@ -13,10 +13,12 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, NamedTuple
 
+import mcp.types as mt
 from docker.errors import APIError, NotFound
 from fastmcp import Context
+from fastmcp.tools import ToolResult
 from pydantic import BeforeValidator
 
 from sunaba import capture_health, proxy_client, proxy_lifecycle
@@ -102,6 +104,13 @@ from .reaper import (
     _reap_idle_containers,
     _reap_orphaned_init_containers,
 )
+
+
+class InitResult(NamedTuple):
+    """Structured outcome of container initialization."""
+    text: str
+    deps_failed: bool = False
+
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -756,7 +765,7 @@ def _format_carry_report(report: _CarryReport, old_cid: str) -> str:
     return segment
 
 
-def sandbox_initialize(
+def _sandbox_initialize(
     image: str | None = None,
     allow_network: bool = False,
     clone_repo: str | None = None,
@@ -771,8 +780,8 @@ def sandbox_initialize(
     name: str | None = None,
     session_label: str | None = None,
     apply_from_container: str | None = None,
-) -> str:
-    """Start a new Docker sandbox container.
+) -> InitResult:
+    """Internal container initialization returning structured outcome.
 
     The container runs ``sleep infinity`` and stays alive until
     explicitly stopped with :func:`sandbox_stop`.
@@ -876,23 +885,25 @@ def sandbox_initialize(
 
     # branch and pr are mutually exclusive (Issue #675b).
     if branch is not None and pr is not None:
-        return (
+        return InitResult(
             "Error: branch and pr are mutually exclusive; "
-            "a PR already determines its own head branch."
+            "a PR already determines its own head branch.",
+            deps_failed=False,
         )
 
     # An empty branch string lets git clone silently land on the default
     # branch (acceptance criterion #3).  Reject it explicitly.
     if branch is not None and not branch:
-        return "Error: branch must not be empty (empty string would clone the default branch)"
+        return InitResult("Error: branch must not be empty (empty string would clone the default branch)", deps_failed=False)
 
     # apply_from_container carries an old container's worktree into a fresh
     # clone, so it is meaningless without one (Issue #889).
     if apply_from_container is not None and not (clone_repo or pr or branch):
-        return (
+        return InitResult(
             "Error: apply_from_container requires clone_repo (or pr/branch) "
             "to be set; it re-applies an old container's uncommitted changes "
-            "into a freshly cloned repo."
+            "into a freshly cloned repo.",
+            deps_failed=False,
         )
 
     # When pr is specified, implicitly enable network access.
@@ -908,9 +919,10 @@ def sandbox_initialize(
         )
         # branch composes with clone_repo; require it.
         if clone_repo is None:
-            return (
+            return InitResult(
                 "Error: branch requires clone_repo to be set; "
-                "use clone_repo= to specify the repository."
+                "use clone_repo= to specify the repository.",
+                deps_failed=False,
             )
 
     # Auto-enable network for clone_repo (Issue #146)
@@ -929,7 +941,7 @@ def sandbox_initialize(
     if name:
         existing = _find_containers_by_name(client, name)
         if existing:
-            return f"Error: a container named {name!r} already exists ({existing[0][:12]}); use a different name or sandbox_attach to connect to it"
+            return InitResult(f"Error: a container named {name!r} already exists ({existing[0][:12]}); use a different name or sandbox_attach to connect to it", deps_failed=False)
 
     # No image given -> the all-in-one default (#584).  Nothing is guessed.
     resolved = _select_initial_image(image)
@@ -943,7 +955,7 @@ def sandbox_initialize(
         try:
             proxy_runtime = proxy_lifecycle.ensure_egress_proxy(client)
         except Exception as e:
-            return f"Error: egress proxy is enabled but unavailable (failing closed): {e}"
+            return InitResult(f"Error: egress proxy is enabled but unavailable (failing closed): {e}", deps_failed=False)
         env.update(proxy_lifecycle.sandbox_proxy_env(proxy_runtime))
 
     try:
@@ -952,7 +964,7 @@ def sandbox_initialize(
         resolved = _resolve_image_ref(resolved)
         validate_image_ref(resolved)
     except ValueError as e:
-        return f"Error: {e}"
+        return InitResult(f"Error: {e}", deps_failed=False)
 
     profile = replace(get_default_profile(), allow_network=allow_network)
 
@@ -973,17 +985,18 @@ def sandbox_initialize(
             requested_mb = _parse_mem_to_mb(mem_limit)
             cap_mb = int(host_mb * _HARD_CAP_RATIO)
             if requested_mb > cap_mb:
-                return (
+                return InitResult(
                     f"Error: mem_limit {mem_limit} exceeds host cap "
-                    f"({_HARD_CAP_RATIO:.0%} of host memory)"
+                    f"({_HARD_CAP_RATIO:.0%} of host memory)",
+                    deps_failed=False,
                 )
         resource_overrides["mem_limit"] = mem_limit
         resource_overrides["memswap_limit"] = mem_limit
     if cpus is not None:
         if cpus <= 0:
-            return "Error: cpus must be > 0"
+            return InitResult("Error: cpus must be > 0", deps_failed=False)
         if host_cpus and cpus > host_cpus:
-            return "Error: cpus exceeds host CPU count"
+            return InitResult("Error: cpus exceeds host CPU count", deps_failed=False)
         resource_overrides["cpu_quota"] = int(cpus * profile.cpu_period)
 
     # Stamp the creation time so the orphan reaper can age a container even if
@@ -1061,7 +1074,7 @@ def sandbox_initialize(
                         "error": "Failed to preflight fetch in source container",
                         "hint": "Ensure the source container is running and healthy.",
                     }
-                    return json.dumps(err_payload)
+                    return InitResult(json.dumps(err_payload), deps_failed=False)
                 if fetch_report is not None:
                     if fetch_report.step:
                         err_payload = {
@@ -1070,8 +1083,8 @@ def sandbox_initialize(
                             "error": fetch_report.error,
                             "hint": fetch_report.hint or "",
                         }
-                        return json.dumps(err_payload)
-                    return f"Error: {fetch_report.error}"
+                        return InitResult(json.dumps(err_payload), deps_failed=False)
+                    return InitResult(f"Error: {fetch_report.error}", deps_failed=False)
                 source_fetched = True
 
     try:
@@ -1093,11 +1106,11 @@ def sandbox_initialize(
                 container = client.containers.run(resolved, **run_kwargs)
                 _ensure_workspace(container, clone_dest)
             except Exception as e2:
-                return f"Error: {e2}"
+                return InitResult(f"Error: {e2}", deps_failed=False)
         else:
-            return f"Error: {e}"
+            return InitResult(f"Error: {e}", deps_failed=False)
     except Exception as e:
-        return f"Error: {e}"
+        return InitResult(f"Error: {e}", deps_failed=False)
 
     cid = str(container.id)[:12]
     with _run_map_lock:
@@ -1126,7 +1139,7 @@ def sandbox_initialize(
                 container.remove(force=True)
             finally:
                 record_stop(cid)
-            return f"Error: egress proxy CA install failed (failing closed): {e}"
+            return InitResult(f"Error: egress proxy CA install failed (failing closed): {e}", deps_failed=False)
 
     # -- Clone via network (Issue #146) --
     # When pr is set, _setup_pr_branch handles its own clone.
@@ -1244,8 +1257,8 @@ def sandbox_initialize(
                     "error": report.error,
                     "hint": report.hint or "",
                 }
-                return json.dumps(err_payload)
-            return f"Error: {report.error}"
+                return InitResult(json.dumps(err_payload), deps_failed=False)
+            return InitResult(f"Error: {report.error}", deps_failed=False)
         carry_msg = _format_carry_report(report, apply_from_container)
 
     # -- Dev dependency install (Issue #146) --
@@ -1255,12 +1268,14 @@ def sandbox_initialize(
     # 1).  The carry helper runs exactly once, before this block; the
     # pr/branch setup functions therefore install with install_deps=False and
     # hand the install to this single site.
+    deps_failed = False
+    deps_note_str = ""
     if repo_cloned and (clone_repo is not None or repo is not None):
         install_repo = clone_repo if clone_repo is not None else repo
         if install_repo is None:
             # Unreachable: the guard above requires at least one of
             # clone_repo/repo to be set when this branch is entered.
-            return "Error: internal — clone_repo/repo unexpectedly unset"
+            return InitResult("Error: internal — clone_repo/repo unexpectedly unset", deps_failed=False)
         deps = _install_repo_deps(
             container,
             install_repo,
@@ -1269,8 +1284,11 @@ def sandbox_initialize(
             allow_network=allow_network,
             pip_args=pip_args,
         )
+        if deps.failed:
+            deps_failed = True
+            deps_note_str = deps.note or "dependency preparation failed"
         if deps.note:
-            deps_note = f" ({deps.note})"
+            deps_note = f" ({deps.note}) [deps failed]" if deps.failed else f" ({deps.note})"
             # PR setup built its message without the deps note; append there.
             # Plain clone and branch both live in clone_msg.
             if pr is not None:
@@ -1290,7 +1308,7 @@ def sandbox_initialize(
     docker_name_msg = ""
     if not name and default_docker_name_msg is not None:
         docker_name_msg = f" [docker name: {default_docker_name_msg}]"
-    return (
+    body = (
         cid
         + clone_msg
         + pr_msg
@@ -1301,6 +1319,11 @@ def sandbox_initialize(
         + " [advisory: if you intend to edit or publish, "
         + "call get_workflow_guide first]"
     )
+    if deps_failed:
+        text = f"Container {cid} is running; dependency preparation failed: {deps_note_str}: {body}"
+    else:
+        text = body
+    return InitResult(text=text, deps_failed=deps_failed)
 
 
 # Async wrapper around sandbox_initialize: the sync work runs in a thread
@@ -1315,6 +1338,124 @@ def sandbox_initialize(
 # docs live on sandbox_initialize.  Private-repo pr=/clone_repo auth rides
 # the egress-proxy read grant (#403/#419); push credentials stay host-side
 # via publish (#347).
+def sandbox_initialize(
+    image: str | None = None,
+    allow_network: bool = False,
+    clone_repo: str | None = None,
+    clone_dest: str = WORKSPACE,
+    repo: str | None = None,
+    pr: int | None = None,
+    branch: str | None = None,
+    pip_extras: str | None = "[dev]",
+    pip_args: str | None = None,
+    mem_limit: str | None = None,
+    cpus: float | None = None,
+    name: str | None = None,
+    session_label: str | None = None,
+    apply_from_container: str | None = None,
+) -> str:
+    """Start a new Docker sandbox container.
+
+    The container runs ``sleep infinity`` and stays alive until
+    explicitly stopped with :func:`sandbox_stop`.
+
+    Container IDs are returned as short 12-character prefixes for
+    use in other tools.
+
+    **One-step init + clone:** pass ``clone_repo`` to clone the repository
+    and install its dependencies as part of startup.  For a full one-shot
+    workflow with commands, use :func:`run_container_and_exec` which wraps
+    init/exec/stop.
+
+    Args:
+        image: Docker image (e.g. ``python@sha256:...``).  Variant aliases
+               resolve to pinned GHCR digest images (Issue #545): "full"
+               (default, every toolchain) or "neutral" / "python" / "go" /
+               "rust" / "js".  Omit it unless you have a reason (Issue #584).
+        allow_network: Whether to allow network access (default ``False``).
+               Set to ``True`` for VCS operations (git/gh) that need to
+               reach GitHub API.  Network access is a boundary-crossing
+               operation and should be used only when necessary.
+        clone_repo: Optional ``owner/name`` repository to clone over the
+               network (``allow_network`` auto-enabled).  A *private* repo
+               clones transparently via the egress proxy read grant (#419),
+               so no credential enters the container.
+        clone_dest: Directory the repo is cloned into; it becomes the git
+               root *and* the container's working directory, so commands
+               run inside the repo by default (``/workspace``).
+        repo: Repository in ``"owner/name"`` format.
+               Required when *pr* or *branch* is specified.
+        pr: Pull request number to clone and check out.
+               Mutually exclusive with *branch*.
+        branch: Branch name to clone and check out.  Requires
+               ``clone_repo=``; mutually exclusive with *pr*.
+        pip_extras: Pip extras string (e.g. ``"[dev]"``) for dev install.
+               ``None`` skips pip install; also skipped automatically when
+               the container has no network access.
+        pip_args: Additional pip arguments (e.g. ``"--index-url https://download.pytorch.org/whl/cpu"``).
+            Ignored when *pip_extras* is ``None`` since pip install is skipped entirely.
+        mem_limit: Optional memory-limit override (e.g. ``"2g"``).
+               The default profile caps containers at 512MB with swap
+               disabled, which OOM-thrashes heavy installs (e.g. torch)
+               into an unhealthy state (Issue #181).  Raise this when a
+               workload legitimately needs more.  ``memswap_limit`` is
+               automatically pinned to this value so swap stays
+               disabled at the new ceiling.
+        cpus: Optional CPU-limit override in cores (e.g. ``2.0``).
+               Defaults to the profile's 0.5-core cap when omitted.
+        session_label: Optional session identifier string.  When provided,
+               this label is recorded in the journal for all subsequent
+               operations on this container, replacing any previous label.
+               Use this to distinguish operations from different model
+               sessions or task contexts (Issue #479).
+        name: Optional user-assigned name for the container (e.g.
+               ``"issue-123"``).  Stored as a Docker label so it survives
+               server restarts.  When a container with the same *name*
+               already exists and is still running, the call returns an
+               error to prevent accidental name collisions (Issue #478).
+        apply_from_container: Optional 12-char prefix of a running
+               container whose uncommitted tracked changes are re-applied
+               into this fresh clone (Issue #889).  Requires ``clone_repo``
+               / ``pr`` / ``branch``; untracked files are not carried and
+               conflicts are not an error.  The source container must have
+               network access (``allow_network=True``); offline source
+               support is tracked in #939.  Source origin is refreshed
+               under host authorization as a preflight before creating or
+               cloning the destination container.  If source fetch fails,
+               initialization fails closed and returns structured JSON
+               (step="carry_fetch") without allocating the destination.
+
+    The image must be pulled locally before use: docker pull <image>
+
+    Returns:
+        Container ID string (12-character prefix).
+        Network state (``[network: on]`` / ``[network: off]``) is appended.
+        If *clone_repo* is specified, a message about the clone copy
+        is appended (and dev install if pip_extras is set).
+        If *pr* is specified, a message about the PR branch setup
+        is appended.
+        If *branch* is specified, a message about the branch checkout
+        is appended.
+
+    """
+    return _sandbox_initialize(
+        image=image,
+        allow_network=allow_network,
+        clone_repo=clone_repo,
+        clone_dest=clone_dest,
+        repo=repo,
+        pr=pr,
+        branch=branch,
+        pip_extras=pip_extras,
+        pip_args=pip_args,
+        mem_limit=mem_limit,
+        cpus=cpus,
+        name=name,
+        session_label=session_label,
+        apply_from_container=apply_from_container,
+    ).text
+
+
 async def sandbox_initialize_tool(
     image: str | None = None,
     allow_network: bool = False,
@@ -1366,8 +1507,8 @@ async def sandbox_initialize_tool(
     Returns:
         Container ID prefix plus clone/checkout/network summary.
     """
-    def _work() -> str:
-        return sandbox_initialize(
+    def _work() -> Any:
+        return _sandbox_initialize(
             image=image,
             allow_network=allow_network,
             clone_repo=clone_repo,
@@ -1384,15 +1525,28 @@ async def sandbox_initialize_tool(
             apply_from_container=apply_from_container,
         )
 
+    def _wrap_result(res: Any) -> Any:
+        if isinstance(res, InitResult):
+            if res.deps_failed:
+                return ToolResult(
+                    content=[mt.TextContent(type="text", text=res.text)],
+                    structured_content={"result": res.text},
+                    is_error=True,
+                )
+            return res.text
+        return res
+
     if ctx is None:
-        return _work()
+        return _wrap_result(_work())
 
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(None, _work)
     start = time.monotonic()
     while not future.done():
         try:
-            await asyncio.wait_for(asyncio.shield(future), timeout=_PROGRESS_INTERVAL_SECONDS)
+            await asyncio.wait_for(
+                asyncio.shield(future), timeout=_PROGRESS_INTERVAL_SECONDS
+            )
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - start
             try:
@@ -1401,7 +1555,7 @@ async def sandbox_initialize_tool(
                 )
             except Exception as e:
                 logger.warning("report_progress failed: %s", e)
-    return await future
+    return _wrap_result(await future)
 
 
 #: sandbox_stop(force=False) refusal when the unpushed-checkpoint guard
@@ -1806,10 +1960,13 @@ def run_container_and_exec(
     # Manifest-aware deps outcome (pip/npm steps) for the clone_repo path;
     # carried in result["deps"] on success (failures land in clone_warning).
     deps_note: str = ""
+    deps_error: str = ""
+    deps_failed: bool = False
     # Same ground truth as sandbox_initialize: a proxied container holds no
     # token (#356), so the network clone must go anonymous (#403 fallout).
     container_has_token = "GITHUB_TOKEN" in env or "GH_TOKEN" in env
     open_read_grant = proxied and not container_has_token
+    repo_cloned = False
     if clone_repo and branch:
         try:
             _setup_branch(
@@ -1822,8 +1979,10 @@ def run_container_and_exec(
                 authenticated=container_has_token,
                 open_read_grant=open_read_grant,
                 pip_args=pip_args,
+                install_deps=False,
                 allow_network=allow_network,
             )
+            repo_cloned = True
         except Exception as e:
             logger.warning("Branch setup failed: %s", e)
             clone_error = str(e)
@@ -1837,18 +1996,7 @@ def run_container_and_exec(
             open_read_grant=open_read_grant,
         )
         if clone_error is None:
-            deps = _install_repo_deps(
-                container,
-                clone_repo,
-                clone_dest,
-                pip_extras,
-                allow_network=allow_network,
-                pip_args=pip_args,
-            )
-            if deps.failed:
-                clone_error = deps.note
-            else:
-                deps_note = deps.note
+            repo_cloned = True
     elif clone_repo and pr is not None:
         logger.info(
             "Skipping clone_repo=%s (pr=%s handles its own clone)",
@@ -1876,11 +2024,35 @@ def run_container_and_exec(
                     authenticated=container_has_token,
                     open_read_grant=open_read_grant,
                     pip_args=pip_args,
+                    install_deps=False,
                     allow_network=allow_network,
                 )
+                repo_cloned = True
             except Exception as e:
                 logger.warning("PR branch setup failed: %s", e)
                 pr_error = str(e)
+
+    # --- Dev dependency install (Issue #146, #949) ---
+    if repo_cloned and (clone_repo is not None or repo is not None):
+        install_repo = repo if pr is not None else (clone_repo if clone_repo is not None else repo)
+        assert install_repo is not None
+        deps = _install_repo_deps(
+            container,
+            install_repo,
+            clone_dest,
+            pip_extras,
+            allow_network=allow_network,
+            pip_args=pip_args,
+        )
+        if deps.failed:
+            if pr is not None:
+                pr_error = deps.note
+            else:
+                clone_error = deps.note
+            deps_error = deps.note
+            deps_failed = True
+        else:
+            deps_note = deps.note
 
     # --- Execute commands ---
     try:
@@ -2002,6 +2174,9 @@ def run_container_and_exec(
         result["stderr"] = stderr_text
     if clone_error:
         result["clone_warning"] = clone_error
+    if deps_failed:
+        result["deps_error"] = deps_error
+        result["deps_failed"] = True
     if deps_note:
         result["deps"] = deps_note
     if pr_error:

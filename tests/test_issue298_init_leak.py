@@ -274,7 +274,7 @@ class TestReaper:
 
 
 class TestAsyncWrapper:
-    @patch("sunaba.tools.container.lifecycle.sandbox_initialize")
+    @patch("sunaba.tools.container.lifecycle._sandbox_initialize")
     def test_ctx_none_runs_inline(self, mock_sync: MagicMock) -> None:
         mock_sync.return_value = "abc123def456"
         result = asyncio.run(sandbox_initialize_tool(image=_IMAGE, ctx=None))
@@ -290,7 +290,7 @@ class TestAsyncWrapper:
             _t.sleep(0.25)
             return "slowcid12345"
 
-        with patch("sunaba.tools.container.lifecycle.sandbox_initialize", side_effect=_slow), patch(
+        with patch("sunaba.tools.container.lifecycle._sandbox_initialize", side_effect=_slow), patch(
             "sunaba.tools.container.lifecycle._PROGRESS_INTERVAL_SECONDS", 0.05
         ):
             result = asyncio.run(sandbox_initialize_tool(image=_IMAGE, ctx=ctx))
@@ -307,7 +307,7 @@ class TestAsyncWrapper:
             _t.sleep(0.2)
             return "okcid1234567"
 
-        with patch("sunaba.tools.container.lifecycle.sandbox_initialize", side_effect=_slow), patch(
+        with patch("sunaba.tools.container.lifecycle._sandbox_initialize", side_effect=_slow), patch(
             "sunaba.tools.container.lifecycle._PROGRESS_INTERVAL_SECONDS", 0.05
         ):
             # Even though report_progress keeps raising, the work's result is returned.

@@ -5,10 +5,20 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import re
 import shlex
 from typing import Any, NamedTuple
 
+from sunaba.edit_verify.shell import (
+    ForegroundTreeTimeout,
+    _active_foreground_scope,
+    close_foreground_deadline,
+    foreground_marker_environment,
+    new_foreground_marker,
+    open_foreground_deadline,
+    run_exec_under_foreground_deadline,
+)
 from sunaba.journal import (
     record_boundary_crossing,
     record_copy,
@@ -25,6 +35,61 @@ from sunaba.tools.vcs import (
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+#: Default dependency install deadline in seconds (fits within MCP ~300s boundary).
+_DEFAULT_DEPS_TIMEOUT: float = 240.0
+
+#: Environment variable resolving the per-call dependency install deadline (seconds).
+#: ``0`` disables the deadline; a positive numeric value overrides the default;
+#: invalid or negative values fall back to the default (only ``0`` disables).
+_DEPS_TIMEOUT_ENV: str = "SUNABA_DEPS_TIMEOUT"
+
+
+def _parse_timeout_env(env_name: str, default: float) -> float:
+    raw = os.environ.get(env_name, "").strip()
+    if raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value < 0:
+        return default
+    return value
+
+
+def resolve_deps_deadline() -> float:
+    """Resolve the dependency install deadline from ``SUNABA_DEPS_TIMEOUT``.
+
+    Contract: default 240.0s when unset; a positive numeric override is used as-is;
+    exactly ``0`` disables the deadline; invalid or negative values fall
+    back to the default (only ``0`` disables -- a misconfiguration must not
+    silently turn the deadline off).
+    """
+    return _parse_timeout_env(_DEPS_TIMEOUT_ENV, _DEFAULT_DEPS_TIMEOUT)
+
+
+def _exec_run_with_deadline(
+    container: Any,
+    cmd: list[str],
+    *,
+    stdout: bool = True,
+    stderr: bool = True,
+    demux: bool = True,
+) -> tuple[int, Any]:
+    """Execute command in container enforcing any active foreground deadline."""
+    marker_env = foreground_marker_environment()
+    exec_kwargs: dict[str, object] = {
+        "stdout": stdout,
+        "stderr": stderr,
+        "demux": demux,
+    }
+    if marker_env is not None:
+        exec_kwargs["environment"] = marker_env
+
+    return run_exec_under_foreground_deadline(
+        lambda: container.exec_run(cmd, **exec_kwargs)
+    )
 
 _CLONE_REPO_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9._-]+$")
 
@@ -230,7 +295,8 @@ def _run_pip_install(
     safe_dest = shlex.quote(clone_dest)
     local_pip_args = pip_args or ""
     install_cmd = f"cd {safe_dest} && {_editable_install_cmd(f'.{pip_extras}', local_pip_args)}"
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_run_with_deadline(
+        container,
         ["/bin/sh", "-c", install_cmd],
         stdout=True,
         stderr=True,
@@ -288,12 +354,15 @@ def _detect_manifests(container: Any, clone_dest: str) -> set[str]:
     """
     probe = _manifest_probe_cmd(clone_dest)
     try:
-        exit_code, output = container.exec_run(
+        exit_code, output = _exec_run_with_deadline(
+            container,
             ["/bin/sh", "-c", probe],
             stdout=True,
             stderr=True,
             demux=True,
         )
+    except ForegroundTreeTimeout:
+        raise
     except Exception as e:
         raise RuntimeError(f"manifest detection failed: {str(e)[:200]}") from e
     if exit_code != 0:
@@ -356,7 +425,8 @@ def _run_npm_install(
         )
         return None
     install_cmd = _npm_install_cmd(clone_dest, lockfile)
-    exit_code, output = container.exec_run(
+    exit_code, output = _exec_run_with_deadline(
+        container,
         ["/bin/sh", "-c", install_cmd],
         stdout=True,
         stderr=True,
@@ -383,6 +453,11 @@ class DepsResult(NamedTuple):
 
     note: str
     failed: bool
+
+    @property
+    def error(self) -> bool:
+        """Alias for :attr:`failed` for caller compatibility."""
+        return self.failed
 
 
 def _record_deps_progress(container: Any, note: str) -> None:
@@ -427,125 +502,154 @@ def _install_repo_deps(
     """
     from sunaba.verify_state import invalidate_verify_success, record_environment_state
 
+    we_opened_scope = False
+    if _active_foreground_scope() is None:
+        deadline_s = resolve_deps_deadline()
+        open_foreground_deadline(container, deadline_s, new_foreground_marker())
+        we_opened_scope = True
+
+    current_step: str = "manifest detection"
     try:
-        manifests = _detect_manifests(container, clone_dest)
-    except RuntimeError as exc:
-        # Root identity is unknown: keep preparation state but discard any
-        # prior verify result that may be stale for this checkout.
-        invalidate_verify_success(str(container.id))
-        return DepsResult(f"deps: manifest detection failed: {exc}", True)
-    has_uv = "pyproject.toml" in manifests and "uv.lock" in manifests
-    if not has_uv:
-        from sunaba.verify_state import clear_environment_state, get_environment_state
+        try:
+            manifests = _detect_manifests(container, clone_dest)
+        except RuntimeError as exc:
+            # Root identity is unknown: keep preparation state but discard any
+            # prior verify result that may be stale for this checkout.
+            invalidate_verify_success(str(container.id))
+            return DepsResult(f"deps: manifest detection failed: {exc}", True)
+        has_uv = "pyproject.toml" in manifests and "uv.lock" in manifests
+        if not has_uv:
+            from sunaba.verify_state import clear_environment_state, get_environment_state
 
-        prior = get_environment_state(str(container.id))
-        if prior is not None:
-            clear_environment_state(str(container.id), invalidate_verify=True)
-    has_py = "pyproject.toml" in manifests or "setup.py" in manifests
-    has_js = "package.json" in manifests
-    has_go = "go.mod" in manifests
-    has_cargo = "Cargo.toml" in manifests
-    notes: list[str] = []
-    errors: list[str] = []
+            prior = get_environment_state(str(container.id))
+            if prior is not None:
+                clear_environment_state(str(container.id), invalidate_verify=True)
+        has_py = "pyproject.toml" in manifests or "setup.py" in manifests
+        has_js = "package.json" in manifests
+        has_go = "go.mod" in manifests
+        has_cargo = "Cargo.toml" in manifests
+        notes: list[str] = []
+        errors: list[str] = []
 
-    if not allow_network and not has_uv:
-        logger.info(
-            "Skipping deps install for %s: container has no network access",
-            clone_repo,
-        )
-        return DepsResult("", False)
+        if not allow_network and not has_uv:
+            logger.info(
+                "Skipping deps install for %s: container has no network access",
+                clone_repo,
+            )
+            return DepsResult("", False)
 
-    if has_uv:
-        if not allow_network:
-            reason = "network_disabled"
-            record_environment_state(
-                container.id, "failed", reason=reason,
-                command="uv sync --locked --all-groups",
-            )
-            errors.append(f"uv preparation failed: {reason}")
-        elif pip_extras is None:
-            record_environment_state(container.id, "not_prepared", reason="pip_extras=None")
-            notes.append("uv not_prepared (pip_extras=None)")
-        elif _normalize_pip_extras(pip_extras) != "[dev]" or (pip_args or "").strip():
-            reason = "unsupported_uv_arguments"
-            record_environment_state(
-                container.id, "failed", reason=reason,
-                command="uv sync --locked --all-groups",
-            )
-            errors.append(f"uv preparation failed: {reason}")
-        else:
-            command = "uv sync --locked --all-groups"
-            record_environment_state(
-                container.id, "not_prepared", reason="uv sync in progress",
-                command=command,
-            )
-            _record_deps_progress(container, "deps: " + command)
-            try:
-                exit_code, output = container.exec_run(
-                    ["/bin/sh", "-c", f"cd {shlex.quote(clone_dest)} && {command}"],
-                    stdout=True,
-                    stderr=True,
-                    demux=True,
-                )
-                stdout_part, stderr_part = output or (b"", b"")
-                stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-                stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-                if exit_code == 0:
-                    record_environment_state(container.id, "ready", command=command, exit_code=0)
-                    notes.append("uv sync --locked --all-groups ok")
-                else:
-                    diagnostic = (stderr_text or stdout_text).strip()
-                    diagnostic = re.sub(r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", diagnostic)
-                    diagnostic = re.sub(r"https?://[^\s/@]+:[^\s/@]+@", "https://[REDACTED]@", diagnostic)
-                    diagnostic = diagnostic[:240]
-                    reason = f"sync_failed: {diagnostic}"
-                    record_environment_state(
-                        container.id, "failed", reason=reason,
-                        command=command, exit_code=exit_code,
-                    )
-                    suffix = f": {diagnostic}" if diagnostic else ""
-                    errors.append(f"uv sync --locked --all-groups failed (exit {exit_code}){suffix}")
-            except Exception as exc:
-                diagnostic = re.sub(r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", str(exc))[:240]
+        if has_uv:
+            current_step = "uv sync"
+            if not allow_network:
+                reason = "network_disabled"
                 record_environment_state(
-                    container.id, "failed", reason=f"sync_error: {diagnostic}",
+                    container.id, "failed", reason=reason,
+                    command="uv sync --locked --all-groups",
+                )
+                errors.append(f"uv preparation failed: {reason}")
+            elif pip_extras is None:
+                record_environment_state(container.id, "not_prepared", reason="pip_extras=None")
+                notes.append("uv not_prepared (pip_extras=None)")
+            elif _normalize_pip_extras(pip_extras) != "[dev]" or (pip_args or "").strip():
+                reason = "unsupported_uv_arguments"
+                record_environment_state(
+                    container.id, "failed", reason=reason,
+                    command="uv sync --locked --all-groups",
+                )
+                errors.append(f"uv preparation failed: {reason}")
+            else:
+                command = "uv sync --locked --all-groups"
+                record_environment_state(
+                    container.id, "not_prepared", reason="uv sync in progress",
                     command=command,
                 )
-                errors.append(f"uv sync --locked --all-groups failed: {diagnostic}")
+                _record_deps_progress(container, "deps: " + command)
+                try:
+                    exit_code, output = _exec_run_with_deadline(
+                        container,
+                        ["/bin/sh", "-c", f"cd {shlex.quote(clone_dest)} && {command}"],
+                        stdout=True,
+                        stderr=True,
+                        demux=True,
+                    )
+                    stdout_part, stderr_part = output or (b"", b"")
+                    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+                    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+                    if exit_code == 0:
+                        record_environment_state(container.id, "ready", command=command, exit_code=0)
+                        notes.append("uv sync --locked --all-groups ok")
+                    else:
+                        diagnostic = (stderr_text or stdout_text).strip()
+                        diagnostic = re.sub(r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", diagnostic)
+                        diagnostic = re.sub(r"https?://[^\s/@]+:[^\s/@]+@", "https://[REDACTED]@", diagnostic)
+                        diagnostic = diagnostic[:240]
+                        reason = f"sync_failed: {diagnostic}"
+                        record_environment_state(
+                            container.id, "failed", reason=reason,
+                            command=command, exit_code=exit_code,
+                        )
+                        suffix = f": {diagnostic}" if diagnostic else ""
+                        errors.append(f"uv sync --locked --all-groups failed (exit {exit_code}){suffix}")
+                except ForegroundTreeTimeout:
+                    raise
+                except Exception as exc:
+                    diagnostic = re.sub(r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", str(exc))[:240]
+                    record_environment_state(
+                        container.id, "failed", reason=f"sync_error: {diagnostic}",
+                        command=command,
+                    )
+                    errors.append(f"uv sync --locked --all-groups failed: {diagnostic}")
 
-    elif has_py:
-        if pip_extras is None:
-            notes.append("pip skipped (pip_extras=None)")
-        else:
-            _record_deps_progress(container, "deps: pip install")
-            err = _run_pip_install(
-                container, clone_repo, clone_dest, pip_extras, allow_network, pip_args
+        elif has_py:
+            current_step = "pip"
+            if pip_extras is None:
+                notes.append("pip skipped (pip_extras=None)")
+            else:
+                _record_deps_progress(container, "deps: pip install")
+                err = _run_pip_install(
+                    container, clone_repo, clone_dest, pip_extras, allow_network, pip_args
+                )
+                if err is not None:
+                    errors.append(err)
+                else:
+                    notes.append("pip install ok")
+
+        if has_js and allow_network:
+            current_step = "npm"
+            lockfile = "package-lock.json" in manifests
+            _record_deps_progress(
+                container, "deps: npm ci" if lockfile else "deps: npm install"
             )
+            err = _run_npm_install(container, clone_repo, clone_dest, allow_network, lockfile)
             if err is not None:
                 errors.append(err)
             else:
-                notes.append("pip install ok")
+                notes.append("npm ci ok" if lockfile else "npm install ok")
+        elif has_js and not allow_network:
+            notes.append("npm skipped (network disabled)")
+        if has_go and not has_py and not has_js:
+            notes.append("go.mod detected — delegated to fetch-on-build")
+        if has_cargo and not has_py and not has_js:
+            notes.append("Cargo.toml detected — delegated to fetch-on-build")
+        if not has_py and not has_js and not has_go and not has_cargo:
+            notes.append("no manifest detected — skipped")
 
-    if has_js and allow_network:
-        lockfile = "package-lock.json" in manifests
-        _record_deps_progress(
-            container, "deps: npm ci" if lockfile else "deps: npm install"
-        )
-        err = _run_npm_install(container, clone_repo, clone_dest, allow_network, lockfile)
-        if err is not None:
-            errors.append(err)
-        else:
-            notes.append("npm ci ok" if lockfile else "npm install ok")
-    elif has_js and not allow_network:
-        notes.append("npm skipped (network disabled)")
-    if has_go and not has_py and not has_js:
-        notes.append("go.mod detected — delegated to fetch-on-build")
-    if has_cargo and not has_py and not has_js:
-        notes.append("Cargo.toml detected — delegated to fetch-on-build")
-    if not has_py and not has_js and not has_go and not has_cargo:
-        notes.append("no manifest detected — skipped")
-
-    return DepsResult(f"deps: {'; '.join(notes + errors)}" if notes or errors else "", bool(errors))
+        return DepsResult(f"deps: {'; '.join(notes + errors)}" if notes or errors else "", bool(errors))
+    except ForegroundTreeTimeout as exc:
+        invalidate_verify_success(str(container.id))
+        if current_step == "uv sync":
+            reason = f"deps_timeout: {current_step} timed out after {exc.deadline_s}s (reap: {exc.reap})"
+            record_environment_state(
+                str(container.id),
+                "failed",
+                reason=reason,
+                command="uv sync --locked --all-groups",
+            )
+        msg = f"deps: {current_step} timed out after {exc.deadline_s}s (reap: {exc.reap})"
+        return DepsResult(msg, True)
+    finally:
+        if we_opened_scope:
+            close_foreground_deadline()
 
 
 def _try_clone_into_container(

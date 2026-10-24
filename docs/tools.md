@@ -61,6 +61,13 @@ When `apply_from_container=<source_cid>` is specified in `sandbox_initialize`:
   ```
   Repository test and caller references: See `_parse_init_error(result)` and `result.startswith("Error:")` in `tests/test_carry_fresh_origin.py` and `tests/test_init_apply_from_container.py`.
 
+### Dependency Install Deadline
+
+Clone-time dependency installs (`uv sync`, `pip install`, `npm ci` / `npm install`) run under a server-side foreground deadline (`SUNABA_DEPS_TIMEOUT`, default 240s, `0` disables, invalid/negative fall back to 240). On expiry the installer command tree, including setsid-detached children, is reaped and the failure is recorded:
+- The initialization response reflects the failure note: `(deps: <step> timed out after <deadline>s (reap: <verdict>))` (for example, `(deps: uv sync timed out after 240.0s (reap: ok))`).
+- For uv-based projects, environment state is recorded as `failed` (`reason="deps_timeout: ..."`), ensuring later `verify_in_container` and `type_check_in_container` calls fail closed via `uv_environment_block_reason`.
+- Any prior verify success record is invalidated.
+
 ---
 
 ## 2. Execution Tools

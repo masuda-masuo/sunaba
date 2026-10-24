@@ -133,18 +133,24 @@ def test_nested_uv_project_uses_project_pyright_interpreter_and_root(tmp_path):
 def test_scope_stage_execution_error_is_reported(extension, runner, tmp_path):
     root = tmp_path / "scope-error"
     root.mkdir()
-    client, _ = _client(root, "issue951-scope-error")
+    if extension == ".ts":
+        (root / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    client, container = _client(root, "issue951-scope-error")
     failed = SimpleNamespace(status="error", detail="scope runner failed", findings=[])
     stage = "_run_python_typecheck" if extension == ".py" else "_run_ts_typecheck"
     with (
         patch(f"sunaba.edit_verify.single_file.{stage}", return_value=[]),
-        patch(f"sunaba.edit_verify.single_file.{runner}", return_value=failed),
+        patch(f"sunaba.edit_verify.single_file.{runner}", return_value=failed) as scope_runner,
     ):
         findings = type_check_file(
             client, "issue951-scope-error", "clean" + extension, scope_workdir=ScopeWorkdir(".", str(root))
         )
     assert any(item["rule"] == "error" for item in findings), findings
     assert any("scope runner failed" in item["message"] for item in findings), findings
+    if extension == ".ts":
+        scope_runner.assert_called_once_with(
+            container, ".", workdir=str(root), project=True
+        )
 
 
 @pytest.mark.parametrize("extension,runner", [(".py", "_run_pyright_verify"), (".ts", "_run_tsc_verify")])

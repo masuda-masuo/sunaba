@@ -401,12 +401,24 @@ def type_check_file(
         findings = _run_ts_typecheck(
             container, target_path, workdir=workdir, original_file_path=file_path
         )
-        if not findings and scope_path is not None:
-            scope_r = _run_tsc_verify(container, scope_path, workdir=workdir)
-            if scope_r.status == "error":
-                return _error_findings(scope_r, file_path, "tsc")
-            if scope_r.status != "not_available":
-                return scope_r.findings
+        if not findings and scope_path is not None and workdir is not None:
+            try:
+                has_tsconfig = _has_tsconfig(container, workdir)
+            except Exception as exc:
+                return [{
+                    "file": file_path,
+                    "line": 0,
+                    "rule": "error",
+                    "message": f"tsc project config probe failed: {str(exc)[:180]}",
+                }]
+            if has_tsconfig:
+                scope_r = _run_tsc_verify(
+                    container, ".", workdir=workdir, project=True
+                )
+                if scope_r.status == "error":
+                    return _error_findings(scope_r, file_path, "tsc")
+                if scope_r.status != "not_available":
+                    return scope_r.findings
         return findings
     else:
         return [
@@ -417,6 +429,20 @@ def type_check_file(
                 "message": f"No type checker configured for {ext} files",
             }
         ]
+
+
+def _has_tsconfig(container: Any, workdir: str) -> bool:
+    """Check directly for tsconfig.json; raise if the filesystem probe fails."""
+    ec, _, stderr = _exec_run(
+        container,
+        ["/bin/sh", "-c", "test -f tsconfig.json"],
+        workdir=workdir,
+    )
+    if ec == 0:
+        return True
+    if ec == 1:
+        return False
+    raise RuntimeError(stderr.strip() or f"tsconfig probe exited {ec}")
 
 
 def _run_python_typecheck(

@@ -39,25 +39,29 @@ def _get_extension(file_path: str) -> str:
 
 
 class ScopeWorkdir(NamedTuple):
-    """``(scope, workdir)`` tuple with named field access.
+    """Lexical (scope, anchor) pair inferred from a file path.
 
-    Return type for :func:`_determine_scope`.
+    workdir remains the public field name for compatibility. It is an anchor
+    for the inferred scope, not a discovered Docker cwd or project root.
+    Single-file execution resolves Docker WORKDIR and the nearest marked
+    project ancestor separately, then rebases this lexical scope.
     """
     scope: str
     workdir: str
 
 
 def _determine_scope(file_path: str) -> ScopeWorkdir:
-    """Determine the project scope and working directory for lint/type-check.
+    """Determine the lexical scope and anchor for a file path.
 
-    Returns a ``(scope, workdir)`` tuple:
+    Returns a (scope, workdir) tuple for compatibility:
 
-    * *scope* — path to pass to the tool (e.g. ``"src"``, ``"."``).
-    * *workdir* — project-root directory that should be the CWD when
-      running scope checks (e.g. ``"/app"``, ``"."``).
+    * scope — the lexical scope inferred from file_path (e.g. "src").
+    * workdir — the lexical anchor paired with that scope (e.g. "." or
+      "tests"), not a discovered project root or necessarily Docker cwd.
 
-    Both values are derived from *file_path* so callers no longer need
-    to call :func:`_resolve_workdir` separately.
+    The single-file context resolver interprets relative targets against Docker
+    WORKDIR, discovers the nearest marked project root from the resolved
+    target, and rebases this lexical scope to that execution root.
 
     Examples
     --------

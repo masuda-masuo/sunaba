@@ -32,6 +32,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev]
 
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install actual type-checker CLIs
+        run: |
+          npm install --global pyright typescript
+          pyright --version
+          tsc --version
+
       # The secret scanner is a Go binary, so pip cannot bring it in with the
       # dev extras.  Same pinned release and same checksum as
       # docker/Dockerfile.base: if the artifact ever changes under the tag,

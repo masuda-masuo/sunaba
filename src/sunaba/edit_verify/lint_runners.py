@@ -476,7 +476,12 @@ def _run_pyright_verify(
     return _envelope_ok("pyright", findings, ec)
 
 
-def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> VerifyResult:
+def _run_tsc_verify(
+    container: Any,
+    path: str,
+    workdir: str | None = None,
+    project: bool = False,
+) -> VerifyResult:
     """Run tsc --noEmit on *path*.  Returns VerifyResult envelope.
 
     Resolves ``node_modules/.bin/tsc`` before the image-baked global
@@ -486,16 +491,29 @@ def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> Ve
     than relying on npx's own (differently-behaved) fallback search.
     """
     cmd, source = _resolve_js_tool(container, "tsc", workdir=workdir)
+    if project and not workdir:
+        return _envelope_error("tsc", "project mode requires a working directory", 1)
+    target_args = (
+        f"-p {_quote_path(workdir)}" if project and workdir else _quote_path(path)
+    )
+    command = f"{_SANDBOX_ENV}{cmd} --noEmit {target_args} 2>&1"
     ec, stdout_text, stderr_text = _exec_run(
         container,
-        [
-            "/bin/sh",
-            "-c",
-            f"{_SANDBOX_ENV}{cmd} --noEmit {_quote_path(path)} 2>&1",
-        ],
+        ["/bin/sh", "-c", command],
         workdir=workdir,
     )
     combined = stdout_text + stderr_text
+
+    # TypeScript 7 refuses explicit files when a tsconfig is in cwd unless
+    # --ignoreConfig is supplied. Preserve explicit-file semantics by retrying
+    # only for that diagnostic; older TypeScript versions never take this path.
+    if not project and "TS5112:" in combined:
+        ec, stdout_text, stderr_text = _exec_run(
+            container,
+            ["/bin/sh", "-c", f"{command} --ignoreConfig"],
+            workdir=workdir,
+        )
+        combined = stdout_text + stderr_text
 
     if ec == 127:
         return _annotate_resolution(
@@ -503,13 +521,23 @@ def _run_tsc_verify(container: Any, path: str, workdir: str | None = None) -> Ve
             source, cmd,
         )
     if ec not in (0, 1, 2):
-        return _annotate_resolution(
-            _envelope_error("tsc", combined.strip() or f"exit code {ec}", ec), source, cmd
+        detail = combined.strip() or f"exit code {ec}"
+        return _envelope_error(
+            "tsc",
+            f"{detail}\n[resolved via {source}: {cmd}]",
+            ec,
         )
 
     findings = _parse_tsc_text(combined, path)
     if not findings:
         findings = _parse_tsc_json(combined, path)
+    if ec != 0 and not findings:
+        detail = combined.strip() or f"exit code {ec}"
+        return _envelope_error(
+            "tsc",
+            f"{detail}\n[resolved via {source}: {cmd}]",
+            ec,
+        )
     for r in findings:
         r["severity"] = "error"
     return _annotate_resolution(_envelope_ok("tsc", findings, ec), source, cmd)

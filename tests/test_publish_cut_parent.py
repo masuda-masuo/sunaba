@@ -48,7 +48,7 @@ from email.message import Message
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -335,9 +335,13 @@ class _HostApi:
 
     def urlopen(self, request: Any, *_args: Any, **_kwargs: Any) -> _FakeResponse:
         """Serve one GitHub REST call, or raise its injected failure."""
-        url = getattr(request, "full_url", str(request))
-        path = url.split("api.github.com", 1)[-1]
-        decoded = unquote(path)
+        selector = getattr(request, "selector", None)
+        if selector is None:
+            url = getattr(request, "full_url", str(request))
+            selector = url.split("api.github.com", 1)[-1]
+        parsed = urlsplit(selector)
+        path = parsed.path
+        decoded = unquote(selector)
         self.calls.append(decoded)
 
         kind, ref = self._classify(path)

@@ -56,6 +56,7 @@ import shlex
 import threading
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 from docker.errors import NotFound
 
@@ -208,7 +209,7 @@ def _fetch_baseline_from_base_branch(
 
     try:
         response = _github_api_request(
-            f"/repos/{repo}/contents/{_BASELINE_FILENAME}?ref={branch}",
+            f"/repos/{repo}/contents/{_BASELINE_FILENAME}?ref={quote(branch, safe='')}",
             token,
         )
     except RuntimeError as exc:

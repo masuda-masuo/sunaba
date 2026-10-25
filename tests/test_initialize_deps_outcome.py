@@ -24,6 +24,9 @@ class _MockContainer:
         self.branch = branch
 
     def exec_run(self, cmd: Any, **kwargs: Any) -> tuple[int, tuple[bytes, bytes]]:
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "rev-parse --abbrev-ref HEAD" in cmd_str:
+            return 0, (f"{self.branch}\n".encode("utf-8"), b"")
         return 0, (b"", b"")
 
     def stop(self) -> None:
@@ -52,6 +55,8 @@ def mock_transports():
         patch("sunaba.tools.container.lifecycle.validate_image_ref", return_value="python@sha256:" + "0" * 64),
         patch("sunaba.tools.container.lifecycle._ensure_image"),
         patch("sunaba.tools.container.clone._resolve_default_branch", return_value="main"),
+        patch("sunaba.tools.container.clone._resolve_pr_head_ref", return_value=("feature", "main")),
+        patch("sunaba.tools.container.clone._resolve_vcs_token", return_value=None),
         patch("sunaba.tools.container.clone._clone_repo_via_network", return_value="Clone OK"),
         patch("sunaba.tools.container.clone.record_copy"),
         patch("sunaba.tools.container.lifecycle.record_initialize_complete"),
@@ -67,10 +72,8 @@ def test_literal_deps_failed_string_remains_success_without_error(
 ) -> None:
     container, mock_deps = mock_transports
     # Output note contains literal substring "[deps failed]" but failed is False
-    mock_deps.return_value = DepsResult(
-        note="deps: installed package containing [deps failed] text ok",
-        failed=False,
-    )
+    success_note = "deps: installed package containing [deps failed] text ok"
+    mock_deps.return_value = DepsResult(note=success_note, failed=False)
 
     # 1. Direct public API returns str without running prefix
     res_str = sandbox_initialize(
@@ -80,6 +83,7 @@ def test_literal_deps_failed_string_remains_success_without_error(
     )
     assert isinstance(res_str, str)
     assert "[deps failed]" in res_str
+    assert f"({success_note})" in res_str
     assert not res_str.startswith("Container")
     assert "dependency preparation failed" not in res_str
 
@@ -96,6 +100,7 @@ def test_literal_deps_failed_string_remains_success_without_error(
     assert not isinstance(res_tool, ToolResult)
     assert not getattr(res_tool, "is_error", False)
     assert "[deps failed]" in res_tool
+    assert f"({success_note})" in str(res_tool)
 
     # 3. Async wrapper with progress ctx also returns plain str
     mock_ctx = MagicMock()
@@ -111,6 +116,7 @@ def test_literal_deps_failed_string_remains_success_without_error(
     assert isinstance(res_tool_ctx, str)
     assert not isinstance(res_tool_ctx, ToolResult)
     assert not getattr(res_tool_ctx, "is_error", False)
+    assert f"({success_note})" in str(res_tool_ctx)
 
 
 @pytest.mark.parametrize(
@@ -145,33 +151,47 @@ def test_preexisting_error_prefix_remains_plain_str(bad_kwargs: dict[str, Any]) 
     assert res_tool_ctx.startswith("Error:")
 
 
+def _initialize_mode_kwargs(mode: str) -> dict[str, Any]:
+    if mode == "plain":
+        return {"clone_repo": "owner/repo", "allow_network": True}
+    if mode == "branch":
+        return {"clone_repo": "owner/repo", "branch": "feature", "allow_network": True}
+    if mode == "pr":
+        return {"repo": "owner/repo", "pr": 42, "allow_network": True}
+    raise ValueError(f"Unknown mode: {mode}")
+
+
+@pytest.mark.parametrize("mode", ["plain", "branch", "pr"])
 def test_failed_deps_yields_toolresult_is_error_with_running_prefix(
     mock_transports: tuple[_MockContainer, MagicMock],
+    mode: str,
 ) -> None:
     container, mock_deps = mock_transports
+    if mode == "branch":
+        container.branch = "feature"
     fail_note = "deps: uv sync timeout (deadline_s=180s, reap=ok)"
     mock_deps.return_value = DepsResult(note=fail_note, failed=True)
 
     expected_prefix = (
-        f"Container {container.id[:12]} is running; dependency preparation failed: {fail_note}"
+        f"Container {container.id[:12]} is running; dependency preparation failed: {fail_note}: "
     )
 
-    # 1. Public API returns str with running prefix
+    # Public API returns the failure note once, in the leading running prefix.
     res_str = sandbox_initialize(
         image="python@sha256:" + "0" * 64,
-        clone_repo="owner/repo",
-        allow_network=True,
+        **_initialize_mode_kwargs(mode),
     )
     assert isinstance(res_str, str)
+    assert res_str.count(fail_note) == 1
+    assert f"({fail_note})" not in res_str
     assert res_str.startswith(expected_prefix)
     assert "[deps failed]" in res_str
 
-    # 2. Wrapper with ctx=None returns ToolResult with is_error=True
+    # Wrapper with ctx=None returns ToolResult with is_error=True.
     res_tool = asyncio.run(
         sandbox_initialize_tool(
             image="python@sha256:" + "0" * 64,
-            clone_repo="owner/repo",
-            allow_network=True,
+            **_initialize_mode_kwargs(mode),
             ctx=None,
         )
     )
@@ -179,25 +199,88 @@ def test_failed_deps_yields_toolresult_is_error_with_running_prefix(
     assert res_tool.is_error is True
     assert isinstance(res_tool.content, list) and res_tool.content
     content_text = getattr(res_tool.content[0], "text", "")
+    assert content_text.count(fail_note) == 1
+    assert f"({fail_note})" not in content_text
     assert content_text.startswith(expected_prefix)
     assert "[deps failed]" in content_text
 
-    # 3. Wrapper with ctx executor returns ToolResult with is_error=True
+    # Wrapper with progress ctx returns ToolResult with is_error=True.
     mock_ctx = MagicMock()
     mock_ctx.report_progress = AsyncMock()
     res_tool_ctx = asyncio.run(
         sandbox_initialize_tool(
             image="python@sha256:" + "0" * 64,
-            clone_repo="owner/repo",
-            allow_network=True,
+            **_initialize_mode_kwargs(mode),
             ctx=mock_ctx,
         )
     )
     assert isinstance(res_tool_ctx, ToolResult)
     assert res_tool_ctx.is_error is True
     content_ctx_text = getattr(res_tool_ctx.content[0], "text", "")
+    assert content_ctx_text.count(fail_note) == 1
+    assert f"({fail_note})" not in content_ctx_text
     assert content_ctx_text.startswith(expected_prefix)
     assert "[deps failed]" in content_ctx_text
+
+
+@pytest.mark.parametrize("mode", ["plain", "branch", "pr"])
+def test_success_deps_retains_parenthesized_note(
+    mock_transports: tuple[_MockContainer, MagicMock],
+    mode: str,
+) -> None:
+    container, mock_deps = mock_transports
+    if mode == "branch":
+        container.branch = "feature"
+    success_note = "deps: uv sync ok"
+    mock_deps.return_value = DepsResult(note=success_note, failed=False)
+
+    # 1. Public API returns str with parenthesized note and without error prefix
+    res_str = sandbox_initialize(
+        image="python@sha256:" + "0" * 64,
+        **_initialize_mode_kwargs(mode),
+    )
+    assert isinstance(res_str, str)
+    assert f" ({success_note})" in res_str
+    assert "[deps failed]" not in res_str
+    assert not res_str.startswith("Container")
+    assert "dependency preparation failed" not in res_str
+    assert res_str.count(success_note) == 1
+
+    # 2. Wrapper with ctx=None returns plain str (is_error is False)
+    res_tool = asyncio.run(
+        sandbox_initialize_tool(
+            image="python@sha256:" + "0" * 64,
+            **_initialize_mode_kwargs(mode),
+            ctx=None,
+        )
+    )
+    assert isinstance(res_tool, str)
+    assert not isinstance(res_tool, ToolResult)
+    assert not getattr(res_tool, "is_error", False)
+    assert f" ({success_note})" in res_tool
+    assert "[deps failed]" not in res_tool
+    assert not res_tool.startswith("Container")
+    assert "dependency preparation failed" not in res_tool
+    assert res_tool.count(success_note) == 1
+
+    # 3. Wrapper with progress ctx also returns plain str
+    mock_ctx = MagicMock()
+    mock_ctx.report_progress = AsyncMock()
+    res_tool_ctx = asyncio.run(
+        sandbox_initialize_tool(
+            image="python@sha256:" + "0" * 64,
+            **_initialize_mode_kwargs(mode),
+            ctx=mock_ctx,
+        )
+    )
+    assert isinstance(res_tool_ctx, str)
+    assert not isinstance(res_tool_ctx, ToolResult)
+    assert not getattr(res_tool_ctx, "is_error", False)
+    assert f" ({success_note})" in res_tool_ctx
+    assert "[deps failed]" not in res_tool_ctx
+    assert not res_tool_ctx.startswith("Container")
+    assert "dependency preparation failed" not in res_tool_ctx
+    assert res_tool_ctx.count(success_note) == 1
 
 
 def test_structured_flag_independent_of_text_and_no_double_invocation() -> None:

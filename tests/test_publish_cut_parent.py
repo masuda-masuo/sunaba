@@ -632,14 +632,14 @@ def _assert_api_read_attempted(ctx: _PublishContext, needle: str) -> None:
 class TestCutParentRegressions:
     """The #934 routes and the post-fetch rewrite race stop the publish."""
 
-    def test_nonsymbolic_forged_origin_head_with_omitted_base_stops(
+    def test_nonsymbolic_forged_origin_head_with_omitted_base_cuts_from_default(
         self, ctx: _PublishContext,
     ) -> None:
-        """S4: origin/HEAD is made a direct ref to a forged checkpoint.
+        """S4 / #946: origin/HEAD is made a direct ref to a forged checkpoint.
 
-        ``git fetch`` leaves origin/HEAD alone, so with no ``base_branch``
-        the commit used to be cut from the forgery.  The host still knows
-        the default branch tip; HEAD^1 must match it.
+        Manifest publish with omitted base cuts from origin/<host default>
+        (origin/main) rather than origin/HEAD. The forged origin/HEAD is
+        ignored and publish succeeds against the legitimate remote default.
         """
         main_sha = _sha(ctx.clone, "refs/remotes/origin/main")
         forged = _forge_bad_commit(ctx.clone, "origin/main")
@@ -655,16 +655,11 @@ class TestCutParentRegressions:
             ctx, branch="feat/forged-head", files=["README.md"],
         )
 
-        _assert_cut_parent_mismatch(
-            result,
-            expected_sha=main_sha,
-            actual_sha=forged,
-            ref_names=(
-                "refs/heads/main", "origin/main", "origin/HEAD",
-                "feat/forged-head",
-            ),
-        )
-        _assert_nothing_pushed(ctx, pr_mock, "feat/forged-head")
+        assert result["status"] == "pushed", result
+        assert result["cut_from"] == "origin/main"
+        created_parent = _sha(ctx.clone, "HEAD^1")
+        assert created_parent == main_sha
+        assert created_parent != forged
 
     def test_phantom_origin_branch_absent_from_remote_stops(
         self, ctx: _PublishContext,
@@ -772,8 +767,9 @@ class TestCutParentRegressions:
         )
 
         _assert_fail_closed(ctx, result, pr_mock, "feat/stacked-from-forgery")
-        assert "feat/local-only" in json.dumps(result), result
-        _assert_api_read_attempted(ctx, "feat/local-only")
+        assert result["step"] == "base_branch"
+        assert "feat/local-only" in result["error"]
+        assert "tried origin/feat/local-only only" in result["error"]
 
     def test_forged_merge_second_parent_stops(
         self, ctx: _PublishContext,
@@ -989,7 +985,7 @@ class TestCutParentSuccessPaths:
         assert result["branch"] == "feat/brand-new"
         assert result["sha"] == _sha(ctx.origin, "refs/heads/feat/brand-new")[:7]
         assert result["staged_files"] == ["new.txt"]
-        assert result["cut_from"] == "origin/HEAD"
+        assert result["cut_from"] == "origin/main"
         assert result["secret_scan_state"] == "skipped"
         assert result["files_scanned"] == ["new.txt"]
         assert result["scan_summary"]
@@ -1081,15 +1077,13 @@ class TestCutParentSuccessPaths:
         assert _sha(ctx.origin, "refs/heads/feat/merge-ok^2") == main_tip
         _assert_scan_before_push(ctx)
 
-    def test_matching_local_base_fallback_publishes(
+    def test_local_only_base_without_remote_tracking_ref_refuses(
         self, ctx: _PublishContext,
     ) -> None:
-        """A legitimate local-base fallback is validated, not refused.
+        """Under #946, local-only base without remote ref fails step=base_branch.
 
-        The tracking ref is absent because this clone only fetches main, and
-        an explicit ``git fetch origin <base>`` does not create a
-        remote-tracking ref.  The local ``feat/base`` is byte-identical to
-        the remote base, so the host read must accept it.
+        The tracking ref is absent because this clone only fetches main.
+        Local-base fallback is eliminated; publish refuses before commit.
         """
         base_tip = _remote_branch(ctx, "feat/base", {"base.txt": "base\n"})
         assert _git(ctx.clone, "fetch", "origin").returncode == 0
@@ -1112,9 +1106,8 @@ class TestCutParentSuccessPaths:
             base_branch="feat/base",
         )
 
-        assert result["status"] == "pushed", result
-        assert result["cut_from"] == "feat/base"
-        assert _sha(ctx.origin, "refs/heads/feat/stacked-local^") == base_tip
-        _assert_scan_before_push(ctx)
-        # The guard must have validated the local fallback against the host.
-        _assert_api_read_attempted(ctx, "feat/base")
+        assert result["status"] == "error", result
+        assert result["step"] == "base_branch"
+        assert "feat/base" in result["error"]
+        assert "tried origin/feat/base only" in result["error"]
+        _assert_nothing_pushed(ctx, _pr, "feat/stacked-local")

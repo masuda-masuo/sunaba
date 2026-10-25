@@ -196,6 +196,7 @@ class TestManifestCheckpointLeakPrevention:
         err, _committed = git_prepare_commit(
             run, branch="fix/x", message="Manifest push",
             files=["declared.txt"],
+            default_branch="main",
         )
         assert err is None, f"git_prepare_commit failed: {err}"
 
@@ -242,6 +243,7 @@ class TestManifestFollowUp:
         err, _committed = git_prepare_commit(
             run, branch="feat/feature-x", message="Second commit",
             files=["second.txt"],
+            default_branch="main",
         )
         assert err is None, f"git_prepare_commit failed: {err}"
 
@@ -296,6 +298,7 @@ class TestManifestUndeclaredEditExcluded:
         err, _committed = git_prepare_commit(
             run, branch="feat/feature-y", message="Manifest push",
             files=["new.txt"],
+            default_branch="main",
         )
         assert err is None, f"git_prepare_commit failed: {err}"
 
@@ -345,6 +348,7 @@ class TestManifestDeclaredDeletion:
         err, _committed = git_prepare_commit(
             run, branch="feat/feature-z", message="Delete todelete.txt",
             files=["todelete.txt"],
+            default_branch="main",
         )
         assert err is None, f"git_prepare_commit failed: {err}"
 
@@ -388,6 +392,7 @@ class TestManifestDeclaredDeletion:
         err, _committed = git_prepare_commit(
             run, branch="feat/feature-rm", message="Delete todelete.txt",
             files=["todelete.txt"],
+            default_branch="main",
         )
         assert err is None, f"git_prepare_commit failed: {err}"
 
@@ -423,6 +428,7 @@ class TestManifestUntrackedPathRejection:
         err, _committed = git_prepare_commit(
             run, branch="feat/rejection", message="Should fail",
             files=["nosuchfile.txt"],
+            default_branch="main",
         )
         assert err is not None, "expected an error for non-existent untracked path"
         # git_prepare_commit does not validate paths (the caller
@@ -447,6 +453,7 @@ class TestManifestUntrackedPathRejection:
         err, _committed = git_prepare_commit(
             run, branch="feat/glob", message="Should fail",
             files=["*.md"],
+            default_branch="main",
         )
         assert err is not None, "glob pathspec must not stage README.md"
         assert err.get("step") == "git_add", f"unexpected error shape: {err}"
@@ -739,6 +746,7 @@ class TestManifestPreservesBaseMerge:
         err, _committed = git_prepare_commit(
             run, branch="feat/x", message="Manifest push after merge",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include=auto_include,
         )
         assert err is None, f"git_prepare_commit failed: {err}"
@@ -784,6 +792,7 @@ class TestManifestPreservesBaseMerge:
         err, _committed = git_prepare_commit(
             run, branch="feat/y", message="Manifest push",
             files=["declared.txt"],
+            default_branch="main",
         )
         assert err is None, f"git_prepare_commit failed: {err}"
 
@@ -851,6 +860,7 @@ class TestForgeRemoteRefCannotLeak:
             run, branch="feat/secret",
             message="Manifest push after forged merge",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include=auto_include,
         )
         assert err is None, f"git_prepare_commit failed: {err}"
@@ -920,6 +930,7 @@ class TestAutoIncludeBaseAdvance:
             run, branch="feat/adv",
             message="Manifest push after merge",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include=auto_include,
         )
         assert err is None, f"git_prepare_commit failed: {err}"
@@ -1023,6 +1034,7 @@ class TestAutoIncludeBaseDeletion:
             run, branch="feat/del",
             message="Manifest push after base deletion merge",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include=auto_include,
         )
         assert err is None, f"git_prepare_commit failed: {err}"
@@ -1125,6 +1137,7 @@ class TestAutoIncludeBaseDeletion:
             run, branch="feat/also_del",
             message="Manifest push after independent-deletion merge",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include=auto_include,
         )
         assert err is None, f"git_prepare_commit failed: {err}"
@@ -1197,6 +1210,7 @@ class TestAutoIncludeBaseBinary:
             run, branch="feat/bin",
             message="Manifest push after binary merge",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include=auto_include,
         )
         assert err is None, f"git_prepare_commit failed: {err}"
@@ -2426,6 +2440,7 @@ class TestManifestCutFromBaseBranch:
             branch="feat/new",
             message="Stack me",
             files=["stacked.txt"],
+            default_branch="main",
             base_branch="feat/existing",
             cut_from=cut_from,
         )
@@ -2455,6 +2470,7 @@ class TestManifestCutFromBaseBranch:
             branch="feat/new",
             message="Nope",
             files=["x.txt"],
+            default_branch="main",
             base_branch="feat/does-not-exist",
         )
         assert err is not None
@@ -2483,6 +2499,7 @@ class TestManifestCutFromBaseBranch:
             branch="feat/from-main",
             message="Bad stack",
             files=["on_main.txt"],
+            default_branch="main",
             base_branch="feat/other",
         )
         assert err is not None
@@ -2495,10 +2512,10 @@ class TestManifestCutFromBaseBranch:
     def test_omitted_base_branch_still_cuts_from_origin_head(
         self, repo_setup: dict[str, Any],
     ) -> None:
-        """No base_branch: parent is origin/HEAD (the default path)."""
+        """No base_branch: parent is origin/<default_branch> (the default path)."""
         clone = repo_setup["clone_dir"]
         default_tip = _git(
-            clone, "rev-parse", "origin/HEAD",
+            clone, "rev-parse", "origin/main",
         ).stdout.strip()
         (Path(clone) / "only.txt").write_text("only\n")
         cut_from: dict[str, str] = {}
@@ -2507,13 +2524,14 @@ class TestManifestCutFromBaseBranch:
             branch="feat/default-cut",
             message="Default path",
             files=["only.txt"],
+            default_branch="main",
             cut_from=cut_from,
         )
         assert err is None, f"git_prepare_commit failed: {err}"
         assert committed == ["only.txt"]
         parent = _git(clone, "rev-parse", "HEAD^").stdout.strip()
         assert parent == default_tip
-        assert cut_from["ref"] == "origin/HEAD"
+        assert cut_from["ref"] == "origin/main"
 
     def test_matching_develop_default_name_resets_to_origin_head(
         self, tmp_path: Path,
@@ -2559,14 +2577,15 @@ class TestManifestCutFromBaseBranch:
             branch="feat/from-develop",
             message="Default by name",
             files=["only.txt"],
+            default_branch="develop",
             base_branch="develop",
             cut_from=cut_from,
         )
         assert err is None, f"git_prepare_commit failed: {err}"
         assert committed == ["only.txt"]
-        default_tip = _git(clone, "rev-parse", "origin/HEAD").stdout.strip()
+        default_tip = _git(clone, "rev-parse", "origin/develop").stdout.strip()
         parent = _git(clone, "rev-parse", "HEAD^").stdout.strip()
         assert parent == default_tip
-        assert cut_from["ref"] == "origin/HEAD"
-        assert any("reset --mixed origin/HEAD" in c for c in recorded)
+        assert cut_from["ref"] == "origin/develop"
+        assert any("reset --mixed origin/develop" in c for c in recorded)
         assert not any("merge-base --is-ancestor" in c for c in recorded)

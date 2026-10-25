@@ -558,8 +558,8 @@ class TestGitPrepareCommitAutoInclude:
             (0, "none\n", ""),               # MERGE_HEAD check
             (0, "", ""),                     # checkout feat/a
             (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/a (empty)
-            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
-            (0, "", ""),                     # git reset --mixed origin/HEAD
+            (0, "deadbeef\n", ""),           # rev-parse origin/main
+            (0, "", ""),                     # git reset --mixed origin/main
             # auto_include writes for two files
             (0, "", ""),                     # echo+base64 for moved.txt
             (0, "", ""),                     # git add moved.txt
@@ -573,6 +573,7 @@ class TestGitPrepareCommitAutoInclude:
         result, _committed = git_prepare_commit(
             run, branch="feat/a", message="Msg",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include={
                 "moved.txt": "moved content\n",
                 "added.txt": "added content\n",
@@ -594,8 +595,8 @@ class TestGitPrepareCommitAutoInclude:
             (0, "none\n", ""),               # MERGE_HEAD check
             (0, "", ""),                     # checkout
             (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/x (empty)
-            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
-            (0, "", ""),                     # git reset --mixed origin/HEAD
+            (0, "deadbeef\n", ""),           # rev-parse origin/main
+            (0, "", ""),                     # git reset --mixed origin/main
             # no auto-include writes (None -> skipped)
             (0, "", ""),                     # git add declared.txt
             (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
@@ -604,6 +605,7 @@ class TestGitPrepareCommitAutoInclude:
         result, _committed = git_prepare_commit(
             run, branch="feat/x", message="Msg",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include=None,
         )
         assert result is None
@@ -617,13 +619,14 @@ class TestGitPrepareCommitAutoInclude:
             (0, "none\n", ""),               # MERGE_HEAD check
             (0, "", ""),                     # checkout
             (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/z (empty)
-            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
-            (0, "", ""),                     # git reset --mixed origin/HEAD
+            (0, "deadbeef\n", ""),           # rev-parse origin/main
+            (0, "", ""),                     # git reset --mixed origin/main
             (1, "", "write error"),          # echo+base64 fails
         ])
         result, _committed = git_prepare_commit(
             run, branch="feat/z", message="Msg",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include={"bad.txt": "content"},
         )
         assert result is not None
@@ -636,8 +639,8 @@ class TestGitPrepareCommitAutoInclude:
             (0, "none\n", ""),               # MERGE_HEAD check
             (0, "", ""),                     # checkout feat/d
             (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/d (empty)
-            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
-            (0, "", ""),                     # git reset --mixed origin/HEAD
+            (0, "deadbeef\n", ""),           # rev-parse origin/main
+            (0, "", ""),                     # git reset --mixed origin/main
             # auto-include deletion: check existence, then rm
             (0, "todelete.txt\n", ""),       # git ls-files --error-unmatch → tracked
             (0, "", ""),                     # git rm todelete.txt
@@ -649,6 +652,7 @@ class TestGitPrepareCommitAutoInclude:
         result, _committed = git_prepare_commit(
             run, branch="feat/d", message="Msg",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include={"todelete.txt": None},
         )
         assert result is None
@@ -665,8 +669,8 @@ class TestGitPrepareCommitAutoInclude:
             (0, "none\n", ""),               # MERGE_HEAD check
             (0, "", ""),                     # checkout feat/e
             (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/e (empty)
-            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
-            (0, "", ""),                     # git reset --mixed origin/HEAD
+            (0, "deadbeef\n", ""),           # rev-parse origin/main
+            (0, "", ""),                     # git reset --mixed origin/main
             # auto-include deletion: file not tracked → ls-files fails
             (1, "", "fatal: ..."),           # git ls-files --error-unmatch → not tracked
             # declared file staging
@@ -677,6 +681,7 @@ class TestGitPrepareCommitAutoInclude:
         result, _committed = git_prepare_commit(
             run, branch="feat/e", message="Msg",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include={"notexist.txt": None},
         )
         assert result is None
@@ -693,8 +698,8 @@ class TestGitPrepareCommitAutoInclude:
             (0, "none\n", ""),               # MERGE_HEAD check
             (0, "", ""),                     # checkout feat/f
             (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/f (empty)
-            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
-            (0, "", ""),                     # git reset --mixed origin/HEAD
+            (0, "deadbeef\n", ""),           # rev-parse origin/main
+            (0, "", ""),                     # git reset --mixed origin/main
             # auto-include deletion: tracked, but git rm fails
             (0, "gone.txt\n", ""),           # git ls-files --error-unmatch → tracked
             (1, "", "git rm failed"),        # git rm fails
@@ -702,6 +707,7 @@ class TestGitPrepareCommitAutoInclude:
         result, _committed = git_prepare_commit(
             run, branch="feat/f", message="Msg",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include={"gone.txt": None},
         )
         assert result is not None
@@ -716,8 +722,8 @@ class TestGitPrepareCommitAutoInclude:
             (0, "none\n", ""),               # MERGE_HEAD check
             (0, "", ""),                     # checkout feat/g
             (0, "\n", "origin/HEAD\n"),      # rev-parse origin/feat/g (empty)
-            (0, "deadbeef\n", ""),           # rev-parse origin/HEAD
-            (0, "", ""),                     # git reset --mixed origin/HEAD
+            (0, "deadbeef\n", ""),           # rev-parse origin/main
+            (0, "", ""),                     # git reset --mixed origin/main
             (0, "", ""),                     # echo+base64 for binary.bin
             (0, "", ""),                     # git add binary.bin
             (0, "", ""),                     # git add declared.txt
@@ -727,6 +733,7 @@ class TestGitPrepareCommitAutoInclude:
         result, _committed = git_prepare_commit(
             run, branch="feat/g", message="Msg",
             files=["declared.txt"],
+            default_branch="main",
             base_auto_include={"binary.bin": raw_bytes},
         )
         assert result is None, f"git_prepare_commit failed: {result}"
@@ -744,31 +751,16 @@ class TestGitPrepareCommitAutoInclude:
 
 
 class TestGitPrepareCommitManifestBaseRef:
-    """Base-ref resolution in manifest mode: origin/HEAD, ls-remote, guess."""
+    """Base-ref resolution in manifest mode: explicit default_branch, no origin/HEAD, ls-remote or guesses."""
 
-    def test_ls_remote_dev_branch(self) -> None:
-        """origin/HEAD unset, ls-remote yields 'dev' — fetches and uses it.
-
-        This exercises the ls-remote resolution path: when the remote's
-        default branch is 'dev' (neither main nor master), the function
-        fetches it and uses origin/dev as the reset target.
-        """
+    def test_default_branch_dev(self) -> None:
+        """When default_branch='dev', resets to origin/dev without ls-remote or fetch."""
         run = RecordingRun([
             (0, "none\n", ""),                # MERGE_HEAD check
             (0, "", ""),                      # checkout feat
             (0, "\n", "origin/HEAD\n"),        # rev-parse origin/feat (empty)
-            (0, "", ""),                      # rev-parse origin/HEAD (empty)
-            # ls-remote succeeds with "dev"
-            (0, "ref: refs/heads/dev\tHEAD\nabc1234\tHEAD\n", ""),
-            # verify locally — fails, so fetch
-            (0, "", ""),
-            # git fetch origin dev
-            (0, "", ""),
-            # verify again — succeeds now
-            (0, "deadbeef\n", ""),
-            # reset to origin/dev
-            (0, "", ""),
-            # nothing to auto-include, stage declared file
+            (0, "deadbeef\n", ""),           # rev-parse origin/dev
+            (0, "", ""),                      # reset to origin/dev
             (0, "", ""),                      # git add declared.txt
             (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat abc1234] Msg\n", ""),  # commit
@@ -776,35 +768,23 @@ class TestGitPrepareCommitManifestBaseRef:
         result, _committed = git_prepare_commit(
             run, branch="feat", message="Msg",
             files=["declared.txt"],
+            default_branch="dev",
         )
         assert result is None
 
-        # Verify the base_ref was resolved from ls-remote
         cmd_strs = [c[0] for c in run.calls]
-        assert any("ls-remote" in c for c in cmd_strs), (
-            "ls-remote should be called when origin/HEAD is unset"
-        )
-        assert any("fetch origin dev" in c for c in cmd_strs), (
-            "should fetch the resolved branch 'dev'"
-        )
-        assert any("reset --mixed origin/dev" in c for c in cmd_strs), (
-            "reset should target origin/dev"
-        )
+        assert not any("ls-remote" in c for c in cmd_strs)
+        assert not any("fetch" in c for c in cmd_strs)
+        assert any("reset --mixed origin/dev" in c for c in cmd_strs)
 
-    def test_ls_remote_fails_guess_succeeds(self) -> None:
-        """origin/HEAD and ls-remote both fail, guess 'main' works."""
+    def test_default_branch_main(self) -> None:
+        """When default_branch='main', resets to origin/main."""
         run = RecordingRun([
             (0, "none\n", ""),                # MERGE_HEAD check
             (0, "", ""),                      # checkout feat
             (0, "\n", "origin/HEAD\n"),        # rev-parse origin/feat (empty)
-            (0, "", ""),                      # rev-parse origin/HEAD (empty)
-            # ls-remote fails (empty output)
-            (0, "", ""),
-            # guess: origin/main exists
-            (0, "deadbeef\n", ""),
-            # reset to origin/main
-            (0, "", ""),
-            # stage declared file
+            (0, "deadbeef\n", ""),           # rev-parse origin/main
+            (0, "", ""),                      # reset to origin/main
             (0, "", ""),                      # git add declared.txt
             (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
             (0, "[feat abc1234] Msg\n", ""),  # commit
@@ -812,70 +792,43 @@ class TestGitPrepareCommitManifestBaseRef:
         result, _committed = git_prepare_commit(
             run, branch="feat", message="Msg",
             files=["declared.txt"],
+            default_branch="main",
         )
         assert result is None
 
         cmd_strs = [c[0] for c in run.calls]
-        assert any("reset --mixed origin/main" in c for c in cmd_strs), (
-            "reset should target origin/main from the guess fallback"
-        )
+        assert any("reset --mixed origin/main" in c for c in cmd_strs)
 
     def test_no_remote_ref_fails_with_diagnostic_message(self) -> None:
-        """Everything fails — error message names non-main/master case."""
+        """Missing remote-tracking ref for default_branch fails with step=base_branch."""
         run = RecordingRun([
             (0, "none\n", ""),                # MERGE_HEAD check
             (0, "", ""),                      # checkout feat
             (0, "\n", "origin/HEAD\n"),        # rev-parse origin/feat (empty)
-            (0, "", ""),                      # rev-parse origin/HEAD (empty)
-            # ls-remote fails
-            (0, "", ""),
-            # guess: main fails
-            (1, "", ""),
-            # guess: master fails
-            (1, "", ""),
+            (1, "", "fatal: Needed a single revision"),  # rev-parse origin/main
         ])
         result, _committed = git_prepare_commit(
             run, branch="feat", message="Msg",
             files=["declared.txt"],
+            default_branch="main",
         )
         assert result is not None
         assert result["status"] == "error"
-        assert result["step"] == "squash_reset"
-        assert "something other than 'main' or 'master'" in result["error"], (
-            f"Error should mention non-main/master default, got: {result['error']}"
-        )
+        assert result["step"] == "base_branch"
+        assert "origin/main" in result["error"]
 
-    def test_ls_remote_verify_succeeds_no_fetch_needed(self) -> None:
-        """ls-remote yields 'dev' and origin/dev already exists locally."""
-        run = RecordingRun([
-            (0, "none\n", ""),                # MERGE_HEAD check
-            (0, "", ""),                      # checkout feat
-            (0, "\n", "origin/HEAD\n"),        # rev-parse origin/feat (empty)
-            (0, "", ""),                      # rev-parse origin/HEAD (empty)
-            # ls-remote succeeds with "dev"
-            (0, "ref: refs/heads/dev\tHEAD\nabc1234\tHEAD\n", ""),
-            # verify locally — succeeds immediately
-            (0, "deadbeef\n", ""),
-            # reset to origin/dev
-            (0, "", ""),
-            # stage declared file
-            (0, "", ""),                      # git add declared.txt
-            (1, "diff --git a/declared.txt b/declared.txt\n", ""),  # diff --cached (non-empty)
-            (0, "[feat abc1234] Msg\n", ""),  # commit
-        ])
+    def test_empty_default_branch_fails_step_base_branch(self) -> None:
+        """Empty default_branch in manifest mode returns step=base_branch immediately."""
+        run = RecordingRun([])
         result, _committed = git_prepare_commit(
             run, branch="feat", message="Msg",
             files=["declared.txt"],
+            default_branch="",
         )
-        assert result is None
-
-        cmd_strs = [c[0] for c in run.calls]
-        assert any("reset --mixed origin/dev" in c for c in cmd_strs), (
-            "reset should target origin/dev"
-        )
-        # No fetch needed
-        fetch_calls = [c for c in cmd_strs if "fetch" in c]
-        assert len(fetch_calls) == 0, "no fetch should be needed when origin/dev exists"
+        assert result is not None
+        assert result["status"] == "error"
+        assert result["step"] == "base_branch"
+        assert "default_branch" in result["error"]
 
 
 class TestGitPrepareCommitCutFromBaseBranch:
@@ -901,6 +854,7 @@ class TestGitPrepareCommitCutFromBaseBranch:
         result, committed = git_prepare_commit(
             run, branch="feat/new", message="Msg",
             files=["stacked.txt"],
+            default_branch="main",
             base_branch="feat/existing",
             cut_from=cut_from,
         )
@@ -920,13 +874,11 @@ class TestGitPrepareCommitCutFromBaseBranch:
             (0, "", ""),         # checkout
             (0, "", ""),         # rev-parse origin/feat/new (empty)
             (0, "", ""),         # rev-parse origin/feat/missing (empty)
-            (0, "", ""),         # fetch origin feat/missing
-            (0, "", ""),         # rev-parse origin/feat/missing again
-            (0, "", ""),         # rev-parse local feat/missing
         ])
         result, committed = git_prepare_commit(
             run, branch="feat/new", message="Msg",
             files=["x.txt"],
+            default_branch="main",
             base_branch="feat/missing",
         )
         assert result is not None
@@ -1059,6 +1011,7 @@ class TestRealGitDeclaredPathNotOverwritten:
                 branch="feat",
                 message="publish edit",
                 files=["target.txt"],
+                default_branch="main",
                 base_auto_include={"target.txt": auto_content},
             )
 
@@ -1122,6 +1075,7 @@ class TestRealGitDeclaredPathNotOverwritten:
                 branch="feat",
                 message="publish",
                 files=["declared.txt"],
+                default_branch="main",
                 base_auto_include={
                     "declared.txt": "should be overridden\n",
                     "auto.txt": "auto-include content wins\n",
@@ -1176,6 +1130,7 @@ class TestRealGitDeclaredPathNotOverwritten:
                 branch="feat",
                 message="no change",
                 files=["same.txt"],
+                default_branch="main",
             )
 
             assert result is not None, "Should reject empty result"
@@ -1218,6 +1173,7 @@ class TestRealGitDeclaredPathNotOverwritten:
                 branch="feat",
                 message="should fail",
                 files=["conflict.txt"],
+                default_branch="main",
             )
 
             assert result is not None, "Should fail on checkout conflict"
@@ -1268,6 +1224,7 @@ class TestRealGitDeclaredPathNotOverwritten:
                 branch="feat",
                 message="publish",
                 files=["changed.txt"],
+                default_branch="main",
                 # The only auto-included path is non-declared AND unchanged
                 # relative to the push target.
                 base_auto_include={"unchanged.txt": "same everywhere\n"},
@@ -1315,6 +1272,7 @@ class TestMergeRebuild:
         result, committed = git_prepare_commit(
             run, branch="feat", message="Merge rebuild",
             files=["declared.txt"],
+            default_branch="main",
             is_merge=True,
             merge_parent_sha="basebranchSHA",
             merge_result=merge_result,
@@ -1347,6 +1305,7 @@ class TestMergeRebuild:
         result, _ = git_prepare_commit(
             run, branch="feat", message="Merge",
             files=["declared.txt"],
+            default_branch="main",
             is_merge=True,
             merge_parent_sha="bbbbbbb",
             merge_result=merge_result,
@@ -1384,6 +1343,7 @@ class TestMergeRebuild:
         result, _ = git_prepare_commit(
             run, branch="feat", message="Merge",
             files=["declared.txt"],
+            default_branch="main",
             is_merge=True,
             merge_parent_sha="sameSHA",
             merge_result=merge_result,
@@ -1413,6 +1373,7 @@ class TestMergeRebuild:
         result, _ = git_prepare_commit(
             run, branch="feat", message="Merge",
             files=["declared.txt"],
+            default_branch="main",
             is_merge=True,
             merge_parent_sha="p2SHA",
             merge_result=merge_result,
@@ -1444,6 +1405,7 @@ class TestMergeRebuild:
         result, committed = git_prepare_commit(
             run, branch="feat", message="History-only merge",
             files=["declared.txt"],
+            default_branch="main",
             is_merge=True,
             merge_parent_sha="baseSHA",
             merge_result=merge_result,
@@ -1469,6 +1431,7 @@ class TestMergeRebuild:
         result, _ = git_prepare_commit(
             run, branch="feat", message="No change",
             files=["declared.txt"],
+            default_branch="main",
         )
         assert result is not None
         assert result["status"] == "error"
@@ -1499,6 +1462,7 @@ class TestMergeRebuild:
         result, committed = git_prepare_commit(
             run, branch="feat", message="Merge",
             files=["changed.txt", "unchanged.txt"],
+            default_branch="main",
             is_merge=True,
             merge_parent_sha="baseSHA",
             merge_result=merge_result,
@@ -1528,6 +1492,7 @@ class TestMergeRebuild:
         result, _ = git_prepare_commit(
             run, branch="feat", message="Msg",
             files=["changed.txt", "unchanged.txt"],
+            default_branch="main",
         )
         assert result is not None
         assert result["status"] == "error"

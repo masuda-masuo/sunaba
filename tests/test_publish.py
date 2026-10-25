@@ -782,8 +782,8 @@ class TestPublishManifest:
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x
-            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"abc1234", b""),  # rev-parse --verify origin/main
+            (0, b"", b""),  # git reset --mixed origin/main
             (0, b"", b""),  # git add -- 'declared.txt'
             (1, b"diff --git a/f b/f\n", b""),
             (0, b"[fix/x abc1234] Fix", b""),
@@ -803,7 +803,7 @@ class TestPublishManifest:
         ))
 
         assert result["status"] == "pushed"
-        assert result["cut_from"] == "origin/HEAD"
+        assert result["cut_from"] == "origin/main"
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -1398,9 +1398,9 @@ class TestPublishManifest:
             (0, b"", b""),  # checkout -b
             # Resolve base - branch does NOT exist on remote yet
             (1, b"", b""),  # rev-parse --verify origin/fix/x (ec=1)
-            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD -> found
+            (0, b"abc1234", b""),  # rev-parse --verify origin/main -> found
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
-            (0, b"", b""),  # git reset --mixed origin/HEAD
+            (0, b"", b""),  # git reset --mixed origin/main
             (0, b"", b""),  # git add -- 'declared.txt'  <-- only declarerd
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (diffs found)
             (0, b"[fix/x abc1234] Fix", b""),  # commit
@@ -1441,7 +1441,7 @@ class TestPublishManifest:
             for c in container.exec_run.call_args_list
             if "git reset" in str(_exec_cmd(c))
         ]
-        assert any("git reset --mixed origin/HEAD" in c for c in reset_calls)
+        assert any("git reset --mixed origin/main" in c for c in reset_calls)
 
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
@@ -1528,8 +1528,6 @@ class TestPublishManifest:
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
-            (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
-            (0, b"", b""),  # ls-remote --symref origin HEAD (empty/fails)
             (0, b"abc1234", b""),  # rev-parse --verify origin/main (found)
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/main
@@ -1561,15 +1559,16 @@ class TestPublishManifest:
         ]
         assert any("git reset --mixed origin/main" in c for c in reset_calls)
 
+    @patch("sunaba.tools.vcs.publishing._host_read_default_branch", return_value=("master", ""))
     @patch("sunaba.tools.vcs.publishing._docker")
     @patch("sunaba.tools.vcs.publishing.record_boundary_crossing")
     def test_manifest_fallback_to_origin_master(
         self,
         mock_record: MagicMock,
         mock_docker: MagicMock,
+        mock_default_branch: MagicMock,
     ) -> None:
-        """When origin/HEAD and origin/main are both absent, fallback to
-        origin/master succeeds."""
+        """When host default branch is master, resets to origin/master."""
         container = _make_publish_container([(0, b"", b""),  # test -f 'declared.txt'
 
             (0, b"", b""),   # git fetch origin (#818, #932)
@@ -1578,9 +1577,6 @@ class TestPublishManifest:
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
-            (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
-            (0, b"", b""),  # ls-remote --symref origin HEAD (empty/fails)
-            (1, b"", b""),  # rev-parse --verify origin/main (not found)
             (0, b"abc1234", b""),  # rev-parse --verify origin/master (found)
             # [REMOVED] old HEAD^2 check moved before git_prepare_commit
             (0, b"", b""),  # git reset --mixed origin/master
@@ -1630,10 +1626,7 @@ class TestPublishManifest:
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),  # checkout -b
             (1, b"", b""),  # rev-parse --verify origin/fix/x (not on remote)
-            (1, b"", b""),  # rev-parse --verify origin/HEAD (not found)
-            (0, b"", b""),  # ls-remote --symref origin HEAD (empty/fails)
             (1, b"", b""),  # rev-parse --verify origin/main (not found)
-            (1, b"", b""),  # rev-parse --verify origin/master (not found)
         ])
         client = _make_client_mock(container)
         mock_docker.return_value = client
@@ -1647,8 +1640,8 @@ class TestPublishManifest:
         ))
 
         assert result["status"] == "error"
-        assert result["step"] == "squash_reset"
-        assert "Cannot resolve a remote base for manifest mode" in result["error"]
+        assert result["step"] == "base_branch"
+        assert "origin/main" in result["error"]
 
 
 class TestCreatePrViaApi:
@@ -2168,8 +2161,8 @@ class TestPublishSecretScanIntegration:
             (0, b"none\n", b""),  # MERGE_HEAD check
             (0, b"", b""),   # checkout -b
             (1, b"", b""),   # rev-parse --verify origin/fix/x (not on remote)
-            (0, b"abc1234", b""),  # rev-parse --verify origin/HEAD
-            (0, b"", b""),   # git reset --mixed origin/HEAD
+            (0, b"abc1234", b""),  # rev-parse --verify origin/main
+            (0, b"", b""),   # git reset --mixed origin/main
             (0, b"", b""),   # git add -- 'changed.txt'
             (0, b"", b""),   # git add -- 'unchanged.txt'
             (1, b"diff --git a/f b/f\n", b""),  # git diff --cached --exit-code (has diffs)
@@ -2192,7 +2185,7 @@ class TestPublishSecretScanIntegration:
         assert result["declared_unchanged"] == ["unchanged.txt"]
         # Must name the offending paths and the base ref
         assert "unchanged.txt" in result["error"]
-        assert "origin/HEAD" in result["error"]
+        assert "origin/main" in result["error"]
         # No push — early return before any push attempt
         assert "sha" not in result
         assert "pr_url" not in result
@@ -2496,7 +2489,7 @@ class TestPublishBaseAutoInclude:
             (0, b"parent2222bbbb\n", b""),    # rev-parse HEAD^2
             (0, b"moved.txt\n", b""),         # git diff --name-only HEAD^1 HEAD
             (0, b"", b""),   # upstream guard probe (merge-base / blobs) (#863)
-            (0, b"freshbase1234\n", b""),  # rev-parse origin/HEAD (P2 fallback)
+            (0, b"freshbase1234\n", b""),  # rev-parse origin/main (P2 fallback)
             (0, b"none\n", b""),          # MERGE_HEAD check
             (0, b"", b""),                # checkout -b
             # Follow-up push: the branch EXISTS on the remote, so base_ref
@@ -2552,7 +2545,7 @@ class TestPublishBaseAutoInclude:
         )
         p2_idx = next(
             i for i, c in enumerate(cmds)
-            if "rev-parse origin/HEAD" in c and "--verify" not in c
+            if "rev-parse origin/main" in c and "--verify" not in c
         )
         assert p2_idx > fetch_idx
 
@@ -3700,7 +3693,7 @@ class TestPublishFreshBaseAuthorization:
                 return (0, (b"", b""))
             if "rev-parse --verify origin/fix/x" in cmd_str:
                 return (1, (b"", b""))
-            if "rev-parse --verify origin/HEAD" in cmd_str or "rev-parse origin/HEAD" in cmd_str:
+            if "rev-parse" in cmd_str and any(ref in cmd_str for ref in ("origin/HEAD", "origin/main")):
                 return (0, (b"basetip1234\n", b""))
             if "reset --mixed" in cmd_str:
                 return (0, (b"", b""))

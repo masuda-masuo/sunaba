@@ -712,12 +712,14 @@ class TestForgedLocalBaseWithRemoteBase:
             publish_ctx.clone, "config", "remote.origin.fetch",
             "+refs/heads/main:refs/remotes/origin/main",
         )
-        _git(publish_ctx.clone, "update-ref", "-d", "refs/remotes/origin/feat/base-live")
-        assert _remote_ref(publish_ctx.clone, "feat/base-live") is None
-        assert _remote_ref(publish_ctx.origin, "feat/base-live") == remote_base
-
         forged = _forge_bad_commit(publish_ctx.clone, "origin/main")
         assert forged != remote_base
+        _git(
+            publish_ctx.clone, "update-ref",
+            "refs/remotes/origin/feat/base-live", forged,
+        )
+        assert _sha(publish_ctx.clone, "refs/remotes/origin/feat/base-live") == forged
+        assert _remote_ref(publish_ctx.origin, "feat/base-live") == remote_base
         _checkout_branch(publish_ctx.clone, "feat/base-live", forged)
         (Path(publish_ctx.clone) / "stacked.txt").write_text("stacked\n")
 
@@ -794,17 +796,17 @@ printf '%s %s\\n' "$c" {legitimate_sha} >> .git/info/grafts
             publish_ctx, "feat/base-live", {"base.txt": "base\n"},
         )
         assert _git(publish_ctx.clone, "fetch", "origin").returncode == 0
-        # Restrict the refspec and drop the tracking ref so prepare_commit
-        # has to fall back to the local branch of the same name.
+        # Restrict the refspec and forge the tracking ref so prepare_commit
+        # cuts from forged while remote has remote_base (#946).
         _git(
             publish_ctx.clone, "config", "remote.origin.fetch",
             "+refs/heads/main:refs/remotes/origin/main",
         )
-        _git(
-            publish_ctx.clone, "update-ref", "-d",
-            "refs/remotes/origin/feat/base-live",
-        )
         forged = _forge_bad_commit(publish_ctx.clone, "origin/main")
+        _git(
+            publish_ctx.clone, "update-ref",
+            "refs/remotes/origin/feat/base-live", forged,
+        )
         _checkout_branch(
             publish_ctx.clone, "feat/base-live", forged,
         )

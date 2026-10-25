@@ -1392,6 +1392,7 @@ def _resolve_expected_cut_parents(
     branch: str,
     base_branch: str,
     merge_is_merge: bool,
+    default_branch: str = "",
 ) -> tuple[ExpectedCutParents | None, dict[str, Any] | None]:
     """Determine the parent SHAs the public commit must have, host-side.
 
@@ -1424,6 +1425,8 @@ def _resolve_expected_cut_parents(
             return base_read, None
         if base_branch:
             base_name = base_branch
+        elif default_branch:
+            base_name = default_branch
         else:
             name, err = _host_read_default_branch(repo, token)
             if err:
@@ -1635,6 +1638,7 @@ def _verify_cut_parents(
     merge_info: dict,
     cut_from_ref: str = "",
     merge_parent_sha: str = "",
+    default_branch: str = "",
 ) -> tuple[str, dict[str, Any] | None]:
     """Verify the public commit's real parents against host-read remote tips.
 
@@ -1654,6 +1658,7 @@ def _verify_cut_parents(
     """
     expected, host_err = _resolve_expected_cut_parents(
         repo, token, branch, base_branch, merge_is_merge,
+        default_branch=default_branch,
     )
     if host_err is not None:
         return "", host_err
@@ -2108,6 +2113,22 @@ def publish(
 
         swept_untracked: list[str] = []
 
+        host_default_branch, host_default_err = _host_read_default_branch(
+            repo, fetch_token,
+        )
+        if host_default_err:
+            cut_parent_err = _cut_parent_host_error(
+                host_default_err, f"/repos/{repo}",
+            )
+            record_boundary_crossing(
+                cid, "publish",
+                "cut_parent refused step="
+                f"{cut_parent_err.get('step', '')} "
+                f"branch={branch} ref={cut_parent_err.get('ref', '')}",
+                approved=False,
+            )
+            return finish_json(cut_parent_err, verified)
+
         # --- Merge detection and auto-include (issue #712/#711) ---
         # When HEAD is a merge (a base merge was performed), capture the
         # discarded merge commit's SHA/parents for the response, compute the
@@ -2130,7 +2151,7 @@ def publish(
             anc_base_ref = (
                 f"origin/{shlex.quote(base_branch)}"
                 if base_branch
-                else "origin/HEAD"
+                else f"origin/{shlex.quote(host_default_branch)}"
             )
             anc_ec, _, _ = _run(
                 f"git merge-base --is-ancestor HEAD {anc_base_ref} 2>/dev/null"
@@ -2182,9 +2203,8 @@ def publish(
                     auto_include_included = auto_result.included
 
 
-        guard_base_ref = (
-            f"origin/{base_branch}" if base_branch else "origin/HEAD"
-        )
+        # _upstream_guard_probe quotes internally, unlike anc_base_ref/p2_ref which are embedded directly in shell commands.
+        guard_base_ref = f"origin/{base_branch or host_default_branch}"
         guard_cmd, guard_env = _upstream_guard_probe(guard_base_ref, files)
         _, guard_out, _ = _run(guard_cmd, guard_env)
         guard_local = _read_merge_base_blobs(guard_out, files)
@@ -2195,7 +2215,7 @@ def publish(
         else:
             try:
                 guard_tip = _fetch_base_tip_blobs(
-                    repo, fetch_token, base_branch, files,
+                    repo, fetch_token, base_branch or host_default_branch, files,
                 )
             except Exception as exc:  # pragma: no cover - defence in depth
                 guard_tip = UpstreamTipRead("", {}, f"{exc}")
@@ -2239,14 +2259,14 @@ def publish(
             # Container-side ``git rev-parse`` carries the same trust
             # as the reset target itself.
             # base_branch defaults to "" (= the repo default branch,
-            # same as PR creation).  Fall back to origin/HEAD so the
-            # common publish() call without an explicit base_branch
+            # same as PR creation).  Fall back to origin/<host_default_branch>
+            # so the common publish() call without an explicit base_branch
             # still builds the two-parent commit instead of silently
             # degrading to a single parent.
             p2_ref = (
                 f"origin/{shlex.quote(base_branch)}"
                 if base_branch
-                else "origin/HEAD"
+                else f"origin/{shlex.quote(host_default_branch)}"
             )
             _, p2_sha, _ = _run(
                 f"git rev-parse {p2_ref} 2>/dev/null"
@@ -2263,7 +2283,8 @@ def publish(
             merge_parent_sha=merge_parent_sha,
             merge_result=merge_info,
             base_branch=base_branch,
-            cut_from=cut_from)
+            cut_from=cut_from,
+            default_branch=host_default_branch)
         if commit_err:
             return finish_json(commit_err, verified)
 
@@ -2291,6 +2312,7 @@ def publish(
             # degenerate decision used container refs, so the candidate is
             # compared with the host base rather than trusted.
             merge_parent_sha=merge_parent_sha or "",
+            default_branch=host_default_branch,
         )
         if cut_parent_err is not None:
             record_boundary_crossing(

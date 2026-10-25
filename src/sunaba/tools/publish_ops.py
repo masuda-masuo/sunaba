@@ -53,24 +53,6 @@ def _check_merge_in_progress(run: RunFunc) -> dict | None:
     return None
 
 
-def _origin_head_branch_name(run: RunFunc) -> str:
-    """Unadorned branch name that origin/HEAD points at, or ''.
-
-    Same lookup as ``merge_base._resolve_base_branch``: read the symbolic
-    ref ``refs/remotes/origin/HEAD``.  A supplied ``base_branch`` is the
-    frozen default-branch path iff it equals this name (issue #891) -- not
-    iff it is the literal string main or master.
-    """
-    _ec, out, _err = run(
-        "git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null"
-    )
-    text = out.strip()
-    for prefix in ("refs/remotes/origin/", "origin/"):
-        if text.startswith(prefix):
-            return text[len(prefix):]
-    return text
-
-
 def git_prepare_commit(
     run: RunFunc,
     *,
@@ -85,6 +67,7 @@ def git_prepare_commit(
     merge_result: dict | None = None,
     base_branch: str = "",
     cut_from: dict | None = None,
+    default_branch: str = "",
 ) -> tuple[dict | None, list[str] | None]:
     """Checkout branch, stage, squash unpushed checkpoints, then commit.
 
@@ -128,14 +111,15 @@ def git_prepare_commit(
             rebuild info (e.g. ``merge_rebuilt_parents``).
         base_branch: When non-empty and origin/<branch> does not exist,
             cut the new branch from origin/<base_branch> instead of
-            origin/HEAD (issue #891), unless *base_branch* equals the
-            unadorned symbolic target of origin/HEAD -- that is the
-            repository default and keeps the origin/HEAD fallback with
-            no ancestor check.  A missing or unreachable ref is an
-            error -- never a silent reset to the default branch.  Empty
-            (the default) keeps the origin/HEAD fallback unchanged.
+            origin/<default_branch> (issue #891), unless *base_branch* equals
+            *default_branch* -- that is the repository default and cuts from
+            origin/<default_branch> with no ancestor check.  A missing or
+            unreachable ref is an error -- never a silent reset to the
+            default branch.  Empty (the default) uses origin/<default_branch>.
         cut_from: Optional out-dict; on a successful manifest commit the
             key ``ref`` is set to the git ref the commit was cut from.
+        default_branch: The repository default branch name read host-side
+            from GitHub (#946). Required in manifest mode (files is not None).
 
     Returns ``(error_dict, None)`` on failure or
     ``(None, committed_paths)`` on success.
@@ -162,30 +146,27 @@ def git_prepare_commit(
         }, None
 
     if files is not None:
+        if not default_branch:
+            return {
+                "status": "error",
+                "step": "base_branch",
+                "error": (
+                    "Manifest publish requires a default_branch to resolve the base ref."
+                ),
+            }, None
+
         # --- Manifest mode: build the commit against the remote base ---
         # Resolve the base: origin/<branch> if the branch already exists on
         # the remote (follow-up push to an open PR preserves earlier commits),
-        # otherwise the remote default branch (origin/HEAD).  This prevents
-        # files a prior checkpoint committed via `git add -A` from leaking
-        # into the pushed commit -- independent of whether the local branch
-        # has an upstream configured.
+        # otherwise origin/<base_branch> if a non-default base was requested,
+        # otherwise origin/<default_branch> (#946).
         stacked = False
         _, remote_branch_out, _ = run(
             f"git rev-parse --verify origin/{shlex.quote(branch)} 2>/dev/null"
         )
         if remote_branch_out.strip():
             base_ref = f"origin/{shlex.quote(branch)}"
-        elif base_branch and _origin_head_branch_name(run) != base_branch:
-            # Named non-default base: cut from that ref, never origin/HEAD
-            # (issue #891).  The comparison is against origin/HEAD's unadorned
-            # symbolic target (same resolver as merge_base.py), not a
-            # main/master string allowlist -- a repo whose default is develop
-            # with base_branch="develop" must keep the origin/HEAD fallback,
-            # and a branch actually named main that is not the default must
-            # stack.  The ``base_branch and ...`` guard skips the lookup when
-            # base_branch is omitted so that command sequence stays
-            # byte-identical.  Matching the default name also skips the
-            # ancestor check (the frozen origin/HEAD path).
+        elif base_branch and base_branch != default_branch:
             stacked = True
             quoted_base = shlex.quote(base_branch)
             _, named_out, _ = run(
@@ -194,134 +175,63 @@ def git_prepare_commit(
             if named_out.strip():
                 base_ref = f"origin/{quoted_base}"
             else:
-                run(f"git fetch origin {quoted_base} 2>/dev/null")
-                _, named_out, _ = run(
-                    f"git rev-parse --verify origin/{quoted_base} 2>/dev/null"
-                )
-                if named_out.strip():
-                    base_ref = f"origin/{quoted_base}"
-                else:
-                    _, local_out, _ = run(
-                        f"git rev-parse --verify {quoted_base} 2>/dev/null"
-                    )
-                    if local_out.strip():
-                        base_ref = quoted_base
-                    else:
-                        return {
-                            "status": "error",
-                            "step": "base_branch",
-                            "error": (
-                                f"base_branch {base_branch!r} does not "
-                                f"resolve to a commit (tried "
-                                f"origin/{base_branch} and local "
-                                f"{base_branch}). Publish refuses to cut "
-                                f"from origin/HEAD when a non-default base "
-                                f"was requested. Initialize a container "
-                                f"from that branch, or omit base_branch to "
-                                f"cut from the repository default."
-                            ),
-                        }, None
-        else:
-            # Fallback: origin/HEAD (set by git clone) points to the
-            # remote default branch.
-            _, head_out, _ = run(
-                "git rev-parse --verify origin/HEAD 2>/dev/null"
-            )
-            if head_out.strip():
-                base_ref = "origin/HEAD"
-            else:
-                # Try to resolve via ls-remote --symref (network).
-                # This resolves main, master, dev, or anything else the
-                # remote has configured as its HEAD without enumerating names.
-                _, ls_out, _ = run(
-                    "timeout 15 git ls-remote --symref origin HEAD 2>/dev/null || true"
-                )
-                for ls_line in ls_out.splitlines():
-                    if ls_line.startswith("ref: refs/heads/") and "\tHEAD" in ls_line:
-                        # Format: "ref: refs/heads/<name>\tHEAD"
-                        ls_default = ls_line.removeprefix(
-                            "ref: refs/heads/"
-                        ).split("\t")[0]
-                        if ls_default:
-                            ls_quoted = shlex.quote(ls_default)
-                            # Check if the branch already exists locally
-                            _, verify_out, _ = run(
-                                f"git rev-parse --verify origin/{ls_quoted} 2>/dev/null"
-                            )
-                            if verify_out.strip():
-                                base_ref = f"origin/{ls_quoted}"
-                                break
-                            # Fetch the branch from the remote
-                            fetch_ec, _, _ = run(
-                                f"git fetch origin {ls_quoted} 2>/dev/null"
-                            )
-                            if fetch_ec == 0:
-                                _, verify2_out, _ = run(
-                                    "git rev-parse --verify"
-                                    f" origin/{ls_quoted} 2>/dev/null"
-                                )
-                                if verify2_out.strip():
-                                    base_ref = f"origin/{ls_quoted}"
-                                    break
-
-                if not base_ref:
-                    # Last-resort fallback: try well-known default names.
-                    for default in ("main", "master"):
-                        _, default_out, _ = run(
-                            f"git rev-parse --verify origin/{default} 2>/dev/null"
-                        )
-                        if default_out.strip():
-                            base_ref = f"origin/{default}"
-                            break
-
-        if base_ref:
-            # Always reset to the remote base (issue #712 Candidate C).
-            # The skip-the-reset merge-preservation branch is removed:
-            # its inputs were all container-supplied and forgeable via
-            # `git update-ref refs/remotes/origin/<branch>`.  Merged-in
-            # base-advance files are recovered host-side via
-            # base_auto_include instead (see below).
-            if stacked:
-                anc_ec, _, _ = run(
-                    f"git merge-base --is-ancestor {base_ref} HEAD"
-                )
-                if anc_ec != 0:
-                    return {
-                        "status": "error",
-                        "step": "base_branch",
-                        "error": (
-                            f"Worktree HEAD is not based on {base_ref}; "
-                            f"cutting a commit from that ref would mix "
-                            f"unrelated trees. Check out {base_branch} "
-                            f"(or initialize a container from it) before "
-                            f"publishing with base_branch={base_branch!r}."
-                        ),
-                    }, None
-            reset_ec, reset_out, reset_err = run(
-                f"git reset --mixed {base_ref}"
-            )
-            if reset_ec != 0:
                 return {
                     "status": "error",
-                    "step": "squash_reset",
-                    "error": reset_err or reset_out,
+                    "step": "base_branch",
+                    "error": (
+                        f"base_branch {base_branch!r} does not "
+                        f"resolve to a commit (tried "
+                        f"origin/{base_branch} only). Base branch must "
+                        f"exist remotely. Initialize a container "
+                        f"from that branch, or omit base_branch to "
+                        f"cut from the repository default."
+                    ),
                 }, None
-            if cut_from is not None:
-                cut_from["ref"] = base_ref
         else:
-            # No remote ref could be resolved — fail instead of silently
-            # skipping the reset, which would re-create the manifest leak.
+            quoted_default = shlex.quote(default_branch)
+            _, default_out, _ = run(
+                f"git rev-parse --verify origin/{quoted_default} 2>/dev/null"
+            )
+            if default_out.strip():
+                base_ref = f"origin/{quoted_default}"
+            else:
+                return {
+                    "status": "error",
+                    "step": "base_branch",
+                    "error": (
+                        f"default branch origin/{default_branch} does not "
+                        f"resolve to a commit. Ensure the remote is reachable "
+                        f"and has a default branch."
+                    ),
+                }, None
+
+        if stacked:
+            anc_ec, _, _ = run(
+                f"git merge-base --is-ancestor {base_ref} HEAD"
+            )
+            if anc_ec != 0:
+                return {
+                    "status": "error",
+                    "step": "base_branch",
+                    "error": (
+                        f"Worktree HEAD is not based on {base_ref}; "
+                        f"cutting a commit from that ref would mix "
+                        f"unrelated trees. Check out {base_branch} "
+                        f"(or initialize a container from it) before "
+                        f"publishing with base_branch={base_branch!r}."
+                    ),
+                }, None
+        reset_ec, reset_out, reset_err = run(
+            f"git reset --mixed {base_ref}"
+        )
+        if reset_ec != 0:
             return {
                 "status": "error",
                 "step": "squash_reset",
-                "error": (
-                    "Cannot resolve a remote base for manifest mode. "
-                    "The repository's default branch may be named something "
-                    "other than 'main' or 'master'. "
-                    "Ensure the remote (origin) is reachable and has a "
-                    "default branch."
-                ),
+                "error": reset_err or reset_out,
             }, None
+        if cut_from is not None:
+            cut_from["ref"] = base_ref
 
         # --- Host-side auto-include (issue #712 Candidate C) ---
         # These are files that the base branch advanced since the feature

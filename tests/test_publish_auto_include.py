@@ -118,10 +118,10 @@ class TestFetchBaseAutoInclude:
         assert mock_api.call_args_list[0][0][0] == "/repos/owner/repo"
 
         # Feature branch ref
-        assert "refs/heads/feat/x" in mock_api.call_args_list[1][0][0]
+        assert "/git/ref/heads/feat%2Fx" in mock_api.call_args_list[1][0][0]
 
         # Base branch ref
-        assert "refs/heads/main" in mock_api.call_args_list[2][0][0]
+        assert "/git/ref/heads/main" in mock_api.call_args_list[2][0][0]
 
         # Compare API
         assert "/compare/feature111...base222" in mock_api.call_args_list[3][0][0]
@@ -167,8 +167,8 @@ class TestFetchBaseAutoInclude:
             "expected no repo-resolution call with explicit base_branch"
         )
         # Feature and base branch refs were called
-        assert "refs/heads/feat/x" in mock_api.call_args_list[0][0][0]
-        assert "refs/heads/develop" in mock_api.call_args_list[1][0][0]
+        assert "/git/ref/heads/feat%2Fx" in mock_api.call_args_list[0][0][0]
+        assert "/git/ref/heads/develop" in mock_api.call_args_list[1][0][0]
         assert result is not None
         assert result.included == {}
         assert result.skipped == []

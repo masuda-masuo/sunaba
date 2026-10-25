@@ -86,6 +86,7 @@ _BRANCH_RE = re.compile(
 
 _SANDBOX_CREATE_PR_SCRIPT = '''
 import base64, json, os, re, shlex, subprocess, sys, tempfile
+from urllib.parse import quote
 
 
 def _run(cmd):
@@ -267,8 +268,10 @@ if source_sha:
         print(json.dumps({"status": "error", "error": "the verified source commit has no parents"}))
         sys.exit(1)
 else:
-    for ref_name in [f"heads/{branch}", "heads/main", "heads/master"]:
-        ec2, ref_out, _ = _run(f"gh api repos/{shlex.quote(repo)}/git/ref/{shlex.quote(ref_name)} 2>/dev/null")
+    for candidate in [branch, "main", "master"]:
+        encoded_ref = f"heads/{quote(candidate, safe='')}"
+        api_path = f"repos/{repo}/git/ref/{encoded_ref}"
+        ec2, ref_out, _ = _run(f"gh api {shlex.quote(api_path)} 2>/dev/null")
         if ec2 == 0:
             try:
                 parent_sha = json.loads(ref_out)["object"]["sha"]
@@ -293,7 +296,7 @@ new_sha = commit["sha"]
 
 # 7. Select create/update from an explicit existence read.  Only a
 #    confirmed 404 permits POST; every other lookup/PATCH error is returned.
-ref_path = f"repos/{repo}/git/ref/heads/{branch}"
+ref_path = f"repos/{repo}/git/ref/heads/{quote(branch, safe='')}"
 try:
     _gh_api("GET", ref_path)
     ref_exists = True
@@ -308,7 +311,7 @@ if ref_exists:
     try:
         _gh_api(
             "PATCH",
-            f"repos/{repo}/git/refs/heads/{branch}",
+            f"repos/{repo}/git/refs/heads/{quote(branch, safe='')}",
             {"sha": new_sha, "force": api_force},
         )
     except RuntimeError as error:
@@ -409,7 +412,7 @@ def _fetch_base_auto_include(
     rename status, Contents API fetch failure, or non-base64 encoding).
     Returns ``None`` on any error (safe fallback: no auto-include).
     """
-    from sunaba.tools.github_api import _github_api_request
+    from sunaba.tools.github_api import _github_api_request, ref_heads_path
 
     # Resolve the base branch (default branch if not given).
     if not base_branch:
@@ -429,10 +432,12 @@ def _fetch_base_auto_include(
     # Get the feature branch's remote tip SHA.
     try:
         ref_info = _github_api_request(
-            f"/repos/{repo}/git/refs/heads/{branch}", token,
+            ref_heads_path(repo, branch), token,
         )
         feature_sha = str(ref_info.get("object", {}).get("sha") or "")
     except Exception as exc:
+        if _http_cause_status(exc) == 404:
+            return AutoIncludeResult(included={}, skipped=[])
         logger.warning(
             "Could not get remote ref for branch %s in %s: %s",
             branch, repo, exc,
@@ -446,7 +451,7 @@ def _fetch_base_auto_include(
     # Get the base branch's tip SHA.
     try:
         ref_info = _github_api_request(
-            f"/repos/{repo}/git/refs/heads/{base_branch}", token,
+            ref_heads_path(repo, base_branch), token,
         )
         base_sha = str(ref_info.get("object", {}).get("sha") or "")
     except Exception as exc:
@@ -497,7 +502,7 @@ def _fetch_base_auto_include(
         # Fetch the file content from the base branch tip.
         try:
             content_resp = _github_api_request(
-                f"/repos/{repo}/contents/{filename}?ref={base_sha}",
+                f"/repos/{repo}/contents/{quote(filename, safe='/')}?ref={base_sha}",
                 token,
             )
         except Exception as exc:
@@ -779,7 +784,7 @@ def _fetch_base_tip_blobs(
     the caller has to be able to tell "read, and identical" apart from
     "could not read" (#866).
     """
-    from sunaba.tools.github_api import _github_api_request
+    from sunaba.tools.github_api import _github_api_request, ref_heads_path
 
     if not paths:
         return UpstreamTipRead(base_sha="", blobs={}, error="")
@@ -800,7 +805,7 @@ def _fetch_base_tip_blobs(
 
     try:
         ref_info = _github_api_request(
-            f"/repos/{repo}/git/refs/heads/{base_branch}", token,
+            ref_heads_path(repo, base_branch), token,
         )
         base_sha = str(ref_info.get("object", {}).get("sha") or "")
     except Exception as exc:
@@ -1262,13 +1267,13 @@ def _host_read_branch_ref(repo: str, token: str, branch: str) -> HostRefRead:
     returned SHA must be a full object name -- a malformed or missing
     ``object.sha`` is an error, not an empty answer.
     """
-    from sunaba.tools.github_api import _github_api_request
+    from sunaba.tools.github_api import _github_api_request, ref_heads_path
 
     if not branch:
         return HostRefRead("", False, "no branch name was given")
     try:
         info = _github_api_request(
-            f"/repos/{repo}/git/ref/heads/{quote(branch, safe='')}",
+            ref_heads_path(repo, branch),
             token,
         )
     except Exception as exc:

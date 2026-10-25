@@ -1751,7 +1751,7 @@ class TestBaseTipBlobRead:
     def test_sha_absent_and_unreadable_are_distinguished(self) -> None:
         tip = "f" * 40
         result = self._read({
-            "/repos/owner/repo/git/refs/heads/main": {"object": {"sha": tip}},
+            "/repos/owner/repo/git/ref/heads/main": {"object": {"sha": tip}},
             # The Contents API's ``sha`` IS the git blob id, so no decoding
             # and no size limit stands between the two halves.
             f"/repos/owner/repo/contents/kept.py?ref={tip}": {
@@ -1779,8 +1779,8 @@ class TestBaseTipBlobRead:
 
     def test_unreadable_tip_reports_the_reason_and_no_blobs(self) -> None:
         result = self._read({
-            "/repos/owner/repo/git/refs/heads/main": RuntimeError(
-                "GitHub API GET /repos/owner/repo/git/refs/heads/main "
+            "/repos/owner/repo/git/ref/heads/main": RuntimeError(
+                "GitHub API GET /repos/owner/repo/git/ref/heads/main "
                 "returned HTTP 401: Bad credentials"
             ),
         })

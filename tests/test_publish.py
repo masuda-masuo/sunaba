@@ -1765,7 +1765,7 @@ class TestCreatePrViaApi:
         assert req1.get_method() == "POST"
 
         req2 = mock_urlopen.call_args_list[1].args[0]
-        assert req2.full_url == "https://api.github.com/repos/owner/repo/pulls?head=owner:fix/x&state=open"
+        assert req2.full_url == "https://api.github.com/repos/owner/repo/pulls?head=owner%3Afix%2Fx&state=open"
         assert req2.get_method() == "GET"
 
 

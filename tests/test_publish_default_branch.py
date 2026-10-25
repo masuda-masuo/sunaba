@@ -216,19 +216,21 @@ class _DefaultBranchHostApi(_HostApi):
     """The host's authorized ref-read API extended to support contents endpoints."""
 
     def urlopen(self, request: Any, *_args: Any, **_kwargs: Any) -> _FakeResponse:
-        url = getattr(request, "full_url", str(request))
-        path = url.split("api.github.com", 1)[-1]
-        decoded = unquote(path)
-        parsed = urlsplit(decoded)
+        selector = getattr(request, "selector", None)
+        if selector is None:
+            url = getattr(request, "full_url", str(request))
+            selector = url.split("api.github.com", 1)[-1]
+        parsed = urlsplit(selector)
         if "/contents/" in parsed.path:
-            self.calls.append(decoded)
-            file_path = parsed.path.split("/contents/", 1)[1]
+            self.calls.append(unquote(selector))
+            raw_file_path = parsed.path.split("/contents/", 1)[1]
+            file_path = unquote(raw_file_path)
             qs = parse_qs(parsed.query)
             target_ref = qs.get("ref", [self.base_branch or self.default_branch])[0]
             fields = _git(self.origin_dir, "ls-tree", target_ref, "--", file_path).stdout.split()
             if len(fields) >= 3 and fields[1] == "blob":
                 return _FakeResponse({"sha": fields[2]})
-            raise _http_error(path, 404, f"file {file_path} not found at {target_ref}")
+            raise _http_error(parsed.path, 404, f"file {file_path} not found at {target_ref}")
         return super().urlopen(request, *_args, **_kwargs)
 
 

@@ -12,10 +12,33 @@ import logging
 import os
 import re
 from typing import Any, Callable
+from urllib.parse import quote
 
 from sunaba import github_auth, token_broker
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Branch ref path helper (Issue #959)
+# ---------------------------------------------------------------------------
+
+
+def ref_heads_path(repo: str, branch: str, *, plural: bool = False) -> str:
+    """Return the GitHub REST API path for a branch ref.
+
+    The ``repo`` parameter is in ``owner/repo`` format, and the result is a
+    path starting with ``/repos/``.
+
+    Encodes the branch name as a single path segment using
+    ``urllib.parse.quote(branch, safe='')`` (escaping ``/``, ``#``, ``?``, ``%``).
+
+    Uses singular ``git/ref/heads/<encoded>`` by default; if ``plural=True``,
+    uses ``git/refs/heads/<encoded>`` (required by the ref update PATCH endpoint).
+    """
+    sub = "refs" if plural else "ref"
+    encoded_branch = quote(branch, safe="")
+    return f"/repos/{repo}/git/{sub}/heads/{encoded_branch}"
 
 
 # ---------------------------------------------------------------------------
@@ -367,8 +390,9 @@ def _create_pr_via_api(
         if "HTTP 422" in err_msg and "already exists" in err_msg.lower():
             try:
                 owner = repo.split("/")[0]
+                head_query = quote(f"{owner}:{branch}", safe="")
                 pulls = _github_api_request_list(
-                    f"/repos/{repo}/pulls?head={owner}:{branch}&state=open", token
+                    f"/repos/{repo}/pulls?head={head_query}&state=open", token
                 )
                 if pulls:
                     url = str(pulls[0].get("html_url") or "")

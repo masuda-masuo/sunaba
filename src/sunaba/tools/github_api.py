@@ -27,19 +27,18 @@ logger = logging.getLogger(__name__)
 def ref_heads_path(repo: str, branch: str, *, plural: bool = False) -> str:
     """Return the GitHub REST API path for a branch ref.
 
+    The ``repo`` parameter is in ``owner/repo`` format, and the result is a
+    path starting with ``/repos/``.
+
     Encodes the branch name as a single path segment using
     ``urllib.parse.quote(branch, safe='')`` (escaping ``/``, ``#``, ``?``, ``%``).
 
     Uses singular ``git/ref/heads/<encoded>`` by default; if ``plural=True``,
     uses ``git/refs/heads/<encoded>`` (required by the ref update PATCH endpoint).
-    Preserves caller leading '/' conventions consistently.
     """
-    clean_repo = repo.strip("/")
-    if clean_repo.startswith("repos/"):
-        clean_repo = clean_repo[len("repos/"):]
     sub = "refs" if plural else "ref"
     encoded_branch = quote(branch, safe="")
-    return f"/repos/{clean_repo}/git/{sub}/heads/{encoded_branch}"
+    return f"/repos/{repo}/git/{sub}/heads/{encoded_branch}"
 
 
 # ---------------------------------------------------------------------------

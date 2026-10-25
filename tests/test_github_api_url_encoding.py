@@ -130,15 +130,6 @@ def test_ref_heads_path(branch: str, expected_encoded: str) -> None:
         ref_heads_path("owner/repo", branch, plural=True)
         == f"/repos/owner/repo/git/refs/heads/{expected_encoded}"
     )
-    # Caller leading slash conventions
-    assert (
-        ref_heads_path("/repos/owner/repo", branch)
-        == f"/repos/owner/repo/git/ref/heads/{expected_encoded}"
-    )
-    assert (
-        ref_heads_path("/owner/repo", branch)
-        == f"/repos/owner/repo/git/ref/heads/{expected_encoded}"
-    )
 
 
 # ============================================================================

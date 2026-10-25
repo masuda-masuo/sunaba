@@ -21,10 +21,13 @@ Pins the contract defined in issue #946 comment 6392414282:
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -33,9 +36,10 @@ from sunaba.tools.publish_ops import git_prepare_commit
 from sunaba.tools.vcs.publishing import (
     ExpectedCutParents,
     HostRefRead,
-    UpstreamTipRead,
+    _fetch_base_tip_blobs,
     _host_read_default_branch,
     _resolve_expected_cut_parents,
+    _upstream_guard_probe,
     _verify_cut_parents,
     publish,
 )
@@ -44,9 +48,10 @@ from tests.test_publish_cut_parent import (
     CONTAINER_ID,
     REPO,
     _assert_nothing_pushed,
+    _FakeResponse,
     _git,
     _HostApi,
-    _origin_tip_blobs,
+    _http_error,
     _PublishContext,
     _sha,
 )
@@ -207,6 +212,26 @@ def _host_side_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GH_TOKEN", raising=False)
 
 
+class _DefaultBranchHostApi(_HostApi):
+    """The host's authorized ref-read API extended to support contents endpoints."""
+
+    def urlopen(self, request: Any, *_args: Any, **_kwargs: Any) -> _FakeResponse:
+        url = getattr(request, "full_url", str(request))
+        path = url.split("api.github.com", 1)[-1]
+        decoded = unquote(path)
+        parsed = urlsplit(decoded)
+        if "/contents/" in parsed.path:
+            self.calls.append(decoded)
+            file_path = parsed.path.split("/contents/", 1)[1]
+            qs = parse_qs(parsed.query)
+            target_ref = qs.get("ref", [self.base_branch or self.default_branch])[0]
+            fields = _git(self.origin_dir, "ls-tree", target_ref, "--", file_path).stdout.split()
+            if len(fields) >= 3 and fields[1] == "blob":
+                return _FakeResponse({"sha": fields[2]})
+            raise _http_error(path, 404, f"file {file_path} not found at {target_ref}")
+        return super().urlopen(request, *_args, **_kwargs)
+
+
 def _publish_harness(
     ctx: _PublishContext,
     *,
@@ -219,7 +244,7 @@ def _publish_harness(
     **kwargs: Any,
 ) -> tuple[dict[str, Any], Any, list[tuple[str, str, bool]]]:
     """Execute publish() with hermetic GitHub API, capturing audit boundary crossings."""
-    api = _HostApi(
+    api = _DefaultBranchHostApi(
         ctx.origin,
         publish_branch=branch,
         base_branch=base_branch or default_branch,
@@ -240,13 +265,6 @@ def _publish_harness(
         ctx.events.append(("scan", tuple(scan_files)))
         return real_scan(container, scan_files, working_dir, **scan_kwargs)
 
-    def host_base_tip(
-        repo: str, token: str, tip_base_branch: str, paths: list[str],
-    ) -> UpstreamTipRead:
-        return _origin_tip_blobs(
-            ctx.origin, tip_base_branch or default_branch, paths,
-        )
-
     crossings: list[tuple[str, str, bool]] = []
 
     def crossing_spy(cid: str, action: str, reason: str, approved: bool = True) -> None:
@@ -266,7 +284,6 @@ def _publish_harness(
             side_effect=crossing_spy,
         ),
         patch("sunaba.tools.vcs.publishing._fetch_base_auto_include", return_value=None),
-        patch("sunaba.tools.vcs.publishing._fetch_base_tip_blobs", side_effect=host_base_tip),
         patch("sunaba.tools.secret_scan._baseline_enabled", return_value=False),
         patch("sunaba.tools.secret_scan.run_secret_scan", side_effect=scan_spy),
         patch("sunaba.tools.vcs.publishing._create_pr_via_api") as pr_mock,
@@ -699,22 +716,47 @@ class TestPublishHostDefaultWorkflow:
     def test_publish_omitted_base_reads_host_default_exactly_once(
         self, ctx: _PublishContext,
     ) -> None:
-        """AC-5: publish() with omitted base reads host default branch exactly once."""
+        """AC-5: publish() with omitted base reads host default branch exactly once and passes it to tip read."""
         (Path(ctx.clone) / "README.md").write_text("# Updated once\n")
 
-        with patch(
-            "sunaba.tools.vcs.publishing._host_read_default_branch",
-            wraps=_host_read_default_branch,
-        ) as spy_read:
+        with (
+            patch(
+                "sunaba.tools.vcs.publishing._host_read_default_branch",
+                wraps=_host_read_default_branch,
+            ) as spy_read,
+            patch(
+                "sunaba.tools.vcs.publishing._fetch_base_tip_blobs",
+                wraps=_fetch_base_tip_blobs,
+            ) as spy_fetch_tip,
+        ):
             result, _, _ = _publish_harness(
                 ctx,
                 branch="feat/once",
                 files=["README.md"],
                 base_branch="",
+                default_branch="main",
             )
             assert result["status"] in ("ok", "pushed"), result
             assert spy_read.call_count == 1, (
                 f"_host_read_default_branch called {spy_read.call_count} times, expected exactly 1"
+            )
+
+            # Spec 6: Assert omitted base sends host_default_branch to _fetch_base_tip_blobs
+            assert spy_fetch_tip.called, "_fetch_base_tip_blobs was not called"
+            tip_base_arg = spy_fetch_tip.call_args[0][2]
+            assert tip_base_arg == "main", (
+                f"_fetch_base_tip_blobs expected host_default_branch 'main', got {tip_base_arg!r}"
+            )
+
+            # Spec 6: verify publish as a whole reads /repos/{repo} metadata exactly once,
+            # including actual _fetch_base_tip_blobs path
+            assert ctx.api is not None
+            repo_reads = [
+                call for call in ctx.api.calls
+                if re.fullmatch(r"/repos/[^/]+/[^/]+/?", call)
+            ]
+            assert len(repo_reads) == 1, (
+                f"Expected exactly 1 /repos/{{repo}} metadata read, got {len(repo_reads)}: {repo_reads}"
             )
 
     def test_publish_explicit_base_still_reads_host_default_and_fails_closed_on_error(
@@ -764,25 +806,107 @@ class TestPublishHostDefaultWorkflow:
             "origin/main" in cmd for cmd in ctx.container.commands
         ), f"origin/main was not probed: {ctx.container.commands}"
 
-    def test_publish_upstream_guard_quotes_explicit_base_branch(
+    def test_publish_upstream_guard_explicit_base_receives_unquoted_ref(
         self, ctx: _PublishContext,
     ) -> None:
-        """AC-5: Upstream guard properly quotes explicit base_branch with special characters."""
-        (Path(ctx.clone) / "README.md").write_text("# Quoting test\n")
+        """AC-5: Explicit base branch (feat#1) passes origin/feat#1 without quotes to _upstream_guard_probe."""
+        (Path(ctx.clone) / "README.md").write_text("# Explicit feat#1\n")
+        _git(ctx.origin, "branch", "feat#1", "main")
+        _git(ctx.clone, "fetch", "origin")
 
-        result, _, _ = _publish_harness(
-            ctx,
-            branch="feat/quoting",
-            files=["README.md"],
-            base_branch="base with spaces",
-            default_branch="main",
-            faults={"base": 404},  # base does not exist remotely, stops after guard/commit attempt
+        with patch(
+            "sunaba.tools.vcs.publishing._upstream_guard_probe",
+            wraps=_upstream_guard_probe,
+        ) as spy_guard:
+            result, _, _ = _publish_harness(
+                ctx,
+                branch="feat/guard-explicit",
+                files=["README.md"],
+                base_branch="feat#1",
+                default_branch="main",
+            )
+            assert result["status"] in ("ok", "pushed"), result
+            assert spy_guard.called, "_upstream_guard_probe was not called"
+            guard_base_ref = spy_guard.call_args[0][0]
+            assert guard_base_ref == "origin/feat#1", (
+                f"Expected unquoted 'origin/feat#1', got {guard_base_ref!r}"
+            )
+
+    def test_publish_upstream_guard_omitted_base_receives_unquoted_host_default(
+        self, ctx: _PublishContext,
+    ) -> None:
+        """AC-5: Omitted base branch passes origin/<host_default> without quotes to _upstream_guard_probe."""
+        (Path(ctx.clone) / "README.md").write_text("# Omitted base\n")
+
+        with patch(
+            "sunaba.tools.vcs.publishing._upstream_guard_probe",
+            wraps=_upstream_guard_probe,
+        ) as spy_guard:
+            result, _, _ = _publish_harness(
+                ctx,
+                branch="feat/guard-omitted",
+                files=["README.md"],
+                base_branch="",
+                default_branch="main",
+            )
+            assert result["status"] in ("ok", "pushed"), result
+            assert spy_guard.called, "_upstream_guard_probe was not called"
+            guard_base_ref = spy_guard.call_args[0][0]
+            assert guard_base_ref == "origin/main", (
+                f"Expected unquoted 'origin/main', got {guard_base_ref!r}"
+            )
+
+    def test_upstream_guard_probe_real_git_unquoted_ref_resolves_merge_base(
+        self, tmp_path: Path,
+    ) -> None:
+        """AC-5: Real git regression proving unquoted origin/feat#1 resolves merge-base while quoted fails."""
+        repo_dir = tmp_path / "probe_repo"
+        repo_dir.mkdir()
+        assert _git(str(repo_dir), "init", "--initial-branch=main").returncode == 0
+        _git(str(repo_dir), "config", "user.email", "probe@example.com")
+        _git(str(repo_dir), "config", "user.name", "probe tester")
+        (repo_dir / "x").write_text("x content\n")
+        assert _git(str(repo_dir), "add", "x").returncode == 0
+        assert _git(str(repo_dir), "commit", "-m", "initial commit").returncode == 0
+        expected_sha = _sha(str(repo_dir), "HEAD")
+        assert expected_sha
+
+        # Create tracking ref refs/remotes/origin/feat#1 pointing to initial commit
+        assert _git(
+            str(repo_dir), "update-ref", "refs/remotes/origin/feat#1", expected_sha,
+        ).returncode == 0
+
+        # Execute command from _upstream_guard_probe("origin/feat#1", ["x"]) via sh -c
+        cmd_fixed, env_fixed = _upstream_guard_probe("origin/feat#1", ["x"])
+        proc_fixed = subprocess.run(  # noqa: S603
+            ["/bin/sh", "-c", cmd_fixed],
+            cwd=str(repo_dir),
+            env={**os.environ, **env_fixed},
+            capture_output=True,
+            text=True,
         )
-        # Verify the command log had origin/'base with spaces'
-        assert any(
-            "origin/'base with spaces'" in cmd or 'origin/"base with spaces"' in cmd
-            for cmd in ctx.container.commands
-        ), f"guard_base_ref was not properly quoted: {ctx.container.commands}"
+        assert proc_fixed.returncode == 0, f"probe command failed: {proc_fixed.stderr}"
+        match_fixed = re.search(r"^base\s+(\S+)", proc_fixed.stdout, re.MULTILINE)
+        assert match_fixed is not None, f"base line missing in probe output: {proc_fixed.stdout}"
+        assert match_fixed.group(1) == expected_sha, (
+            f"Expected base sha {expected_sha}, got {match_fixed.group(1)}"
+        )
+
+        # Control: pass "origin/'feat#1'" to helper (simulating double quoting bug)
+        cmd_broken, env_broken = _upstream_guard_probe("origin/'feat#1'", ["x"])
+        proc_broken = subprocess.run(  # noqa: S603
+            ["/bin/sh", "-c", cmd_broken],
+            cwd=str(repo_dir),
+            env={**os.environ, **env_broken},
+            capture_output=True,
+            text=True,
+        )
+        assert proc_broken.returncode == 0, f"control command failed: {proc_broken.stderr}"
+        match_broken = re.search(r"^base\s*(\S*)", proc_broken.stdout, re.MULTILINE)
+        assert match_broken is not None, f"base line missing in control output: {proc_broken.stdout}"
+        assert match_broken.group(1) == "", (
+            f"Expected empty base sha for double-quoted ref, got {match_broken.group(1)!r}"
+        )
 
 
 # ============================================================================

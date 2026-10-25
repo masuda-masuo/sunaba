@@ -2203,11 +2203,8 @@ def publish(
                     auto_include_included = auto_result.included
 
 
-        guard_base_ref = (
-            f"origin/{shlex.quote(base_branch)}"
-            if base_branch
-            else f"origin/{shlex.quote(host_default_branch)}"
-        )
+        # _upstream_guard_probe quotes internally, unlike anc_base_ref/p2_ref which are embedded directly in shell commands.
+        guard_base_ref = f"origin/{base_branch or host_default_branch}"
         guard_cmd, guard_env = _upstream_guard_probe(guard_base_ref, files)
         _, guard_out, _ = _run(guard_cmd, guard_env)
         guard_local = _read_merge_base_blobs(guard_out, files)
@@ -2218,7 +2215,7 @@ def publish(
         else:
             try:
                 guard_tip = _fetch_base_tip_blobs(
-                    repo, fetch_token, base_branch, files,
+                    repo, fetch_token, base_branch or host_default_branch, files,
                 )
             except Exception as exc:  # pragma: no cover - defence in depth
                 guard_tip = UpstreamTipRead("", {}, f"{exc}")

@@ -1818,24 +1818,52 @@ def publish(
         return json.dumps({"status": "error", "error": str(e)})
 
     cid = container_id[:12]
+    full_cid = str(getattr(container, "id", None) or container_id)
     working_dir = resolve_git_root(container, working_dir)
 
     verified = has_verify_success(cid)
     if not skip_verify_gate:
         from sunaba.verify_state import get_environment_state
 
-        environment_state = get_environment_state(cid)
-        if environment_state is not None and environment_state.get("status") != "ready":
+        environment_state = get_environment_state(full_cid)
+        if environment_state is not None:
             state_name = environment_state.get("status") or "not_prepared"
             reason = environment_state.get("reason") or "preparation state missing"
-            return json.dumps({
-                "status": "error",
-                "step": "verify_gate",
-                "error": (
-                    "publish refused: no successful verify_in_container; "
-                    f"uv environment is {state_name}: {reason}"
-                ),
-            })
+            if state_name == "ready":
+                recorded_fp = environment_state.get("fingerprint")
+                uv_root = environment_state.get("project_root") or (recorded_fp or {}).get("root") or working_dir
+                if recorded_fp:
+                    from sunaba.environment_state_store import (
+                        FingerprintProbeError,
+                        check_manifest_staleness,
+                    )
+                    from sunaba.verify_state import invalidate_verify_success
+
+                    try:
+                        is_stale, changed = check_manifest_staleness(
+                            container, uv_root, recorded_fp
+                        )
+                        if is_stale:
+                            invalidate_verify_success(full_cid)
+                            state_name = "stale"
+                            reason = f"{', '.join(changed)} changed; recreate container to recover"
+                    except FingerprintProbeError as exc:
+                        invalidate_verify_success(full_cid)
+                        state_name = "failed"
+                        reason = f"fingerprint probe failed: {exc}"
+                    except Exception as exc:
+                        invalidate_verify_success(full_cid)
+                        state_name = "failed"
+                        reason = f"fingerprint probe failed: {str(exc)[:180]}"
+            if state_name != "ready":
+                return json.dumps({
+                    "status": "error",
+                    "step": "verify_gate",
+                    "error": (
+                        "publish refused: no successful verify_in_container; "
+                        f"uv environment is {state_name}: {reason}"
+                    ),
+                })
     gate_err = verify_gate_error(verified, skip_verify_gate)
     if gate_err:
         return json.dumps(gate_err)

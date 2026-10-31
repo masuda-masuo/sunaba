@@ -470,6 +470,190 @@ def _record_deps_progress(container: Any, note: str) -> None:
         logger.warning("Failed to record init progress %r: %s", note, e)
 
 
+class UvPrepareResult(NamedTuple):
+    """Result of uv environment preparation."""
+
+    success: bool
+    message: str
+    reason: str | None
+    exit_code: int | None = None
+
+
+def prepare_uv_environment(
+    container: Any,
+    project_root: str,
+    allow_network: bool = True,
+    *,
+    recreate: bool = False,
+) -> UvPrepareResult:
+    """Prepare or update a uv environment for *project_root*.
+
+    Runs ``uv sync --locked --all-groups`` under the ``SUNABA_DEPS_TIMEOUT``
+    deadline. Reaps descendant processes on deadline expiration.
+    When *recreate* is True, removes ``.venv`` before preparing.
+    Records environment state as 'ready' on success, 'failed' on failure.
+    """
+    from sunaba.verify_state import invalidate_verify_success, record_environment_state
+
+    command = "uv sync --locked --all-groups"
+    if not allow_network:
+        reason = "network_disabled"
+        record_environment_state(
+            container.id,
+            "failed",
+            reason=reason,
+            command=command,
+            project_root=project_root,
+        )
+        return UvPrepareResult(
+            success=False,
+            message=f"uv preparation failed: {reason}",
+            reason=reason,
+            exit_code=None,
+        )
+
+    owned_scope = False
+    if _active_foreground_scope() is None:
+        deadline_s = resolve_deps_deadline()
+        open_foreground_deadline(container, deadline_s, new_foreground_marker())
+        owned_scope = _active_foreground_scope() is not None
+
+    active_step = "uv sync"
+    try:
+        if recreate:
+            venv_path = os.path.join(project_root, ".venv")
+            _exec_run_with_deadline(
+                container,
+                ["/bin/sh", "-c", f"rm -rf {shlex.quote(venv_path)}"],
+            )
+
+        record_environment_state(
+            container.id,
+            "not_prepared",
+            reason="uv sync in progress",
+            command=command,
+            project_root=project_root,
+        )
+        _record_deps_progress(container, "deps: " + command)
+        try:
+            exit_code, output = _exec_run_with_deadline(
+                container,
+                ["/bin/sh", "-c", f"cd {shlex.quote(project_root)} && {command}"],
+            )
+            stdout_part, stderr_part = output or (b"", b"")
+            stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
+            stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
+            if exit_code == 0:
+                from sunaba.environment_state_store import compute_manifest_fingerprint
+
+                try:
+                    fp = compute_manifest_fingerprint(container, project_root)
+                except Exception as exc:
+                    diagnostic = re.sub(
+                        r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+",
+                        r"\1\2[REDACTED]",
+                        str(exc),
+                    )[:240]
+                    reason = f"fingerprint_read_failed: {diagnostic}"
+                    record_environment_state(
+                        container.id,
+                        "failed",
+                        reason=reason,
+                        command=command,
+                        exit_code=0,
+                        project_root=project_root,
+                    )
+                    return UvPrepareResult(
+                        success=False,
+                        message=f"uv sync succeeded but manifest fingerprint read failed: {diagnostic}",
+                        reason=reason,
+                        exit_code=0,
+                    )
+                else:
+                    record_environment_state(
+                        container.id,
+                        "ready",
+                        command=command,
+                        exit_code=0,
+                        fingerprint=fp,
+                        project_root=project_root,
+                    )
+                    return UvPrepareResult(
+                        success=True,
+                        message="uv sync --locked --all-groups ok",
+                        reason=None,
+                        exit_code=0,
+                    )
+            else:
+                diagnostic = (stderr_text or stdout_text).strip()
+                diagnostic = re.sub(
+                    r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", diagnostic
+                )
+                diagnostic = re.sub(r"https?://[^\s/@]+:[^\s/@]+@", "https://[REDACTED]@", diagnostic)
+                diagnostic = diagnostic[:240]
+                reason = f"sync_failed: {diagnostic}"
+                record_environment_state(
+                    container.id,
+                    "failed",
+                    reason=reason,
+                    command=command,
+                    exit_code=exit_code,
+                    project_root=project_root,
+                )
+                suffix = f": {diagnostic}" if diagnostic else ""
+                return UvPrepareResult(
+                    success=False,
+                    message=f"uv sync --locked --all-groups failed (exit {exit_code}){suffix}",
+                    reason=reason,
+                    exit_code=exit_code,
+                )
+        except ForegroundTreeTimeout:
+            raise
+        except Exception as exc:
+            diagnostic = re.sub(
+                r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", str(exc)
+            )[:240]
+            reason = f"sync_error: {diagnostic}"
+            record_environment_state(
+                container.id,
+                "failed",
+                reason=reason,
+                command=command,
+                project_root=project_root,
+            )
+            return UvPrepareResult(
+                success=False,
+                message=f"uv sync --locked --all-groups failed: {diagnostic}",
+                reason=reason,
+                exit_code=None,
+            )
+    except ForegroundTreeTimeout as exc:
+        invalidate_verify_success(str(container.id))
+        record_environment_state(
+            container.id,
+            "failed",
+            reason=f"deps_timeout: {exc}",
+            command=command,
+            project_root=project_root,
+        )
+        if not owned_scope:
+            raise
+        reap_verdict = exc.reap or "incomplete"
+        note = f"deps: {active_step} timeout (deadline_s={exc.deadline_s:g}s, reap={reap_verdict})"
+        return UvPrepareResult(
+            success=False,
+            message=note,
+            reason=f"deps_timeout: {exc}",
+            exit_code=124,
+        )
+    finally:
+        if owned_scope:
+            close_foreground_deadline()
+
+
+_prepare_uv_environment = prepare_uv_environment
+
+
 def _install_repo_deps(
     container: Any,
     clone_repo: str,
@@ -525,15 +709,12 @@ def _install_repo_deps(
 
         if has_uv:
             if not allow_network:
-                reason = "network_disabled"
-                record_environment_state(
-                    container.id,
-                    "failed",
-                    reason=reason,
-                    command="uv sync --locked --all-groups",
-                    project_root=clone_dest,
+                res = prepare_uv_environment(
+                    container,
+                    clone_dest,
+                    allow_network=False,
                 )
-                errors.append(f"uv preparation failed: {reason}")
+                errors.append(res.message)
             elif pip_extras is None:
                 record_environment_state(
                     container.id,
@@ -554,88 +735,15 @@ def _install_repo_deps(
                 errors.append(f"uv preparation failed: {reason}")
             else:
                 active_step = "uv sync"
-                command = "uv sync --locked --all-groups"
-                record_environment_state(
-                    container.id,
-                    "not_prepared",
-                    reason="uv sync in progress",
-                    command=command,
-                    project_root=clone_dest,
+                res = prepare_uv_environment(
+                    container,
+                    clone_dest,
+                    allow_network=allow_network,
                 )
-                _record_deps_progress(container, "deps: " + command)
-                try:
-                    exit_code, output = _exec_run_with_deadline(
-                        container,
-                        ["/bin/sh", "-c", f"cd {shlex.quote(clone_dest)} && {command}"],
-                    )
-                    stdout_part, stderr_part = output or (b"", b"")
-                    stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
-                    stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
-                    if exit_code == 0:
-                        from sunaba.environment_state_store import compute_manifest_fingerprint
-
-                        try:
-                            fp = compute_manifest_fingerprint(container, clone_dest)
-                        except Exception as exc:
-                            diagnostic = re.sub(
-                                r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+",
-                                r"\1\2[REDACTED]",
-                                str(exc),
-                            )[:240]
-                            reason = f"fingerprint_read_failed: {diagnostic}"
-                            record_environment_state(
-                                container.id,
-                                "failed",
-                                reason=reason,
-                                command=command,
-                                exit_code=0,
-                                project_root=clone_dest,
-                            )
-                            errors.append(
-                                f"uv sync succeeded but manifest fingerprint read failed: {diagnostic}"
-                            )
-                        else:
-                            record_environment_state(
-                                container.id,
-                                "ready",
-                                command=command,
-                                exit_code=0,
-                                fingerprint=fp,
-                                project_root=clone_dest,
-                            )
-                            notes.append("uv sync --locked --all-groups ok")
-                    else:
-                        diagnostic = (stderr_text or stdout_text).strip()
-                        diagnostic = re.sub(
-                            r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", diagnostic
-                        )
-                        diagnostic = re.sub(r"https?://[^\s/@]+:[^\s/@]+@", "https://[REDACTED]@", diagnostic)
-                        diagnostic = diagnostic[:240]
-                        reason = f"sync_failed: {diagnostic}"
-                        record_environment_state(
-                            container.id,
-                            "failed",
-                            reason=reason,
-                            command=command,
-                            exit_code=exit_code,
-                            project_root=clone_dest,
-                        )
-                        suffix = f": {diagnostic}" if diagnostic else ""
-                        errors.append(f"uv sync --locked --all-groups failed (exit {exit_code}){suffix}")
-                except ForegroundTreeTimeout:
-                    raise
-                except Exception as exc:
-                    diagnostic = re.sub(
-                        r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+", r"\1\2[REDACTED]", str(exc)
-                    )[:240]
-                    record_environment_state(
-                        container.id,
-                        "failed",
-                        reason=f"sync_error: {diagnostic}",
-                        command=command,
-                        project_root=clone_dest,
-                    )
-                    errors.append(f"uv sync --locked --all-groups failed: {diagnostic}")
+                if res.success:
+                    notes.append(res.message)
+                else:
+                    errors.append(res.message)
 
         elif has_py:
             if pip_extras is None:

@@ -120,7 +120,10 @@ def check_recorded_environment_staleness(
 
     if is_stale:
         invalidate_verify_success(container_id)
-        return "stale", f"{', '.join(changed)} changed; recreate container to recover"
+        return (
+            "stale",
+            f"{', '.join(changed)} changed; run sandbox_prepare_environment or recreate container to recover",
+        )
     return "ready", None
 
 

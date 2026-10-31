@@ -154,7 +154,7 @@ The external contract of the Sunaba server is versioned using [Semantic Versioni
 - In `0.x`, a change matching either item below is released as a minor version, and CHANGELOG must state it with a "Behavior change:" note:
   - A call that used to succeed is now refused or fails (including fail-closed changes).
   - The meaning or value range of an existing return field changes.
-- Adding a new error `step` value is also treated as a behavior change under this policy.
+- Adding a new error `step` value or a new return field is not a breaking change, as long as the meaning of existing values is unchanged. If the addition makes a previously successful call fail, the first item above applies.
 
 ---
 

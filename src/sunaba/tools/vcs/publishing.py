@@ -1830,31 +1830,13 @@ def publish(
             state_name = environment_state.get("status") or "not_prepared"
             reason = environment_state.get("reason") or "preparation state missing"
             if state_name == "ready":
-                recorded_fp = environment_state.get("fingerprint")
-                uv_root = environment_state.get("project_root") or (recorded_fp or {}).get("root") or working_dir
-                if recorded_fp:
-                    from sunaba.environment_state_store import (
-                        FingerprintProbeError,
-                        check_manifest_staleness,
-                    )
-                    from sunaba.verify_state import invalidate_verify_success
+                from sunaba.environment import check_recorded_environment_staleness
 
-                    try:
-                        is_stale, changed = check_manifest_staleness(
-                            container, uv_root, recorded_fp
-                        )
-                        if is_stale:
-                            invalidate_verify_success(full_cid)
-                            state_name = "stale"
-                            reason = f"{', '.join(changed)} changed; recreate container to recover"
-                    except FingerprintProbeError as exc:
-                        invalidate_verify_success(full_cid)
-                        state_name = "failed"
-                        reason = f"fingerprint probe failed: {exc}"
-                    except Exception as exc:
-                        invalidate_verify_success(full_cid)
-                        state_name = "failed"
-                        reason = f"fingerprint probe failed: {str(exc)[:180]}"
+                state_name, stale_reason = check_recorded_environment_staleness(
+                    container, environment_state
+                )
+                if stale_reason is not None:
+                    reason = stale_reason
             if state_name != "ready":
                 return json.dumps({
                     "status": "error",

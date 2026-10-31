@@ -152,6 +152,24 @@ def check_manifest_staleness(
     return bool(changed), changed
 
 
+def check_recorded_environment_staleness(
+    container: Any,
+    recorded_fingerprint: dict[str, Any] | None,
+    project_root: str | None = None,
+) -> tuple[bool, list[str]]:
+    """Compare manifests only at the root captured during preparation.
+
+    Caller workdirs do not define the prepared environment. The explicit
+    recorded project_root takes precedence over the fingerprint's root.
+    """
+    if not recorded_fingerprint:
+        return False, []
+    root = project_root or recorded_fingerprint.get("root")
+    if not root:
+        return False, []
+    return check_manifest_staleness(container, root, recorded_fingerprint)
+
+
 def _find_state_file(state_dir: Path, container_id: str) -> Path | None:
     p_json = state_dir / f"{container_id}.json"
     if p_json.exists():
@@ -164,43 +182,52 @@ def _find_state_file(state_dir: Path, container_id: str) -> Path | None:
 
 def save_environment_state(container_id: str, record: dict[str, Any]) -> None:
     """Atomically persist environment state for full container_id to disk."""
-    state_dir = get_environment_state_dir()
-    state_dir.mkdir(parents=True, exist_ok=True)
-    target_path = state_dir / f"{container_id}.json"
-
-    data = dict(record)
-    data["container_id"] = container_id
-
-    payload = json.dumps(data, indent=2).encode("utf-8")
-    fd, temp_path = tempfile.mkstemp(dir=state_dir, prefix=f".{container_id}.", suffix=".tmp")
+    temp_path: str | None = None
     try:
+        state_dir = get_environment_state_dir()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        target_path = state_dir / f"{container_id}.json"
+
+        data = dict(record)
+        data["container_id"] = container_id
+
+        payload = json.dumps(data, indent=2).encode("utf-8")
+        fd, temp_path = tempfile.mkstemp(
+            dir=state_dir, prefix=f".{container_id}.", suffix=".tmp"
+        )
         with os.fdopen(fd, "wb") as f:
             f.write(payload)
             f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, target_path)
+    except Exception as exc:
+        if temp_path is not None:
             try:
-                os.fsync(f.fileno())
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
             except OSError:
                 pass
-        os.replace(temp_path, target_path)
-    except Exception:
-        try:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-        except OSError:
-            pass
-        raise
+        logger.warning("Could not save environment state for %s: %s", container_id, exc)
 
 
 def remove_environment_state(container_id: str) -> None:
     """Remove persisted environment state for container_id."""
-    state_dir = get_environment_state_dir()
-    if not state_dir.exists():
-        return
-    for p in (state_dir / f"{container_id}.json", state_dir / container_id):
-        try:
-            p.unlink(missing_ok=True)
-        except OSError:
-            pass
+    try:
+        state_dir = get_environment_state_dir()
+        if not state_dir.exists():
+            return
+        for path in (state_dir / f"{container_id}.json", state_dir / container_id):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "Could not remove environment state for %s at %s: %s",
+                    container_id,
+                    path,
+                    exc,
+                )
+    except Exception as exc:
+        logger.warning("Could not remove environment state for %s: %s", container_id, exc)
 
 
 def load_environment_state(container_id: str) -> dict[str, Any] | None:

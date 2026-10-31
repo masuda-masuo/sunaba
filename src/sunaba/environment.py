@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 from typing import Any
 
@@ -71,43 +72,46 @@ def is_uv_project_root(container: Any, root: str) -> bool:
     return probe_uv_project_root(container, root)
 
 
-def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
-    """Check uv environment status and fingerprint staleness for root.
+def check_recorded_environment_staleness(
+    container: Any,
+    state: dict[str, Any],
+    caller_root: str | None = None,
+) -> tuple[str, str | None]:
+    """Return the recorded environment's status after its single stale check.
 
-    Returns (status, reason_detail).
-    status is one of:
-      - "ready": prepared and fingerprint matches (reason is None)
-      - "stale": manifest changed since preparation
-      - "not_prepared": never prepared
-      - "failed": preparation failed or probe failed
-      - "not_uv": not a uv project root (reason is None)
+    Fingerprints are always read from the prepared project root. The caller's
+    workdir is used only for legacy ready records that have no fingerprint.
     """
-    from sunaba.verify_state import get_environment_state, invalidate_verify_success
-
-    container_id = str(getattr(container, "id", ""))
-    state = get_environment_state(container_id)
-    if state is None:
-        try:
-            if not probe_uv_project_root(container, root):
-                return "not_uv", None
-        except Exception as exc:
-            return "failed", f"uv root probe failed: {str(exc)[:180]}"
-        return "not_prepared", "preparation state missing"
+    from sunaba.verify_state import invalidate_verify_success
 
     status = state.get("status") or "not_prepared"
     if status != "ready":
-        reason = state.get("reason") or "preparation state missing or not_prepared"
-        return status, reason
+        return status, state.get("reason") or "preparation state missing or not_prepared"
 
-    # Stored status is "ready". Check fingerprint staleness.
     recorded_fp = state.get("fingerprint")
     if not recorded_fp:
+        project_root = state.get("project_root") or caller_root
+        if project_root:
+            try:
+                probe_uv_project_root(container, project_root)
+            except Exception as exc:
+                invalidate_verify_success(str(getattr(container, "id", "")))
+                return "failed", f"uv manifest probe failed: {str(exc)[:200]}"
         return "ready", None
 
-    from sunaba.environment_state_store import FingerprintProbeError, check_manifest_staleness
+    from sunaba.environment_state_store import (
+        FingerprintProbeError,
+    )
+    from sunaba.environment_state_store import (
+        check_recorded_environment_staleness as compare_recorded_fingerprint,
+    )
 
+    container_id = str(getattr(container, "id", ""))
+    project_root = state.get("project_root") or recorded_fp.get("root")
     try:
-        is_stale, changed = check_manifest_staleness(container, root, recorded_fp)
+        is_stale, changed = compare_recorded_fingerprint(
+            container, recorded_fp, project_root
+        )
     except FingerprintProbeError as exc:
         invalidate_verify_success(container_id)
         return "failed", f"fingerprint probe failed: {exc}"
@@ -117,11 +121,37 @@ def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
 
     if is_stale:
         invalidate_verify_success(container_id)
-        changed_str = ", ".join(changed)
-        reason = f"{changed_str} changed; recreate container to recover"
-        return "stale", reason
-
+        return "stale", f"{', '.join(changed)} changed; recreate container to recover"
     return "ready", None
+
+
+def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
+    """Check status, probing the caller root when unrecorded or differing from project_root."""
+    from sunaba.verify_state import get_environment_state
+
+    state = get_environment_state(str(getattr(container, "id", "")))
+    if state is None:
+        try:
+            if not probe_uv_project_root(container, root):
+                return "not_uv", None
+        except Exception as exc:
+            return "failed", f"uv root probe failed: {str(exc)[:180]}"
+        return "not_prepared", "preparation state missing"
+
+    project_root = state.get("project_root")
+    if not project_root:
+        recorded_fp = state.get("fingerprint")
+        if isinstance(recorded_fp, dict):
+            project_root = recorded_fp.get("root")
+
+    if not project_root or os.path.normpath(root) != os.path.normpath(project_root):
+        try:
+            if not probe_uv_project_root(container, root):
+                return "not_uv", None
+        except Exception as exc:
+            return "failed", f"uv root probe failed: {str(exc)[:180]}"
+
+    return check_recorded_environment_staleness(container, state, root)
 
 
 def uv_environment_block_reason(container: Any, root: str) -> str | None:

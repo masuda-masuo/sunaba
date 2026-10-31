@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,7 @@ from sunaba.environment_state_store import (
     compute_manifest_fingerprint,
     load_environment_state,
     prune_and_load_environment_states,
+    remove_environment_state,
     save_environment_state,
 )
 from sunaba.tools.vcs.publishing import publish
@@ -37,6 +39,7 @@ class MockFilesystemContainer:
         self.probe_failure: str | None = None
         self.fingerprint_probe_failure: str | None = None
         self.executed: list[str] = []
+        self.cat_read_failure: str | None = None
 
     def exec_run(self, cmd: list[str] | str, **kwargs) -> tuple[int, tuple[bytes, bytes]]:
         cmd_str = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
@@ -45,11 +48,19 @@ class MockFilesystemContainer:
         if self.probe_failure:
             return 127, (b"", self.probe_failure.encode("utf-8"))
 
+        cd_match = re.search(r"cd\s+(?:'([^']+)'|\"([^\"]+)\"|(\S+))\s+&&", cmd_str)
+        raw_dir = (
+            (cd_match.group(1) or cd_match.group(2) or cd_match.group(3)).rstrip("/")
+            if cd_match
+            else self.root
+        )
+        curr_dir = self.root if raw_dir in ("/home/sandbox", self.root) else raw_dir
+
         # Manifest probe loop (probe_uv_project_root)
         if "for f in pyproject.toml uv.lock" in cmd_str:
             lines = []
             for fname in ("pyproject.toml", "uv.lock"):
-                full_path = f"{self.root}/{fname}"
+                full_path = f"{curr_dir}/{fname}"
                 if full_path in self.files:
                     lines.append(fname.encode("utf-8"))
             out = b"\n".join(lines) + (b"\n" if lines else b"")
@@ -60,9 +71,9 @@ class MockFilesystemContainer:
             if f"'{fname}'" in cmd_str or f'"{fname}"' in cmd_str or f" {fname}" in cmd_str:
                 if self.fingerprint_probe_failure:
                     return 127, (b"", self.fingerprint_probe_failure.encode("utf-8"))
-                full_path = f"{self.root}/{fname}"
+                full_path = f"{curr_dir}/{fname}"
                 if full_path in self.files:
-                    if getattr(self, "cat_read_failure", None):
+                    if self.cat_read_failure is not None:
                         return 1, (b"", self.cat_read_failure.encode("utf-8"))
                     return 0, (self.files[full_path], b"")
                 return 0, (b"__SUNABA_MANIFEST_ABSENT__\n", b"")
@@ -452,8 +463,9 @@ def test_container_prepared_with_short_id_found_by_full_id_and_isolated_from_pre
         )
 
     # State is recorded under the full 64-char ID
-    assert get_environment_state(cid_full_a) is not None
-    assert get_environment_state(cid_full_a)["status"] == "ready"
+    state_a = get_environment_state(cid_full_a)
+    assert state_a is not None
+    assert state_a["status"] == "ready"
     assert get_environment_state(prefix_12) is None
     # Container B with shared prefix has NO record
     assert get_environment_state(cid_full_b) is None
@@ -630,3 +642,261 @@ def test_failing_cat_is_read_failure_not_absent(isolated_state: Path) -> None:
         assert res["status"] == "environment_setup_failed"
         assert res["environment_setup"]["status"] == "failed"
         assert "fingerprint probe failed" in res["environment_setup"]["reason"]
+
+
+@pytest.mark.parametrize("workdir", ["/workspace/sub", "/workspace/pkg"])
+def test_recorded_environment_is_not_stale_from_subdirectory(
+    isolated_state: Path, workdir: str
+) -> None:
+    container, files = _make_ready_container()
+    if workdir.endswith("/pkg"):
+        files[f"{container.root}/pkg/pyproject.toml"] = b"[project]\nname='nested'\n"
+        files[f"{container.root}/pkg/uv.lock"] = b"version = 1\n"
+    fp = compute_manifest_fingerprint(container, container.root)
+    record_environment_state(
+        container.id,
+        "ready",
+        command="uv sync --locked",
+        exit_code=0,
+        fingerprint=fp,
+        project_root=container.root,
+    )
+
+    status, reason = check_uv_environment(container, workdir)
+    if workdir.endswith("/pkg"):
+        assert (status, reason) == ("ready", None)
+    else:
+        assert (status, reason) == ("not_uv", None)
+    assert uv_environment_block_reason(container, workdir) is None
+
+
+def test_recorded_root_change_is_stale_from_any_workdir(isolated_state: Path) -> None:
+    container, files = _make_ready_container()
+    fp = compute_manifest_fingerprint(container, container.root)
+    record_environment_state(
+        container.id,
+        "ready",
+        command="uv sync --locked",
+        exit_code=0,
+        fingerprint=fp,
+        project_root=container.root,
+    )
+    files[f"{container.root}/uv.lock"] = b"version = 1\nrevision = changed\n"
+
+    # Stale detection applies when caller root is a uv project or the root itself
+    files[f"{container.root}/pkg/pyproject.toml"] = b"[project]\nname='nested'\n"
+    files[f"{container.root}/pkg/uv.lock"] = b"version = 1\n"
+    for workdir in (container.root, f"{container.root}/pkg"):
+        status, reason = check_uv_environment(container, workdir)
+        assert status == "stale"
+        assert reason is not None and "uv.lock" in reason
+
+    # Non-uv subdirectory is not blocked (not_uv)
+    status, reason = check_uv_environment(container, f"{container.root}/sub")
+    assert (status, reason) == ("not_uv", None)
+    assert uv_environment_block_reason(container, f"{container.root}/sub") is None
+
+
+@pytest.mark.parametrize("recorded_status", ["failed", "not_prepared"])
+def test_non_uv_subdir_not_blocked_when_recorded_state_is_failed_or_not_prepared(
+    isolated_state: Path, recorded_status: str
+) -> None:
+    container, files = _make_ready_container()
+    reason = "sync_failed: exit 1" if recorded_status == "failed" else "preparation state missing"
+    record_environment_state(
+        container.id,
+        recorded_status,
+        reason=reason,
+        command="uv sync",
+        project_root=container.root,
+    )
+    workdir = f"{container.root}/sub"
+    status, reason_out = check_uv_environment(container, workdir)
+    assert status == "not_uv"
+    assert reason_out is None
+    assert uv_environment_block_reason(container, workdir) is None
+
+
+def test_non_uv_subdir_not_blocked_when_recorded_state_is_ready(
+    isolated_state: Path,
+) -> None:
+    container, files = _make_ready_container()
+    fp = compute_manifest_fingerprint(container, container.root)
+    record_environment_state(
+        container.id,
+        "ready",
+        command="uv sync --locked",
+        exit_code=0,
+        fingerprint=fp,
+        project_root=container.root,
+    )
+    workdir = f"{container.root}/sub"
+    status, reason = check_uv_environment(container, workdir)
+    assert status == "not_uv"
+    assert reason is None
+    assert uv_environment_block_reason(container, workdir) is None
+
+
+def test_prepared_root_itself_blocked_when_recorded_state_is_failed(
+    isolated_state: Path,
+) -> None:
+    container, files = _make_ready_container()
+    record_environment_state(
+        container.id,
+        "failed",
+        reason="sync_failed: exit 1",
+        command="uv sync",
+        project_root=container.root,
+    )
+    status, reason = check_uv_environment(container, container.root)
+    assert status == "failed"
+    assert reason == "sync_failed: exit 1"
+    block_reason = uv_environment_block_reason(container, container.root)
+    assert block_reason is not None
+    assert "uv environment failed: sync_failed: exit 1" in block_reason
+
+
+def test_differing_caller_root_probe_failure_returns_failed(
+    isolated_state: Path,
+) -> None:
+    container, files = _make_ready_container()
+    record_environment_state(
+        container.id,
+        "ready",
+        command="uv sync",
+        exit_code=0,
+        project_root=container.root,
+    )
+    container.probe_failure = "sh: 1: probe failed: permission denied"
+    status, reason = check_uv_environment(container, f"{container.root}/sub")
+    assert status == "failed"
+    assert reason is not None and "uv root probe failed" in reason
+    block_reason = uv_environment_block_reason(container, f"{container.root}/sub")
+    assert block_reason is not None
+    assert "failed" in block_reason
+
+
+def test_legacy_record_without_project_root_non_uv_subdir_not_blocked(
+    isolated_state: Path,
+) -> None:
+    container, files = _make_ready_container()
+    record_environment_state(
+        container.id,
+        "failed",
+        reason="preparation state missing",
+    )
+    status, reason = check_uv_environment(container, f"{container.root}/sub")
+    assert status == "not_uv"
+    assert reason is None
+    assert uv_environment_block_reason(container, f"{container.root}/sub") is None
+
+
+def test_legacy_record_without_project_root_prepared_root_blocked(
+    isolated_state: Path,
+) -> None:
+    container, files = _make_ready_container()
+    record_environment_state(
+        container.id,
+        "failed",
+        reason="sync_failed: exit 1",
+    )
+    status, reason = check_uv_environment(container, container.root)
+    assert status == "failed"
+    assert reason == "sync_failed: exit 1"
+    block_reason = uv_environment_block_reason(container, container.root)
+    assert block_reason is not None
+    assert "uv environment failed: sync_failed: exit 1" in block_reason
+
+
+def test_environment_store_failures_are_logged_and_do_not_raise(
+    isolated_state: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import sunaba.environment_state_store as store
+
+    with patch.object(store.os, "replace", side_effect=OSError("replace denied")):
+        save_environment_state("save_failure", {"status": "ready"})
+    assert "Could not save environment state" in caplog.text
+
+    store_file = isolated_state / "remove_failure.json"
+    store_file.write_text("{}", encoding="utf-8")
+    with patch.object(Path, "unlink", side_effect=OSError("unlink denied")):
+        remove_environment_state("remove_failure")
+    assert "Could not remove environment state" in caplog.text
+
+
+def test_fingerprint_read_failure_after_sync_is_recorded_as_fingerprint_failure(
+    isolated_state: Path,
+) -> None:
+    from sunaba.tools.container import clone
+
+    container = MagicMock()
+    container.id = "fingerprint_read_failure"
+    with (
+        patch.object(clone, "_active_foreground_scope", return_value=object()),
+        patch.object(clone, "_detect_manifests", return_value={"pyproject.toml", "uv.lock"}),
+        patch.object(clone, "_exec_run_with_deadline", return_value=(0, (b"", b""))),
+        patch(
+            "sunaba.environment_state_store.compute_manifest_fingerprint",
+            side_effect=RuntimeError("manifest read denied"),
+        ),
+    ):
+        result = clone._install_repo_deps(
+            container, "owner/repo", "/workspace", "[dev]"
+        )
+
+    state = get_environment_state(container.id)
+    assert result.failed is True
+    assert state is not None
+    assert state["status"] == "failed"
+    assert state["reason"].startswith("fingerprint_read_failed:")
+    assert state["project_root"] == "/workspace"
+
+
+@pytest.mark.parametrize(
+    ("prep_kwargs", "exec_result", "expected_reason_prefix"),
+    [
+        ({"allow_network": False}, None, "network_disabled"),
+        ({"pip_extras": "[unsupported]"}, None, "unsupported_uv_arguments"),
+        ({}, (1, (b"", b"uv sync error")), "sync_failed: uv sync error"),
+        ({}, RuntimeError("connection lost"), "sync_error: connection lost"),
+    ],
+)
+def test_failed_uv_preparation_records_project_root_equal_to_prepared_root(
+    isolated_state: Path,
+    prep_kwargs: dict[str, Any],
+    exec_result: Any,
+    expected_reason_prefix: str,
+) -> None:
+    from sunaba.tools.container import clone
+
+    container = MagicMock()
+    container.id = "failed_prep_project_root"
+    prepared_root = "/workspace/my_project"
+    exec_side_effect: Any
+    if isinstance(exec_result, Exception):
+        exec_side_effect = exec_result
+    elif exec_result is not None:
+        def _exec_fn(*args: Any, **kwargs: Any) -> Any:
+            return exec_result
+
+        exec_side_effect = _exec_fn
+    else:
+        exec_side_effect = None
+    with (
+        patch.object(clone, "_active_foreground_scope", return_value=object()),
+        patch.object(clone, "_detect_manifests", return_value={"pyproject.toml", "uv.lock"}),
+        patch.object(clone, "_exec_run_with_deadline", side_effect=exec_side_effect)
+        if exec_side_effect
+        else patch.object(clone, "_exec_run_with_deadline", return_value=(0, (b"", b""))),
+    ):
+        result = clone._install_repo_deps(
+            container, "owner/repo", prepared_root, **prep_kwargs
+        )
+
+    state = get_environment_state(container.id)
+    assert result.failed is True
+    assert state is not None
+    assert state["status"] == "failed"
+    assert state["project_root"] == prepared_root
+    assert expected_reason_prefix in state["reason"]
+

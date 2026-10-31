@@ -152,7 +152,7 @@ def check_manifest_staleness(
     return bool(changed), changed
 
 
-def check_recorded_environment_staleness(
+def compare_recorded_fingerprint(
     container: Any,
     recorded_fingerprint: dict[str, Any] | None,
     project_root: str | None = None,

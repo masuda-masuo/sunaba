@@ -93,7 +93,8 @@ def check_recorded_environment_staleness(
         project_root = state.get("project_root") or caller_root
         if project_root:
             try:
-                probe_uv_project_root(container, project_root)
+                if not probe_uv_project_root(container, project_root):
+                    return "not_uv", None
             except Exception as exc:
                 invalidate_verify_success(str(getattr(container, "id", "")))
                 return "failed", f"uv manifest probe failed: {str(exc)[:200]}"
@@ -101,9 +102,7 @@ def check_recorded_environment_staleness(
 
     from sunaba.environment_state_store import (
         FingerprintProbeError,
-    )
-    from sunaba.environment_state_store import (
-        check_recorded_environment_staleness as compare_recorded_fingerprint,
+        compare_recorded_fingerprint,
     )
 
     container_id = str(getattr(container, "id", ""))
@@ -135,7 +134,7 @@ def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
             if not probe_uv_project_root(container, root):
                 return "not_uv", None
         except Exception as exc:
-            return "failed", f"uv root probe failed: {str(exc)[:180]}"
+            return "failed", f"uv manifest probe failed: {str(exc)[:200]}"
         return "not_prepared", "preparation state missing"
 
     project_root = state.get("project_root")
@@ -144,7 +143,13 @@ def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
         if isinstance(recorded_fp, dict):
             project_root = recorded_fp.get("root")
 
-    if not project_root or os.path.normpath(root) != os.path.normpath(project_root):
+    if project_root and os.path.normpath(root) != os.path.normpath(project_root):
+        try:
+            if not probe_uv_project_root(container, root):
+                return "not_uv", None
+        except Exception as exc:
+            return "failed", f"uv root probe failed: {str(exc)[:180]}"
+    elif not project_root and state.get("status") != "ready":
         try:
             if not probe_uv_project_root(container, root):
                 return "not_uv", None

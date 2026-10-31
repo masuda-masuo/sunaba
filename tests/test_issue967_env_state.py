@@ -96,8 +96,13 @@ class MockFilesystemContainer:
 def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Isolate environment state and persistence store directory."""
     monkeypatch.setenv("SUNABA_ENVIRONMENT_STATE_DIR", str(tmp_path))
-    with patch("sunaba.verify_state._environment_state", {}), patch(
-        "sunaba.verify_state._verify_map", {}
+    with (
+        patch("sunaba.verify_state._environment_state", {}),
+        patch("sunaba.verify_state._verify_map", {}),
+        patch(
+            "sunaba.tools.vcs.resolve_git_root",
+            side_effect=lambda c, wd=None: wd if wd is not None else (getattr(c, "root", None) or "/workspace"),
+        ),
     ):
         yield tmp_path
 
@@ -899,4 +904,65 @@ def test_failed_uv_preparation_records_project_root_equal_to_prepared_root(
     assert state["status"] == "failed"
     assert state["project_root"] == prepared_root
     assert expected_reason_prefix in state["reason"]
+
+
+@pytest.mark.parametrize("recorded_status", ["failed", "stale"])
+def test_verify_non_uv_working_dir_not_blocked_by_recorded_state_failure_or_staleness(
+    isolated_state: Path, recorded_status: str
+) -> None:
+    container, files = _make_ready_container()
+    cid = container.id
+    prepared_root = container.root
+    non_uv_workdir = f"{container.root}/sub"
+
+    if recorded_status == "failed":
+        record_environment_state(
+            cid, "failed", reason="sync_failed: exit 1", command="uv sync", project_root=prepared_root
+        )
+    else:
+        fp = compute_manifest_fingerprint(container, prepared_root)
+        record_environment_state(
+            cid, "ready", command="uv sync --locked", exit_code=0, fingerprint=fp, project_root=prepared_root
+        )
+        files[f"{prepared_root}/uv.lock"] = b"version = 1\nrevision = 2 # modified\n"
+
+    client = _make_client_mock(cast(Any, container))
+    with patch("sunaba.tools.verify._docker", return_value=client):
+        res = json.loads(
+            verify_in_container(container_id=cid, path="tests/", working_dir=non_uv_workdir)
+        )
+        assert res["status"] != "environment_setup_failed"
+        assert "environment_setup" not in res.get("gate_fail_kinds", [])
+
+
+@pytest.mark.parametrize("recorded_status", ["failed", "stale"])
+def test_verify_prepared_root_working_dir_blocked_by_recorded_state_failure_or_staleness(
+    isolated_state: Path, recorded_status: str
+) -> None:
+    container, files = _make_ready_container()
+    cid = container.id
+    prepared_root = container.root
+
+    if recorded_status == "failed":
+        expected_reason = "sync_failed: exit 1"
+        record_environment_state(
+            cid, "failed", reason=expected_reason, command="uv sync", project_root=prepared_root
+        )
+    else:
+        fp = compute_manifest_fingerprint(container, prepared_root)
+        record_environment_state(
+            cid, "ready", command="uv sync --locked", exit_code=0, fingerprint=fp, project_root=prepared_root
+        )
+        files[f"{prepared_root}/uv.lock"] = b"version = 1\nrevision = 2 # modified\n"
+        expected_reason = "uv.lock"
+
+    client = _make_client_mock(cast(Any, container))
+    with patch("sunaba.tools.verify._docker", return_value=client):
+        res = json.loads(
+            verify_in_container(container_id=cid, path=prepared_root, working_dir=prepared_root)
+        )
+        assert res["status"] == "environment_setup_failed"
+        assert res["gate_passed"] is False
+        assert res["environment_setup"]["status"] == recorded_status
+        assert expected_reason in res["environment_setup"]["reason"]
 

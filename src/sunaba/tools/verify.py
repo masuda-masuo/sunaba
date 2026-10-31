@@ -958,40 +958,36 @@ def _verify_in_container_guarded(
     environment_state = get_environment_state(full_cid)
 
     if environment_state is not None:
-        state_name = environment_state.get("status") or "not_prepared"
-        reason = environment_state.get("reason") or "preparation state missing or not_prepared"
-        if state_name == "ready":
-            from sunaba.environment import check_recorded_environment_staleness
+        from sunaba.environment import check_uv_environment
 
-            state_name, stale_reason = check_recorded_environment_staleness(
-                container, environment_state, working_dir
-            )
-            if stale_reason is not None:
-                reason = stale_reason
-
-        if state_name != "ready":
+        status, reason = check_uv_environment(container, working_dir)
+        if status == "not_uv":
+            uv_project = False
+        elif status == "ready":
+            uv_project = True
+        else:
+            reason = reason or environment_state.get("reason") or "preparation state missing or not_prepared"
             probe_fail = reason.startswith("uv manifest probe failed")
             result = {
                 "status": "environment_setup_failed",
                 "gate_passed": False,
                 "gate_fail_kinds": ["environment_setup"],
-                "gate_fail_reasons": [reason if probe_fail else f"uv environment {state_name}: {reason}"],
+                "gate_fail_reasons": [reason if probe_fail else f"uv environment {status}: {reason}"],
                 "environment_setup": {
-                    "status": state_name,
+                    "status": status,
                     "reason": reason,
                     "command": "root manifest probe" if probe_fail else environment_state.get("command"),
                     "exit_code": environment_state.get("exit_code"),
                 },
-                "lint": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {state_name}"},
-                "types": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {state_name}"},
-                "patch_targets": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {state_name}"},
-                "tests": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {state_name}"},
+                "lint": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {status}"},
+                "types": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {status}"},
+                "patch_targets": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {status}"},
+                "tests": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {status}"},
                 "diff_hash": None,
                 "test_selection": _empty_test_selection(),
             }
             _record_verify_outcome(container_id, result)
             return json.dumps(result)
-        uv_project = True
     else:
         try:
             from sunaba.environment import probe_uv_project_root

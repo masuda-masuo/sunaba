@@ -69,9 +69,6 @@ def sandbox_prepare_environment(
         })
 
     try:
-        # Issue #969 Spec 1: at start, invalidate any recorded verify success
-        invalidate_verify_success(container_id)
-
         client = common._docker()
         try:
             container = client.containers.get(container_id)
@@ -87,7 +84,6 @@ def sandbox_prepare_environment(
             })
 
         full_cid = str(getattr(container, "id", container_id))
-        invalidate_verify_success(full_cid)
 
         # Target only the recorded project_root (or the clone root when none is recorded)
         state = get_environment_state(full_cid) or get_environment_state(container_id)
@@ -107,19 +103,38 @@ def sandbox_prepare_environment(
             except Exception:
                 project_root = "/workspace"
 
+        # Check 1: Target root must be a uv project (both pyproject.toml and uv.lock exist)
+        from sunaba.environment import probe_uv_project_root
+
+        try:
+            is_uv = probe_uv_project_root(container, project_root)
+        except Exception as exc:
+            return json.dumps({
+                "status": "error",
+                "error": f"failed to probe project manifests: {exc}",
+                "reason": "manifest_read_failed",
+            })
+
+        if not is_uv:
+            return json.dumps({
+                "status": "error",
+                "error": "not_uv_project",
+                "reason": "not_uv_project",
+            })
+
+        # Check 2: Container network must be enabled
         allow_network = _is_container_network_enabled(container)
         if not allow_network:
-            prepare_uv_environment(
-                container,
-                project_root,
-                allow_network=False,
-                recreate=recreate,
-            )
             return json.dumps({
                 "status": "error",
                 "error": "network_disabled",
                 "reason": "network_disabled",
             })
+
+        # Preparation actually starts: invalidate verify success now
+        invalidate_verify_success(container_id)
+        if full_cid != container_id:
+            invalidate_verify_success(full_cid)
 
         res = prepare_uv_environment(
             container,

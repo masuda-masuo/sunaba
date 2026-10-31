@@ -521,12 +521,55 @@ def prepare_uv_environment(
     active_step = "uv sync"
     try:
         if recreate:
+            active_step = "venv removal"
             venv_path = os.path.join(project_root, ".venv")
-            _exec_run_with_deadline(
-                container,
-                ["/bin/sh", "-c", f"rm -rf {shlex.quote(venv_path)}"],
-            )
+            try:
+                rm_ec, rm_out = _exec_run_with_deadline(
+                    container,
+                    ["/bin/sh", "-c", f"rm -rf {shlex.quote(venv_path)}"],
+                )
+            except ForegroundTreeTimeout:
+                raise
+            except Exception as exc:
+                reason = f"venv_removal_failed: {str(exc)[:160]}"
+                record_environment_state(
+                    container.id,
+                    "failed",
+                    reason=reason,
+                    command=f"rm -rf {venv_path}",
+                    project_root=project_root,
+                )
+                return UvPrepareResult(
+                    success=False,
+                    message=f"failed to remove .venv: {exc}",
+                    reason=reason,
+                )
 
+            if rm_ec != 0:
+                stdout_part, stderr_part = rm_out or (b"", b"")
+                diag = (stderr_part or stdout_part or b"").decode("utf-8", errors="replace").strip()[:160]
+                reason = f"venv_removal_failed: {diag}" if diag else f"venv_removal_failed (exit {rm_ec})"
+                record_environment_state(
+                    container.id,
+                    "failed",
+                    reason=reason,
+                    command=f"rm -rf {venv_path}",
+                    exit_code=rm_ec,
+                    project_root=project_root,
+                )
+                err_msg = (
+                    f"failed to remove .venv (exit {rm_ec}): {diag}"
+                    if diag
+                    else f"failed to remove .venv (exit {rm_ec})"
+                )
+                return UvPrepareResult(
+                    success=False,
+                    message=err_msg,
+                    reason=reason,
+                    exit_code=rm_ec,
+                )
+
+        active_step = "uv sync"
         record_environment_state(
             container.id,
             "not_prepared",

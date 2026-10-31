@@ -44,6 +44,7 @@ class MockPrepareContainer:
         allow_network: bool = True,
         locked_fail: bool = False,
         timeout_on_sync: bool = False,
+        rm_venv_fail: bool = False,
     ) -> None:
         self.id = cid
         self.root = root.rstrip("/")
@@ -56,6 +57,7 @@ class MockPrepareContainer:
         }
         self.locked_fail = locked_fail
         self.timeout_on_sync = timeout_on_sync
+        self.rm_venv_fail = rm_venv_fail
         self.executed: list[str] = []
 
     def exec_run(self, cmd: list[str] | str, **kwargs: Any) -> tuple[int, tuple[bytes, bytes]]:
@@ -64,6 +66,8 @@ class MockPrepareContainer:
 
         # Recreate .venv removal
         if "rm -rf" in cmd_str and ".venv" in cmd_str:
+            if self.rm_venv_fail:
+                return 1, (b"", b"rm: cannot remove '.venv': Permission denied\n")
             return 0, (b"", b"")
 
         # Manifest probe loop (probe_uv_project_root)
@@ -199,7 +203,7 @@ class TestPrepareEnvironment:
     def test_network_disabled_fails_with_network_disabled(
         self, isolated_env: Path
     ) -> None:
-        """AC 2: With network disabled, the tool fails with network_disabled and the recorded state is failed."""
+        """With network disabled, the tool fails with network_disabled and changes no state."""
         cid = "c_prepare_nonet_02"
         files = _create_sample_files()
         container = MockPrepareContainer(cid, "/workspace", files, allow_network=False)
@@ -211,14 +215,103 @@ class TestPrepareEnvironment:
             assert "network_disabled" in res["error"]
             assert res["reason"] == "network_disabled"
 
-            # State recorded as failed
-            state = get_environment_state(cid)
-            assert state is not None
-            assert state["status"] == "failed"
-            assert state["reason"] == "network_disabled"
+            # No state recorded
+            assert get_environment_state(cid) is None
 
             # uv sync was never executed
             assert not any("uv sync" in cmd for cmd in container.executed)
+
+    def test_ready_network_disabled_keeps_ready(
+        self, isolated_env: Path
+    ) -> None:
+        """AC 2: A ready container with network disabled returns network_disabled and keeps ready."""
+        cid = "c_prepare_nonet_ready_02b"
+        files = _create_sample_files()
+        container = MockPrepareContainer(cid, "/workspace", files, allow_network=False)
+
+        with _mock_docker_context(container):
+            fp = compute_manifest_fingerprint(container, "/workspace")
+            record_environment_state(
+                cid,
+                "ready",
+                command="uv sync --locked --all-groups",
+                fingerprint=fp,
+                project_root="/workspace",
+            )
+            record_verify_success(cid)
+            assert has_verify_success(cid) is True
+
+            prep_out = sandbox_prepare_environment(cid)
+            res = json.loads(prep_out)
+            assert res["status"] == "error"
+            assert "network_disabled" in res["error"]
+            assert res["reason"] == "network_disabled"
+
+            # Recorded state stays ready
+            state = get_environment_state(cid)
+            assert state is not None
+            assert state["status"] == "ready"
+
+            # Verify success was preserved
+            assert has_verify_success(cid) is True
+
+            # uv sync was never executed
+            assert not any("uv sync" in cmd for cmd in container.executed)
+
+    def test_pip_project_rejected_not_uv_project_keeps_verify(
+        self, isolated_env: Path
+    ) -> None:
+        """AC 1: A pip project (no uv.lock) is rejected with not_uv_project and verify passes."""
+        cid = "c_prepare_pip_01b"
+        files = {
+            "/workspace/pyproject.toml": b"[project]\nname = 'sample'\nversion = '0.1.0'\n",
+            "/workspace/setup.py": b"# setup.py\n",
+        }
+        container = MockPrepareContainer(cid, "/workspace", files)
+
+        record_verify_success(cid)
+        assert has_verify_success(cid) is True
+
+        with _mock_docker_context(container):
+            prep_out = sandbox_prepare_environment(cid)
+            res = json.loads(prep_out)
+            assert res["status"] == "error"
+            assert res["reason"] == "not_uv_project"
+            assert "not_uv_project" in res["error"]
+
+            # Record is unchanged (no state recorded)
+            assert get_environment_state(cid) is None
+
+            # Verify success was not invalidated
+            assert has_verify_success(cid) is True
+
+            # Following verify passes as before
+            v_res = json.loads(verify_in_container(cid, path="/workspace"))
+            assert v_res["status"] != "environment_setup_failed"
+
+    def test_manifest_read_failure_returns_error_and_changes_no_state(
+        self, isolated_env: Path
+    ) -> None:
+        """Spec 1: If manifest probe itself cannot read the files, return error and change no state."""
+        cid = "c_prepare_probe_err_01c"
+        files = _create_sample_files()
+        container = MockPrepareContainer(cid, "/workspace", files)
+
+        record_verify_success(cid)
+        assert has_verify_success(cid) is True
+
+        with (
+            _mock_docker_context(container),
+            patch("sunaba.environment.probe_uv_project_root", side_effect=RuntimeError("disk read error")),
+        ):
+            prep_out = sandbox_prepare_environment(cid)
+            res = json.loads(prep_out)
+            assert res["status"] == "error"
+            assert "disk read error" in res["error"]
+            assert res["reason"] == "manifest_read_failed"
+
+            assert get_environment_state(cid) is None
+            assert has_verify_success(cid) is True
 
     def test_locked_failure_records_failed_and_preserves_lockfile(
         self, isolated_env: Path
@@ -274,6 +367,30 @@ class TestPrepareEnvironment:
             rm_idx = container_recreate.executed.index(rm_cmds[0])
             sync_idx = container_recreate.executed.index(sync_cmds[0])
             assert rm_idx < sync_idx
+
+    def test_venv_delete_failure_fails_without_sync(
+        self, isolated_env: Path
+    ) -> None:
+        """AC 3: When .venv removal fails, uv sync is not run and state becomes failed."""
+        cid = "c_prepare_rm_fail_04b"
+        files = _create_sample_files()
+        container = MockPrepareContainer(cid, "/workspace", files, rm_venv_fail=True)
+
+        with _mock_docker_context(container):
+            prep_out = sandbox_prepare_environment(cid, recreate=True)
+            res = json.loads(prep_out)
+            assert res["status"] == "error"
+            assert res["exit_code"] == 1
+            assert "venv" in str(res["reason"]).lower() or "venv" in str(res["error"]).lower()
+
+            # State recorded as failed with reason naming .venv removal
+            state = get_environment_state(cid)
+            assert state is not None
+            assert state["status"] == "failed"
+            assert "venv" in str(state["reason"]).lower()
+
+            # uv sync was never executed
+            assert not any("uv sync" in cmd for cmd in container.executed)
 
     def test_concurrency_rejects_prepare_while_verify_running(
         self, isolated_env: Path

@@ -952,40 +952,103 @@ def _verify_in_container_guarded(
         f"echo {_NS_MARKER}; git diff HEAD --name-status 2>/dev/null"
     )
     unstaged_raw = unstaged_raw if unstaged_ec == 0 else ""
-    try:
-        from sunaba.environment import probe_uv_project_root
-        uv_project = probe_uv_project_root(container, working_dir)
-    except Exception as exc:
-        from sunaba.verify_state import invalidate_verify_success
+    from sunaba.verify_state import get_environment_state, invalidate_verify_success
 
-        reason = f"uv manifest probe failed: {str(exc)[:200]}"
-        invalidate_verify_success(container_id)
-        result = {
-            "status": "environment_setup_failed",
-            "gate_passed": False,
-            "gate_fail_kinds": ["environment_setup"],
-            "gate_fail_reasons": [reason],
-            "environment_setup": {
-                "status": "failed", "reason": reason,
-                "command": "root manifest probe",
-            },
-            "lint": {"status": "skipped", "reason": "root manifest probe failed"},
-            "types": {"status": "skipped", "reason": "root manifest probe failed"},
-            "patch_targets": {"status": "skipped", "reason": "root manifest probe failed"},
-            "tests": {"status": "skipped", "reason": "root manifest probe failed"},
-            "diff_hash": None,
-            "test_selection": _empty_test_selection(),
-        }
-        _record_verify_outcome(container_id, result)
-        return json.dumps(result)
+    full_cid = str(getattr(container, "id", None) or container_id)
+    environment_state = get_environment_state(full_cid)
 
-    if uv_project:
-        from sunaba.verify_state import get_environment_state
+    if environment_state is not None:
+        state_name = environment_state.get("status") or "not_prepared"
+        reason = environment_state.get("reason") or "preparation state missing or not_prepared"
+        if state_name == "ready":
+            recorded_fp = environment_state.get("fingerprint")
+            uv_root = environment_state.get("project_root") or (recorded_fp or {}).get("root") or working_dir
+            if recorded_fp:
+                from sunaba.environment_state_store import (
+                    FingerprintProbeError,
+                    check_manifest_staleness,
+                )
 
-        environment_state = get_environment_state(container_id)
-        state_name = (environment_state or {}).get("status") or "not_prepared"
+                try:
+                    is_stale, changed = check_manifest_staleness(
+                        container, uv_root, recorded_fp
+                    )
+                    if is_stale:
+                        invalidate_verify_success(full_cid)
+                        state_name = "stale"
+                        reason = f"{', '.join(changed)} changed; recreate container to recover"
+                except FingerprintProbeError as exc:
+                    invalidate_verify_success(full_cid)
+                    state_name = "failed"
+                    reason = f"fingerprint probe failed: {exc}"
+                except Exception as exc:
+                    invalidate_verify_success(full_cid)
+                    state_name = "failed"
+                    reason = f"fingerprint probe failed: {str(exc)[:180]}"
+            else:
+                try:
+                    from sunaba.environment import probe_uv_project_root
+
+                    probe_uv_project_root(container, uv_root)
+                except Exception as exc:
+                    invalidate_verify_success(full_cid)
+                    state_name = "failed"
+                    reason = f"uv manifest probe failed: {str(exc)[:200]}"
+
         if state_name != "ready":
-            reason = (environment_state or {}).get("reason") or "preparation state missing or not_prepared"
+            probe_fail = reason.startswith("uv manifest probe failed")
+            result = {
+                "status": "environment_setup_failed",
+                "gate_passed": False,
+                "gate_fail_kinds": ["environment_setup"],
+                "gate_fail_reasons": [reason if probe_fail else f"uv environment {state_name}: {reason}"],
+                "environment_setup": {
+                    "status": state_name,
+                    "reason": reason,
+                    "command": "root manifest probe" if probe_fail else environment_state.get("command"),
+                    "exit_code": environment_state.get("exit_code"),
+                },
+                "lint": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {state_name}"},
+                "types": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {state_name}"},
+                "patch_targets": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {state_name}"},
+                "tests": {"status": "skipped", "reason": "root manifest probe failed" if probe_fail else f"uv environment is {state_name}"},
+                "diff_hash": None,
+                "test_selection": _empty_test_selection(),
+            }
+            _record_verify_outcome(container_id, result)
+            return json.dumps(result)
+        uv_project = True
+    else:
+        try:
+            from sunaba.environment import probe_uv_project_root
+
+            uv_project = probe_uv_project_root(container, working_dir)
+        except Exception as exc:
+            invalidate_verify_success(full_cid)
+            reason = f"uv manifest probe failed: {str(exc)[:200]}"
+            result = {
+                "status": "environment_setup_failed",
+                "gate_passed": False,
+                "gate_fail_kinds": ["environment_setup"],
+                "gate_fail_reasons": [reason],
+                "environment_setup": {
+                    "status": "failed",
+                    "reason": reason,
+                    "command": "root manifest probe",
+                },
+                "lint": {"status": "skipped", "reason": "root manifest probe failed"},
+                "types": {"status": "skipped", "reason": "root manifest probe failed"},
+                "patch_targets": {"status": "skipped", "reason": "root manifest probe failed"},
+                "tests": {"status": "skipped", "reason": "root manifest probe failed"},
+                "diff_hash": None,
+                "test_selection": _empty_test_selection(),
+            }
+            _record_verify_outcome(container_id, result)
+            return json.dumps(result)
+
+        if uv_project:
+            state_name = "not_prepared"
+            reason = "preparation state missing or not_prepared"
             result = {
                 "status": "environment_setup_failed",
                 "gate_passed": False,
@@ -994,27 +1057,34 @@ def _verify_in_container_guarded(
                 "environment_setup": {
                     "status": state_name,
                     "reason": reason,
-                    "command": (environment_state or {}).get("command"),
-                    "exit_code": (environment_state or {}).get("exit_code"),
+                    "command": None,
+                    "exit_code": None,
                 },
-                "lint": {"status": "skipped", "reason": "uv environment is not ready"},
-                "types": {"status": "skipped", "reason": "uv environment is not ready"},
-                "patch_targets": {"status": "skipped", "reason": "uv environment is not ready"},
-                "tests": {"status": "skipped", "reason": "uv environment is not ready"},
+                "lint": {"status": "skipped", "reason": f"uv environment is {state_name}"},
+                "types": {"status": "skipped", "reason": f"uv environment is {state_name}"},
+                "patch_targets": {"status": "skipped", "reason": f"uv environment is {state_name}"},
+                "tests": {"status": "skipped", "reason": f"uv environment is {state_name}"},
                 "diff_hash": None,
                 "test_selection": _empty_test_selection(),
             }
             _record_verify_outcome(container_id, result)
             return json.dumps(result)
+
+    if uv_project:
         from sunaba.environment import resolve_uv_python_tools
 
         try:
-            python_toolchain = resolve_uv_python_tools(container, working_dir)
+            uv_tool_root = (
+                (environment_state or {}).get("project_root")
+                or ((environment_state or {}).get("fingerprint") or {}).get("root")
+                or working_dir
+            )
+            python_toolchain = resolve_uv_python_tools(container, uv_tool_root)
         except Exception as exc:
             from sunaba.verify_state import invalidate_verify_success
 
             reason = f"uv tool resolution failed: {str(exc)[:180]}"
-            invalidate_verify_success(container_id)
+            invalidate_verify_success(full_cid)
             result = {
                 "status": "environment_setup_failed",
                 "gate_passed": False,
@@ -1050,7 +1120,7 @@ def _verify_in_container_guarded(
             reason = f"required verification tool unavailable: {missing}"
             from sunaba.verify_state import invalidate_verify_success
 
-            invalidate_verify_success(container_id)
+            invalidate_verify_success(full_cid)
             result = {
                 "status": "environment_setup_failed",
                 "gate_passed": False,

@@ -564,7 +564,17 @@ def _install_repo_deps(
                     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
                     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
                     if exit_code == 0:
-                        record_environment_state(container.id, "ready", command=command, exit_code=0)
+                        from sunaba.environment_state_store import compute_manifest_fingerprint
+
+                        fp = compute_manifest_fingerprint(container, clone_dest)
+                        record_environment_state(
+                            container.id,
+                            "ready",
+                            command=command,
+                            exit_code=0,
+                            fingerprint=fp,
+                            project_root=clone_dest,
+                        )
                         notes.append("uv sync --locked --all-groups ok")
                     else:
                         diagnostic = (stderr_text or stdout_text).strip()

@@ -71,22 +71,65 @@ def is_uv_project_root(container: Any, root: str) -> bool:
     return probe_uv_project_root(container, root)
 
 
-def uv_environment_block_reason(container: Any, root: str) -> str | None:
-    """Return why a uv root is not runnable, or None for non-uv/ready roots."""
-    try:
-        if not probe_uv_project_root(container, root):
-            return None
-    except Exception as exc:
-        return f"uv root probe failed: {str(exc)[:180]}"
-    from sunaba.verify_state import get_environment_state
+def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
+    """Check uv environment status and fingerprint staleness for root.
+
+    Returns (status, reason_detail).
+    status is one of:
+      - "ready": prepared and fingerprint matches (reason is None)
+      - "stale": manifest changed since preparation
+      - "not_prepared": never prepared
+      - "failed": preparation failed or probe failed
+      - "not_uv": not a uv project root (reason is None)
+    """
+    from sunaba.verify_state import get_environment_state, invalidate_verify_success
 
     container_id = str(getattr(container, "id", ""))
     state = get_environment_state(container_id)
-    status = (state or {}).get("status") or "not_prepared"
+    if state is None:
+        try:
+            if not probe_uv_project_root(container, root):
+                return "not_uv", None
+        except Exception as exc:
+            return "failed", f"uv root probe failed: {str(exc)[:180]}"
+        return "not_prepared", "preparation state missing"
+
+    status = state.get("status") or "not_prepared"
     if status != "ready":
-        detail = (state or {}).get("reason") or "preparation state missing"
-        return f"uv environment {status}: {detail}"
-    return None
+        reason = state.get("reason") or "preparation state missing or not_prepared"
+        return status, reason
+
+    # Stored status is "ready". Check fingerprint staleness.
+    recorded_fp = state.get("fingerprint")
+    if not recorded_fp:
+        return "ready", None
+
+    from sunaba.environment_state_store import FingerprintProbeError, check_manifest_staleness
+
+    try:
+        is_stale, changed = check_manifest_staleness(container, root, recorded_fp)
+    except FingerprintProbeError as exc:
+        invalidate_verify_success(container_id)
+        return "failed", f"fingerprint probe failed: {exc}"
+    except Exception as exc:
+        invalidate_verify_success(container_id)
+        return "failed", f"fingerprint probe failed: {str(exc)[:180]}"
+
+    if is_stale:
+        invalidate_verify_success(container_id)
+        changed_str = ", ".join(changed)
+        reason = f"{changed_str} changed; recreate container to recover"
+        return "stale", reason
+
+    return "ready", None
+
+
+def uv_environment_block_reason(container: Any, root: str) -> str | None:
+    """Return why a uv root is not runnable, or None for non-uv/ready roots."""
+    status, reason = check_uv_environment(container, root)
+    if status in ("ready", "not_uv"):
+        return None
+    return f"uv environment {status}: {reason}"
 
 
 def _resolve_image_tool(

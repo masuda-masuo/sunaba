@@ -580,6 +580,14 @@ def main() -> None:
             args.prewarm_timeout_seconds,
         )
 
+    # Load and prune persisted environment state (sunaba #967)
+    try:
+        from sunaba.environment_state_store import prune_and_load_environment_states
+
+        prune_and_load_environment_states()
+    except Exception as exc:
+        logger.warning("Failed to initialize environment state store: %s", exc)
+
     try:
         mcp.run(transport=args.transport, host=args.host, port=args.port)
     finally:

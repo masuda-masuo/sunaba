@@ -966,3 +966,30 @@ def test_verify_prepared_root_working_dir_blocked_by_recorded_state_failure_or_s
         assert res["environment_setup"]["status"] == recorded_status
         assert expected_reason in res["environment_setup"]["reason"]
 
+
+def test_verify_nested_uv_workdir_resolves_tools_from_working_dir(isolated_state: Path) -> None:
+    """A nested uv project as working_dir looks up tools there, not at the prepared root (main behaviour)."""
+    from sunaba import environment as env_mod
+
+    container, files = _make_ready_container()
+    cid = container.id
+    prepared_root = container.root
+    nested = f"{prepared_root}/pkg"
+    files[f"{nested}/pyproject.toml"] = b"[project]\nname='nested'\n"
+    files[f"{nested}/uv.lock"] = b"version = 1\n"
+    fp = compute_manifest_fingerprint(container, prepared_root)
+    record_environment_state(
+        cid, "ready", command="uv sync --locked", exit_code=0, fingerprint=fp, project_root=prepared_root
+    )
+
+    real_resolve = env_mod.resolve_uv_python_tools
+    client = _make_client_mock(cast(Any, container))
+    with patch("sunaba.tools.verify._docker", return_value=client):
+        with patch.object(env_mod, "resolve_uv_python_tools", side_effect=real_resolve) as resolve:
+            res = json.loads(verify_in_container(container_id=cid, path=nested, working_dir=nested))
+
+    roots = [call.args[1] for call in resolve.call_args_list]
+    assert roots, "resolve_uv_python_tools was not called"
+    assert all(root == nested for root in roots), roots
+    assert res.get("status") != "environment_setup_failed"
+

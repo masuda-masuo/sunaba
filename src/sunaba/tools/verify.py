@@ -1044,11 +1044,8 @@ def _verify_in_container_guarded(
         from sunaba.environment import resolve_uv_python_tools
 
         try:
-            uv_tool_root = (
-                (environment_state or {}).get("project_root")
-                or ((environment_state or {}).get("fingerprint") or {}).get("root")
-                or working_dir
-            )
+            # Tool lookup follows the caller's working_dir, as on main (#941 owns nested-project behaviour).
+            uv_tool_root = working_dir
             python_toolchain = resolve_uv_python_tools(container, uv_tool_root)
         except Exception as exc:
             from sunaba.verify_state import invalidate_verify_success

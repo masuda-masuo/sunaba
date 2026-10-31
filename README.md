@@ -143,6 +143,21 @@ Dive deeper into specific topics:
 
 ---
 
+## Compatibility Policy
+
+The external contract of the Sunaba server is versioned using [Semantic Versioning](https://semver.org/).
+
+*   **Covered by Semver**: MCP tool names, argument names/types, return shapes, and environment variables. Breaking modifications (e.g. removing a tool or argument) require a minor version bump while in `0.x` (or major bump in `1.x+`).
+*   **NOT Covered by Semver**: The sandbox image contents, internal module layout, and digests.
+
+### Behavior changes while on 0.x
+- In `0.x`, a change matching either item below is released as a minor version, and CHANGELOG must state it with a "Behavior change:" note:
+  - A call that used to succeed is now refused or fails (including fail-closed changes).
+  - The meaning or value range of an existing return field changes.
+- Adding a new error `step` value or a new return field is not a breaking change, as long as the meaning of existing values is unchanged. If the addition makes a previously successful call fail, the first item above applies.
+
+---
+
 ## Known Limitations
 
 *   **No local export (No host write-back)**: To prevent host contamination, file transfer is strictly one-way (host → container). The only way to export changes from the sandbox is via `publish` to a GitHub repository. Purely local projects that are not hosted on GitHub cannot be round-tripped.

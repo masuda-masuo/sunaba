@@ -399,6 +399,7 @@ We organize agent workflows into specialized roles. State is managed externally 
 
 ### #473: v1.0.0 Compatibility Policy
 *   **Decision**: Bumped version to `1.0.0` and defined stability policies (tool names, environments, and argument schemas are frozen under SemVer).
+*   **Current policy**: After the #531/#534 rollback to 0.8.0, the current compatibility policy is in README.md under "Compatibility Policy".
 
 ### #531 / #534: Project Rename to Sunaba
 *   **Decision**: Retracted the unreleased `1.0.0` tag, renamed the package from `code-sandbox-mcp` to `sunaba`, and reset the version to `0.8.0` to finalize name transitions before freezing the public API.

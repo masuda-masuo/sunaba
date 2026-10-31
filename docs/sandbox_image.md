@@ -65,10 +65,8 @@ The default images come pre-installed with the following utilities, which the se
 
 ## 4. Image Compatibility & Semver Policy
 
-The external contract of the Sunaba server is versioned using [Semantic Versioning](https://semver.org/).
+The compatibility policy (semver scope and behavior-change handling) is in [README.md](../README.md#compatibility-policy).
 
-*   **Covered by Semver**: MCP tool names, argument names/types, return shapes, and environment variables. Breaking modifications (e.g. removing a tool or argument) require a minor version bump while in `0.x` (or major bump in `1.x+`).
-*   **NOT Covered by Semver**: The sandbox image contents, internal module layout, and digests. 
 *   **Image Pins**: Image digests are pinned inside `image_pins.json` (updated via `scripts/update_image_pins.py`). Any server release is guaranteed to work with the digests bundled in its release package. If you supply a custom image via `image=`, ensure the expected tools (e.g., `ruff`, `pyright`, `pytest`, `eslint`, `jest`, `go test`) are installed and behave compatibly with the server's edit/verify wrappers.
 
 ### Updating Pinned Images (uv & Python Patch Releases)

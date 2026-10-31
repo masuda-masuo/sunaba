@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 The compatibility policy (what counts as a breaking change) is described in
-[docs/sandbox_image.md](docs/sandbox_image.md#4-image-compatibility--semver-policy).
+[README.md](README.md#compatibility-policy).
 
 ## [Unreleased]
 

@@ -531,10 +531,16 @@ def _install_repo_deps(
                     "failed",
                     reason=reason,
                     command="uv sync --locked --all-groups",
+                    project_root=clone_dest,
                 )
                 errors.append(f"uv preparation failed: {reason}")
             elif pip_extras is None:
-                record_environment_state(container.id, "not_prepared", reason="pip_extras=None")
+                record_environment_state(
+                    container.id,
+                    "not_prepared",
+                    reason="pip_extras=None",
+                    project_root=clone_dest,
+                )
                 notes.append("uv not_prepared (pip_extras=None)")
             elif _normalize_pip_extras(pip_extras) != "[dev]" or (pip_args or "").strip():
                 reason = "unsupported_uv_arguments"
@@ -543,6 +549,7 @@ def _install_repo_deps(
                     "failed",
                     reason=reason,
                     command="uv sync --locked --all-groups",
+                    project_root=clone_dest,
                 )
                 errors.append(f"uv preparation failed: {reason}")
             else:
@@ -553,6 +560,7 @@ def _install_repo_deps(
                     "not_prepared",
                     reason="uv sync in progress",
                     command=command,
+                    project_root=clone_dest,
                 )
                 _record_deps_progress(container, "deps: " + command)
                 try:
@@ -564,8 +572,38 @@ def _install_repo_deps(
                     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""
                     stderr_text = stderr_part.decode("utf-8", errors="replace") if stderr_part else ""
                     if exit_code == 0:
-                        record_environment_state(container.id, "ready", command=command, exit_code=0)
-                        notes.append("uv sync --locked --all-groups ok")
+                        from sunaba.environment_state_store import compute_manifest_fingerprint
+
+                        try:
+                            fp = compute_manifest_fingerprint(container, clone_dest)
+                        except Exception as exc:
+                            diagnostic = re.sub(
+                                r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+",
+                                r"\1\2[REDACTED]",
+                                str(exc),
+                            )[:240]
+                            reason = f"fingerprint_read_failed: {diagnostic}"
+                            record_environment_state(
+                                container.id,
+                                "failed",
+                                reason=reason,
+                                command=command,
+                                exit_code=0,
+                                project_root=clone_dest,
+                            )
+                            errors.append(
+                                f"uv sync succeeded but manifest fingerprint read failed: {diagnostic}"
+                            )
+                        else:
+                            record_environment_state(
+                                container.id,
+                                "ready",
+                                command=command,
+                                exit_code=0,
+                                fingerprint=fp,
+                                project_root=clone_dest,
+                            )
+                            notes.append("uv sync --locked --all-groups ok")
                     else:
                         diagnostic = (stderr_text or stdout_text).strip()
                         diagnostic = re.sub(
@@ -580,6 +618,7 @@ def _install_repo_deps(
                             reason=reason,
                             command=command,
                             exit_code=exit_code,
+                            project_root=clone_dest,
                         )
                         suffix = f": {diagnostic}" if diagnostic else ""
                         errors.append(f"uv sync --locked --all-groups failed (exit {exit_code}){suffix}")
@@ -594,6 +633,7 @@ def _install_repo_deps(
                         "failed",
                         reason=f"sync_error: {diagnostic}",
                         command=command,
+                        project_root=clone_dest,
                     )
                     errors.append(f"uv sync --locked --all-groups failed: {diagnostic}")
 
@@ -636,6 +676,7 @@ def _install_repo_deps(
                 "failed",
                 reason=f"deps_timeout: {exc}",
                 command="uv sync --locked --all-groups",
+                project_root=clone_dest,
             )
         reap_verdict = exc.reap or "incomplete"
         note = f"deps: {active_step} timeout (deadline_s={exc.deadline_s:g}s, reap={reap_verdict})"

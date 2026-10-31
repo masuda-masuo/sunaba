@@ -1818,24 +1818,34 @@ def publish(
         return json.dumps({"status": "error", "error": str(e)})
 
     cid = container_id[:12]
+    full_cid = str(getattr(container, "id", None) or container_id)
     working_dir = resolve_git_root(container, working_dir)
 
     verified = has_verify_success(cid)
     if not skip_verify_gate:
         from sunaba.verify_state import get_environment_state
 
-        environment_state = get_environment_state(cid)
-        if environment_state is not None and environment_state.get("status") != "ready":
+        environment_state = get_environment_state(full_cid)
+        if environment_state is not None:
             state_name = environment_state.get("status") or "not_prepared"
             reason = environment_state.get("reason") or "preparation state missing"
-            return json.dumps({
-                "status": "error",
-                "step": "verify_gate",
-                "error": (
-                    "publish refused: no successful verify_in_container; "
-                    f"uv environment is {state_name}: {reason}"
-                ),
-            })
+            if state_name == "ready":
+                from sunaba.environment import check_recorded_environment_staleness
+
+                state_name, stale_reason = check_recorded_environment_staleness(
+                    container, environment_state
+                )
+                if stale_reason is not None:
+                    reason = stale_reason
+            if state_name != "ready":
+                return json.dumps({
+                    "status": "error",
+                    "step": "verify_gate",
+                    "error": (
+                        "publish refused: no successful verify_in_container; "
+                        f"uv environment is {state_name}: {reason}"
+                    ),
+                })
     gate_err = verify_gate_error(verified, skip_verify_gate)
     if gate_err:
         return json.dumps(gate_err)

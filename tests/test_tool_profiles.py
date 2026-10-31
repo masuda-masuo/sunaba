@@ -176,6 +176,7 @@ READ_ONLY_TOOLS = frozenset(
         "lint_in_container",
         "type_check_in_container",
         "verify_in_container",
+        "sandbox_prepare_environment",
         "issue_view",
         "sandbox_attach",
         "sandbox_list_containers",
@@ -386,6 +387,7 @@ class TestProfileContents:
             "publish",
             "sandbox_attach",
             "issue_view",
+            "sandbox_prepare_environment",
         } <= tools
 
     def test_review_has_no_write_tools_beyond_the_granted_exec(self) -> None:
@@ -408,6 +410,7 @@ class TestProfileContents:
         # writes to GitHub, not to the container.  sandbox_exec is the one
         # exec exception: the kusabi review allowlist grants it (#860).
         assert "sandbox_pr_review_write" in tools
+        assert "sandbox_prepare_environment" in tools
         assert tools <= (
             READ_ONLY_TOOLS | GRANTED_EXEC_TOOLS | {"sandbox_pr_review_write"}
         )

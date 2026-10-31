@@ -34,6 +34,9 @@ from .tools.container import (
     sandbox_list_containers,
     sandbox_stop,
 )
+from .tools.container.prepare_environment import (
+    sandbox_prepare_environment,
+)
 from .tools.diff import (
     diff_in_container,
 )
@@ -191,6 +194,8 @@ sandbox_stop = recovery_bound(sandbox_stop)
 sandbox_stop = mcp.tool()(sandbox_stop)
 run_container_and_exec = docker_bound(run_container_and_exec)
 run_container_and_exec = mcp.tool()(run_container_and_exec)
+sandbox_prepare_environment = docker_bound(sandbox_prepare_environment)
+sandbox_prepare_environment = mcp.tool()(sandbox_prepare_environment)
 
 # File tool registrations
 write_file = docker_bound(write_file)

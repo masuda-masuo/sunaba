@@ -148,6 +148,7 @@ _IMPLEMENT = ToolProfile(
             "type_check_in_container",
             "package_install",
             "diff_in_container",
+            "sandbox_prepare_environment",
             # session entry + issue surface (kusabi#860): the worker binds to
             # the container id its brief hands it, and reads the issue under
             # work
@@ -212,6 +213,7 @@ _REVIEW = ToolProfile(
             "lint_in_container",
             "type_check_in_container",
             "diff_in_container",
+            "sandbox_prepare_environment",
             # the reviewer's only write channel
             "sandbox_pr_review_write",
         }

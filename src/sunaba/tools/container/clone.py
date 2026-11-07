@@ -479,6 +479,12 @@ class UvPrepareResult(NamedTuple):
     exit_code: int | None = None
 
 
+UV_NETWORK_DISABLED_GUIDANCE: str = (
+    "this container has no network; start a new container with network enabled "
+    "(clone_repo, pr or branch enable it automatically, or pass allow_network=True)"
+)
+
+
 def prepare_uv_environment(
     container: Any,
     project_root: str,
@@ -507,7 +513,7 @@ def prepare_uv_environment(
         )
         return UvPrepareResult(
             success=False,
-            message=f"uv preparation failed: {reason}",
+            message=f"uv preparation failed: {reason}: {UV_NETWORK_DISABLED_GUIDANCE}",
             reason=reason,
             exit_code=None,
         )

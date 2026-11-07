@@ -25,10 +25,10 @@ Manage the lifecycle of disposable Docker sandbox containers.
 ### Carry Preflight, Network Requirement, and Error Response Shapes
 
 When `apply_from_container=<source_cid>` is specified in `sandbox_initialize`:
-- **Source Network Requirement**: The source container must have network access enabled (`allow_network=True`). An `allow_network=False` source cannot carry because refreshing origin (`git fetch origin`) requires contacting GitHub and fails closed. Common authorized fetch abstraction is tracked in #940.
-- **Offline source containers (not supported, by design — #939)**: In normal use a carry source is already online. `clone_repo`, `pr` and `branch` all enable network access automatically, and a source needs an `origin` to carry from. An offline source with an `origin` only exists outside that path (for example, a repository set up by hand in an `allow_network=False` container). Carry from such a source stops at `step="carry_fetch"` before the destination is created, and the source container and its work are left untouched. sunaba does not enable network access implicitly, does not continue from a stale `origin`, and has no public tool to reconnect an existing container. Carrying offline by moving Git objects between containers (bundles) was evaluated and not adopted: it would need repository/target identity checks, a new object-disclosure contract, cleanup after the destination exists, and an offline E2E (see the investigation on #939).
+- **Source Network Requirement**: The source container must have network access enabled (`allow_network=True`). An `allow_network=False` source cannot carry because refreshing origin (`git fetch origin`) requires contacting GitHub and fails closed. The authorized fetch is shared with publish (implemented in #940).
+- **Offline source containers (not supported, by design — #939)**: In normal use a carry source is already online. `clone_repo`, `pr` and `branch` all enable network access automatically, and a source needs an `origin` to carry from. An offline source with an `origin` only exists outside that path (for example, a repository set up by hand in an `allow_network=False` container). When such a source is **running**, the carry stops at `step="carry_fetch"` during the preflight, before the destination is created, and the source container and its work are left untouched. The preflight only runs for a source that is found and running. A missing or stopped source skips it: the destination is created and cloned, the carry then fails with a legacy `Error:` string (`old container <cid> not found or not running` / `old container <cid> is not running`), and the destination is removed again. sunaba does not enable network access implicitly, does not continue from a stale `origin`, and has no public tool to reconnect an existing container. Carrying offline by moving Git objects between containers (bundles) was evaluated and not adopted: it would need repository/target identity checks, a new object-disclosure contract, cleanup after the destination exists, and an offline E2E (see the investigation on #939).
 - **What a carry does and does not guarantee**:
-  - Checkpointed commits and staged/unstaged tracked changes are carried; untracked files are reported only.
+  - What moves is the **final diff** of tracked changes from the diff base: checkpointed commits plus staged and unstaged edits, folded into one patch. It lands in the destination as uncommitted worktree changes (`git apply --3way`, then `git reset -q`). The source's commit history and staged/unstaged split are **not** reproduced, and the `checkpointed commit(s) included` count in the report only says how many commits were folded in. Untracked files are reported only.
   - Refreshing `origin` keeps work already merged upstream with a normal merge or fast-forward out of the patch.
   - Work merged upstream with a **squash** is not detected. A fresh `merge-base` still predates the squash, so that work can be carried again. It often surfaces as conflicts, but nothing guarantees it will (#974).
   - When `origin/HEAD` is missing, the diff base falls back to `HEAD`. Checkpointed commits are then **not** carried, only uncommitted changes, and the carry report says so.
@@ -36,17 +36,17 @@ When `apply_from_container=<source_cid>` is specified in `sandbox_initialize`:
 - **Preflight Fetch Before Destination Allocation**: Source origin is refreshed host-side under host authorization before creating/running or cloning the destination container. If the source fetch fails, destination container allocation and checkout are skipped entirely (no `containers.run` or clone), avoiding wasted resource allocation, network operations, and teardown. Exactly one authenticated source fetch is performed per public carry.
 - **Error Response Formats (Structured JSON vs. Legacy `Error:` Strings)**:
   `sandbox_initialize` returns two distinct error forms depending on the failure stage:
-  1. **Carry Fetch Failure (`step="carry_fetch"`)**: Returns a plain structured JSON object:
+  1. **Carry Fetch Failure (`step="carry_fetch"`)**: Returns a plain structured JSON object. Illustrative example for a running source started with `allow_network=False`; the `error` text comes from git and `hint` is built from the container's network label and host token state:
      ```json
      {
        "status": "error",
        "step": "carry_fetch",
        "error": "git fetch origin failed (exit 128): fatal: repository 'origin' does not exist",
-       "hint": "Network access is disabled for this container. Pass allow_network=True to sandbox_initialize or verify network profile."
+       "hint": "Container was started with allow_network=False (no network access). Push needs network access to reach GitHub."
      }
      ```
   2. **Legacy Initialization & Carry Errors**: All other initialization errors (parameter validation, name collision, resource caps, missing/stopped source container, fatal patch apply) return plain-text strings prefixed with `Error: `:
-     - Unknown or stopped source container: `Error: old container <cid> not found or not running`
+     - Unknown source container: `Error: old container <cid> not found or not running`; stopped source container: `Error: old container <cid> is not running` (the destination is created first, then removed)
      - Parameter errors: `Error: apply_from_container requires clone_repo (or pr/branch) to be set; ...`, `Error: branch and pr are mutually exclusive; ...`
      - Patch application fatal errors: `Error: git apply failed: ...`
 - **Caller Handling**:

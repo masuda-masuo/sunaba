@@ -11,6 +11,7 @@ from typing import Any
 
 from sunaba.tools.publish_planner import (
     build_push_command,
+    fetch_failure_hints,
     finish_json,
     is_egress_block,
     pr_body_validation_error,
@@ -144,6 +145,52 @@ class TestPushFailureHints:
 
     def test_no_hints(self) -> None:
         assert push_failure_hints(network_off=False, token_missing=False) == []
+
+
+class TestFetchFailureHints:
+    """fetch_failure_hints returns deterministic hint lists for carry/fetch."""
+
+    def test_both_network_off_and_token_missing(self) -> None:
+        hints = fetch_failure_hints(network_off=True, token_missing=True)
+        assert hints == [
+            (
+                "Source container was started with allow_network=False "
+                "(no network access). Carry fetches origin from GitHub in the source "
+                "container, so carry is not available from this container; an existing "
+                "container cannot be reconnected. Its work is left untouched "
+                '(see docs/tools.md "Offline source containers").'
+            ),
+            (
+                "No VCS token is available on the host. "
+                "Set GITHUB_TOKEN or GH_TOKEN in the "
+                "server environment."
+            ),
+        ]
+
+    def test_only_network_off(self) -> None:
+        hints = fetch_failure_hints(network_off=True, token_missing=False)
+        assert hints == [
+            (
+                "Source container was started with allow_network=False "
+                "(no network access). Carry fetches origin from GitHub in the source "
+                "container, so carry is not available from this container; an existing "
+                "container cannot be reconnected. Its work is left untouched "
+                '(see docs/tools.md "Offline source containers").'
+            ),
+        ]
+
+    def test_only_token_missing(self) -> None:
+        hints = fetch_failure_hints(network_off=False, token_missing=True)
+        assert hints == [
+            (
+                "No VCS token is available on the host. "
+                "Set GITHUB_TOKEN or GH_TOKEN in the "
+                "server environment."
+            ),
+        ]
+
+    def test_no_hints(self) -> None:
+        assert fetch_failure_hints(network_off=False, token_missing=False) == []
 
 
 class TestFinishJson:

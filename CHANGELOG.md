@@ -15,6 +15,10 @@ The compatibility policy (what counts as a breaking change) is described in
 - The 0.14.0 Known limit (uv preparation state lost on server restart) is resolved.
 - **`sandbox_prepare_environment` returns a `hint` when network is disabled** (#971): the refusal keeps `error` and `reason` `network_disabled` and adds a `hint` saying how to get a container with network; uv preparation during initialization reports the same guidance in its message.
 
+### Changed
+
+- **Carry preflight failure network-off hint wording** (#977): when preflight source fetch fails on an offline source container (`allow_network=False`), the returned hint clarifies that carry fetches origin from GitHub in the source container and cannot reconnect an existing container, rather than referencing push; `status`, `step` (`carry_fetch`), and `error` payloads remain unchanged.
+
 ### Behavior change
 
 - verify now lints the project root `.` instead of only `src/` and `tests/` (#973), so a verify that passed before can now fail on lint findings in other directories (for example `app/` in a repo without `src/`, or `scripts/`). To pass again: fix the new findings, or exclude the paths in the repo's ruff config (`extend-exclude`). What is linted follows ruff's default excludes and `.gitignore` handling (this is what keeps `.venv` out); a repo that overrides `exclude` instead of using `extend-exclude` loses the default excludes.

@@ -130,8 +130,9 @@ def sandbox_prepare_environment(
         if not allow_network:
             return json.dumps({
                 "status": "error",
-                "error": f"network_disabled: {UV_NETWORK_DISABLED_GUIDANCE}",
+                "error": "network_disabled",
                 "reason": "network_disabled",
+                "hint": UV_NETWORK_DISABLED_GUIDANCE,
             })
 
         # Preparation actually starts: invalidate verify success now

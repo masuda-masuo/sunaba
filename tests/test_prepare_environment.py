@@ -234,11 +234,12 @@ class TestPrepareEnvironment:
             prep_out = sandbox_prepare_environment(cid)
             res = json.loads(prep_out)
             assert res["status"] == "error"
-            assert (
-                res["error"]
-                == "network_disabled: this container has no network, and uv projects are prepared only in a container started with clone_repo, pr or branch (which enables network); start a new container that way"
-            )
+            assert res["error"] == "network_disabled"
             assert res["reason"] == "network_disabled"
+            assert (
+                res["hint"]
+                == "this container has no network; start a new container with network enabled (clone_repo, pr or branch enable it automatically, or pass allow_network=True)"
+            )
 
     def test_network_disabled_message_in_prepare_uv_environment(
         self, isolated_env: Path
@@ -256,7 +257,7 @@ class TestPrepareEnvironment:
         assert result.success is False
         assert (
             result.message
-            == "uv preparation failed: network_disabled: this container has no network, and uv projects are prepared only in a container started with clone_repo, pr or branch (which enables network); start a new container that way"
+            == "uv preparation failed: network_disabled: this container has no network; start a new container with network enabled (clone_repo, pr or branch enable it automatically, or pass allow_network=True)"
         )
         assert result.reason == "network_disabled"
 

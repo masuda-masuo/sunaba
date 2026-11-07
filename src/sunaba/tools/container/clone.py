@@ -480,8 +480,8 @@ class UvPrepareResult(NamedTuple):
 
 
 UV_NETWORK_DISABLED_GUIDANCE: str = (
-    "this container has no network, and uv projects are prepared only in a container "
-    "started with clone_repo, pr or branch (which enables network); start a new container that way"
+    "this container has no network; start a new container with network enabled "
+    "(clone_repo, pr or branch enable it automatically, or pass allow_network=True)"
 )
 
 

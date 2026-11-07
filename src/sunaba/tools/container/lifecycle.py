@@ -70,7 +70,7 @@ from sunaba.tools.common import (
     _docker_client_timeout_scope,
 )
 from sunaba.tools.github_api import _push_token_env
-from sunaba.tools.publish_planner import push_failure_hints, select_push_env
+from sunaba.tools.publish_planner import fetch_failure_hints, select_push_env
 from sunaba.tools.vcs import (
     checkpoint_list,
     resolve_git_root,
@@ -533,7 +533,7 @@ def _fetch_source_origin(
         )
     if outcome.failure == "exit":
         network_off = getattr(container, "labels", {}).get(NETWORK_LABEL) == "false"
-        hints = push_failure_hints(network_off, outcome.token_missing)
+        hints = fetch_failure_hints(network_off, outcome.token_missing)
         hint_str = " ".join(hints) if hints else "Ensure the remote is reachable and authorization is valid."
         return _CarryReport(
             files=[], applied=[], conflicts=[], untracked=[],

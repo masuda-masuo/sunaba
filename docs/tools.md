@@ -42,7 +42,7 @@ When `apply_from_container=<source_cid>` is specified in `sandbox_initialize`:
        "status": "error",
        "step": "carry_fetch",
        "error": "git fetch origin failed (exit 128): fatal: repository 'origin' does not exist",
-       "hint": "Container was started with allow_network=False (no network access). Push needs network access to reach GitHub."
+       "hint": "Source container was started with allow_network=False (no network access). Carry fetches origin from GitHub in the source container, so carry is not available from this container; an existing container cannot be reconnected. Its work is left untouched (see docs/tools.md \"Offline source containers\")."
      }
      ```
   2. **Legacy Initialization & Carry Errors**: All other initialization errors (parameter validation, name collision, resource caps, missing/stopped source container, fatal patch apply) return plain-text strings prefixed with `Error: `:

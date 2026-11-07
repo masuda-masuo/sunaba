@@ -94,6 +94,13 @@ def is_egress_block(push_error_text: str) -> bool:
     return "blocked by egress proxy" in push_error_text
 
 
+_TOKEN_MISSING_HINT = (
+    "No VCS token is available on the host. "
+    "Set GITHUB_TOKEN or GH_TOKEN in the "
+    "server environment."
+)
+
+
 def push_failure_hints(network_off: bool, token_missing: bool) -> list[str]:
     """Return deterministic hint strings for push failures (Issue #577).
 
@@ -108,11 +115,26 @@ def push_failure_hints(network_off: bool, token_missing: bool) -> list[str]:
             "to reach GitHub."
         )
     if token_missing:
+        hints.append(_TOKEN_MISSING_HINT)
+    return hints
+
+
+def fetch_failure_hints(network_off: bool, token_missing: bool) -> list[str]:
+    """Return deterministic hint strings for carry fetch failures (Issue #977).
+
+    Returns an empty list when neither condition applies.
+    """
+    hints: list[str] = []
+    if network_off:
         hints.append(
-            "No VCS token is available on the host. "
-            "Set GITHUB_TOKEN or GH_TOKEN in the "
-            "server environment."
+            "Source container was started with allow_network=False "
+            "(no network access). Carry fetches origin from GitHub in the "
+            "source container, so carry is not available from this container; "
+            "an existing container cannot be reconnected. Its work is left "
+            'untouched (see docs/tools.md "Offline source containers").'
         )
+    if token_missing:
+        hints.append(_TOKEN_MISSING_HINT)
     return hints
 
 

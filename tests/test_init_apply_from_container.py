@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sunaba.security import NETWORK_LABEL
 from sunaba.tools.container.lifecycle import _carry_worktree, sandbox_initialize
 from tests.test_publish_ops_gitrepo import (
     _git,
@@ -1295,3 +1296,93 @@ def test_carry_success_single_fetch_before_allocation_on_pr_path():
     assert fetch_idx < run_idx, f"Source fetch must run before allocation: {events}"
     assert run_idx < apply_idx, f"Allocation must run before carry: {events}"
     assert apply_idx < install_idx, f"Carry must run before dep install: {events}"
+
+
+def test_carry_fetch_exit_offline_source_token_available():
+    """Carry preflight failure on offline source (network_off=True) with token available.
+
+    Locks existing status/step/error and asserts carry-specific hint wording
+    without push references. Destination container must not be allocated.
+    """
+    old = _make_container(OLD_CID)
+    old.status = "running"
+    old.labels = {NETWORK_LABEL: "false"}
+    new = _make_container(NEW_CID)
+    fake = _fake_exec_factory(b"", fetch_error=True)
+    old.exec_run.side_effect = fake
+    new.exec_run.side_effect = fake
+    client = _make_client(old, new)
+
+    with _patched(client), patch(
+        "sunaba.tools.github_api._resolve_vcs_token",
+        return_value="ghp_test_token_12345",
+    ):
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container=OLD_CID,
+            pip_extras=None,
+        )
+
+    assert not result.startswith("Error:"), result
+    data = json.loads(result)
+    expected = {
+        "status": "error",
+        "step": "carry_fetch",
+        "error": "git fetch origin failed (exit 128): fatal: network error",
+        "hint": (
+            "Source container was started with allow_network=False "
+            "(no network access). Carry fetches origin from GitHub in the source "
+            "container, so carry is not available from this container; an existing "
+            "container cannot be reconnected. Its work is left untouched "
+            '(see docs/tools.md "Offline source containers").'
+        ),
+    }
+    assert data == expected
+    assert "Push" not in data["hint"]
+    client.containers.run.assert_not_called()
+
+
+def test_carry_fetch_exit_offline_source_token_missing():
+    """Carry preflight failure on offline source (network_off=True) with token missing.
+
+    Locks existing status/step/error and asserts carry-specific hint wording
+    joined with host token hint. Destination container must not be allocated.
+    """
+    old = _make_container(OLD_CID)
+    old.status = "running"
+    old.labels = {NETWORK_LABEL: "false"}
+    new = _make_container(NEW_CID)
+    fake = _fake_exec_factory(b"", fetch_error=True)
+    old.exec_run.side_effect = fake
+    new.exec_run.side_effect = fake
+    client = _make_client(old, new)
+
+    with _patched(client), patch(
+        "sunaba.tools.github_api._resolve_vcs_token",
+        return_value="",
+    ):
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container=OLD_CID,
+            pip_extras=None,
+        )
+
+    assert not result.startswith("Error:"), result
+    data = json.loads(result)
+    expected = {
+        "status": "error",
+        "step": "carry_fetch",
+        "error": "git fetch origin failed (exit 128): fatal: network error",
+        "hint": (
+            "Source container was started with allow_network=False "
+            "(no network access). Carry fetches origin from GitHub in the source "
+            "container, so carry is not available from this container; an existing "
+            "container cannot be reconnected. Its work is left untouched "
+            '(see docs/tools.md "Offline source containers"). '
+            "No VCS token is available on the host. Set GITHUB_TOKEN or GH_TOKEN "
+            "in the server environment."
+        ),
+    }
+    assert data == expected
+    assert "Push" not in data["hint"]
+    client.containers.run.assert_not_called()

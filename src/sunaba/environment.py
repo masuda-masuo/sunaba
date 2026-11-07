@@ -41,6 +41,37 @@ def _run(container: Any, root: str, command: str) -> tuple[int, str]:
     return ec, (out + err).strip()[:240]
 
 
+def _run_split(container: Any, root: str, command: str) -> tuple[int, str, str]:
+    """Run a container command and return its stdout and stderr separately."""
+    exec_kwargs: dict[str, Any] = {
+        "stdout": True,
+        "stderr": True,
+        "demux": True,
+    }
+    try:
+        from sunaba.edit_verify.shell import foreground_marker_environment
+
+        marker_env = foreground_marker_environment()
+        if marker_env is not None:
+            exec_kwargs["environment"] = marker_env
+    except Exception:
+        pass
+
+    try:
+        ec, output = container.exec_run(
+            ["/bin/sh", "-c", f"cd {shlex.quote(root)} && {command}"],
+            **exec_kwargs,
+        )
+    except Exception as exc:
+        raise EnvironmentResolutionError(
+            f"container command failed: {str(exc)[:180]}"
+        ) from exc
+    stdout, stderr = output or (b"", b"")
+    out = stdout.decode("utf-8", errors="replace") if stdout else ""
+    err = stderr.decode("utf-8", errors="replace") if stderr else ""
+    return ec, out, err
+
+
 def _test_executable(container: Any, root: str, path: str) -> bool:
     ec, output = _run(container, root, f"test -x {shlex.quote(path)}")
     if ec == 0:
@@ -93,13 +124,16 @@ def resolve_uv_root(container: Any, workdir: str) -> str | None:
         'if [ -f "$d/uv.lock" ]; then '
         "printf 'above:%s\\n' \"$d\"; break; fi; done"
     )
-    ec, output = _run(container, workdir, probe + "; " + ancestor_walk)
+    ec, stdout, stderr = _run_split(
+        container, workdir, probe + "; " + ancestor_walk
+    )
     if ec != 0:
+        detail = (stdout + stderr).strip()[:240]
         raise EnvironmentResolutionError(
-            f"uv manifest probe failed (exit {ec}): {output}"
+            f"uv manifest probe failed (exit {ec}): {detail}"
         )
 
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     for line in lines:
         if line in {"pyproject.toml", "uv.lock"}:
             continue
@@ -116,17 +150,23 @@ def resolve_uv_root(container: Any, workdir: str) -> str | None:
     if not any(line.startswith("above:") for line in lines):
         return None
 
-    ec, output = _run(container, workdir, "unset VIRTUAL_ENV; uv workspace dir")
+    ec, stdout, stderr = _run_split(
+        container, workdir, "unset VIRTUAL_ENV; uv workspace dir"
+    )
     if ec != 0:
-        if "No `pyproject.toml` found" in output or "No `project` table found" in output:
+        detail = (stdout + stderr).strip()[:240]
+        if (
+            "No `pyproject.toml` found" in stderr + stdout
+            or "No `project` table found" in stderr + stdout
+        ):
             return None
         raise EnvironmentResolutionError(
-            f"uv workspace dir failed (exit {ec}): {output}"
+            f"uv workspace dir failed (exit {ec}): {detail}"
         )
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     if not lines:
         raise EnvironmentResolutionError(
-            f"uv workspace dir returned empty output: {output}"
+            f"uv workspace dir returned empty output: {stdout[:240]}"
         )
     candidate = lines[-1]
     if not candidate.startswith("/"):

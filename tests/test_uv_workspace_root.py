@@ -445,3 +445,87 @@ dependencies = []
     pytest_res = _run_pytest_verify(no_uv, "tests/", workdir=str(sub_dir))
     assert pytest_res.status == "error"
     assert "uv workspace dir failed" in pytest_res.detail
+
+
+class StderrWarningContainer(MinimalRealExecContainer):
+    """Real-exec adapter that appends a warning to selected command stderr."""
+
+    def __init__(self, *args: Any, warning_command: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.warning_command = warning_command
+
+    def exec_run(
+        self,
+        cmd: list[str] | str,
+        stdout: bool = True,
+        stderr: bool = True,
+        demux: bool = True,
+        environment: dict[str, str] | None = None,
+        workdir: str | None = None,
+        **kwargs: Any,
+    ) -> tuple[int, tuple[bytes, bytes] | bytes]:
+        result = super().exec_run(
+            cmd,
+            stdout=stdout,
+            stderr=stderr,
+            demux=demux,
+            environment=environment,
+            workdir=workdir,
+            **kwargs,
+        )
+        cmd_text = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+        if demux and self.warning_command in cmd_text:
+            ec, (out, err) = result
+            return ec, (out, err + b"uv warning: harmless diagnostic\n")
+        return result
+
+
+def test_workspace_member_resolves_when_uv_workspace_dir_prints_stderr_warning(
+    tmp_path: Path,
+) -> None:
+    ws_dir = tmp_path / "warning_workspace"
+    member = ws_dir / "packages" / "member"
+    member.mkdir(parents=True)
+    (ws_dir / "pyproject.toml").write_text(
+        """[project]
+name = "warning-workspace"
+version = "0.1.0"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["packages/*"]
+"""
+    )
+    (member / "pyproject.toml").write_text(
+        """[project]
+name = "warning-member"
+version = "0.1.0"
+dependencies = []
+"""
+    )
+    subprocess.run(["uv", "lock"], cwd=ws_dir, check=True, capture_output=True)
+    container = StderrWarningContainer(
+        root=str(tmp_path), warning_command="uv workspace dir"
+    )
+
+    assert resolve_uv_root(container, str(member)) == str(ws_dir)
+
+
+def test_standalone_project_resolves_when_combined_probe_prints_stderr_warning(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "warning_standalone"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        """[project]
+name = "warning-standalone"
+version = "0.1.0"
+dependencies = []
+"""
+    )
+    subprocess.run(["uv", "lock"], cwd=project, check=True, capture_output=True)
+    container = StderrWarningContainer(
+        root=str(tmp_path), warning_command="for f in pyproject.toml uv.lock"
+    )
+
+    assert resolve_uv_root(container, str(project)) == str(project)

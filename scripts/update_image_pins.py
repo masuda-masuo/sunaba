@@ -26,7 +26,7 @@ import sys
 from importlib import resources
 from pathlib import Path
 
-from sunaba.image_pins import PIN_KEYS, _PINS_RESOURCE, load_image_pins
+from sunaba.image_pins import _PINS_RESOURCE, PIN_KEYS, load_image_pins
 
 
 def _build_refs(repo: str, digests: dict[str, str]) -> dict[str, str]:
@@ -37,6 +37,7 @@ def _build_refs(repo: str, digests: dict[str, str]) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Write and verify ``image-pins.json`` from the pushed image digests."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="GHCR owner/name")
     parser.add_argument("--neutral", required=True, help="base/neutral image digest (sha256:...)")

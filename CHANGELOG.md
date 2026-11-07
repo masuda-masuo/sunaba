@@ -14,6 +14,10 @@ The compatibility policy (what counts as a breaking change) is described in
 - **Host-side uv environment state persistence and fingerprint staleness detection** (#967): uv preparation records are stored on the host under `platformdirs.user_state_dir("sunaba")` (or `SUNABA_ENVIRONMENT_STATE_DIR`) keyed by full container ID, surviving server restarts. A content fingerprint of `pyproject.toml`, `uv.lock`, and `.python-version` is computed by the host at preparation time; any subsequent manifest change is detected on verify and publish precondition checks, reporting status `stale` and invalidating verify success.
 - The 0.14.0 Known limit (uv preparation state lost on server restart) is resolved.
 
+### Changed
+
+- **verify lints the project root `.`** (#973): verify now passes `lint_scope="."` to the lint gate unconditionally, instead of only existing `src/` and `tests/` directories. Repositories without a `src/` directory (such as flat layouts or those using `app/` or other root structures) now get their production code linted by verify, and this may surface new lint findings.
+
 ### Behavior change
 
 - verify and publish now stop with status `stale` when `pyproject.toml`, `uv.lock`, or `.python-version` differs from the content recorded at preparation (including files created or deleted). Recovery is to recreate the container. Previously these checks passed against a stale environment.

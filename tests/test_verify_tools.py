@@ -807,9 +807,8 @@ class TestVerifyInContainer:
     def test_gate_scope_includes_tests_dir_when_present(
         self, mock_docker: MagicMock
     ) -> None:
-        """Regression for #417: when both src/ and tests/ exist, lint_scope
-        must cover both (matching CI's ``ruff check src/ tests/``) while
-        type_scope stays "src" (CI has no type-check step)."""
+        """Regression for #417 and #973: when both src/ and tests/ exist,
+        lint_scope is "." while type_scope stays "src" (CI has no type-check step)."""
         from sunaba.edit_verify import DetectionResult
 
         mock_client = MagicMock()
@@ -842,7 +841,47 @@ class TestVerifyInContainer:
 
         _args, kwargs = mock_gate.call_args
         assert _args[1] == "src"
-        assert kwargs["lint_scope"] == ["src", "tests"]
+        assert kwargs["lint_scope"] == "."
+
+    @patch("sunaba.tools.verify._docker")
+    def test_gate_scope_when_only_tests_dir_exists(
+        self, mock_docker: MagicMock
+    ) -> None:
+        """Knowledge-hub layout (issue #973): only tests/ exists.
+        lint_scope must still be "." while type_scope falls back to "."."""
+        from sunaba.edit_verify import DetectionResult
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_container.exec_run.side_effect = [
+            (0, (b"", b"")),  # git diff HEAD --numstat
+            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"", b"")),  # git diff --cached --numstat
+            (0, (b"", b"")),  # git ls-files --others --exclude-standard
+            (0, (b"tests\n", b"")),  # src/tests existence probe: only tests exists
+            (5, (b"collected 0 items\n", b"")),  # pytest
+        ]
+        gate_ret = {
+            "gate_passed": True, "incomplete": False,
+            "lint": [], "types": [], "gate_fail_reasons": [],
+        }
+
+        with patch(
+            "sunaba.edit_verify.detect_languages",
+            return_value=DetectionResult(
+                languages={"python"}, scope={"python": "."}, reason=None
+            ),
+        ), patch(
+            "sunaba.edit_verify.run_lint_type_gate",
+            return_value=gate_ret,
+        ) as mock_gate:
+            verify_in_container(container_id="abc123", path="tests/")
+
+        _args, kwargs = mock_gate.call_args
+        assert _args[1] == "."
+        assert kwargs["lint_scope"] == "."
 
     @patch("sunaba.tools.verify._docker")
     def test_gate_scope_falls_back_to_dot_when_neither_dir_exists(

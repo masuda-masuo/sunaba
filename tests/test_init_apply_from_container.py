@@ -294,6 +294,38 @@ def test_unknown_old_container_errors_and_cleans_up():
     assert stop.called
 
 
+def test_stopped_old_container_skips_preflight_and_cleans_up():
+    """A stopped source skips the carry_fetch preflight (it only runs for a
+    found, running source).  The destination is created and cloned, the carry
+    then fails with the legacy ``Error:`` string, and the destination is torn
+    down (#976 review; docs/tools.md "Offline source containers")."""
+    old = _make_container(OLD_CID)
+    old.status = "exited"
+    new = _make_container(NEW_CID)
+    fake = _fake_exec_factory(b"")
+    old.exec_run.side_effect = fake
+    new.exec_run.side_effect = fake
+    client = _make_client(old, new)
+
+    with _patched(client) as stop, patch(
+        "sunaba.tools.container.lifecycle._fetch_source_origin"
+    ) as fetch:
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container=OLD_CID,
+            pip_extras=None,
+        )
+
+    assert result.startswith("Error:"), result
+    assert f"old container {OLD_CID[:12]} is not running" in result, result
+    fetch.assert_not_called()
+    assert old.exec_run.call_count == 0
+    # Created first, then removed -- no half-initialised container is left.
+    client.containers.run.assert_called_once()
+    assert new.remove.called
+    assert stop.called
+
+
 def test_git_apply_fatal_error_is_reported():
     """A non-conflict apply failure is a real Error, not a silent carry."""
     old = _make_container(OLD_CID)
@@ -430,6 +462,44 @@ def test_checkpointed_commit_carried():
     assert "(1 checkpointed commit(s) included)" in result, result
     cmds = _cmd_strings(new)
     assert any("git apply --3way /tmp/sunaba-carry.patch" in c for c in cmds)
+
+
+def test_carry_lands_as_uncommitted_worktree_without_history_or_staging():
+    """The carry moves the final diff only: the destination gets a 3-way apply
+    followed by ``git reset -q`` and never a commit, so neither the source's
+    checkpoint history nor its staged/unstaged split is reproduced (#976
+    review; docs/tools.md "What a carry does and does not guarantee")."""
+    old = _make_container(OLD_CID)
+    old.status = "running"
+    new = _make_container(NEW_CID)
+    patch_bytes = (
+        b"diff --git a/a.txt b/a.txt\n"
+        b"--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n+carried\n"
+    )
+    fake = _fake_exec_factory(
+        patch_bytes,
+        changed=b"a.txt\n",
+        base=b"baseabc123\n",
+        commits=b"2\n",
+    )
+    old.exec_run.side_effect = fake
+    new.exec_run.side_effect = fake
+    client = _make_client(old, new)
+
+    with _patched(client):
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container=OLD_CID,
+            pip_extras=None,
+        )
+
+    assert not result.startswith("Error:"), result
+    assert "(2 checkpointed commit(s) included)" in result, result
+    cmds = _cmd_strings(new)
+    apply_idx = next(i for i, c in enumerate(cmds) if "git apply --3way /tmp/sunaba-carry.patch" in c)
+    assert any("git reset -q" in c for c in cmds[apply_idx + 1:]), cmds
+    history_ops = ("git commit", "git am", "git cherry-pick", "git merge", "git rebase", "git fetch", "git add")
+    assert not any(op in c for c in cmds for op in history_ops), cmds
 
 
 def test_untracked_probe_uses_repo_root():

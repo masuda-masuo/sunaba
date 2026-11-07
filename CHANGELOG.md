@@ -17,6 +17,7 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ### Behavior change
 
+- verify now lints the project root `.` instead of only `src/` and `tests/` (#973), so a verify that passed before can now fail on lint findings in other directories (for example `app/` in a repo without `src/`, or `scripts/`). To pass again: fix the new findings, or exclude the paths in the repo's ruff config (`extend-exclude`). What is linted follows ruff's default excludes and `.gitignore` handling (this is what keeps `.venv` out); a repo that overrides `exclude` instead of using `extend-exclude` loses the default excludes.
 - verify and publish now stop with status `stale` when `pyproject.toml`, `uv.lock`, or `.python-version` differs from the content recorded at preparation (including files created or deleted). Recovery is to recreate the container. Previously these checks passed against a stale environment.
 
 ## [0.14.0] - 2026-10-31

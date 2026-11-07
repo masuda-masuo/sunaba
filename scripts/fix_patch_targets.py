@@ -119,7 +119,7 @@ def rewrite_source(source: str, renames: list[Rename]) -> tuple[str, list[Replac
 
     # Apply edits right-to-left within each line so earlier column offsets stay
     # valid after a length-changing replacement.
-    for lineno, col, end_col, old_val, new_val in sorted(edits, key=lambda e: (e[0], e[1]), reverse=True):
+    for lineno, col, end_col, _old_val, new_val in sorted(edits, key=lambda e: (e[0], e[1]), reverse=True):
         line = lines[lineno - 1]
         literal = line[col:end_col]
         # Detect the quote character(s): triple quotes (''' / """) take priority.

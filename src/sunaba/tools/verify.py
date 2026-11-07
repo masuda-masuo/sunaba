@@ -1200,24 +1200,26 @@ def _verify_in_container_guarded(
         result["detection_warning"] = detected.reason
 
     # --- Pre-test lint + type gate (Issue #293) ---
-    # Lint runs on src/ + tests/ when both exist, mirroring CI's actual
-    # ``ruff check src/ tests/`` (issue #417 -- a lint-only violation
-    # confined to tests/ used to slip past this gate and only surface in
-    # CI).  Type-check stays scoped to src/ since CI has no type-check
-    # step to mirror.  Both are independent of the test ``path``.  This
-    # makes verify a single quality gate so a forgotten lint can no
-    # longer slip through to CI; both must pass before the test suite
-    # runs.  The skip_* flags let the edit loop get faster focused-test
-    # feedback when lint/type are known clean -- the gate is still
-    # enforced on the final pre-publish call where the flags are left at
-    # their default (False).
+    # Lint runs on the project root ``.`` (issue #973 -- a repo without
+    # src/ previously had its production code skipped, while repos with
+    # root scripts or flat layout were only partially checked).  What ``.``
+    # covers is decided by ruff's default excludes, ``.gitignore``, and the
+    # repo's ``exclude`` / ``extend-exclude`` (overriding ``exclude`` drops
+    # the defaults).  Type-check stays scoped to src/ when present (or ``.``
+    # otherwise) since CI has no type-check step to mirror.  Both are
+    # independent of the test ``path``.  This makes verify a single quality
+    # gate so a forgotten lint can no longer slip through to CI; both must
+    # pass before the test suite runs.  The skip_* flags let the edit loop
+    # get faster focused-test feedback when lint/type are known clean -- the
+    # gate is still enforced on the final pre-publish call where the flags
+    # are left at their default (False).
     if not (skip_lint_gate and skip_type_gate and skip_patch_targets_gate):
         _, dirs_out, _ = _run(
             "for d in src tests; do test -d \"$d\" && echo \"$d\"; done"
         )
         existing_dirs = dirs_out.split()
         type_scope = "src" if "src" in existing_dirs else "."
-        lint_scope: str | list[str] = existing_dirs if existing_dirs else "."
+        lint_scope = "."
         lt_gate = run_lint_type_gate(
             container,
             type_scope,

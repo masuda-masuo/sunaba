@@ -63,7 +63,7 @@ jobs:
           gitleaks version
 
       - name: Lint (ruff)
-        run: ruff check src/ tests/
+        run: ruff check .
 
       - name: Check patch targets (issue #166)
         run: |

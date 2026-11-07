@@ -259,5 +259,5 @@ def test_verify_in_container_keeps_project_lint_scope_independent_of_test_path()
 
     assert result["status"] == "failed"
     assert gate.call_args.args[1] == "src"
-    assert gate.call_args.kwargs["lint_scope"] == ["src", "tests"]
+    assert gate.call_args.kwargs["lint_scope"] == "."
     assert gate.call_args.kwargs["gate_on_lint"] is True

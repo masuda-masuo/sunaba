@@ -28,8 +28,8 @@ from importlib import resources
 from pathlib import Path
 
 from sunaba.image_pins import (
-    PROXY_PIN_KEY,
     _PROXY_PINS_RESOURCE,
+    PROXY_PIN_KEY,
     load_proxy_pin,
 )
 

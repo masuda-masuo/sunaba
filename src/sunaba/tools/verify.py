@@ -956,6 +956,7 @@ def _verify_in_container_guarded(
 
     full_cid = str(getattr(container, "id", None) or container_id)
     environment_state = get_environment_state(full_cid)
+    uv_tool_root = working_dir
 
     if environment_state is not None:
         from sunaba.environment import check_uv_environment
@@ -965,9 +966,14 @@ def _verify_in_container_guarded(
             uv_project = False
         elif status == "ready":
             uv_project = True
+            uv_tool_root = environment_state.get("project_root") or working_dir
         else:
             reason = reason or environment_state.get("reason") or "preparation state missing or not_prepared"
-            probe_fail = reason.startswith("uv manifest probe failed")
+            probe_fail = (
+                reason.startswith("uv manifest probe failed")
+                or reason.startswith("uv root probe failed")
+                or reason.startswith("uv workspace dir failed")
+            )
             result = {
                 "status": "environment_setup_failed",
                 "gate_passed": False,
@@ -990,9 +996,10 @@ def _verify_in_container_guarded(
             return json.dumps(result)
     else:
         try:
-            from sunaba.environment import probe_uv_project_root
+            from sunaba.environment import resolve_uv_root
 
-            uv_project = probe_uv_project_root(container, working_dir)
+            uv_root = resolve_uv_root(container, working_dir)
+            uv_project = uv_root is not None
         except Exception as exc:
             invalidate_verify_success(full_cid)
             reason = f"uv manifest probe failed: {str(exc)[:200]}"
@@ -1041,11 +1048,16 @@ def _verify_in_container_guarded(
             return json.dumps(result)
 
     if uv_project:
-        from sunaba.environment import resolve_uv_python_tools
+        from sunaba.environment import resolve_uv_python_tools, resolve_uv_root
 
         try:
-            # Tool lookup follows the caller's working_dir, as on main (#941 owns nested-project behaviour).
-            uv_tool_root = working_dir
+            if environment_state is None or (
+                environment_state.get("project_root")
+                and os.path.normpath(working_dir) != os.path.normpath(environment_state["project_root"])
+            ):
+                uv_tool_root = resolve_uv_root(container, working_dir) or working_dir
+            else:
+                uv_tool_root = environment_state.get("project_root") or working_dir
             python_toolchain = resolve_uv_python_tools(container, uv_tool_root)
         except Exception as exc:
             from sunaba.verify_state import invalidate_verify_success

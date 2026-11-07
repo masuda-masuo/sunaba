@@ -107,10 +107,10 @@ def sandbox_prepare_environment(
                 project_root = "/workspace"
 
         # Check 1: Target root must be a uv project (both pyproject.toml and uv.lock exist)
-        from sunaba.environment import probe_uv_project_root
+        from sunaba.environment import resolve_uv_root
 
         try:
-            is_uv = probe_uv_project_root(container, project_root)
+            uv_root = resolve_uv_root(container, project_root)
         except Exception as exc:
             return json.dumps({
                 "status": "error",
@@ -118,12 +118,14 @@ def sandbox_prepare_environment(
                 "reason": "manifest_read_failed",
             })
 
-        if not is_uv:
+        if not uv_root:
             return json.dumps({
                 "status": "error",
                 "error": "not_uv_project",
                 "reason": "not_uv_project",
             })
+
+        project_root = uv_root
 
         # Check 2: Container network must be enabled
         allow_network = _is_container_network_enabled(container)
@@ -152,7 +154,7 @@ def sandbox_prepare_environment(
                 "status": "ok",
                 "environment": "ready",
                 "project_root": project_root,
-                "command": "uv sync --locked --all-groups",
+                "command": "uv sync --locked --all-groups --all-packages",
                 "message": res.message,
             })
         else:

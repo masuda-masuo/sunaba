@@ -12,12 +12,24 @@ class EnvironmentResolutionError(RuntimeError):
 
 
 def _run(container: Any, root: str, command: str) -> tuple[int, str]:
+    exec_kwargs: dict[str, Any] = {
+        "stdout": True,
+        "stderr": True,
+        "demux": True,
+    }
+    try:
+        from sunaba.edit_verify.shell import foreground_marker_environment
+
+        marker_env = foreground_marker_environment()
+        if marker_env is not None:
+            exec_kwargs["environment"] = marker_env
+    except Exception:
+        pass
+
     try:
         ec, output = container.exec_run(
             ["/bin/sh", "-c", f"cd {shlex.quote(root)} && {command}"],
-            stdout=True,
-            stderr=True,
-            demux=True,
+            **exec_kwargs,
         )
     except Exception as exc:
         raise EnvironmentResolutionError(
@@ -27,6 +39,37 @@ def _run(container: Any, root: str, command: str) -> tuple[int, str]:
     out = stdout.decode("utf-8", errors="replace") if stdout else ""
     err = stderr.decode("utf-8", errors="replace") if stderr else ""
     return ec, (out + err).strip()[:240]
+
+
+def _run_split(container: Any, root: str, command: str) -> tuple[int, str, str]:
+    """Run a container command and return its stdout and stderr separately."""
+    exec_kwargs: dict[str, Any] = {
+        "stdout": True,
+        "stderr": True,
+        "demux": True,
+    }
+    try:
+        from sunaba.edit_verify.shell import foreground_marker_environment
+
+        marker_env = foreground_marker_environment()
+        if marker_env is not None:
+            exec_kwargs["environment"] = marker_env
+    except Exception:
+        pass
+
+    try:
+        ec, output = container.exec_run(
+            ["/bin/sh", "-c", f"cd {shlex.quote(root)} && {command}"],
+            **exec_kwargs,
+        )
+    except Exception as exc:
+        raise EnvironmentResolutionError(
+            f"container command failed: {str(exc)[:180]}"
+        ) from exc
+    stdout, stderr = output or (b"", b"")
+    out = stdout.decode("utf-8", errors="replace") if stdout else ""
+    err = stderr.decode("utf-8", errors="replace") if stderr else ""
+    return ec, out, err
 
 
 def _test_executable(container: Any, root: str, path: str) -> bool:
@@ -48,6 +91,7 @@ def _tool_version(container: Any, root: str, path: str) -> str:
         )
     return version
 
+
 def probe_uv_project_root(container: Any, root: str) -> bool:
     """Reliably detect root uv manifests; raise when the probe itself fails."""
     probe = (
@@ -62,6 +106,76 @@ def probe_uv_project_root(container: Any, root: str) -> bool:
         raise RuntimeError(f"uv manifest probe returned malformed output: {output[:160]}")
     manifests = set(lines)
     return {"pyproject.toml", "uv.lock"} <= manifests
+
+
+def resolve_uv_root(container: Any, workdir: str) -> str | None:
+    """Resolve the uv workspace or project root for *workdir*.
+
+    Probe the workdir manifests and its ancestors in one command so queued
+    container replies are not consumed by a separate discovery probe.
+    """
+    probe = (
+        "for f in pyproject.toml uv.lock; do "
+        "[ -f \"$f\" ] && printf '%s\\n' \"$f\" || true; done"
+    )
+    ancestor_walk = (
+        'd=$(pwd); while [ "$d" != "/" ]; do '
+        'd="${d%/*}"; [ -z "$d" ] && d="/"; '
+        'if [ -f "$d/uv.lock" ]; then '
+        "printf 'above:%s\\n' \"$d\"; break; fi; done"
+    )
+    ec, stdout, stderr = _run_split(
+        container, workdir, probe + "; " + ancestor_walk
+    )
+    if ec != 0:
+        detail = (stdout + stderr).strip()[:240]
+        raise EnvironmentResolutionError(
+            f"uv manifest probe failed (exit {ec}): {detail}"
+        )
+
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    for line in lines:
+        if line in {"pyproject.toml", "uv.lock"}:
+            continue
+        if line.startswith("above:") and os.path.isabs(line.removeprefix("above:")):
+            continue
+        raise EnvironmentResolutionError(
+            f"uv manifest probe returned malformed output: {line[:160]}"
+        )
+
+    manifests = set(lines)
+    has_workdir_project = "pyproject.toml" in manifests
+    if has_workdir_project and "uv.lock" in manifests:
+        return os.path.normpath(workdir)
+    if not any(line.startswith("above:") for line in lines):
+        return None
+
+    ec, stdout, stderr = _run_split(
+        container, workdir, "unset VIRTUAL_ENV; uv workspace dir"
+    )
+    if ec != 0:
+        detail = (stdout + stderr).strip()[:240]
+        if (
+            "No `pyproject.toml` found" in stderr + stdout
+            or "No `project` table found" in stderr + stdout
+        ):
+            return None
+        raise EnvironmentResolutionError(
+            f"uv workspace dir failed (exit {ec}): {detail}"
+        )
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        raise EnvironmentResolutionError(
+            f"uv workspace dir returned empty output: {stdout[:240]}"
+        )
+    candidate = lines[-1]
+    if not candidate.startswith("/"):
+        raise EnvironmentResolutionError(
+            f"uv workspace dir returned non-absolute path: {candidate}"
+        )
+    if probe_uv_project_root(container, candidate):
+        return os.path.normpath(candidate)
+    return None
 
 
 def is_uv_project_root(container: Any, root: str) -> bool:
@@ -93,7 +207,7 @@ def check_recorded_environment_staleness(
         project_root = state.get("project_root") or caller_root
         if project_root:
             try:
-                if not probe_uv_project_root(container, project_root):
+                if resolve_uv_root(container, project_root) is None:
                     return "not_uv", None
             except Exception as exc:
                 invalidate_verify_success(str(getattr(container, "id", "")))
@@ -134,7 +248,8 @@ def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
     state = get_environment_state(str(getattr(container, "id", "")))
     if state is None:
         try:
-            if not probe_uv_project_root(container, root):
+            uv_root = resolve_uv_root(container, root)
+            if uv_root is None:
                 return "not_uv", None
         except Exception as exc:
             return "failed", f"uv manifest probe failed: {str(exc)[:200]}"
@@ -148,16 +263,20 @@ def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
 
     if project_root and os.path.normpath(root) != os.path.normpath(project_root):
         try:
-            if not probe_uv_project_root(container, root):
+            uv_root = resolve_uv_root(container, root)
+            if uv_root is None:
                 return "not_uv", None
         except Exception as exc:
             return "failed", f"uv root probe failed: {str(exc)[:180]}"
+        return check_recorded_environment_staleness(container, state, uv_root)
     elif not project_root and state.get("status") != "ready":
         try:
-            if not probe_uv_project_root(container, root):
+            uv_root = resolve_uv_root(container, root)
+            if uv_root is None:
                 return "not_uv", None
         except Exception as exc:
             return "failed", f"uv root probe failed: {str(exc)[:180]}"
+        return check_recorded_environment_staleness(container, state, uv_root)
 
     return check_recorded_environment_staleness(container, state, root)
 

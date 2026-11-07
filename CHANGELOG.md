@@ -10,6 +10,7 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ### Added
 
+- **uv workspace support** (#972): verification and test/lint runners resolve the uv workspace root using `uv workspace dir` for workspace members and their subdirectories, resolving manifests and tools from the workspace root while executing in the caller's working directory.
 - **`sandbox_prepare_environment` tool** (#969): allows recovering a stale uv Python environment (`pyproject.toml`, `uv.lock`, or `.python-version` changed after initialization) back to `ready` without recreating the container. With `recreate=True`, the `.venv` directory is removed before running `uv sync --locked --all-groups`. Stale guidance text in `environment.py` is updated to point to `sandbox_prepare_environment` instead of only recreating the container.
 - **Host-side uv environment state persistence and fingerprint staleness detection** (#967): uv preparation records are stored on the host under `platformdirs.user_state_dir("sunaba")` (or `SUNABA_ENVIRONMENT_STATE_DIR`) keyed by full container ID, surviving server restarts. A content fingerprint of `pyproject.toml`, `uv.lock`, and `.python-version` is computed by the host at preparation time; any subsequent manifest change is detected on verify and publish precondition checks, reporting status `stale` and invalidating verify success.
 - The 0.14.0 Known limit (uv preparation state lost on server restart) is resolved.
@@ -21,6 +22,7 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ### Behavior change
 
+- uv dependency synchronization now runs `uv sync --locked --all-groups --all-packages` at the uv root (including workspace preparation during initialization and `sandbox_prepare_environment`), installing all workspace member packages and workspace root dev dependencies.
 - verify now lints the project root `.` instead of only `src/` and `tests/` (#973), so a verify that passed before can now fail on lint findings in other directories (for example `app/` in a repo without `src/`, or `scripts/`). To pass again: fix the new findings, or exclude the paths in the repo's ruff config (`extend-exclude`). What is linted follows ruff's default excludes and `.gitignore` handling (this is what keeps `.venv` out); a repo that overrides `exclude` instead of using `extend-exclude` loses the default excludes.
 - verify and publish now stop with status `stale` when `pyproject.toml`, `uv.lock`, or `.python-version` differs from the content recorded at preparation (including files created or deleted). Recovery is to recreate the container. Previously these checks passed against a stale environment.
 

@@ -354,7 +354,7 @@ class TestDeadlineZeroAndQuickInstall:
 
         assert elapsed >= 0.5, f"installer elapsed {elapsed}s must exceed comparison threshold 0.25s"
         assert result.failed is False, f"expected DepsResult success under deadline 0, got: {result!r}"
-        assert "uv sync --locked --all-groups ok" in result.note
+        assert "uv sync --locked --all-groups --all-packages ok" in result.note
         assert "timeout" not in result.note.lower()
 
     def test_quick_install_under_positive_deadline_preserves_order_and_passes_marker(
@@ -384,7 +384,7 @@ class TestDeadlineZeroAndQuickInstall:
         # Exact result note must match
         assert res_pos.failed is False and res_zero.failed is False
         assert res_pos.note == res_zero.note
-        assert "uv sync --locked --all-groups ok" in res_pos.note
+        assert "uv sync --locked --all-groups --all-packages ok" in res_pos.note
         assert "npm ci ok" in res_pos.note
 
         def _user_commands(calls: list[tuple[object, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:

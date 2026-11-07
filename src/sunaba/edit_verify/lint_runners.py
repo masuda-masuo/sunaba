@@ -107,19 +107,22 @@ def _run_ruff_verify(
     )
     fix_arg = "--fix " if fix else ""
     tool_cmd = "ruff"
-    uv_root = False
     if workdir:
-        from sunaba.environment import is_uv_project_root, resolve_uv_tool, uv_environment_block_reason
+        from sunaba.environment import resolve_uv_root, resolve_uv_tool, uv_environment_block_reason
 
         blocked = uv_environment_block_reason(container, workdir)
         if blocked:
             return _envelope_error("ruff", blocked, 1)
-        uv_root = is_uv_project_root(container, workdir)
-        if uv_root:
+        try:
+            resolved_uv_root = resolve_uv_root(container, workdir)
+        except Exception as exc:
+            return _envelope_error("ruff", f"uv root resolution failed: {str(exc)[:180]}", 1)
+        if resolved_uv_root is not None:
+            uv_tool_root = resolved_uv_root
             try:
                 executable = (
                     resolved_tool.get("path") if resolved_tool is not None
-                    else resolve_uv_tool(container, workdir, "ruff")[0]
+                    else resolve_uv_tool(container, uv_tool_root, "ruff")[0]
                 )
             except Exception as exc:
                 return _envelope_error("ruff", f"uv tool resolution failed: {str(exc)[:180]}", 1)
@@ -433,23 +436,28 @@ def _run_pyright_verify(
     tool_cmd = "pyright"
     interpreter_arg = ""
     if project_root and workdir:
-        from sunaba.environment import is_uv_project_root, resolve_uv_tool, uv_environment_block_reason
+        from sunaba.environment import resolve_uv_root, resolve_uv_tool, uv_environment_block_reason
 
         blocked = uv_environment_block_reason(container, workdir)
         if blocked:
             return _envelope_error("pyright", blocked, 1)
-        if is_uv_project_root(container, workdir):
+        try:
+            resolved_uv_root = resolve_uv_root(container, workdir)
+        except Exception as exc:
+            return _envelope_error("pyright", f"uv root resolution failed: {str(exc)[:180]}", 1)
+        if resolved_uv_root is not None:
+            uv_tool_root = resolved_uv_root
             try:
                 executable = (
                     resolved_tool.get("path") if resolved_tool is not None
-                    else resolve_uv_tool(container, workdir, "pyright")[0]
+                    else resolve_uv_tool(container, uv_tool_root, "pyright")[0]
                 )
             except Exception as exc:
                 return _envelope_error("pyright", f"uv tool resolution failed: {str(exc)[:180]}", 1)
             if executable is None:
                 return _envelope_not_available("pyright", "pyright unavailable in project and image")
             tool_cmd = shlex.quote(executable)
-            interpreter = resolved_python or f"{workdir.rstrip('/')}/.venv/bin/python"
+            interpreter = resolved_python or f"{uv_tool_root.rstrip('/')}/.venv/bin/python"
             interpreter_arg = f"--pythonpath {shlex.quote(interpreter)} "
 
     ec, stdout_text, stderr_text = _exec_run(

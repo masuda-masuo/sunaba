@@ -56,7 +56,7 @@ def test_resolve_uv_tool_falls_back_to_image_only_when_project_tool_absent() -> 
 def test_pyright_receives_project_interpreter_and_absolute_executable() -> None:
     container = MagicMock()
     with (
-        patch("sunaba.environment.is_uv_project_root", return_value=True),
+        patch("sunaba.environment.resolve_uv_root", return_value="/workspace"),
         patch("sunaba.environment.uv_environment_block_reason", return_value=None),
         patch(
             "sunaba.environment.resolve_uv_tool",
@@ -360,7 +360,7 @@ def test_shared_pytest_runner_uses_same_resolved_uv_python() -> None:
         b'\n---PYTEST-RAW---\n'
     )
     with (
-        patch("sunaba.environment.probe_uv_project_root", return_value=True),
+        patch("sunaba.environment.resolve_uv_root", return_value="/workspace"),
         patch("sunaba.environment.uv_environment_block_reason", return_value=None),
         patch(
             "sunaba.environment.resolve_uv_python_tools",
@@ -379,7 +379,7 @@ def test_shared_pytest_runner_refuses_unprepared_uv_root_without_execution() -> 
     container = MagicMock()
     container.id = "uv_runner_unprepared"
     with (
-        patch("sunaba.environment.probe_uv_project_root", return_value=True),
+        patch("sunaba.environment.resolve_uv_root", return_value="/workspace"),
         patch(
             "sunaba.environment.uv_environment_block_reason",
             return_value="uv environment not_prepared: pip_extras=None",
@@ -403,7 +403,7 @@ def test_uv_sync_execution_exception_marks_environment_failed() -> None:
 
     def timeout_sync(cmd, **kwargs):
         command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
-        if "uv sync --locked --all-groups" in command:
+        if "uv sync --locked --all-groups --all-packages" in command:
             raise TimeoutError("uv sync execution exception")
         return original_exec(cmd, **kwargs)
 
@@ -553,7 +553,7 @@ def test_shared_pytest_runner_reports_resolution_exception_without_running_tests
     container = MagicMock()
     container.id = "uv_pytest_resolution_error"
     with (
-        patch("sunaba.environment.probe_uv_project_root", return_value=True),
+        patch("sunaba.environment.resolve_uv_root", return_value="/workspace"),
         patch("sunaba.environment.uv_environment_block_reason", return_value=None),
         patch(
             "sunaba.environment.resolve_uv_python_tools",
@@ -691,13 +691,13 @@ def test_transient_manifest_probe_preserves_preparation_and_verify_recovers(uv_r
         patch("sunaba.edit_verify.detect_languages", return_value=detection),
         patch("sunaba.edit_verify.run_lint_type_gate", return_value=clean_gate),
         patch(
-            "sunaba.environment.probe_uv_project_root",
-            side_effect=[RuntimeError("temporary root probe failure"), uv_root],
+            "sunaba.environment.resolve_uv_root",
+            side_effect=[RuntimeError("temporary root probe failure"), "/workspace" if uv_root else None],
         ),
         patch("sunaba.environment.resolve_uv_python_tools", return_value=toolchain),
     ):
         if uv_root:
-            record_environment_state(cid, "ready", command="uv sync --locked --all-groups")
+            record_environment_state(cid, "ready", command="uv sync --locked --all-groups --all-packages")
         failed = json.loads(verify_in_container(container_id=cid, path="tests/"))
         assert failed["status"] == "environment_setup_failed"
         assert failed["gate_passed"] is False
@@ -745,7 +745,7 @@ def test_manifest_detection_failure_invalidates_verify_without_changing_uv_prepa
     clean_state = {
         "status": "ready",
         "reason": "",
-        "command": "uv sync --locked --all-groups",
+        "command": "uv sync --locked --all-groups --all-packages",
         "exit_code": 0,
     }
 
@@ -761,7 +761,7 @@ def test_manifest_detection_failure_invalidates_verify_without_changing_uv_prepa
         ),
     ):
         record_environment_state(
-            cid, "ready", command="uv sync --locked --all-groups", exit_code=0
+            cid, "ready", command="uv sync --locked --all-groups --all-packages", exit_code=0
         )
         record_verify_success(cid)
         assert get_environment_state(cid) == clean_state

@@ -494,14 +494,18 @@ def prepare_uv_environment(
 ) -> UvPrepareResult:
     """Prepare or update a uv environment for *project_root*.
 
-    Runs ``uv sync --locked --all-groups`` under the ``SUNABA_DEPS_TIMEOUT``
+    Runs ``uv sync --locked --all-groups --all-packages`` under the ``SUNABA_DEPS_TIMEOUT``
     deadline. Reaps descendant processes on deadline expiration.
     When *recreate* is True, removes ``.venv`` before preparing.
     Records environment state as 'ready' on success, 'failed' on failure.
     """
     from sunaba.verify_state import invalidate_verify_success, record_environment_state
 
-    command = "uv sync --locked --all-groups"
+    # *project_root* is already the uv root: init reaches here only for a clone root
+    # holding both manifests, and sandbox_prepare_environment resolves it with
+    # resolve_uv_root before calling.  Resolving again would add a probe exec inside
+    # the shared deps deadline.
+    command = "uv sync --locked --all-groups --all-packages"
     if not allow_network:
         reason = "network_disabled"
         record_environment_state(
@@ -629,7 +633,7 @@ def prepare_uv_environment(
                     )
                     return UvPrepareResult(
                         success=True,
-                        message="uv sync --locked --all-groups ok",
+                        message="uv sync --locked --all-groups --all-packages ok",
                         reason=None,
                         exit_code=0,
                     )
@@ -652,7 +656,7 @@ def prepare_uv_environment(
                 suffix = f": {diagnostic}" if diagnostic else ""
                 return UvPrepareResult(
                     success=False,
-                    message=f"uv sync --locked --all-groups failed (exit {exit_code}){suffix}",
+                    message=f"uv sync --locked --all-groups --all-packages failed (exit {exit_code}){suffix}",
                     reason=reason,
                     exit_code=exit_code,
                 )
@@ -672,7 +676,7 @@ def prepare_uv_environment(
             )
             return UvPrepareResult(
                 success=False,
-                message=f"uv sync --locked --all-groups failed: {diagnostic}",
+                message=f"uv sync --locked --all-groups --all-packages failed: {diagnostic}",
                 reason=reason,
                 exit_code=None,
             )
@@ -778,7 +782,7 @@ def _install_repo_deps(
                     container.id,
                     "failed",
                     reason=reason,
-                    command="uv sync --locked --all-groups",
+                    command="uv sync --locked --all-groups --all-packages",
                     project_root=clone_dest,
                 )
                 errors.append(f"uv preparation failed: {reason}")
@@ -832,7 +836,7 @@ def _install_repo_deps(
                 container.id,
                 "failed",
                 reason=f"deps_timeout: {exc}",
-                command="uv sync --locked --all-groups",
+                command="uv sync --locked --all-groups --all-packages",
                 project_root=clone_dest,
             )
         reap_verdict = exc.reap or "incomplete"

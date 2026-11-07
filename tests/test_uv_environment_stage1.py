@@ -53,6 +53,11 @@ def _make_mock_container(
         )
         executed_cmds.append(cmd_str)
 
+        if "uv workspace dir" in cmd_str:
+            if "pyproject.toml" in root_files:
+                return 0, (b"/workspace\n", b"")
+            return 2, (b"", b"error: No `pyproject.toml` found in current directory or any parent directory\n")
+
         # Manifest probe loop
         if "for f in" in cmd_str and any(
             m in cmd_str for m in ("pyproject.toml", "uv.lock", "package.json")
@@ -137,7 +142,7 @@ class TestUvEnvironmentStage1:
     """Acceptance test suite for sunaba #930 stage 1."""
 
     def test_spec1_2_uv_root_runs_locked_sync_without_pip(self) -> None:
-        """Spec 1 & 2: Root with pyproject.toml + uv.lock uses uv sync --locked --all-groups.
+        """Spec 1 & 2: Root with pyproject.toml + uv.lock uses uv sync --locked --all-groups --all-packages.
 
         --frozen is superseded, pip fallback is forbidden, and pip_extras default
         [dev] is a compatibility default rather than an extra request to uv.
@@ -152,8 +157,8 @@ class TestUvEnvironmentStage1:
 
         assert deps.failed is False
         assert any(
-            "uv sync --locked --all-groups" in cmd for cmd in executed
-        ), f"Expected 'uv sync --locked --all-groups' in commands, got: {executed}"
+            "uv sync --locked --all-groups --all-packages" in cmd for cmd in executed
+        ), f"Expected 'uv sync --locked --all-groups --all-packages' in commands, got: {executed}"
         assert not any(
             "--frozen" in cmd for cmd in executed
         ), f"--frozen is superseded but was found in commands: {executed}"
@@ -380,7 +385,7 @@ class TestUvEnvironmentStage1:
             container, "owner/repo", "/workspace", "[dev]"
         )
         assert any(
-            "uv sync --locked --all-groups" in cmd for cmd in executed
+            "uv sync --locked --all-groups --all-packages" in cmd for cmd in executed
         ), f"Expected uv sync in commands, got: {executed}"
         assert deps.failed is False
 

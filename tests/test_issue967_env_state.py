@@ -56,6 +56,11 @@ class MockFilesystemContainer:
         )
         curr_dir = self.root if raw_dir in ("/home/sandbox", self.root) else raw_dir
 
+        if "uv workspace dir" in cmd_str:
+            if f"{curr_dir}/pyproject.toml" in self.files:
+                return 0, (f"{curr_dir}\n".encode("utf-8"), b"")
+            return 2, (b"", b"error: No `pyproject.toml` found in current directory or any parent directory\n")
+
         # Manifest probe loop (probe_uv_project_root)
         if "for f in pyproject.toml uv.lock" in cmd_str:
             lines = []

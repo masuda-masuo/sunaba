@@ -65,6 +65,11 @@ class MockPrepareContainer:
         cmd_str = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
         self.executed.append(cmd_str)
 
+        if "uv workspace dir" in cmd_str:
+            if f"{self.root}/pyproject.toml" in self.files:
+                return 0, (f"{self.root}\n".encode("utf-8"), b"")
+            return 2, (b"", b"error: No `pyproject.toml` found in current directory or any parent directory\n")
+
         # Recreate .venv removal
         if "rm -rf" in cmd_str and ".venv" in cmd_str:
             if self.rm_venv_fail:
@@ -161,7 +166,7 @@ class TestPrepareEnvironment:
             record_environment_state(
                 cid,
                 "ready",
-                command="uv sync --locked --all-groups",
+                command="uv sync --locked --all-groups --all-packages",
                 fingerprint=fp,
                 project_root="/workspace",
             )
@@ -274,7 +279,7 @@ class TestPrepareEnvironment:
             record_environment_state(
                 cid,
                 "ready",
-                command="uv sync --locked --all-groups",
+                command="uv sync --locked --all-groups --all-packages",
                 fingerprint=fp,
                 project_root="/workspace",
             )
@@ -342,7 +347,7 @@ class TestPrepareEnvironment:
 
         with (
             _mock_docker_context(container),
-            patch("sunaba.environment.probe_uv_project_root", side_effect=RuntimeError("disk read error")),
+            patch("sunaba.environment.resolve_uv_root", side_effect=RuntimeError("disk read error")),
         ):
             prep_out = sandbox_prepare_environment(cid)
             res = json.loads(prep_out)

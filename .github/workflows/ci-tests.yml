@@ -62,6 +62,20 @@ jobs:
           sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
 
+      # uv itself, at the same pinned version and by the same installer as
+      # docker/Dockerfile.base.  tests/test_uv_workspace_root.py builds real
+      # uv workspaces and runs real `uv lock` / `uv sync` / `uv workspace dir`;
+      # without uv on PATH those tests fail (they deliberately do not skip, so
+      # the real-uv coverage cannot disappear quietly).
+      - name: Install uv
+        env:
+          UV_VERSION: "0.13.1"
+        run: |
+          set -euo pipefail
+          curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/uv" --version
+
       - name: Lint (ruff)
         run: ruff check .
 

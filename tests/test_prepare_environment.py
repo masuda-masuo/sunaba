@@ -17,6 +17,7 @@ from sunaba.environment_state_store import (
     compute_manifest_fingerprint,
 )
 from sunaba.security import NETWORK_LABEL
+from sunaba.tools.container.clone import prepare_uv_environment
 from sunaba.tools.container.prepare_environment import (
     sandbox_prepare_environment,
 )
@@ -220,6 +221,44 @@ class TestPrepareEnvironment:
 
             # uv sync was never executed
             assert not any("uv sync" in cmd for cmd in container.executed)
+
+    def test_network_disabled_message_in_sandbox_prepare_environment(
+        self, isolated_env: Path
+    ) -> None:
+        """AC 1: sandbox_prepare_environment error message matches exact guidance string."""
+        cid = "c_prepare_nonet_msg_tool"
+        files = _create_sample_files()
+        container = MockPrepareContainer(cid, "/workspace", files, allow_network=False)
+
+        with _mock_docker_context(container):
+            prep_out = sandbox_prepare_environment(cid)
+            res = json.loads(prep_out)
+            assert res["status"] == "error"
+            assert (
+                res["error"]
+                == "network_disabled: this container has no network, and uv projects are prepared only in a container started with clone_repo, pr or branch (which enables network); start a new container that way"
+            )
+            assert res["reason"] == "network_disabled"
+
+    def test_network_disabled_message_in_prepare_uv_environment(
+        self, isolated_env: Path
+    ) -> None:
+        """AC 1: prepare_uv_environment message matches exact guidance string."""
+        cid = "c_prepare_nonet_msg_fn"
+        files = _create_sample_files()
+        container = MockPrepareContainer(cid, "/workspace", files, allow_network=False)
+
+        result = prepare_uv_environment(
+            container,
+            "/workspace",
+            allow_network=False,
+        )
+        assert result.success is False
+        assert (
+            result.message
+            == "uv preparation failed: network_disabled: this container has no network, and uv projects are prepared only in a container started with clone_repo, pr or branch (which enables network); start a new container that way"
+        )
+        assert result.reason == "network_disabled"
 
     def test_ready_network_disabled_keeps_ready(
         self, isolated_env: Path

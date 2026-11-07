@@ -13,7 +13,10 @@ from docker.errors import NotFound
 
 from sunaba.security import NETWORK_LABEL
 from sunaba.tools import common
-from sunaba.tools.container.clone import prepare_uv_environment
+from sunaba.tools.container.clone import (
+    UV_NETWORK_DISABLED_GUIDANCE,
+    prepare_uv_environment,
+)
 from sunaba.verify_state import (
     get_environment_state,
     invalidate_verify_success,
@@ -127,7 +130,7 @@ def sandbox_prepare_environment(
         if not allow_network:
             return json.dumps({
                 "status": "error",
-                "error": "network_disabled",
+                "error": f"network_disabled: {UV_NETWORK_DISABLED_GUIDANCE}",
                 "reason": "network_disabled",
             })
 

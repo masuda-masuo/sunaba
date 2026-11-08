@@ -177,7 +177,9 @@ def test_publish_token_resolution_response_is_complete_and_fail_closed(monkeypat
 
 
 
-def test_carry_public_initialize_response_json_is_complete(tmp_path):
+def test_carry_public_initialize_response_json_is_complete(tmp_path, monkeypatch):
+    # Pin "no token" so the token-missing hint below does not depend on host GH_TOKEN/GITHUB_TOKEN (#981).
+    monkeypatch.setattr(lifecycle.github_api, "_resolve_vcs_token", lambda: "")
     fixture = _make_normal_merge_fixture(tmp_path)
     old_c = _CarryGitContainer(
         fixture["source_dir"], cid="compatold001", repo="owner/repo",

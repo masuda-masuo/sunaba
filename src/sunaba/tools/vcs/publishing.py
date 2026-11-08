@@ -1884,8 +1884,11 @@ def publish(
                     if stale_reason is not None:
                         reason = stale_reason
                 if state_name != "ready":
-                    display_root = root or environment_state.get("project_root") or "<unknown root>"
-                    blocked.append(f"{display_root}: {state_name}: {reason}")
+                    display_root = root or environment_state.get("project_root")
+                    if display_root:
+                        blocked.append(f"{display_root}: {state_name}: {reason}")
+                    else:
+                        blocked.append(f"uv environment is {state_name}: {reason}")
             if blocked:
                 return _publish_json({
                     "status": "error",
@@ -1897,12 +1900,7 @@ def publish(
                             if not verified
                             else ""
                         )
-                        + "; ".join(
-                            f"uv environment is {item.split(': ', 1)[1]}"
-                            if item.startswith("<unknown root>: ")
-                            else item
-                            for item in blocked
-                        )
+                        + "; ".join(blocked)
                     ),
                 })
     gate_err = verify_gate_error(verified, skip_verify_gate)

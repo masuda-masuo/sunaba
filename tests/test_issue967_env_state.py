@@ -655,7 +655,7 @@ def test_failing_cat_is_read_failure_not_absent(isolated_state: Path) -> None:
 
 
 @pytest.mark.parametrize("workdir", ["/workspace/sub", "/workspace/pkg"])
-def test_recorded_environment_is_not_stale_from_subdirectory(
+def test_recorded_environment_is_not_stale_from_subdirectory_and_unprepared_nested_root(
     isolated_state: Path, workdir: str
 ) -> None:
     container, files = _make_ready_container()
@@ -674,10 +674,13 @@ def test_recorded_environment_is_not_stale_from_subdirectory(
 
     status, reason = check_uv_environment(container, workdir)
     if workdir.endswith("/pkg"):
-        assert (status, reason) == ("ready", None)
+        assert status == "not_prepared"
+        assert "/workspace/pkg" in (reason or "")
+        assert "sandbox_prepare_environment(container_id, working_dir=" in (reason or "")
+        assert uv_environment_block_reason(container, workdir) is not None
     else:
         assert (status, reason) == ("not_uv", None)
-    assert uv_environment_block_reason(container, workdir) is None
+        assert uv_environment_block_reason(container, workdir) is None
 
 
 def test_recorded_root_change_is_stale_from_any_workdir(isolated_state: Path) -> None:
@@ -693,13 +696,19 @@ def test_recorded_root_change_is_stale_from_any_workdir(isolated_state: Path) ->
     )
     files[f"{container.root}/uv.lock"] = b"version = 1\nrevision = changed\n"
 
-    # Stale detection applies when caller root is a uv project or the root itself
-    files[f"{container.root}/pkg/pyproject.toml"] = b"[project]\nname='nested'\n"
-    files[f"{container.root}/pkg/uv.lock"] = b"version = 1\n"
-    for workdir in (container.root, f"{container.root}/pkg"):
-        status, reason = check_uv_environment(container, workdir)
-        assert status == "stale"
-        assert reason is not None and "uv.lock" in reason
+    # The recorded root remains stale, while an independent nested root has
+    # no preparation record of its own.
+    status, reason = check_uv_environment(container, container.root)
+    assert status == "stale"
+    assert reason is not None and "uv.lock" in reason
+
+    nested = f"{container.root}/pkg"
+    files[f"{nested}/pyproject.toml"] = b"[project]\nname='nested'\n"
+    files[f"{nested}/uv.lock"] = b"version = 1\n"
+    status, reason = check_uv_environment(container, nested)
+    assert status == "not_prepared"
+    assert nested in (reason or "")
+    assert "sandbox_prepare_environment(container_id, working_dir=" in (reason or "")
 
     # Non-uv subdirectory is not blocked (not_uv)
     status, reason = check_uv_environment(container, f"{container.root}/sub")
@@ -972,8 +981,8 @@ def test_verify_prepared_root_working_dir_blocked_by_recorded_state_failure_or_s
         assert expected_reason in res["environment_setup"]["reason"]
 
 
-def test_verify_nested_uv_workdir_resolves_tools_from_working_dir(isolated_state: Path) -> None:
-    """A nested uv project as working_dir looks up tools there, not at the prepared root (main behaviour)."""
+def test_verify_nested_uv_workdir_requires_its_own_preparation(isolated_state: Path) -> None:
+    """An independent nested uv root needs its own record before tool lookup."""
     from sunaba import environment as env_mod
 
     container, files = _make_ready_container()
@@ -991,10 +1000,31 @@ def test_verify_nested_uv_workdir_resolves_tools_from_working_dir(isolated_state
     client = _make_client_mock(cast(Any, container))
     with patch("sunaba.tools.verify._docker", return_value=client):
         with patch.object(env_mod, "resolve_uv_python_tools", side_effect=real_resolve) as resolve:
-            res = json.loads(verify_in_container(container_id=cid, path=nested, working_dir=nested))
+            unprepared = json.loads(
+                verify_in_container(container_id=cid, path=nested, working_dir=nested)
+            )
+            assert unprepared["status"] == "environment_setup_failed"
+            assert nested in unprepared["environment_setup"]["reason"]
+            assert "sandbox_prepare_environment(container_id, working_dir=" in (
+                unprepared["environment_setup"]["reason"]
+            )
+            assert resolve.call_args_list == []
+
+            nested_fp = compute_manifest_fingerprint(container, nested)
+            record_environment_state(
+                cid,
+                "ready",
+                command="uv sync --locked",
+                exit_code=0,
+                fingerprint=nested_fp,
+                project_root=nested,
+            )
+            prepared = json.loads(
+                verify_in_container(container_id=cid, path=nested, working_dir=nested)
+            )
 
     roots = [call.args[1] for call in resolve.call_args_list]
-    assert roots, "resolve_uv_python_tools was not called"
+    assert roots, "resolve_uv_python_tools was not called after nested preparation"
     assert all(root == nested for root in roots), roots
-    assert res.get("status") != "environment_setup_failed"
+    assert prepared.get("status") != "environment_setup_failed"
 

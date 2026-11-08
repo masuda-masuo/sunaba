@@ -1823,27 +1823,42 @@ def publish(
 
     verified = has_verify_success(cid)
     if not skip_verify_gate:
-        from sunaba.verify_state import get_environment_state
+        from sunaba.verify_state import list_environment_states
 
-        environment_state = get_environment_state(full_cid)
-        if environment_state is not None:
-            state_name = environment_state.get("status") or "not_prepared"
-            reason = environment_state.get("reason") or "preparation state missing"
-            if state_name == "ready":
-                from sunaba.environment import check_recorded_environment_staleness
+        environment_states = list_environment_states(full_cid)
+        if environment_states:
+            from sunaba.environment import check_recorded_environment_staleness
 
-                state_name, stale_reason = check_recorded_environment_staleness(
-                    container, environment_state
-                )
-                if stale_reason is not None:
-                    reason = stale_reason
-            if state_name != "ready":
+            blocked: list[str] = []
+            for root, environment_state in environment_states.items():
+                state_name = environment_state.get("status") or "not_prepared"
+                reason = environment_state.get("reason") or "preparation state missing"
+                if state_name == "ready":
+                    state_name, stale_reason = check_recorded_environment_staleness(
+                        container, environment_state
+                    )
+                    if stale_reason is not None:
+                        reason = stale_reason
+                if state_name != "ready":
+                    display_root = root or environment_state.get("project_root") or "<unknown root>"
+                    blocked.append(f"{display_root}: {state_name}: {reason}")
+            if blocked:
                 return json.dumps({
                     "status": "error",
                     "step": "verify_gate",
                     "error": (
-                        "publish refused: no successful verify_in_container; "
-                        f"uv environment is {state_name}: {reason}"
+                        "publish refused: "
+                        + (
+                            "no successful verify_in_container; "
+                            if not verified
+                            else ""
+                        )
+                        + "; ".join(
+                            f"uv environment is {item.split(': ', 1)[1]}"
+                            if item.startswith("<unknown root>: ")
+                            else item
+                            for item in blocked
+                        )
                     ),
                 })
     gate_err = verify_gate_error(verified, skip_verify_gate)

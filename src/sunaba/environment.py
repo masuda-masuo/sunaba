@@ -242,43 +242,42 @@ def check_recorded_environment_staleness(
 
 
 def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
-    """Check status, probing the caller root when unrecorded or differing from project_root."""
-    from sunaba.verify_state import get_environment_state
+    """Check the preparation record for the uv root containing *root*."""
+    from sunaba.verify_state import (
+        get_environment_state_for_root,
+        list_environment_states,
+    )
 
-    state = get_environment_state(str(getattr(container, "id", "")))
+    container_id = str(getattr(container, "id", ""))
+    try:
+        uv_root = resolve_uv_root(container, root)
+    except Exception as exc:
+        return "failed", f"uv root probe failed: {str(exc)[:200]}"
+    records = list_environment_states(container_id)
+    state = (
+        get_environment_state_for_root(container_id, uv_root)
+        if uv_root is not None
+        else None
+    )
+    if uv_root is None:
+        # A recorded root whose lock disappeared is stale, not an unrelated
+        # non-uv directory.
+        state = get_environment_state_for_root(container_id, os.path.normpath(root))
+        if state is None:
+            return "not_uv", None
+        return check_recorded_environment_staleness(container, state, root)
+    if state is None and len(records) == 1 and "" in records:
+        # A legacy record without a root can only be scoped from the caller.
+        state = records[""]
+    if state is None and records:
+        return (
+            "not_prepared",
+            f"uv root {uv_root} is not prepared; run "
+            f'sandbox_prepare_environment(container_id, working_dir="{uv_root}")',
+        )
     if state is None:
-        try:
-            uv_root = resolve_uv_root(container, root)
-            if uv_root is None:
-                return "not_uv", None
-        except Exception as exc:
-            return "failed", f"uv manifest probe failed: {str(exc)[:200]}"
         return "not_prepared", "preparation state missing"
-
-    project_root = state.get("project_root")
-    if not project_root:
-        recorded_fp = state.get("fingerprint")
-        if isinstance(recorded_fp, dict):
-            project_root = recorded_fp.get("root")
-
-    if project_root and os.path.normpath(root) != os.path.normpath(project_root):
-        try:
-            uv_root = resolve_uv_root(container, root)
-            if uv_root is None:
-                return "not_uv", None
-        except Exception as exc:
-            return "failed", f"uv root probe failed: {str(exc)[:180]}"
-        return check_recorded_environment_staleness(container, state, uv_root)
-    elif not project_root and state.get("status") != "ready":
-        try:
-            uv_root = resolve_uv_root(container, root)
-            if uv_root is None:
-                return "not_uv", None
-        except Exception as exc:
-            return "failed", f"uv root probe failed: {str(exc)[:180]}"
-        return check_recorded_environment_staleness(container, state, uv_root)
-
-    return check_recorded_environment_staleness(container, state, root)
+    return check_recorded_environment_staleness(container, state, uv_root)
 
 
 def uv_environment_block_reason(container: Any, root: str) -> str | None:

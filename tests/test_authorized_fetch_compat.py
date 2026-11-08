@@ -33,6 +33,9 @@ class _Container:
 
 
 def _carry(monkeypatch, *, token="token-secret", repo="owner/repo", grant=None, exec_run=None):
+    # Pin "no proxy" so a control URL inherited from the host does not make the
+    # real authorized_read_grant substitute for the inert path (#984).
+    monkeypatch.delenv("SUNABA_PROXY_CONTROL_URL", raising=False)
     events = []
     monkeypatch.setattr(lifecycle.github_api, "_resolve_vcs_token", lambda: events.append("token") or token)
     monkeypatch.setattr(lifecycle, "_resolve_repo_from_container", lambda *_: events.append("repo") or repo)
@@ -135,6 +138,9 @@ def _raise_context(exc):
 
 def test_publish_nonzero_fetch_response_is_complete_and_unchanged(monkeypatch):
     monkeypatch.setenv("SUNABA_ENABLE_EGRESS_PROXY", "false")
+    # Keep the real authorized_read_grant on its inert path when the host exports
+    # a control URL; this test exercises the unproxied fetch response (#984).
+    monkeypatch.delenv("SUNABA_PROXY_CONTROL_URL", raising=False)
     container = _make_publish_container([
         (0, b"", b""),
         (7, b"stdout secret-token", b"fatal secret-token"),

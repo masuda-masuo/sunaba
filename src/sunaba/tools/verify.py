@@ -953,17 +953,59 @@ def _verify_in_container_guarded(
     )
     unstaged_raw = unstaged_raw if unstaged_ec == 0 else ""
     from sunaba.verify_state import (
+        forget_environment_state_for_root,
         get_environment_state_for_root,
         invalidate_verify_success,
         list_environment_states,
     )
 
     full_cid = str(getattr(container, "id", None) or container_id)
+    records = list_environment_states(full_cid)
+    normalized_working_dir = os.path.normpath(working_dir)
+    direct_record = records.get(normalized_working_dir)
+    directory_probe_failed = False
+    if direct_record is not None:
+        try:
+            from sunaba.environment import probe_directory_exists
+
+            directory_exists = probe_directory_exists(container, normalized_working_dir)
+        except Exception:
+            directory_probe_failed = True
+            directory_exists = True
+        if not directory_exists:
+            forget_environment_state_for_root(
+                full_cid,
+                normalized_working_dir,
+                reason="directory no longer exists",
+            )
+            records = list_environment_states(full_cid)
+
     try:
         from sunaba.environment import resolve_uv_root
 
         uv_root = resolve_uv_root(container, working_dir)
         uv_project = uv_root is not None
+        if (
+            direct_record is not None
+            and not directory_probe_failed
+            and uv_root is not None
+        ):
+            if os.path.normpath(uv_root) != normalized_working_dir:
+                forget_environment_state_for_root(
+                    full_cid,
+                    normalized_working_dir,
+                    reason=f"root now resolves to {os.path.normpath(uv_root)}",
+                )
+                records = list_environment_states(full_cid)
+        elif direct_record is not None and not directory_probe_failed and not uv_project:
+            forget_environment_state_for_root(
+                full_cid,
+                normalized_working_dir,
+                reason="root no longer resolves as a uv project",
+            )
+            records = list_environment_states(full_cid)
+
+
     except Exception as exc:
         invalidate_verify_success(full_cid)
         reason = f"uv manifest probe failed: {str(exc)[:200]}"

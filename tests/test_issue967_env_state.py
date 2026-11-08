@@ -48,6 +48,17 @@ class MockFilesystemContainer:
         if self.probe_failure:
             return 127, (b"", self.probe_failure.encode("utf-8"))
 
+        if "__SUNABA_DIRECTORY_EXISTS__" in cmd_str:
+            directory = cmd_str.split("[ -d ", 1)[1].split(" ];", 1)[0].strip().strip("'\\\"")
+            directory = directory.rstrip("/")
+            exists = any(path.startswith(directory + "/") for path in self.files)
+            marker = (
+                b"__SUNABA_DIRECTORY_EXISTS__\n"
+                if exists
+                else b"__SUNABA_DIRECTORY_ABSENT__\n"
+            )
+            return 0, (marker, b"")
+
         cd_match = re.search(r"cd\s+(?:'([^']+)'|\"([^\"]+)\"|(\S+))\s+&&", cmd_str)
         raw_dir = (
             (cd_match.group(1) or cd_match.group(2) or cd_match.group(3)).rstrip("/")
@@ -567,18 +578,14 @@ def test_staleness_on_deleting_uv_lock_and_recovery(isolated_state: Path) -> Non
 
     client = _make_client_mock(cast(Any, container))
 
-    # verify_in_container reports stale naming uv.lock and gate does not run
+    # The manifest-level single-file helper above still reports stale.
+    # Container verify and publish forget a recorded root when its lock is gone.
     with patch("sunaba.tools.verify._docker", return_value=client):
         res_json = verify_in_container(container_id=cid, path=container.root)
         res = json.loads(res_json)
-        assert res["status"] == "environment_setup_failed"
-        assert res["gate_passed"] is False
-        assert res["environment_setup"]["status"] == "stale"
-        assert "uv.lock" in res["environment_setup"]["reason"]
-        assert res["lint"]["status"] == "skipped"
-        assert res["tests"]["status"] == "skipped"
+        assert res["status"] != "environment_setup_failed"
+        assert get_environment_state(cid) is None
 
-    # Publish check is refused naming uv.lock
     with patch("sunaba.tools.vcs.publishing._docker", return_value=client):
         pub_json = publish(
             container_id=cid,
@@ -588,13 +595,18 @@ def test_staleness_on_deleting_uv_lock_and_recovery(isolated_state: Path) -> Non
             skip_verify_gate=False,
         )
         pub = json.loads(pub_json)
-        assert pub["status"] == "error"
-        assert pub["step"] == "verify_gate"
-        assert "stale" in pub["error"]
-        assert "uv.lock" in pub["error"]
+        assert pub.get("step") != "verify_gate"
 
-    # Restore uv.lock to original content
+    # Restore uv.lock and simulate preparing the restored project again.
     files[f"{container.root}/uv.lock"] = original_uv_lock
+    record_environment_state(
+        cid,
+        "ready",
+        command="uv sync --locked",
+        exit_code=0,
+        fingerprint=fp,
+        project_root=container.root,
+    )
     # Status returns to ready without re-preparing
     status, reason = check_uv_environment(container, container.root)
     assert status == "ready"

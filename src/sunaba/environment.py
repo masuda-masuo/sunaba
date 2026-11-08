@@ -108,6 +108,72 @@ def probe_uv_project_root(container: Any, root: str) -> bool:
     return {"pyproject.toml", "uv.lock"} <= manifests
 
 
+
+def probe_directory_exists(container: Any, root: str) -> bool:
+    """Probe a root directory without changing the command working directory."""
+    quoted_root = shlex.quote(root)
+    script = (
+        f"if [ -d {quoted_root} ]; then "
+        "printf '__SUNABA_DIRECTORY_EXISTS__\n'; "
+        "else printf '__SUNABA_DIRECTORY_ABSENT__\n'; fi"
+    )
+    exec_kwargs: dict[str, Any] = {
+        "stdout": True,
+        "stderr": True,
+        "demux": True,
+    }
+    try:
+        from sunaba.edit_verify.shell import foreground_marker_environment
+
+        marker_env = foreground_marker_environment()
+        if marker_env is not None:
+            exec_kwargs["environment"] = marker_env
+    except Exception:
+        pass
+    try:
+        result = container.exec_run(["/bin/sh", "-c", script], **exec_kwargs)
+    except Exception as exc:
+        raise EnvironmentResolutionError(
+            f"directory probe failed: {str(exc)[:180]}"
+        ) from exc
+
+    if isinstance(result, tuple):
+        exit_code, output = result
+    else:
+        exit_code = getattr(result, "exit_code", None)
+        output = getattr(result, "output", b"")
+    stdout, stderr = output if isinstance(output, tuple) else (output, b"")
+    stdout_text = (stdout or b"").decode("utf-8", errors="replace")
+    stderr_text = (stderr or b"").decode("utf-8", errors="replace")
+    if exit_code != 0:
+        detail = (stdout_text + stderr_text).strip()[:180]
+        raise EnvironmentResolutionError(
+            f"directory probe failed (exit {exit_code}): {detail}"
+        )
+    marker = stdout_text.strip()
+    if marker == "__SUNABA_DIRECTORY_EXISTS__":
+        return True
+    if marker == "__SUNABA_DIRECTORY_ABSENT__":
+        return False
+    raise EnvironmentResolutionError(
+        f"directory probe returned malformed output: {marker[:160]}"
+    )
+
+
+def recorded_root_is_uv_project(container: Any, root: str) -> tuple[bool, str]:
+    """Check whether a recorded root still exists and resolves to itself."""
+    if not probe_directory_exists(container, root):
+        return False, "directory no longer exists"
+    resolved = resolve_uv_root(container, root)
+    if resolved is None:
+        return False, "root no longer resolves as a uv project"
+    normalized_root = os.path.normpath(root)
+    if os.path.normpath(resolved) != normalized_root:
+        return False, f"root now resolves to {os.path.normpath(resolved)}"
+    return True, ""
+
+
+
 def resolve_uv_root(container: Any, workdir: str) -> str | None:
     """Resolve the uv workspace or project root for *workdir*.
 

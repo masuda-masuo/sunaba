@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from sunaba.tools.vcs.publishing import publish
 from sunaba.tools.verify import verify_in_container
 from sunaba.verify_state import (
     clear_environment_state,
+    forget_environment_state_for_root,
     get_environment_state,
     get_environment_state_for_root,
     has_verify_success,
@@ -322,3 +324,163 @@ def test_publish_checks_stale_and_failed_secondary_roots(
     assert failed_a["step"] == "verify_gate"
     assert str(root_a) in failed_a["error"]
     assert "failed" in failed_a["error"]
+
+
+def test_vanished_uv_root_record_does_not_block_publish(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vanished secondary uv root is pruned so it cannot block publish."""
+    root_a = tmp_path / "project-a"
+    root_b = tmp_path / "project-b"
+    _make_locked_project(root_a, "project-a")
+    _make_locked_project(root_b, "project-b")
+    container = LocalExecContainer(tmp_path)
+    fingerprint_a = compute_manifest_fingerprint(container, str(root_a))
+    fingerprint_b = compute_manifest_fingerprint(container, str(root_b))
+    record_environment_state(
+        container.id,
+        "ready",
+        fingerprint=fingerprint_a,
+        project_root=str(root_a),
+    )
+    record_environment_state(
+        container.id,
+        "ready",
+        fingerprint=fingerprint_b,
+        project_root=str(root_b),
+    )
+    record_verify_success(container.id)
+    state_a_before = list_environment_states(container.id)[str(root_a)].copy()
+
+    shutil.rmtree(root_b)
+
+    class Containers:
+        def get(self, container_id: str) -> LocalExecContainer:
+            return container
+
+    client = SimpleNamespace(containers=Containers())
+    monkeypatch.setattr("sunaba.tools.vcs.publishing._docker", lambda: client)
+
+    publish_result = json.loads(
+        publish(container.id, "owner/repo", "feature", "message", skip_verify_gate=False)
+    )
+    assert publish_result.get("step") != "verify_gate", publish_result.get("error")
+
+    states = list_environment_states(container.id)
+    assert str(root_b) not in states
+    assert states[str(root_a)] == state_a_before
+
+    persisted = json.loads(
+        (isolated_state / f"{container.id}.json").read_text(encoding="utf-8")
+    )
+    assert str(root_b) not in json.dumps(persisted)
+
+
+def test_forget_environment_state_for_root_preserves_other_record_and_removes_last_file(
+    isolated_state: Path,
+) -> None:
+    cid = "forget-state-container"
+    root_a = "/workspace/a"
+    root_b = "/workspace/b"
+    record_environment_state(
+        cid,
+        "ready",
+        reason="unchanged",
+        project_root=root_a,
+        fingerprint={"root": root_a, "files": {"uv.lock": "a"}},
+    )
+    record_environment_state(
+        cid,
+        "failed",
+        reason="kept",
+        project_root=root_b,
+        fingerprint={"root": root_b, "files": {"uv.lock": "b"}},
+    )
+    state_file = isolated_state / f"{cid}.json"
+    before = json.loads(state_file.read_text(encoding="utf-8"))
+    record_b_before = before["roots"][root_b].copy()
+
+    assert forget_environment_state_for_root(cid, root_a + "/.") is True
+    assert list_environment_states(cid) == {root_b: record_b_before}
+    after = json.loads(state_file.read_text(encoding="utf-8"))
+    assert after["roots"][root_b] == record_b_before
+    assert root_a not in after["roots"]
+
+    assert forget_environment_state_for_root(cid, root_b) is True
+    assert not state_file.exists()
+    assert list_environment_states(cid) == {}
+    assert forget_environment_state_for_root(cid, root_b) is False
+
+
+def test_publish_forgets_uv_root_when_its_lock_disappears(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root_a = tmp_path / "project-a"
+    root_b = tmp_path / "project-b"
+    _make_locked_project(root_a, "project-a")
+    _make_locked_project(root_b, "project-b")
+    container = LocalExecContainer(tmp_path)
+    fingerprint_a = compute_manifest_fingerprint(container, str(root_a))
+    fingerprint_b = compute_manifest_fingerprint(container, str(root_b))
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint_a, project_root=str(root_a)
+    )
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint_b, project_root=str(root_b)
+    )
+    record_verify_success(container.id)
+    (root_b / "uv.lock").unlink()
+
+    class Containers:
+        def get(self, container_id: str) -> LocalExecContainer:
+            return container
+
+    monkeypatch.setattr(
+        "sunaba.tools.vcs.publishing._docker",
+        lambda: SimpleNamespace(containers=Containers()),
+    )
+    result = json.loads(
+        publish(container.id, "owner/repo", "feature", "message", skip_verify_gate=False)
+    )
+    assert result.get("step") != "verify_gate"
+    assert str(root_b) not in list_environment_states(container.id)
+    assert result["environment_notes"] == [
+        f"forgot uv preparation record for {root_b}: root no longer resolves as a uv project"
+    ]
+
+
+def test_publish_probe_failure_preserves_root_record_and_blocks(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "project"
+    _make_locked_project(root, "project")
+    base = LocalExecContainer(tmp_path)
+    fingerprint = compute_manifest_fingerprint(base, str(root))
+
+    class BrokenDirectoryProbe(LocalExecContainer):
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "__SUNABA_DIRECTORY_EXISTS__" in rendered:
+                raise RuntimeError("probe unavailable")
+            return super().exec_run(cmd, *args, **kwargs)
+
+    container = BrokenDirectoryProbe(tmp_path)
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    record_verify_success(container.id)
+
+    class Containers:
+        def get(self, container_id: str) -> BrokenDirectoryProbe:
+            return container
+
+    monkeypatch.setattr(
+        "sunaba.tools.vcs.publishing._docker",
+        lambda: SimpleNamespace(containers=Containers()),
+    )
+    result = json.loads(
+        publish(container.id, "owner/repo", "feature", "message", skip_verify_gate=False)
+    )
+    assert result["step"] == "verify_gate"
+    assert "failed" in result["error"]
+    assert list_environment_states(container.id)[str(root)]["status"] == "ready"

@@ -1809,13 +1809,30 @@ def publish(
     Returns:
         JSON with the operation result.
     """
+    environment_notes: list[str] = []
+
+    def _publish_json(payload: dict[str, Any]) -> str:
+        if environment_notes:
+            payload["environment_notes"] = list(environment_notes)
+        return json.dumps(payload)
+
+    def _publish_finish(payload: dict[str, Any], was_verified: bool) -> str:
+        rendered = finish_json(payload, was_verified)
+        if not environment_notes:
+            return rendered
+        result = json.loads(rendered) if isinstance(rendered, str) else rendered
+        if isinstance(result, dict):
+            result["environment_notes"] = list(environment_notes)
+            return _publish_json(result)
+        return rendered
+
     client = _docker()
     try:
         container = client.containers.get(container_id)
     except NotFound:
         return container_not_found_error(container_id)
     except Exception as e:
-        return json.dumps({"status": "error", "error": str(e)})
+        return _publish_json({"status": "error", "error": str(e)})
 
     cid = container_id[:12]
     full_cid = str(getattr(container, "id", None) or container_id)
@@ -1827,12 +1844,39 @@ def publish(
 
         environment_states = list_environment_states(full_cid)
         if environment_states:
-            from sunaba.environment import check_recorded_environment_staleness
+            from sunaba.environment import (
+                check_recorded_environment_staleness,
+                recorded_root_is_uv_project,
+            )
+            from sunaba.verify_state import forget_environment_state_for_root
 
             blocked: list[str] = []
             for root, environment_state in environment_states.items():
                 state_name = environment_state.get("status") or "not_prepared"
                 reason = environment_state.get("reason") or "preparation state missing"
+                recorded_root = (
+                    environment_state.get("project_root")
+                    or (environment_state.get("fingerprint") or {}).get("root")
+                    or root
+                )
+                if recorded_root:
+                    forget_reason = ""
+                    try:
+                        still_uv, forget_reason = recorded_root_is_uv_project(
+                            container, recorded_root
+                        )
+                    except Exception as exc:
+                        still_uv = True
+                        state_name = "failed"
+                        reason = f"uv root probe failed: {str(exc)[:200]}"
+                    if not still_uv:
+                        if forget_environment_state_for_root(
+                            full_cid, recorded_root, reason=forget_reason
+                        ):
+                            environment_notes.append(
+                                f"forgot uv preparation record for {recorded_root}: {forget_reason}"
+                            )
+                        continue
                 if state_name == "ready":
                     state_name, stale_reason = check_recorded_environment_staleness(
                         container, environment_state
@@ -1843,7 +1887,7 @@ def publish(
                     display_root = root or environment_state.get("project_root") or "<unknown root>"
                     blocked.append(f"{display_root}: {state_name}: {reason}")
             if blocked:
-                return json.dumps({
+                return _publish_json({
                     "status": "error",
                     "step": "verify_gate",
                     "error": (
@@ -1863,11 +1907,11 @@ def publish(
                 })
     gate_err = verify_gate_error(verified, skip_verify_gate)
     if gate_err:
-        return json.dumps(gate_err)
+        return _publish_finish(gate_err, verified)
 
     body_err = pr_body_validation_error(create_pr, pr_body)
     if body_err:
-        return json.dumps(body_err)
+        return _publish_finish(body_err, verified)
 
     def _run(cmd, env=None):
         full_cmd = f"cd {shlex.quote(working_dir)} && {cmd}"
@@ -1882,7 +1926,7 @@ def publish(
 
     proxy_err = _ensure_proxy_ready(client)
     if proxy_err:
-        return finish_json({"status": "error", "step": "egress_proxy", "error": proxy_err}, verified)
+        return _publish_finish({"status": "error", "step": "egress_proxy", "error": proxy_err}, verified)
 
     # --- Manifest mode vs fallback mode ---
     manifest = files is not None and len(files) > 0
@@ -1901,7 +1945,7 @@ def publish(
         for f in files:
             path_err = _validate_manifest_path(_run, f, classification=manifest_classification)
             if path_err is not None:
-                return finish_json(path_err, verified)
+                return _publish_finish(path_err, verified)
 
     # --- Secret scan (issue #676) ---
     # Scan BEFORE commit in manifest mode: the declared file list is already
@@ -2022,7 +2066,7 @@ def publish(
             )
             has_override = check_override(cid)  # noqa: F821  # peek, don't consume yet
             if not has_override:
-                return finish_json({
+                return _publish_finish({
                     "status": "error",
                     "step": "secret_scan",
                     "secret_scan": scan_result.get("secret_scan"),
@@ -2058,7 +2102,7 @@ def publish(
                 f"repo={repo} branch={branch} token_resolution_failed",
                 approved=False,
             )
-            return finish_json({
+            return _publish_finish({
                 "status": "error",
                 "step": "token_resolution",
                 "error": "Failed to resolve VCS token: token provider error",
@@ -2074,7 +2118,7 @@ def publish(
                 _redact_fetch_token(f"repo={repo} branch={branch} proxy_read_grant_failed"),
                 approved=False,
             )
-            return finish_json({
+            return _publish_finish({
                 "status": "error",
                 "step": "proxy_auth",
                 "error": err_msg,
@@ -2087,7 +2131,7 @@ def publish(
                     _redact_fetch_token(f"repo={repo} branch={branch} read_grant_close_failed: {exc_msg}"),
                     approved=False,
                 )
-                return finish_json({
+                return _publish_finish({
                     "status": "error",
                     "step": "fetch",
                     "error": f"Failed to close authorization grant for fetch: {exc_msg}",
@@ -2097,7 +2141,7 @@ def publish(
                 _redact_fetch_token(f"repo={repo} branch={branch} read_grant_failed: {exc_msg}"),
                 approved=False,
             )
-            return finish_json({
+            return _publish_finish({
                 "status": "error",
                 "step": "fetch",
                 "error": f"Failed to open authorization grant for fetch: {exc_msg}",
@@ -2109,7 +2153,7 @@ def publish(
                 _redact_fetch_token(f"repo={repo} branch={branch} fetch_execution_failed: {exc_msg}"),
                 approved=False,
             )
-            return finish_json({
+            return _publish_finish({
                 "status": "error",
                 "step": "fetch",
                 "error": f"Failed to execute fetch: {exc_msg}",
@@ -2123,7 +2167,7 @@ def publish(
             )
             hints = push_failure_hints(outcome.network_off, outcome.token_missing)
             hint_str = " ".join(hints) if hints else "Ensure the remote is reachable and authorization is valid."
-            return finish_json({
+            return _publish_finish({
                 "status": "error",
                 "step": "fetch",
                 "error": f"git fetch origin failed (exit {outcome.exit_code}): {fetch_detail}",
@@ -2135,7 +2179,7 @@ def publish(
                 cid, "publish", "authorized_fetch_failed_unrecognized",
                 approved=False,
             )
-            return finish_json({
+            return _publish_finish({
                 "status": "error",
                 "step": "fetch",
                 "error": "Authorized fetch failed with an unrecognized failure.",
@@ -2157,7 +2201,7 @@ def publish(
                 f"branch={branch} ref={cut_parent_err.get('ref', '')}",
                 approved=False,
             )
-            return finish_json(cut_parent_err, verified)
+            return _publish_finish(cut_parent_err, verified)
 
         # --- Merge detection and auto-include (issue #712/#711) ---
         # When HEAD is a merge (a base merge was performed), capture the
@@ -2264,7 +2308,7 @@ def publish(
                     f"{guard_report.conflicts}",
                     approved=False,
                 )
-                return finish_json(
+                return _publish_finish(
                     _upstream_overwrite_error(
                         guard_base_ref,
                         guard_report.merge_base,
@@ -2316,7 +2360,7 @@ def publish(
             cut_from=cut_from,
             default_branch=host_default_branch)
         if commit_err:
-            return finish_json(commit_err, verified)
+            return _publish_finish(commit_err, verified)
 
         # --- Host-authorized cut-parent validation (#948) ---
         # The commit was cut from refs the container controls, and the
@@ -2352,7 +2396,7 @@ def publish(
                 f"branch={branch} ref={cut_parent_err.get('ref', '')}",
                 approved=False,
             )
-            return finish_json(cut_parent_err, verified)
+            return _publish_finish(cut_parent_err, verified)
 
         # Compute AC-4 set: paths the merge touched that are explained
         # by neither the manifest nor the base's auto-include.
@@ -2402,7 +2446,7 @@ def publish(
 
         # Reject if untracked files exist and caller didn't opt in
         if swept_untracked and not include_untracked:
-            return finish_json({
+            return _publish_finish({
                 "status": "error",
                 "step": "untracked_files",
                 "error": (
@@ -2422,7 +2466,7 @@ def publish(
             _run, branch=branch, message=message,
             author_name=author_name, author_email=author_email)
         if commit_err:
-            return finish_json(commit_err, verified)
+            return _publish_finish(commit_err, verified)
         # Legacy mode does not report worktree_leftover
         worktree_leftover = []
 
@@ -2474,7 +2518,7 @@ def publish(
             )
             has_override = check_override(cid)  # noqa: F821
             if not has_override:
-                return finish_json({
+                return _publish_finish({
                     "status": "error",
                     "step": "secret_scan",
                     "secret_scan": scan_result.get("secret_scan"),
@@ -2498,7 +2542,7 @@ def publish(
             f"repo={repo} branch={branch} token_resolution_failed",
             approved=False,
         )
-        return finish_json({
+        return _publish_finish({
             "status": "error",
             "step": "token_resolution",
             "error": "Failed to resolve VCS token: token provider error",
@@ -2537,7 +2581,7 @@ def publish(
                 record_crossing=_record_crossing,
             )
             if push_err_payload:
-                return finish_json(push_err_payload, verified)
+                return _publish_finish(push_err_payload, verified)
 
             # Push succeeded — consume the override flag now (not before,
             # so an override is never lost on retry after a push failure).
@@ -2554,7 +2598,7 @@ def publish(
         _record_crossing(
             f"repo={repo} branch={branch} proxy_auth_failed", False,
         )
-        return finish_json(
+        return _publish_finish(
             {"status": "error", "step": "proxy_auth", "error": str(exc)}, verified)
 
     pr_url: str | None = None
@@ -2569,7 +2613,7 @@ def publish(
                 f"repo={repo} branch={branch} sha={sha} pr_create_failed",
                 approved=True,
             )
-            return finish_json({
+            return _publish_finish({
                 "status": "pushed", "branch": branch, "sha": sha,
                 "pr_create_error": pr_create_error,
             }, verified)
@@ -2638,7 +2682,7 @@ def publish(
             "pushed only -- no PR was created. Pass create_pr=True to open "
             "one, or the branch may already have an open PR."
         )
-    return finish_json(result, verified)
+    return _publish_finish(result, verified)
 
 
 # ---------------------------------------------------------------------------

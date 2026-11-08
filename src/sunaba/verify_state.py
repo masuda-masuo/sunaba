@@ -16,6 +16,7 @@ separate hard prerequisite for verify and publish.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Any
@@ -28,6 +29,7 @@ _verify_map_lock: threading.Lock = threading.Lock()
 #: Per-container Python environment preparation for locked uv projects.
 _environment_state: dict[str, dict[str, Any]] = {}
 _environment_state_lock: threading.Lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 def _normalized_root(root: str | None) -> str:
@@ -109,6 +111,63 @@ def record_environment_state(
 
     if status != "ready":
         invalidate_verify_success(container_id)
+
+
+
+def forget_environment_state_for_root(
+    container_id: str,
+    root: str,
+    *,
+    reason: str = "no longer a uv project",
+) -> bool:
+    """Forget one normalized uv root without invalidating verify success."""
+    container_id = _state_container_id(container_id)
+    normalized = _normalized_root(root)
+    with _environment_state_lock:
+        records = _root_records(_environment_state.get(container_id))
+        if not records:
+            try:
+                from sunaba.environment_state_store import load_environment_state
+
+                stored = load_environment_state(container_id)
+                if isinstance(stored, dict) and isinstance(stored.get("roots"), dict):
+                    records = _root_records(stored["roots"])
+                elif isinstance(stored, dict):
+                    records = _root_records(stored)
+            except Exception:
+                records = {}
+        if normalized not in records:
+            return False
+        records.pop(normalized)
+        if records:
+            _environment_state[container_id] = records
+        else:
+            _environment_state.pop(container_id, None)
+
+    try:
+        if records:
+            from sunaba.environment_state_store import save_environment_states
+
+            save_environment_states(container_id, records)
+        else:
+            from sunaba.environment_state_store import remove_environment_state
+
+            remove_environment_state(container_id)
+    except Exception:
+        pass
+
+    logger.info(
+        "Forgot uv preparation record for %s at %s: %s",
+        container_id,
+        normalized,
+        reason,
+        extra={
+            "container_id": container_id,
+            "root": normalized,
+            "reason": reason,
+        },
+    )
+    return True
 
 
 def clear_environment_state(container_id: str, *, invalidate_verify: bool = False) -> None:

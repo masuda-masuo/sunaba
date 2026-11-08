@@ -6,6 +6,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -231,6 +233,56 @@ def test_restart_normalizes_root_keys_without_rewriting_state_files(
 
     assert set(_root_records({root: record})) == {normalized_root}
     assert set(_root_records(legacy_state)) == {normalized_root}
+
+
+def test_concurrent_root_records_persist_without_losing_either_root(
+    isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sunaba import environment_state_store
+
+    cid = "concurrent-root-record-container"
+    roots = ("/workspace/project-a", "/workspace/project-b")
+    start = threading.Barrier(3)
+    save_lock = threading.Lock()
+    save_count = 0
+    original_save = environment_state_store.save_environment_states
+
+    def slowed_first_save(container_id: str, records: dict[str, dict[str, Any]]) -> None:
+        nonlocal save_count
+        with save_lock:
+            save_count += 1
+            current_save = save_count
+        if current_save == 1:
+            time.sleep(0.1)
+        original_save(container_id, records)
+
+    monkeypatch.setattr(
+        environment_state_store, "save_environment_states", slowed_first_save
+    )
+    errors: list[BaseException] = []
+
+    def record_root(root: str) -> None:
+        try:
+            start.wait(timeout=5)
+            record_environment_state(cid, "ready", project_root=root)
+        except BaseException as exc:
+            errors.append(exc)
+
+    workers = [threading.Thread(target=record_root, args=(root,)) for root in roots]
+    for worker in workers:
+        worker.start()
+    start.wait(timeout=5)
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert not any(worker.is_alive() for worker in workers)
+    assert errors == []
+    expected_roots = set(roots)
+    assert set(list_environment_states(cid)) == expected_roots
+
+    persisted = load_environment_state(cid)
+    assert persisted is not None
+    assert set(persisted["roots"]) == expected_roots
 
 
 def test_latest_record_and_clear_cover_all_roots(isolated_state: Path) -> None:

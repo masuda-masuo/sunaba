@@ -103,11 +103,12 @@ def record_environment_state(
         records[root] = record
         _environment_state[container_id] = records
 
-    try:
-        from sunaba.environment_state_store import save_environment_states
-        save_environment_states(container_id, records)
-    except Exception:
-        pass
+        try:
+            from sunaba.environment_state_store import save_environment_states
+
+            save_environment_states(container_id, records)
+        except Exception:
+            pass
 
     if status != "ready":
         invalidate_verify_success(container_id)
@@ -144,17 +145,17 @@ def forget_environment_state_for_root(
         else:
             _environment_state.pop(container_id, None)
 
-    try:
-        if records:
-            from sunaba.environment_state_store import save_environment_states
+        try:
+            if records:
+                from sunaba.environment_state_store import save_environment_states
 
-            save_environment_states(container_id, records)
-        else:
-            from sunaba.environment_state_store import remove_environment_state
+                save_environment_states(container_id, records)
+            else:
+                from sunaba.environment_state_store import remove_environment_state
 
-            remove_environment_state(container_id)
-    except Exception:
-        pass
+                remove_environment_state(container_id)
+        except Exception:
+            pass
 
     logger.info(
         "Forgot uv preparation record for %s at %s: %s",

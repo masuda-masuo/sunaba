@@ -179,6 +179,60 @@ def test_old_single_record_file_loads_without_rewrite(
     assert json.loads(state_file.read_text(encoding="utf-8")) == original
 
 
+def test_restart_normalizes_root_keys_without_rewriting_state_files(
+    isolated_state: Path,
+) -> None:
+    root = "/workspace/"
+    normalized_root = "/workspace"
+    legacy_cid = "trailing-slash-legacy"
+    roots_cid = "trailing-slash-roots"
+    record = {
+        "status": "ready",
+        "reason": "",
+        "command": "uv sync --locked",
+        "exit_code": 0,
+        "project_root": root,
+        "fingerprint": {"root": root, "files": {"uv.lock": "old"}},
+    }
+    legacy_state = {"container_id": legacy_cid, **record}
+    roots_state = {"container_id": roots_cid, "roots": {root: record}}
+    legacy_file = isolated_state / f"{legacy_cid}.json"
+    roots_file = isolated_state / f"{roots_cid}.json"
+    legacy_file.write_text(json.dumps(legacy_state, indent=2), encoding="utf-8")
+    roots_file.write_text(json.dumps(roots_state, indent=2), encoding="utf-8")
+    legacy_bytes = legacy_file.read_bytes()
+    roots_bytes = roots_file.read_bytes()
+
+    class Containers:
+        def list(self, all: bool = True) -> list[Any]:
+            class LegacyContainer:
+                id = legacy_cid
+
+            class RootsContainer:
+                id = roots_cid
+
+            return [LegacyContainer(), RootsContainer()]
+
+    class Client:
+        containers = Containers()
+
+    prune_and_load_environment_states(Client())
+
+    for cid in (legacy_cid, roots_cid):
+        states = list_environment_states(cid)
+        assert set(states) == {normalized_root}
+        assert get_environment_state_for_root(cid, normalized_root) is not None
+        assert states[normalized_root]["project_root"] == root
+
+    assert legacy_file.read_bytes() == legacy_bytes
+    assert roots_file.read_bytes() == roots_bytes
+
+    from sunaba.verify_state import _root_records
+
+    assert set(_root_records({root: record})) == {normalized_root}
+    assert set(_root_records(legacy_state)) == {normalized_root}
+
+
 def test_latest_record_and_clear_cover_all_roots(isolated_state: Path) -> None:
     cid = "state-order-container"
     record_environment_state(cid, "ready", project_root="/workspace/a")

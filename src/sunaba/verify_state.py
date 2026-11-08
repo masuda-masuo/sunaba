@@ -46,7 +46,7 @@ def _root_records(value: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
         if not root and isinstance(fingerprint, dict):
             root = fingerprint.get("root")
         return {_normalized_root(root): record}
-    return {str(root): dict(record) for root, record in value.items() if isinstance(record, dict)}
+    return {_normalized_root(str(root)): dict(record) for root, record in value.items() if isinstance(record, dict)}
 
 
 def _state_container_id(container_id: str) -> str:

@@ -332,13 +332,17 @@ def prune_and_load_environment_states(client: Any = None) -> dict[str, dict[str,
         except Exception:
             loaded[cid] = {"status": "not_prepared", "reason": "corrupt environment state store"}
 
-    from sunaba.verify_state import _environment_state, _environment_state_lock
+    from sunaba.verify_state import (
+        _environment_state,
+        _environment_state_lock,
+        _normalized_root,
+    )
 
     with _environment_state_lock:
         for cid, value in loaded.items():
             if isinstance(value, dict) and isinstance(value.get("roots"), dict):
                 records = {
-                    str(root): dict(record)
+                    _normalized_root(str(root)): dict(record)
                     for root, record in value["roots"].items()
                     if isinstance(record, dict)
                 }
@@ -348,7 +352,7 @@ def prune_and_load_environment_states(client: Any = None) -> dict[str, dict[str,
                 fingerprint = record.get("fingerprint")
                 if not root and isinstance(fingerprint, dict):
                     root = fingerprint.get("root")
-                records = {str(root or ""): record}
+                records = {_normalized_root(root): record}
             _environment_state[cid] = records
             loaded[cid] = dict(next(reversed(records.values()))) if records else {
                 "status": "not_prepared", "reason": "corrupt environment state store"

@@ -997,14 +997,6 @@ def _verify_in_container_guarded(
                     reason=f"root now resolves to {os.path.normpath(uv_root)}",
                 )
                 records = list_environment_states(full_cid)
-        elif direct_record is not None and not directory_probe_failed and not uv_project:
-            forget_environment_state_for_root(
-                full_cid,
-                normalized_working_dir,
-                reason="root no longer resolves as a uv project",
-            )
-            records = list_environment_states(full_cid)
-
 
     except Exception as exc:
         invalidate_verify_success(full_cid)

@@ -466,7 +466,7 @@ def test_forget_environment_state_for_root_preserves_other_record_and_removes_la
     assert forget_environment_state_for_root(cid, root_b) is False
 
 
-def test_publish_forgets_uv_root_when_its_lock_disappears(
+def test_publish_blocks_when_recorded_root_loses_uv_lock(
     tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root_a = tmp_path / "project-a"
@@ -496,11 +496,53 @@ def test_publish_forgets_uv_root_when_its_lock_disappears(
     result = json.loads(
         publish(container.id, "owner/repo", "feature", "message", skip_verify_gate=False)
     )
+    assert result["step"] == "verify_gate"
+    assert str(root_b) in result["error"]
+    assert "stale" in result["error"]
+    assert "uv.lock" in result["error"]
+    assert str(root_b) in list_environment_states(container.id)
+
+
+def test_publish_forgets_root_that_resolves_to_a_different_workspace_root(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    root_b = workspace / "project-b"
+    _make_locked_project(root_b, "project-b")
+    container = LocalExecContainer(tmp_path)
+    fingerprint_b = compute_manifest_fingerprint(container, str(root_b))
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint_b, project_root=str(root_b)
+    )
+    record_verify_success(container.id)
+
+    (root_b / "uv.lock").unlink()
+    (workspace / "pyproject.toml").write_text(
+        '[tool.uv.workspace]\nmembers = ["project-b"]\n', encoding="utf-8"
+    )
+    subprocess.run(["uv", "lock"], cwd=workspace, check=True, capture_output=True)
+
+    from sunaba.environment import resolve_uv_root
+
+    assert resolve_uv_root(container, str(root_b)) == str(workspace)
+
+    class Containers:
+        def get(self, container_id: str) -> LocalExecContainer:
+            return container
+
+    monkeypatch.setattr(
+        "sunaba.tools.vcs.publishing._docker",
+        lambda: SimpleNamespace(containers=Containers()),
+    )
+    result = json.loads(
+        publish(container.id, "owner/repo", "feature", "message", skip_verify_gate=False)
+    )
     assert result.get("step") != "verify_gate"
     assert str(root_b) not in list_environment_states(container.id)
-    assert result["environment_notes"] == [
-        f"forgot uv preparation record for {root_b}: root no longer resolves as a uv project"
-    ]
+    assert (
+        f"forgot uv preparation record for {root_b}: root now resolves to {workspace}"
+        in result["environment_notes"]
+    )
 
 
 def test_publish_probe_failure_preserves_root_record_and_blocks(

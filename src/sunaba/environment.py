@@ -165,10 +165,8 @@ def recorded_root_is_uv_project(container: Any, root: str) -> tuple[bool, str]:
     if not probe_directory_exists(container, root):
         return False, "directory no longer exists"
     resolved = resolve_uv_root(container, root)
-    if resolved is None:
-        return False, "root no longer resolves as a uv project"
     normalized_root = os.path.normpath(root)
-    if os.path.normpath(resolved) != normalized_root:
+    if resolved is not None and os.path.normpath(resolved) != normalized_root:
         return False, f"root now resolves to {os.path.normpath(resolved)}"
     return True, ""
 

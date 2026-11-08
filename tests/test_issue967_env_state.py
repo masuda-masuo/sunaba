@@ -16,7 +16,7 @@ from sunaba.environment_state_store import (
     load_environment_state,
     prune_and_load_environment_states,
     remove_environment_state,
-    save_environment_state,
+    save_environment_states,
 )
 from sunaba.tools.vcs.publishing import publish
 from sunaba.tools.verify import verify_in_container
@@ -398,8 +398,8 @@ def test_startup_prunes_records_for_dead_containers(isolated_state: Path) -> Non
     alive_cid = "alive_container_id_111111111111"
     dead_cid = "dead_container_id_222222222222"
 
-    save_environment_state(alive_cid, {"status": "ready", "command": "uv sync"})
-    save_environment_state(dead_cid, {"status": "ready", "command": "uv sync"})
+    save_environment_states(alive_cid, {"": {"status": "ready", "command": "uv sync"}})
+    save_environment_states(dead_cid, {"": {"status": "ready", "command": "uv sync"}})
 
     assert (isolated_state / f"{alive_cid}.json").exists()
     assert (isolated_state / f"{dead_cid}.json").exists()
@@ -844,7 +844,7 @@ def test_environment_store_failures_are_logged_and_do_not_raise(
     import sunaba.environment_state_store as store
 
     with patch.object(store.os, "replace", side_effect=OSError("replace denied")):
-        save_environment_state("save_failure", {"status": "ready"})
+        save_environment_states("save_failure", {"": {"status": "ready"}})
     assert "Could not save environment state" in caplog.text
 
     store_file = isolated_state / "remove_failure.json"

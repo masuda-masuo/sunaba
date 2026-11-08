@@ -187,32 +187,6 @@ def save_environment_states(
     _write_environment_store(container_id, {"roots": records})
 
 
-def save_environment_state(container_id: str, record: dict[str, Any]) -> None:
-    """Atomically persist or merge a legacy single preparation record."""
-    current = load_environment_state(container_id)
-    records: dict[str, dict[str, Any]] = {}
-    if isinstance(current, dict) and isinstance(current.get("roots"), dict):
-        records = {
-            str(root): dict(value)
-            for root, value in current["roots"].items()
-            if isinstance(value, dict)
-        }
-    elif isinstance(current, dict) and "status" in current:
-        old_root = current.get("project_root")
-        fingerprint = current.get("fingerprint")
-        if not old_root and isinstance(fingerprint, dict):
-            old_root = fingerprint.get("root")
-        records[str(old_root or "")] = current
-    new_root = record.get("project_root")
-    fingerprint = record.get("fingerprint")
-    if not new_root and isinstance(fingerprint, dict):
-        new_root = fingerprint.get("root")
-    root = str(new_root or "")
-    records.pop(root, None)
-    records[root] = dict(record)
-    _write_environment_store(container_id, {"roots": records})
-
-
 def _write_environment_store(container_id: str, state: dict[str, Any]) -> None:
     temp_path: str | None = None
     try:

@@ -145,6 +145,26 @@ def _reset_capture_guard() -> None:
     capture_health.reset()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate tests from inherited proxy-control environment (#984, #987).
+
+    When ``SUNABA_PROXY_CONTROL_URL`` or ``SUNABA_PROXY_CONTROL_SECRET`` are
+    set in the host environment, tests inadvertently treat the egress proxy
+    as configured and fail attempting to reach an unconfigured or unreachable
+    control API.  Clearing them ensures each test begins with proxy control
+    unconfigured while preserving explicit ``monkeypatch.setenv`` calls in tests.
+    """
+    from sunaba.proxy_client import CONTROL_SECRET_ENV, CONTROL_URL_ENV
+    from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
+
+    # monkeypatch restores original state at teardown even if product code
+    # assigns those variables to os.environ during test.
+    monkeypatch.delenv(CONTROL_URL_ENV, raising=False)
+    monkeypatch.delenv(CONTROL_SECRET_ENV, raising=False)
+    monkeypatch.delenv(ENABLE_EGRESS_PROXY_ENV, raising=False)
+
+
 # -------------------------------------------------------------------
 # Shared helpers for VCS tool tests
 # -------------------------------------------------------------------

@@ -632,3 +632,54 @@ def test_publish_probe_failure_preserves_root_record_and_blocks(
     assert result["step"] == "verify_gate"
     assert "failed" in result["error"]
     assert list_environment_states(container.id)[str(root)]["status"] == "ready"
+
+
+def test_forgotten_root_notes_are_attached_to_later_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "project"
+    _make_locked_project(root, "project")
+    container = LocalExecContainer(tmp_path)
+    fingerprint = compute_manifest_fingerprint(container, str(root))
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    record_verify_success(container.id)
+    shutil.rmtree(root)
+
+    class Containers:
+        def get(self, container_id: str) -> LocalExecContainer:
+            return container
+
+    monkeypatch.setattr(
+        "sunaba.tools.vcs.publishing._docker",
+        lambda: SimpleNamespace(containers=Containers()),
+    )
+    result = json.loads(
+        publish(
+            container.id,
+            "owner/repo",
+            "feature",
+            "message",
+            create_pr=True,
+            pr_title="Feature",
+            pr_body="",
+            skip_verify_gate=False,
+        )
+    )
+
+    assert result["status"] == "error"
+    assert result["step"] == "validation"
+    assert "pr_body" in result["error"]
+    assert (
+        f"forgot uv preparation record for {root}: directory no longer exists"
+        in result["environment_notes"]
+    )
+
+
+def test_publish_tool_description_documents_public_arguments() -> None:
+    description = publish.__doc__ or ""
+
+    assert "create_pr:" in description
+    assert "files:" in description
+    assert len(description.splitlines()) > 1

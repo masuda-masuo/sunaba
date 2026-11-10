@@ -180,17 +180,21 @@ def _find_state_file(state_dir: Path, container_id: str) -> Path | None:
     return None
 
 
-def save_environment_state(container_id: str, record: dict[str, Any]) -> None:
-    """Atomically persist environment state for full container_id to disk."""
+def save_environment_states(
+    container_id: str, records: dict[str, dict[str, Any]]
+) -> None:
+    """Atomically persist all preparation records for one container."""
+    _write_environment_store(container_id, {"roots": records})
+
+
+def _write_environment_store(container_id: str, state: dict[str, Any]) -> None:
     temp_path: str | None = None
     try:
         state_dir = get_environment_state_dir()
         state_dir.mkdir(parents=True, exist_ok=True)
         target_path = state_dir / f"{container_id}.json"
-
-        data = dict(record)
+        data = dict(state)
         data["container_id"] = container_id
-
         payload = json.dumps(data, indent=2).encode("utf-8")
         fd, temp_path = tempfile.mkstemp(
             dir=state_dir, prefix=f".{container_id}.", suffix=".tmp"
@@ -302,10 +306,30 @@ def prune_and_load_environment_states(client: Any = None) -> dict[str, dict[str,
         except Exception:
             loaded[cid] = {"status": "not_prepared", "reason": "corrupt environment state store"}
 
-    from sunaba.verify_state import _environment_state, _environment_state_lock
+    from sunaba.verify_state import (
+        _environment_state,
+        _environment_state_lock,
+        _normalized_root,
+    )
 
     with _environment_state_lock:
-        for cid, record in loaded.items():
-            _environment_state[cid] = record
+        for cid, value in loaded.items():
+            if isinstance(value, dict) and isinstance(value.get("roots"), dict):
+                records = {
+                    _normalized_root(str(root)): dict(record)
+                    for root, record in value["roots"].items()
+                    if isinstance(record, dict)
+                }
+            else:
+                record = dict(value)
+                root = record.get("project_root")
+                fingerprint = record.get("fingerprint")
+                if not root and isinstance(fingerprint, dict):
+                    root = fingerprint.get("root")
+                records = {_normalized_root(root): record}
+            _environment_state[cid] = records
+            loaded[cid] = dict(next(reversed(records.values()))) if records else {
+                "status": "not_prepared", "reason": "corrupt environment state store"
+            }
 
     return loaded

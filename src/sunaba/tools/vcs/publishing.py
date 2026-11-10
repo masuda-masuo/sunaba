@@ -3,6 +3,7 @@
 from __future__ import annotations  # noqa: I001
 
 import base64
+import inspect
 import json
 import logging
 import os
@@ -1809,6 +1810,59 @@ def publish(
     Returns:
         JSON with the operation result.
     """
+    environment_notes: list[str] = []
+    result = _publish_impl(
+        container_id,
+        repo,
+        branch,
+        message,
+        working_dir=working_dir,
+        create_pr=create_pr,
+        pr_title=pr_title,
+        pr_body=pr_body,
+        base_branch=base_branch,
+        allow_force_push=allow_force_push,
+        author_name=author_name,
+        author_email=author_email,
+        skip_verify_gate=skip_verify_gate,
+        files=files,
+        include_untracked=include_untracked,
+        allow_upstream_overwrite=allow_upstream_overwrite,
+        environment_notes=environment_notes,
+    )
+    if not environment_notes:
+        return result
+    payload = json.loads(result)
+    if isinstance(payload, dict):
+        payload["environment_notes"] = environment_notes
+        return json.dumps(payload)
+    return result
+
+
+publish.__doc__ = inspect.cleandoc(publish.__doc__ or "")
+
+
+def _publish_impl(
+    container_id: str,
+    repo: str,
+    branch: str,
+    message: str,
+    working_dir: str | None = None,
+    create_pr: bool = False,
+    pr_title: str = "",
+    pr_body: str = "",
+    base_branch: str = "",
+    allow_force_push: bool = False,
+    author_name: str | None = None,
+    author_email: str | None = None,
+    skip_verify_gate: bool = False,
+    files: list[str] | None = None,
+    include_untracked: bool = False,
+    allow_upstream_overwrite: bool = False,
+    *,
+    environment_notes: list[str],
+) -> str:
+    """Implementation of publish(); environment notes are attached by the caller."""
     client = _docker()
     try:
         container = client.containers.get(container_id)
@@ -1823,36 +1877,76 @@ def publish(
 
     verified = has_verify_success(cid)
     if not skip_verify_gate:
-        from sunaba.verify_state import get_environment_state
+        from sunaba.verify_state import list_environment_states
 
-        environment_state = get_environment_state(full_cid)
-        if environment_state is not None:
-            state_name = environment_state.get("status") or "not_prepared"
-            reason = environment_state.get("reason") or "preparation state missing"
-            if state_name == "ready":
-                from sunaba.environment import check_recorded_environment_staleness
+        environment_states = list_environment_states(full_cid)
+        if environment_states:
+            from sunaba.environment import (
+                check_recorded_environment_staleness,
+                recorded_root_is_uv_project,
+            )
+            from sunaba.verify_state import forget_environment_state_for_root
 
-                state_name, stale_reason = check_recorded_environment_staleness(
-                    container, environment_state
+            blocked: list[str] = []
+            for root, environment_state in environment_states.items():
+                state_name = environment_state.get("status") or "not_prepared"
+                reason = environment_state.get("reason") or "preparation state missing"
+                recorded_root = (
+                    environment_state.get("project_root")
+                    or (environment_state.get("fingerprint") or {}).get("root")
+                    or root
                 )
-                if stale_reason is not None:
-                    reason = stale_reason
-            if state_name != "ready":
+                if recorded_root:
+                    forget_reason = ""
+                    try:
+                        still_uv, forget_reason = recorded_root_is_uv_project(
+                            container, recorded_root
+                        )
+                    except Exception as exc:
+                        still_uv = True
+                        state_name = "failed"
+                        reason = f"uv root probe failed: {str(exc)[:200]}"
+                    if not still_uv:
+                        if forget_environment_state_for_root(
+                            full_cid, recorded_root, reason=forget_reason
+                        ):
+                            environment_notes.append(
+                                f"forgot uv preparation record for {recorded_root}: {forget_reason}"
+                            )
+                        continue
+                if state_name == "ready":
+                    state_name, stale_reason = check_recorded_environment_staleness(
+                        container, environment_state
+                    )
+                    if stale_reason is not None:
+                        reason = stale_reason
+                if state_name != "ready":
+                    display_root = root or environment_state.get("project_root")
+                    if display_root:
+                        blocked.append(f"{display_root}: {state_name}: {reason}")
+                    else:
+                        blocked.append(f"uv environment is {state_name}: {reason}")
+            if blocked:
                 return json.dumps({
                     "status": "error",
                     "step": "verify_gate",
                     "error": (
-                        "publish refused: no successful verify_in_container; "
-                        f"uv environment is {state_name}: {reason}"
+                        "publish refused: "
+                        + (
+                            "no successful verify_in_container; "
+                            if not verified
+                            else ""
+                        )
+                        + "; ".join(blocked)
                     ),
                 })
     gate_err = verify_gate_error(verified, skip_verify_gate)
     if gate_err:
-        return json.dumps(gate_err)
+        return finish_json(gate_err, verified)
 
     body_err = pr_body_validation_error(create_pr, pr_body)
     if body_err:
-        return json.dumps(body_err)
+        return finish_json(body_err, verified)
 
     def _run(cmd, env=None):
         full_cmd = f"cd {shlex.quote(working_dir)} && {cmd}"

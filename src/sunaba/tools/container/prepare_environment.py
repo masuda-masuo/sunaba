@@ -50,15 +50,16 @@ def _is_container_network_enabled(container: Any) -> bool:
 def sandbox_prepare_environment(
     container_id: str,
     recreate: bool = False,
+    working_dir: str | None = None,
 ) -> str:
-    """Prepare or update a locked uv Python environment in the container.
+    """Prepare a locked uv Python environment in the container.
 
-    Recovers a stale environment (when pyproject.toml, uv.lock, or
-    .python-version changed) back to 'ready' without recreating the container.
+    Re-syncs stale dependencies without recreating the container.
 
     Args:
-        container_id: Container ID.
+        container_id: ID.
         recreate: Wipe .venv.
+        working_dir: Project path.
 
     Returns:
         JSON string with preparation status and details.
@@ -88,10 +89,11 @@ def sandbox_prepare_environment(
 
         full_cid = str(getattr(container, "id", container_id))
 
-        # Target only the recorded project_root (or the clone root when none is recorded)
+        # Explicit working_dir selects its containing uv root. Otherwise
+        # recover the most recently prepared root, then fall back to git root.
         state = get_environment_state(full_cid) or get_environment_state(container_id)
-        project_root: str | None = None
-        if state:
+        project_root: str | None = working_dir
+        if project_root is None and state:
             project_root = state.get("project_root")
             if not project_root:
                 recorded_fp = state.get("fingerprint")

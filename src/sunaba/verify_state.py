@@ -16,6 +16,8 @@ separate hard prerequisite for verify and publish.
 
 from __future__ import annotations
 
+import logging
+import os
 import threading
 from typing import Any
 
@@ -27,6 +29,33 @@ _verify_map_lock: threading.Lock = threading.Lock()
 #: Per-container Python environment preparation for locked uv projects.
 _environment_state: dict[str, dict[str, Any]] = {}
 _environment_state_lock: threading.Lock = threading.Lock()
+logger = logging.getLogger(__name__)
+
+
+def _normalized_root(root: str | None) -> str:
+    return os.path.normpath(root) if root else ""
+
+
+def _root_records(value: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not value:
+        return {}
+    if "status" in value:
+        record = dict(value)
+        root = record.get("project_root")
+        fingerprint = record.get("fingerprint")
+        if not root and isinstance(fingerprint, dict):
+            root = fingerprint.get("root")
+        return {_normalized_root(root): record}
+    return {_normalized_root(str(root)): dict(record) for root, record in value.items() if isinstance(record, dict)}
+
+
+def _state_container_id(container_id: str) -> str:
+    try:
+        from sunaba.tools.common import _docker
+        container = _docker().containers.get(container_id)
+        return str(container.id)
+    except Exception:
+        return container_id
 
 
 def record_environment_state(
@@ -39,19 +68,23 @@ def record_environment_state(
     fingerprint: dict[str, Any] | None = None,
     project_root: str | None = None,
 ) -> None:
-    """Record uv preparation state and invalidate verify on failure."""
+    """Record preparation state for one uv root and invalidate verify on failure."""
     if status not in {"not_prepared", "ready", "failed"}:
         raise ValueError(f"invalid environment state: {status}")
-    try:
-        from sunaba.tools.common import _docker
+    container_id = _state_container_id(container_id)
+    fingerprint_root = (fingerprint or {}).get("root")
 
-        client = _docker()
-        container = client.containers.get(container_id)
-        container_id = str(container.id)
-    except Exception:
-        pass
-    key = container_id
     with _environment_state_lock:
+        records = _root_records(_environment_state.get(container_id))
+        requested_root = project_root or fingerprint_root
+        if requested_root:
+            root = _normalized_root(requested_root)
+        elif len(records) == 1:
+            root = next(iter(records))
+        elif records:
+            root = next(reversed(records))
+        else:
+            root = ""
         record: dict[str, Any] = {
             "status": status,
             "reason": reason[:240],
@@ -60,36 +93,91 @@ def record_environment_state(
         }
         if fingerprint is not None:
             record["fingerprint"] = fingerprint
-        if project_root is not None:
-            record["project_root"] = project_root
-        _environment_state[key] = record
+        if project_root is not None or fingerprint_root:
+            record["project_root"] = root
+        elif root:
+            # Keep the root identity when compatibility callers update the
+            # single container record without supplying project_root.
+            record["project_root"] = root
+        records.pop(root, None)
+        records[root] = record
+        _environment_state[container_id] = records
 
-    try:
-        from sunaba.environment_state_store import save_environment_state
+        try:
+            from sunaba.environment_state_store import save_environment_states
 
-        save_environment_state(container_id, record)
-    except Exception:
-        pass
+            save_environment_states(container_id, records)
+        except Exception:
+            pass
 
     if status != "ready":
         invalidate_verify_success(container_id)
 
 
-def clear_environment_state(container_id: str, *, invalidate_verify: bool = False) -> None:
-    """Forget stale uv preparation after a confirmed transition to a non-uv root."""
-    try:
-        from sunaba.tools.common import _docker
 
-        client = _docker()
-        container = client.containers.get(container_id)
-        container_id = str(container.id)
-    except Exception:
-        pass
+def forget_environment_state_for_root(
+    container_id: str,
+    root: str,
+    *,
+    reason: str = "no longer a uv project",
+) -> bool:
+    """Forget one normalized uv root without invalidating verify success."""
+    container_id = _state_container_id(container_id)
+    normalized = _normalized_root(root)
+    with _environment_state_lock:
+        records = _root_records(_environment_state.get(container_id))
+        if not records:
+            try:
+                from sunaba.environment_state_store import load_environment_state
+
+                stored = load_environment_state(container_id)
+                if isinstance(stored, dict) and isinstance(stored.get("roots"), dict):
+                    records = _root_records(stored["roots"])
+                elif isinstance(stored, dict):
+                    records = _root_records(stored)
+            except Exception:
+                records = {}
+        if normalized not in records:
+            return False
+        records.pop(normalized)
+        if records:
+            _environment_state[container_id] = records
+        else:
+            _environment_state.pop(container_id, None)
+
+        try:
+            if records:
+                from sunaba.environment_state_store import save_environment_states
+
+                save_environment_states(container_id, records)
+            else:
+                from sunaba.environment_state_store import remove_environment_state
+
+                remove_environment_state(container_id)
+        except Exception:
+            pass
+
+    logger.info(
+        "Forgot uv preparation record for %s at %s: %s",
+        container_id,
+        normalized,
+        reason,
+        extra={
+            "container_id": container_id,
+            "root": normalized,
+            "reason": reason,
+        },
+    )
+    return True
+
+
+def clear_environment_state(container_id: str, *, invalidate_verify: bool = False) -> None:
+    """Forget all uv preparation records after a confirmed transition to non-uv."""
+    container_id = _state_container_id(container_id)
     with _environment_state_lock:
         _environment_state.pop(container_id, None)
     try:
         from sunaba.environment_state_store import remove_environment_state
-
         remove_environment_state(container_id)
     except Exception:
         pass
@@ -97,11 +185,28 @@ def clear_environment_state(container_id: str, *, invalidate_verify: bool = Fals
         invalidate_verify_success(container_id)
 
 
-def get_environment_state(container_id: str) -> dict[str, Any] | None:
-    """Return a copy of preparation state, or None when never recorded."""
+def list_environment_states(container_id: str) -> dict[str, dict[str, Any]]:
+    """Return a copy of all preparation records keyed by normalized uv root."""
     with _environment_state_lock:
-        value = _environment_state.get(container_id)
-        return dict(value) if value is not None else None
+        records = _root_records(_environment_state.get(container_id))
+    return records
+
+
+def get_environment_state_for_root(container_id: str, root: str) -> dict[str, Any] | None:
+    """Return the preparation record for one normalized uv root."""
+    normalized = _normalized_root(root)
+    records = list_environment_states(container_id)
+    value = records.get(normalized)
+    return dict(value) if value is not None else None
+
+
+def get_environment_state(container_id: str) -> dict[str, Any] | None:
+    """Return the most recently recorded preparation state, if any."""
+    records = list_environment_states(container_id)
+    if not records:
+        return None
+    return dict(next(reversed(records.values())))
+
 
 def invalidate_verify_success(container_id: str) -> None:
     """Forget a previous verify success after environment preparation fails."""

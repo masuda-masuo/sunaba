@@ -1868,3 +1868,359 @@ def test_metadata_startup_eligibility_fails_closed_on_clock_or_protocol_mismatch
         assert not any("uv workspace metadata" in c for c in real_container.exec_calls)
     finally:
         _kill_token_processes(token)
+
+
+def _build_recording_passthrough_uv_bin(
+    bin_dir: Path,
+    *,
+    started_file: Path,
+) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for tool in ("sh", "tr", "cat", "sleep", "env", "find", "git", "echo"):
+        found = shutil.which(tool)
+        if found:
+            (bin_dir / tool).symlink_to(found)
+    real_uv = shutil.which("uv")
+    assert real_uv is not None
+    orig_path = os.environ.get("PATH", "")
+    uv_script = bin_dir / "uv"
+    uv_script.write_text(
+        f"""#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "metadata" ]; then
+    printf 'started\\n' >> '{started_file}'
+fi
+PATH='{orig_path}' exec '{real_uv}' "$@"
+""",
+        encoding="utf-8",
+    )
+    uv_script.chmod(0o755)
+
+
+class _ClockDomainOverrideContainer(LocalWorkspaceContainer):
+    """Container adapter substituting /proc clock-domain files in metadata commands."""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        cid: str,
+        path_override: str,
+        boot_id_path: Path | None = None,
+        timens_offsets_path: Path | None = None,
+        uptime_path: Path | None = None,
+    ) -> None:
+        super().__init__(root, cid=cid, path_override=path_override)
+        self.boot_id_path = str(boot_id_path) if boot_id_path is not None else None
+        self.timens_offsets_path = (
+            str(timens_offsets_path) if timens_offsets_path is not None else None
+        )
+        self.uptime_path = str(uptime_path) if uptime_path is not None else None
+
+    def exec_run(
+        self,
+        cmd: list[str] | str,
+        stdout: bool = True,
+        stderr: bool = True,
+        demux: bool = True,
+        environment: dict[str, str] | None = None,
+        workdir: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        if isinstance(cmd, (list, tuple)) and cmd and isinstance(cmd[-1], str):
+            script = cmd[-1]
+            if self.boot_id_path is not None:
+                script = script.replace(
+                    "/proc/sys/kernel/random/boot_id", self.boot_id_path
+                )
+            if self.timens_offsets_path is not None:
+                script = script.replace(
+                    "/proc/self/timens_offsets", self.timens_offsets_path
+                )
+            if self.uptime_path is not None:
+                script = script.replace("/proc/uptime", self.uptime_path)
+            cmd = [*cmd[:-1], script]
+        return super().exec_run(
+            cmd,
+            stdout=stdout,
+            stderr=stderr,
+            demux=demux,
+            environment=environment,
+            workdir=workdir,
+            **kwargs,
+        )
+
+
+def test_distinct_clock_origin_inside_numeric_uptime_window_fails_before_uv(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test-first regression: matching numeric uptime across distinct clock domains must fail closed."""
+    ws_dir, pkg_a, _, _ = _make_workspace(tmp_path, name="distinct-clock-origin")
+    prep_container = LocalWorkspaceContainer(ws_dir, cid="distinct-clock-cid")
+    _prepare_and_verify_context(monkeypatch, prep_container)
+    assert (
+        json.loads(sandbox_prepare_environment(prep_container.id, working_dir=str(ws_dir)))[
+            "status"
+        ]
+        == "ok"
+    )
+    record_verify_success(prep_container.id)
+
+    bin_dir = tmp_path / "clock-origin-bin"
+    started_file = tmp_path / "uv_started"
+    _build_recording_passthrough_uv_bin(bin_dir, started_file=started_file)
+
+    host_boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    distinct_boot_id = (
+        "00000000-0000-4000-8000-000000000001"
+        if host_boot_id != "00000000-0000-4000-8000-000000000001"
+        else "00000000-0000-4000-8000-000000000002"
+    )
+    host_timens = Path("/proc/self/timens_offsets").read_text(encoding="utf-8")
+
+    now_cs = time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 10_000_000
+    in_window_uptime = tmp_path / "in_window_uptime"
+    in_window_uptime.write_text(f"{(now_cs + 150) / 100:.2f} 0.00\n", encoding="utf-8")
+
+    lock_before = (ws_dir / "uv.lock").read_bytes()
+    state_file = isolated_env / f"{prep_container.id}.json"
+    state_bytes_before = state_file.read_bytes()
+
+    # 1. Remote/independently-booted Docker host (distinct boot_id) with coincidentally
+    #    in-window numeric /proc/uptime must fail closed before invoking uv.
+    remote_boot_id_file = tmp_path / "remote_boot_id"
+    remote_boot_id_file.write_text(f"{distinct_boot_id}\n", encoding="utf-8")
+    same_timens_file = tmp_path / "same_timens"
+    same_timens_file.write_text(host_timens, encoding="utf-8")
+
+    remote_container = _ClockDomainOverrideContainer(
+        ws_dir,
+        cid=prep_container.id,
+        path_override=str(bin_dir),
+        boot_id_path=remote_boot_id_file,
+        timens_offsets_path=same_timens_file,
+        uptime_path=in_window_uptime,
+    )
+    _prepare_and_verify_context(monkeypatch, remote_container)
+    monkeypatch.setenv("SUNABA_UV_METADATA_TIMEOUT", "15.0")
+
+    with pytest.raises(FingerprintProbeError, match="boot_id|clock domain"):
+        compute_manifest_fingerprint(remote_container, str(ws_dir))
+    assert not started_file.exists(), "uv must not start on distinct boot_id clock domain"
+
+    verify_remote = json.loads(
+        verify_in_container(
+            remote_container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
+    )
+    assert verify_remote["status"] == "environment_setup_failed"
+    assert verify_remote["gate_passed"] is False
+    assert "boot_id" in verify_remote["environment_setup"]["reason"]
+    assert has_verify_success(remote_container.id) is False
+    assert not started_file.exists()
+    assert state_file.read_bytes() == state_bytes_before
+    assert (ws_dir / "uv.lock").read_bytes() == lock_before
+
+    # 2. Same kernel boot_id, different time-namespace boottime offset, but numeric
+    #    uptime still inside [issued, cutoff) must fail closed before invoking uv.
+    record_verify_success(prep_container.id)
+    same_boot_id_file = tmp_path / "same_boot_id"
+    same_boot_id_file.write_text(f"{host_boot_id}\n", encoding="utf-8")
+    shifted_timens_file = tmp_path / "shifted_timens"
+    shifted_timens_file.write_text(
+        "monotonic           0         0\nboottime         3600         0\n",
+        encoding="utf-8",
+    )
+
+    timens_container = _ClockDomainOverrideContainer(
+        ws_dir,
+        cid=prep_container.id,
+        path_override=str(bin_dir),
+        boot_id_path=same_boot_id_file,
+        timens_offsets_path=shifted_timens_file,
+        uptime_path=in_window_uptime,
+    )
+    _prepare_and_verify_context(monkeypatch, timens_container)
+
+    with pytest.raises(FingerprintProbeError, match="time-namespace|boottime offset"):
+        compute_manifest_fingerprint(timens_container, str(ws_dir))
+    assert not started_file.exists(), "uv must not start on mismatched time-namespace boottime offset"
+
+    verify_timens = json.loads(
+        verify_in_container(
+            timens_container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
+    )
+    assert verify_timens["status"] == "environment_setup_failed"
+    assert verify_timens["gate_passed"] is False
+    assert "boottime offset" in verify_timens["environment_setup"]["reason"]
+    assert has_verify_success(timens_container.id) is False
+    assert not started_file.exists()
+    assert state_file.read_bytes() == state_bytes_before
+    assert (ws_dir / "uv.lock").read_bytes() == lock_before
+
+
+def test_clock_domain_validation_compatible_and_unverifiable_layouts(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir, _, _, _ = _make_workspace(tmp_path, name="clock-domain-matrix")
+    bin_dir = tmp_path / "matrix-bin"
+    started_file = tmp_path / "uv_started"
+    _build_recording_passthrough_uv_bin(bin_dir, started_file=started_file)
+
+    host_boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    same_boot_id_file = tmp_path / "same_boot_id"
+    same_boot_id_file.write_text(f"{host_boot_id}\n", encoding="utf-8")
+
+    # 1. Compatible local clock: same boot_id and equivalent boottime offset
+    #    (even when monotonic offset differs) succeeds and computes members.
+    diff_monotonic_timens = tmp_path / "diff_monotonic_timens"
+    diff_monotonic_timens.write_text(
+        "monotonic         123   456000000\nboottime            0         0\n",
+        encoding="utf-8",
+    )
+    compat_container = _ClockDomainOverrideContainer(
+        ws_dir,
+        cid="compat-cid",
+        path_override=str(bin_dir),
+        boot_id_path=same_boot_id_file,
+        timens_offsets_path=diff_monotonic_timens,
+    )
+    fp = compute_manifest_fingerprint(compat_container, str(ws_dir))
+    assert "members" in fp
+    assert started_file.exists()
+    started_file.unlink()
+
+    # 2. Compatible non-zero matching boottime offset across host and container
+    now_cs = time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 10_000_000
+    in_window_uptime = tmp_path / "in_window_uptime"
+    in_window_uptime.write_text(f"{(now_cs + 150) / 100:.2f} 0.00\n", encoding="utf-8")
+    host_nonzero_timens = tmp_path / "host_nonzero_timens"
+    host_nonzero_timens.write_text(
+        "monotonic           0         0\nboottime          -12 500000000\n",
+        encoding="utf-8",
+    )
+    container_nonzero_timens = tmp_path / "container_nonzero_timens"
+    container_nonzero_timens.write_text(
+        "monotonic           0         0\nboottime         -012 0500000000",
+        encoding="utf-8",
+    )
+    with monkeypatch.context() as m:
+        m.setattr(
+            "sunaba.environment_state_store._PROC_TIMENS_OFFSETS_PATH",
+            str(host_nonzero_timens),
+        )
+        nonzero_container = _ClockDomainOverrideContainer(
+            ws_dir,
+            cid="nonzero-cid",
+            path_override=str(bin_dir),
+            boot_id_path=same_boot_id_file,
+            timens_offsets_path=container_nonzero_timens,
+            uptime_path=in_window_uptime,
+        )
+        fp_nz = compute_manifest_fingerprint(nonzero_container, str(ws_dir))
+        assert "members" in fp_nz
+        assert started_file.exists()
+    started_file.unlink()
+
+    # 3. Unverifiable container boot_id (missing / multi-line) fails closed before uv
+    bad_boot_multi = tmp_path / "bad_boot_multi"
+    bad_boot_multi.write_text(f"{host_boot_id}\nextra\n", encoding="utf-8")
+    for bad_boot in (tmp_path / "missing_boot_id", bad_boot_multi):
+        c = _ClockDomainOverrideContainer(
+            ws_dir,
+            cid="bad-boot-cid",
+            path_override=str(bin_dir),
+            boot_id_path=bad_boot,
+            uptime_path=in_window_uptime,
+        )
+        with pytest.raises(FingerprintProbeError, match="boot_id"):
+            compute_manifest_fingerprint(c, str(ws_dir))
+        assert not started_file.exists()
+
+    # 4. Unverifiable container timens_offsets (missing / no boottime / duplicate / invalid nsec)
+    no_boottime = tmp_path / "no_boottime"
+    no_boottime.write_text("monotonic 0 0\n", encoding="utf-8")
+    dup_boottime = tmp_path / "dup_boottime"
+    dup_boottime.write_text("boottime 0 0\nboottime 0 0\n", encoding="utf-8")
+    bad_nsec = tmp_path / "bad_nsec"
+    bad_nsec.write_text("boottime 0 1000000000\n", encoding="utf-8")
+    bad_sec = tmp_path / "bad_sec"
+    bad_sec.write_text("boottime abc 0\n", encoding="utf-8")
+    for bad_to in (
+        tmp_path / "missing_timens",
+        no_boottime,
+        dup_boottime,
+        bad_nsec,
+        bad_sec,
+    ):
+        c = _ClockDomainOverrideContainer(
+            ws_dir,
+            cid="bad-timens-cid",
+            path_override=str(bin_dir),
+            boot_id_path=same_boot_id_file,
+            timens_offsets_path=bad_to,
+            uptime_path=in_window_uptime,
+        )
+        with pytest.raises(FingerprintProbeError, match="timens_offsets"):
+            compute_manifest_fingerprint(c, str(ws_dir))
+        assert not started_file.exists()
+
+    # 5. Unverifiable host boot_id / timens_offsets / unapplied time_for_children fails
+    #    closed before exec_run or uv is invoked.
+    real_container = LocalWorkspaceContainer(
+        ws_dir, cid="host-unverifiable-cid", path_override=str(bin_dir)
+    )
+    with monkeypatch.context() as m:
+        m.setattr(
+            "sunaba.environment_state_store._PROC_BOOT_ID_PATH",
+            str(tmp_path / "missing_host_boot_id"),
+        )
+        with pytest.raises(FingerprintProbeError, match="host boot_id"):
+            compute_manifest_fingerprint(real_container, str(ws_dir))
+    with monkeypatch.context() as m:
+        m.setattr(
+            "sunaba.environment_state_store._PROC_TIMENS_OFFSETS_PATH",
+            str(tmp_path / "missing_host_timens"),
+        )
+        with pytest.raises(FingerprintProbeError, match="host timens_offsets"):
+            compute_manifest_fingerprint(real_container, str(ws_dir))
+    ns_a = tmp_path / "ns_a"
+    ns_b = tmp_path / "ns_b"
+    ns_a.symlink_to("time:[1]")
+    ns_b.symlink_to("time:[2]")
+    with monkeypatch.context() as m:
+        m.setattr("sunaba.environment_state_store._PROC_TIME_NS_PATH", str(ns_a))
+        m.setattr(
+            "sunaba.environment_state_store._PROC_TIME_FOR_CHILDREN_NS_PATH", str(ns_b)
+        )
+        with pytest.raises(FingerprintProbeError, match="time namespace"):
+            compute_manifest_fingerprint(real_container, str(ws_dir))
+    assert not started_file.exists()
+    assert not any("uv workspace metadata" in call for call in real_container.exec_calls)
+
+    # 6. Ordinary non-workspace project still computes fingerprint without clock-domain probing
+    ord_dir = tmp_path / "ordinary-no-clock"
+    ord_dir.mkdir()
+    (ord_dir / "pyproject.toml").write_text(
+        '[project]\nname = "ord"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    (ord_dir / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    ord_container = LocalWorkspaceContainer(
+        ord_dir, cid="ord-no-clock-cid", path_override=str(bin_dir)
+    )
+    with monkeypatch.context() as m:
+        m.setattr(
+            "sunaba.environment_state_store._PROC_BOOT_ID_PATH",
+            str(tmp_path / "missing_host_boot_id"),
+        )
+        ord_fp = compute_manifest_fingerprint(ord_container, str(ord_dir))
+    assert "members" not in ord_fp
+    assert not any("uv workspace metadata" in call for call in ord_container.exec_calls)

@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import posixpath
+import re
 import shlex
 import tempfile
 import threading
@@ -33,6 +34,13 @@ MANIFEST_FILES: tuple[str, ...] = ("pyproject.toml", "uv.lock", ".python-version
 MANIFEST_ABSENT_MARKER: bytes = b"__SUNABA_MANIFEST_ABSENT__\n"
 _DEFAULT_UV_METADATA_TIMEOUT: float = 15.0
 _UV_METADATA_MARKER_ENV: str = "SUNABA_UV_METADATA_MARKER"
+_PROC_BOOT_ID_PATH: str = "/proc/sys/kernel/random/boot_id"
+_PROC_TIMENS_OFFSETS_PATH: str = "/proc/self/timens_offsets"
+_PROC_TIME_NS_PATH: str = "/proc/self/ns/time"
+_PROC_TIME_FOR_CHILDREN_NS_PATH: str = "/proc/self/ns/time_for_children"
+_BOOT_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 
 
 class FingerprintProbeError(RuntimeError):
@@ -155,6 +163,81 @@ def _exec_container_script(
     return _unpack_exec_result(res)
 
 
+def _host_boot_id() -> str:
+    """Return the host Linux kernel boot UUID from ``/proc/sys/kernel/random/boot_id``."""
+    try:
+        raw = Path(_PROC_BOOT_ID_PATH).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise FingerprintProbeError(
+            "cannot guarantee bounded startup eligibility for uv workspace metadata: "
+            f"host boot_id unavailable ({exc})"
+        ) from exc
+    boot_id = raw.strip()
+    if not _BOOT_ID_RE.fullmatch(boot_id):
+        raise FingerprintProbeError(
+            "cannot guarantee bounded startup eligibility for uv workspace metadata: "
+            "host boot_id is malformed"
+        )
+    return boot_id
+
+
+def _host_timens_boottime_offset() -> tuple[int, int]:
+    """Return the host ``boottime`` time-namespace offset ``(sec, nsec)``."""
+    try:
+        raw = Path(_PROC_TIMENS_OFFSETS_PATH).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise FingerprintProbeError(
+            "cannot guarantee bounded startup eligibility for uv workspace metadata: "
+            f"host timens_offsets unavailable ({exc})"
+        ) from exc
+
+    try:
+        time_ns = os.readlink(_PROC_TIME_NS_PATH)
+        children_time_ns = os.readlink(_PROC_TIME_FOR_CHILDREN_NS_PATH)
+    except OSError as exc:
+        raise FingerprintProbeError(
+            "cannot guarantee bounded startup eligibility for uv workspace metadata: "
+            f"host time namespace unavailable ({exc})"
+        ) from exc
+    if time_ns != children_time_ns:
+        raise FingerprintProbeError(
+            "cannot guarantee bounded startup eligibility for uv workspace metadata: "
+            "host process has unapplied child time namespace offsets"
+        )
+
+    matches: list[tuple[int, int]] = []
+    for line in raw.splitlines():
+        parts = line.split()
+        if not parts or parts[0] != "boottime":
+            continue
+        if len(parts) != 3:
+            raise FingerprintProbeError(
+                "cannot guarantee bounded startup eligibility for uv workspace metadata: "
+                "host timens_offsets boottime entry is malformed"
+            )
+        sec_str, nsec_str = parts[1], parts[2]
+        if not re.fullmatch(r"-?[0-9]+", sec_str) or not re.fullmatch(r"[0-9]+", nsec_str):
+            raise FingerprintProbeError(
+                "cannot guarantee bounded startup eligibility for uv workspace metadata: "
+                "host timens_offsets boottime entry is non-numeric"
+            )
+        sec = int(sec_str)
+        nsec = int(nsec_str)
+        if not (0 <= nsec < 1_000_000_000):
+            raise FingerprintProbeError(
+                "cannot guarantee bounded startup eligibility for uv workspace metadata: "
+                "host timens_offsets boottime nsec out of range"
+            )
+        matches.append((sec, nsec))
+
+    if len(matches) != 1:
+        raise FingerprintProbeError(
+            "cannot guarantee bounded startup eligibility for uv workspace metadata: "
+            "host timens_offsets missing unique boottime entry"
+        )
+    return matches[0]
+
+
 def _host_boottime_ns() -> int:
     """Return host ``CLOCK_BOOTTIME`` in nanoseconds for container ``/proc/uptime`` alignment."""
     clock_boottime = getattr(time, "CLOCK_BOOTTIME", None)
@@ -182,19 +265,103 @@ def _compute_boottime_cutoff_cs(effective_deadline_at: float) -> tuple[int, int]
     return issued_cs, cutoff_cs
 
 
+def _compute_boottime_clock_domain_window(
+    effective_deadline_at: float,
+) -> tuple[str, int, int, int, int]:
+    """Capture host clock-domain proof and ``[issued_cs, cutoff_cs)`` cutoff window."""
+    boot_id = _host_boot_id()
+    boottime_offset_sec, boottime_offset_nsec = _host_timens_boottime_offset()
+    issued_cs, cutoff_cs = _compute_boottime_cutoff_cs(effective_deadline_at)
+    return boot_id, boottime_offset_sec, boottime_offset_nsec, issued_cs, cutoff_cs
+
+
 def _build_metadata_probe_script(
     root: str,
     marker_env_name: str,
     *,
+    boot_id: str,
+    boottime_offset_sec: int,
+    boottime_offset_nsec: int,
     issued_cs: int,
     cutoff_cs: int,
 ) -> str:
-    """Build the shell script enforcing fail-closed startup eligibility and bounded execution."""
+    """Build the shell script enforcing clock-domain alignment and bounded execution."""
     root_str = root.rstrip("/") or "/"
     script = (
         "unset VIRTUAL_ENV; "
+        "_sunaba_boot_id=''; "
+        "_sunaba_boot_extra=''; "
+        "_sunaba_boot_lines=0; "
+        "if [ -f /proc/sys/kernel/random/boot_id ] && [ -r /proc/sys/kernel/random/boot_id ]; then "
+        "{ "
+        "if IFS= read -r _sunaba_boot_id || [ -n \"$_sunaba_boot_id\" ]; then "
+        "_sunaba_boot_lines=1; "
+        "fi; "
+        "if IFS= read -r _sunaba_boot_extra || [ -n \"$_sunaba_boot_extra\" ]; then "
+        "_sunaba_boot_lines=2; "
+        "fi; "
+        "} < /proc/sys/kernel/random/boot_id; "
+        "fi; "
+        'if [ "$_sunaba_boot_lines" -ne 1 ] || [ -z "$_sunaba_boot_id" ]; then '
+        "echo 'uv workspace metadata boot_id unavailable' >&2; exit 125; "
+        "fi; "
+        f'if [ "$_sunaba_boot_id" != {shlex.quote(boot_id)} ]; then '
+        "echo 'uv workspace metadata boot_id mismatch (distinct clock domain)' >&2; exit 125; "
+        "fi; "
+        "_sunaba_bt_sec=''; "
+        "_sunaba_bt_nsec=''; "
+        "_sunaba_bt_count=0; "
+        "_sunaba_bt_bad=0; "
+        "if [ -f /proc/self/timens_offsets ] && [ -r /proc/self/timens_offsets ]; then "
+        "while IFS=' \t' read -r _sunaba_clk _sunaba_s _sunaba_ns _sunaba_rest "
+        '|| [ -n "$_sunaba_clk" ]; do '
+        'case "$_sunaba_clk" in '
+        "boottime) "
+        "_sunaba_bt_count=$((_sunaba_bt_count + 1)); "
+        'if [ -n "$_sunaba_rest" ] || [ -z "$_sunaba_s" ] || [ -z "$_sunaba_ns" ]; then '
+        "_sunaba_bt_bad=1; "
+        "else "
+        '_sunaba_bt_sec="$_sunaba_s"; '
+        '_sunaba_bt_nsec="$_sunaba_ns"; '
+        "fi ;; "
+        "esac; "
+        "done < /proc/self/timens_offsets; "
+        "fi; "
+        'if [ "$_sunaba_bt_count" -ne 1 ] || [ "$_sunaba_bt_bad" -ne 0 ]; then '
+        "echo 'uv workspace metadata timens_offsets unavailable' >&2; exit 125; "
+        "fi; "
+        "_sunaba_s_sign=''; "
+        'case "$_sunaba_bt_sec" in '
+        "-*) _sunaba_s_sign='-'; _sunaba_bt_sec=${_sunaba_bt_sec#-} ;; "
+        "esac; "
+        'case "$_sunaba_bt_sec" in '
+        "''|*[!0-9]*) _sunaba_bt_sec='' ;; "
+        "*) "
+        '_sunaba_bt_sec=${_sunaba_bt_sec#"${_sunaba_bt_sec%%[!0]*}"}; '
+        ': "${_sunaba_bt_sec:=0}"; '
+        'if [ "$_sunaba_s_sign" = \'-\' ] && [ "$_sunaba_bt_sec" != \'0\' ]; then '
+        '_sunaba_bt_sec="-$_sunaba_bt_sec"; '
+        "fi ;; "
+        "esac; "
+        'case "$_sunaba_bt_nsec" in '
+        "''|*[!0-9]*) _sunaba_bt_nsec='' ;; "
+        "*) "
+        '_sunaba_bt_nsec=${_sunaba_bt_nsec#"${_sunaba_bt_nsec%%[!0]*}"}; '
+        ': "${_sunaba_bt_nsec:=0}"; '
+        'case "$_sunaba_bt_nsec" in '
+        "??????????*) _sunaba_bt_nsec='' ;; "
+        "esac ;; "
+        "esac; "
+        'if [ -z "$_sunaba_bt_sec" ] || [ -z "$_sunaba_bt_nsec" ]; then '
+        "echo 'uv workspace metadata timens_offsets unavailable' >&2; exit 125; "
+        "fi; "
+        f'if [ "$_sunaba_bt_sec" != {shlex.quote(str(boottime_offset_sec))} ] '
+        f'|| [ "$_sunaba_bt_nsec" != {shlex.quote(str(boottime_offset_nsec))} ]; then '
+        "echo 'uv workspace metadata time-namespace boottime offset mismatch' >&2; exit 125; "
+        "fi; "
         "_sunaba_now_cs=''; "
-        "if [ -r /proc/uptime ] && IFS=' ' read -r _sunaba_up _ < /proc/uptime; then "
+        "if [ -f /proc/uptime ] && [ -r /proc/uptime ] "
+        "&& IFS=' ' read -r _sunaba_up _ < /proc/uptime; then "
         "_sunaba_sec=${_sunaba_up%%.*}; "
         "_sunaba_frac=${_sunaba_up#*.}; "
         'if [ -n "$_sunaba_sec" ] && [ -n "$_sunaba_frac" ] && [ "$_sunaba_sec" != "$_sunaba_up" ]; then '
@@ -300,10 +467,15 @@ def _run_bounded_metadata_exec(
                 "outer deadline scope has no marker environment"
             )
         marker_env_name = next(iter(outer_env))
-        issued_cs, cutoff_cs = _compute_boottime_cutoff_cs(outer_scope.deadline_at)
+        boot_id, off_sec, off_nsec, issued_cs, cutoff_cs = (
+            _compute_boottime_clock_domain_window(outer_scope.deadline_at)
+        )
         full_script = _build_metadata_probe_script(
             root,
             marker_env_name,
+            boot_id=boot_id,
+            boottime_offset_sec=off_sec,
+            boottime_offset_nsec=off_nsec,
             issued_cs=issued_cs,
             cutoff_cs=cutoff_cs,
         )
@@ -350,13 +522,18 @@ def _run_bounded_metadata_exec(
         else metadata_scope.deadline_at
     )
     try:
-        issued_cs, cutoff_cs = _compute_boottime_cutoff_cs(effective_deadline_at)
+        boot_id, off_sec, off_nsec, issued_cs, cutoff_cs = (
+            _compute_boottime_clock_domain_window(effective_deadline_at)
+        )
     except Exception:
         metadata_scope.cancelled = True
         raise
     full_script = _build_metadata_probe_script(
         root,
         _UV_METADATA_MARKER_ENV,
+        boot_id=boot_id,
+        boottime_offset_sec=off_sec,
+        boottime_offset_nsec=off_nsec,
         issued_cs=issued_cs,
         cutoff_cs=cutoff_cs,
     )

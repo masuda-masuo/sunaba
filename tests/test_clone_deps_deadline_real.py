@@ -1040,13 +1040,19 @@ class TestScopeReuseAndSharedBudget:
         deadline_s = 1.4
         monkeypatch.setenv(_DEPS_TIMEOUT_ENV, str(deadline_s))
         box: dict[str, Any] = {}
-        t0 = time.monotonic()
-        t = _run_in_thread(
-            lambda: _install_repo_deps(
-                fake, "testowner/testrepo", str(tmp_path), pip_extras="[dev]", allow_network=True
-            ),
-            box,
-        )
+        worker_samples: dict[str, float] = {}
+
+        def _run_deps_worker() -> DepsResult:
+            started_at = time.monotonic()
+            try:
+                return _install_repo_deps(
+                    fake, "testowner/testrepo", str(tmp_path), pip_extras="[dev]", allow_network=True
+                )
+            finally:
+                worker_samples["started_at"] = started_at
+                worker_samples["finished_at"] = time.monotonic()
+
+        t = _run_in_thread(_run_deps_worker, box)
         pids: list[int | None] = []
         opened_marker: str | None = None
         try:
@@ -1075,7 +1081,7 @@ class TestScopeReuseAndSharedBudget:
             pids = [parent, child, ord_child]
 
             _join_deps_thread(t, 15.0, "_install_repo_deps with shared budget", box)
-            elapsed = time.monotonic() - t0
+            elapsed = worker_samples["finished_at"] - worker_samples["started_at"]
 
             # Deterministic scope and deadline identity observation across execs:
             assert len(opened_scopes) == 1, (
@@ -1136,9 +1142,10 @@ class TestScopeReuseAndSharedBudget:
             assert reap_entry["enter_at"] >= i_start, "reaper must enter after installer exec started"
             assert reap_entry["verdict"] == "ok", f"expected reap verdict 'ok', got: {reap_entry!r}"
 
-            # Meaningful end-to-end completion bound under load (matches _join_deps_thread 15.0s
-            # across this module; accommodates 1.4s deadline + up to 10s bounded _await_reap
-            # for multi-pass /proc reaping observed up to ~6.8s under 16-worker xdist).
+            # Meaningful _install_repo_deps completion bound under load (matches _join_deps_thread
+            # 15.0s across this module; accommodates 1.4s deadline + up to 10s bounded _await_reap
+            # for multi-pass /proc reaping observed up to ~6.8s under 16-worker xdist, measured
+            # inside the worker around _install_repo_deps independently of test-thread resume lag).
             assert elapsed < 15.0, f"shared budget completion exceeded 15.0s bound: elapsed {elapsed:.3f}s"
 
             result = box["value"]

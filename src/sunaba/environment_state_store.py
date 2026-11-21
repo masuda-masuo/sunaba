@@ -10,13 +10,17 @@ the container can rewrite it.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
+import math
 import os
 import posixpath
 import shlex
 import tempfile
 import threading
+import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -28,6 +32,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 MANIFEST_FILES: tuple[str, ...] = ("pyproject.toml", "uv.lock", ".python-version")
 MANIFEST_ABSENT_MARKER: bytes = b"__SUNABA_MANIFEST_ABSENT__\n"
 _DEFAULT_UV_METADATA_TIMEOUT: float = 15.0
+_UV_METADATA_MARKER_ENV: str = "SUNABA_UV_METADATA_MARKER"
 
 
 class FingerprintProbeError(RuntimeError):
@@ -48,16 +53,51 @@ def _uv_metadata_timeout() -> float:
     if raw:
         try:
             value = float(raw)
-            if value > 0:
+            if math.isfinite(value) and value > 0:
                 return value
         except ValueError:
             pass
     try:
         from sunaba.tools.common import RECOVERY_DOCKER_TIMEOUT
 
-        return float(RECOVERY_DOCKER_TIMEOUT)
+        fallback = float(RECOVERY_DOCKER_TIMEOUT)
+        if math.isfinite(fallback) and fallback > 0:
+            return fallback
     except Exception:
-        return _DEFAULT_UV_METADATA_TIMEOUT
+        pass
+    return _DEFAULT_UV_METADATA_TIMEOUT
+
+
+def _exec_run_accepts_environment(container: Any) -> bool:
+    """Return True when ``container.exec_run`` can accept an ``environment`` dict."""
+    exec_fn = getattr(container, "exec_run", None)
+    if not callable(exec_fn):
+        return False
+    try:
+        sig = inspect.signature(exec_fn)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        param.kind == inspect.Parameter.VAR_KEYWORD or param.name == "environment"
+        for param in sig.parameters.values()
+    )
+
+
+def _unpack_exec_result(res: Any) -> tuple[int, bytes, bytes]:
+    """Normalize a ``container.exec_run`` return value to ``(ec, stdout, stderr)``."""
+    if isinstance(res, tuple):
+        ec = res[0]
+        output = res[1]
+    else:
+        ec = getattr(res, "exit_code", 0)
+        output = getattr(res, "output", b"")
+
+    if isinstance(output, tuple):
+        stdout, stderr = output
+    else:
+        stdout, stderr = output, b""
+
+    return int(ec), stdout or b"", stderr or b""
 
 
 def _exec_container_script(
@@ -66,7 +106,6 @@ def _exec_container_script(
     script: str,
     *,
     label: str,
-    timeout_s: float | None = None,
 ) -> tuple[int, bytes, bytes]:
     """Run *script* at *root* in *container*, aligned with active deadline scopes."""
     root_str = root.rstrip("/") or "/"
@@ -102,32 +141,7 @@ def _exec_container_script(
         pass
 
     def _invoke_exec() -> Any:
-        if timeout_s is None:
-            return container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
-
-        result_box: list[Any] = []
-        error_box: list[BaseException] = []
-
-        def _worker() -> None:
-            try:
-                result_box.append(
-                    container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
-                )
-            except BaseException as exc:
-                error_box.append(exc)
-
-        worker = threading.Thread(
-            target=_worker,
-            name="sunaba-fingerprint-probe",
-            daemon=True,
-        )
-        worker.start()
-        worker.join(timeout=timeout_s)
-        if worker.is_alive():
-            raise FingerprintProbeError(f"{label} timed out after {timeout_s:g}s")
-        if error_box:
-            raise error_box[0]
-        return result_box[0]
+        return container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
 
     try:
         res = deadline_runner(_invoke_exec) if deadline_runner is not None else _invoke_exec()
@@ -138,19 +152,157 @@ def _exec_container_script(
             raise
         raise FingerprintProbeError(f"container exec failed for {label}: {exc}") from exc
 
-    if isinstance(res, tuple):
-        ec = res[0]
-        output = res[1]
-    else:
-        ec = getattr(res, "exit_code", 0)
-        output = getattr(res, "output", b"")
+    return _unpack_exec_result(res)
 
-    if isinstance(output, tuple):
-        stdout, stderr = output
-    else:
-        stdout, stderr = output, b""
 
-    return int(ec), stdout or b"", stderr or b""
+def _build_metadata_probe_script(root: str, marker_env_name: str, bound: float) -> str:
+    """Build the shell script that enforces bounded ``uv workspace metadata`` execution."""
+    root_str = root.rstrip("/") or "/"
+    timeout_arg = f"{bound:g}"
+    script = (
+        "unset VIRTUAL_ENV; "
+        f'if [ -n "${{{marker_env_name}:-}}" ] && [ -r /proc/$$/environ ]; then '
+        "uv workspace metadata --frozen --offline; "
+        "elif command -v timeout >/dev/null 2>&1; then "
+        f"timeout {shlex.quote(timeout_arg)} uv workspace metadata --frozen --offline; "
+        "else "
+        "echo 'uv workspace metadata bounded cleanup unavailable' >&2; exit 125; "
+        "fi"
+    )
+    return f"cd {shlex.quote(root_str)} && {script}"
+
+
+def _run_bounded_metadata_exec(
+    container: Any,
+    root: str,
+    *,
+    bound: float,
+) -> tuple[int, bytes, bytes]:
+    """Run ``uv workspace metadata`` under a guaranteed bounded exec and reaper."""
+    if (
+        not isinstance(bound, (int, float))
+        or isinstance(bound, bool)
+        or not math.isfinite(bound)
+        or bound <= 0
+    ):
+        raise FingerprintProbeError(
+            f"uv workspace metadata requires a positive finite timeout bound, got {bound!r}"
+        )
+
+    if not _exec_run_accepts_environment(container):
+        raise FingerprintProbeError(
+            "cannot guarantee bounded cleanup for uv workspace metadata: "
+            "container exec_run does not accept environment markers"
+        )
+
+    try:
+        from sunaba.edit_verify.shell import (
+            ForegroundTreeTimeout,
+            TreeTimeout,
+            VerifyTreeTimeout,
+            _active_deadline_scope,
+            _active_foreground_scope,
+            _DeadlineScope,
+            _watchdog,
+            foreground_marker_environment,
+            verify_marker_environment,
+        )
+    except Exception as exc:
+        raise FingerprintProbeError(
+            f"cannot guarantee bounded cleanup for uv workspace metadata: {exc}"
+        ) from exc
+
+    class _MetadataTreeTimeout(TreeTimeout):
+        """Internal timeout raised when the metadata probe deadline expires."""
+
+        _label = "uv workspace metadata"
+
+    fg_scope = _active_foreground_scope()
+    verify_scope = _active_deadline_scope()
+    outer_scope = fg_scope if fg_scope is not None else verify_scope
+    outer_env = (
+        foreground_marker_environment()
+        if fg_scope is not None
+        else verify_marker_environment()
+    )
+
+    # If an active outer scope expires at or before the metadata bound, run directly
+    # under that outer scope so its watchdog reaps the tree and surfaces the actual
+    # outer timeout/reap verdict.
+    if outer_scope is not None and (outer_scope.deadline_at - time.monotonic()) <= bound:
+        if not outer_env:
+            raise FingerprintProbeError(
+                "cannot guarantee bounded cleanup for uv workspace metadata: "
+                "outer deadline scope has no marker environment"
+            )
+        marker_env_name = next(iter(outer_env))
+        full_script = _build_metadata_probe_script(root, marker_env_name, bound)
+        exec_kwargs: dict[str, Any] = {
+            "stdout": True,
+            "stderr": True,
+            "demux": True,
+            "environment": dict(outer_env),
+        }
+        try:
+            res = outer_scope.run_exec(
+                lambda: container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
+            )
+        except (ForegroundTreeTimeout, VerifyTreeTimeout):
+            raise
+        except Exception as exc:
+            raise FingerprintProbeError(
+                f"container exec failed for uv workspace metadata: {exc}"
+            ) from exc
+        return _unpack_exec_result(res)
+
+    metadata_marker = f"sunabamd{uuid.uuid4().hex[:12]}"
+    exec_env = dict(outer_env or {})
+    exec_env[_UV_METADATA_MARKER_ENV] = metadata_marker
+    full_script = _build_metadata_probe_script(root, _UV_METADATA_MARKER_ENV, bound)
+    exec_kwargs = {
+        "stdout": True,
+        "stderr": True,
+        "demux": True,
+        "environment": exec_env,
+    }
+
+    metadata_scope = _DeadlineScope(
+        container, bound, metadata_marker, _MetadataTreeTimeout
+    )
+    threading.Thread(
+        target=_watchdog,
+        args=(metadata_scope,),
+        daemon=True,
+        name="uv-metadata-deadline-watchdog",
+    ).start()
+
+    def _run_under_metadata_scope() -> Any:
+        return metadata_scope.run_exec(
+            lambda: container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
+        )
+
+    try:
+        res = (
+            outer_scope.run_exec(_run_under_metadata_scope)
+            if outer_scope is not None
+            else _run_under_metadata_scope()
+        )
+    except (ForegroundTreeTimeout, VerifyTreeTimeout):
+        raise
+    except _MetadataTreeTimeout as exc:
+        raise FingerprintProbeError(
+            f"uv workspace metadata timed out after {bound:g}s (reap={exc.reap})"
+        ) from exc
+    except FingerprintProbeError:
+        raise
+    except Exception as exc:
+        raise FingerprintProbeError(
+            f"container exec failed for uv workspace metadata: {exc}"
+        ) from exc
+    finally:
+        metadata_scope.cancelled = True
+
+    return _unpack_exec_result(res)
 
 
 def _read_container_file(container: Any, root: str, filename: str) -> bytes | None:
@@ -293,22 +445,15 @@ def _validate_workspace_metadata(payload: Any, root: str) -> list[str]:
 def _enumerate_workspace_members(container: Any, root: str) -> list[str]:
     """Run ``uv workspace metadata --frozen --offline`` at *root* and validate members."""
     bound = _uv_metadata_timeout()
-    timeout_arg = f"{bound:g}"
-    script = (
-        "unset VIRTUAL_ENV; "
-        "if command -v timeout >/dev/null 2>&1; then "
-        f"timeout {shlex.quote(timeout_arg)} uv workspace metadata --frozen --offline; "
-        "else "
-        "uv workspace metadata --frozen --offline; "
-        "fi"
-    )
-    ec, stdout_bytes, stderr_bytes = _exec_container_script(
+    ec, stdout_bytes, stderr_bytes = _run_bounded_metadata_exec(
         container,
         root,
-        script,
-        label="uv workspace metadata",
-        timeout_s=bound,
+        bound=bound,
     )
+    if ec == 124:
+        raise FingerprintProbeError(
+            f"uv workspace metadata timed out after {bound:g}s (exit 124)"
+        )
     if ec != 0:
         detail = (
             (stderr_bytes or stdout_bytes)

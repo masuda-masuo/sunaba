@@ -974,12 +974,21 @@ class TestScopeReuseAndSharedBudget:
         cid = f"budget{uuid.uuid4().hex[:6]}"
         fake.id = cid
 
-        opened_scopes: list[tuple[float, str]] = []
+        opened_scopes: list[tuple[float, str, Any, float, float]] = []
         orig_open = shell.open_foreground_deadline
 
         def spy_open(container: Any, deadline_s: float, marker: str) -> None:
-            opened_scopes.append((deadline_s, marker))
-            return orig_open(container, deadline_s, marker)
+            orig_open(container, deadline_s, marker)
+            scope = _active_foreground_scope()
+            opened_scopes.append(
+                (
+                    deadline_s,
+                    marker,
+                    scope,
+                    scope.started_at if scope is not None else -1.0,
+                    scope.deadline_at if scope is not None else -1.0,
+                )
+            )
 
         monkeypatch.setattr(shell, "open_foreground_deadline", spy_open)
         import sunaba.tools.container.clone as clone_mod
@@ -987,29 +996,65 @@ class TestScopeReuseAndSharedBudget:
         if hasattr(clone_mod, "open_foreground_deadline"):
             monkeypatch.setattr(clone_mod, "open_foreground_deadline", spy_open)
 
-        observed_execs: list[tuple[str, str | None]] = []
+        reap_entries: list[dict[str, Any]] = []
+        orig_reap = shell._reap_verify_tree
+
+        def spy_reap(scope: Any) -> str:
+            enter_at = time.monotonic()
+            entry: dict[str, Any] = {
+                "enter_at": enter_at,
+                "scope": scope,
+                "marker": scope.marker,
+                "deadline_s": scope.deadline_s,
+                "started_at": scope.started_at,
+                "deadline_at": scope.deadline_at,
+            }
+            reap_entries.append(entry)
+            verdict = orig_reap(scope)
+            entry["verdict"] = verdict
+            return verdict
+
+        monkeypatch.setattr(shell, "_reap_verify_tree", spy_reap)
+
+        exec_starts: list[tuple[str, str | None, float]] = []
+        manifest_ends: list[float] = []
+        obs_lock = threading.Lock()
         old_exec_run = fake.exec_run
 
         def tracking_exec_run(cmd: object, **kwargs: Any) -> Any:
             text = _cmd_text(cmd)
             env = kwargs.get("environment")
             marker = env.get(_FOREGROUND_MARKER_ENV) if isinstance(env, dict) else None
-            observed_execs.append((text, marker))
-            return old_exec_run(cmd, **kwargs)
+            start_at = time.monotonic()
+            with obs_lock:
+                exec_starts.append((text, marker, start_at))
+            try:
+                return old_exec_run(cmd, **kwargs)
+            finally:
+                if "for f in pyproject.toml" in text:
+                    with obs_lock:
+                        manifest_ends.append(time.monotonic())
 
         fake.exec_run = tracking_exec_run  # type: ignore
 
         deadline_s = 1.4
         monkeypatch.setenv(_DEPS_TIMEOUT_ENV, str(deadline_s))
         box: dict[str, Any] = {}
-        t0 = time.monotonic()
-        t = _run_in_thread(
-            lambda: _install_repo_deps(
-                fake, "testowner/testrepo", str(tmp_path), pip_extras="[dev]", allow_network=True
-            ),
-            box,
-        )
+        worker_samples: dict[str, float] = {}
+
+        def _run_deps_worker() -> DepsResult:
+            started_at = time.monotonic()
+            try:
+                return _install_repo_deps(
+                    fake, "testowner/testrepo", str(tmp_path), pip_extras="[dev]", allow_network=True
+                )
+            finally:
+                worker_samples["started_at"] = started_at
+                worker_samples["finished_at"] = time.monotonic()
+
+        t = _run_in_thread(_run_deps_worker, box)
         pids: list[int | None] = []
+        opened_marker: str | None = None
         try:
             if not fake.tree_ready.wait(15.0):
                 error = box.get("error")
@@ -1018,38 +1063,110 @@ class TestScopeReuseAndSharedBudget:
                     raise exc_value.with_traceback(exc_tb)
                 raise AssertionError("installer did not become ready")
 
-            pids = [_read_pid(parent_pid), _read_pid(child_pid), _read_pid(ord_pid)]
+            # _make_hanging_script writes `ready` only after all three PID files
+            # are non-empty, giving deterministic creation evidence without a
+            # test-thread _pid_alive() check that races with the remaining ~0.6s
+            # deadline firing under xdist scheduling lag.
+            assert Path(ready).is_file(), "ready marker file must exist once tree_ready is set"
+            parent = _read_pid(parent_pid)
+            child = _read_pid(child_pid)
+            ord_child = _read_pid(ord_pid)
+            assert parent is not None and parent > 0, f"parent pid must be positive: {parent}"
+            assert child is not None and child > 0, f"detached child pid must be positive: {child}"
+            assert ord_child is not None and ord_child > 0, f"ordinary child pid must be positive: {ord_child}"
+            assert len({parent, child, ord_child}) == 3, (
+                f"marked processes must have distinct PIDs: {(parent, child, ord_child)}"
+            )
+            live_pids: list[int] = [parent, child, ord_child]
+            pids = [parent, child, ord_child]
+
             _join_deps_thread(t, 15.0, "_install_repo_deps with shared budget", box)
-            elapsed = time.monotonic() - t0
+            elapsed = worker_samples["finished_at"] - worker_samples["started_at"]
 
             # Deterministic scope and deadline identity observation across execs:
             assert len(opened_scopes) == 1, (
                 f"expected exactly one deadline scope opened, got {len(opened_scopes)}: {opened_scopes}"
             )
-            opened_deadline, opened_marker = opened_scopes[0]
+            opened_deadline, opened_marker, opened_scope, opened_started_at, opened_deadline_at = opened_scopes[0]
             assert opened_deadline == deadline_s
+            assert opened_scope is not None
+            assert opened_deadline_at == opened_started_at + deadline_s, (
+                "initial scope deadline_at must match started_at + deadline_s"
+            )
 
-            manifest_obs = [obs for obs in observed_execs if "for f in pyproject.toml" in obs[0]]
-            installer_obs = [obs for obs in observed_execs if "uv sync" in obs[0]]
-            assert manifest_obs, "manifest detection exec must be observed"
-            assert installer_obs, "installer exec must be observed"
+            with obs_lock:
+                starts_snapshot = list(exec_starts)
+                manifest_ends_snapshot = list(manifest_ends)
 
-            _m_cmd, m_marker = manifest_obs[0]
-            _i_cmd, i_marker = installer_obs[0]
+            manifest_starts = [obs for obs in starts_snapshot if "for f in pyproject.toml" in obs[0]]
+            installer_starts = [obs for obs in starts_snapshot if "uv sync" in obs[0]]
+            assert manifest_starts, "manifest detection exec must be observed"
+            assert manifest_ends_snapshot, "manifest detection exec completion must be observed"
+            assert installer_starts, "installer exec must be observed"
+
+            _m_cmd, m_marker, m_start = manifest_starts[0]
+            m_end = manifest_ends_snapshot[0]
+            _i_cmd, i_marker, i_start = installer_starts[0]
             assert m_marker is not None and m_marker == opened_marker, (
                 "manifest probe must run with the armed foreground marker"
             )
             assert i_marker is not None and i_marker == opened_marker, (
                 "installer must run with the same armed foreground marker"
             )
+            assert opened_started_at <= m_start < i_start and m_end <= i_start, (
+                f"scope ({opened_started_at}) must open before manifest probe ({m_start}..{m_end}) "
+                f"and probe must complete before installer ({i_start})"
+            )
 
-            # Finite timing: total duration terminates boundedly around 1.4s deadline (probe 0.8s + remaining 0.6s)
-            assert elapsed < 6.0, f"shared budget exceeded: elapsed {elapsed}s for {deadline_s}s deadline"
+            # Structural reaper entry & single-deadline identity (independent of scheduling lag):
+            # Comparing the original immutable started_at/deadline_at snapshot, marker, and scope
+            # object identity at reap entry (together with len(opened_scopes) == 1 and matching
+            # probe/installer markers) detects any deadline renewal or scope replacement
+            # deterministically regardless of scheduler latency: reopening a scope replaces
+            # scope/marker/started_at/deadline_at, and extending the scope alters deadline_at
+            # or deadline_s relative to the snapshot captured when the scope was opened.
+            assert len(reap_entries) == 1, (
+                f"expected exactly one reaper entry for shared budget, got {len(reap_entries)}: {reap_entries}"
+            )
+            reap_entry = reap_entries[0]
+            assert reap_entry["scope"] is opened_scope, "reaper must fire on the original opened scope"
+            assert reap_entry["marker"] == opened_marker
+            assert reap_entry["deadline_s"] == deadline_s
+            assert reap_entry["started_at"] == opened_started_at
+            assert reap_entry["deadline_at"] == opened_deadline_at, (
+                "shared deadline_at must not be renewed between manifest probe and installer"
+            )
+            assert reap_entry["enter_at"] >= opened_deadline_at, (
+                "reaper must not enter before the shared deadline expires"
+            )
+            assert reap_entry["enter_at"] >= i_start, "reaper must enter after installer exec started"
+            assert reap_entry["verdict"] == "ok", f"expected reap verdict 'ok', got: {reap_entry!r}"
+
+            # Meaningful _install_repo_deps completion bound under load (matches _join_deps_thread
+            # 15.0s across this module; accommodates 1.4s deadline + up to 10s bounded _await_reap
+            # for multi-pass /proc reaping observed up to ~6.8s under 16-worker xdist, measured
+            # inside the worker around _install_repo_deps independently of test-thread resume lag).
+            assert elapsed < 15.0, f"shared budget completion exceeded 15.0s bound: elapsed {elapsed:.3f}s"
+
             result = box["value"]
             assert result.failed is True
+            assert "uv sync" in result.note, f"expected uv sync timeout in note, got: {result.note!r}"
+            assert re.search(r"reap[=:\s]+ok\b", result.note, re.IGNORECASE) is not None, (
+                f"note must report reap verdict ok: {result.note!r}"
+            )
+
+            # Real subprocess cleanup and container usability after timeout:
+            assert _processes_with_env_marker(opened_marker) == [], (
+                f"processes carrying foreground marker {opened_marker} still exist after reap"
+            )
+            assert _wait_pids_dead(live_pids), f"marked pids still alive: {live_pids}"
+            assert _token_processes(token) == [], "token processes still exist after reap"
+            ec, out = fake.exec_run(["echo", "ok"])
+            out_bytes = out if isinstance(out, bytes) else b"".join(out)
+            assert ec == 0 and b"ok" in out_bytes, "container unusable after deadline reap"
         finally:
             all_pids = [_read_pid(parent_pid), _read_pid(child_pid), _read_pid(ord_pid)]
-            _reap_process_tree(all_pids + pids, token)
+            _reap_process_tree(all_pids + pids, token, opened_marker)
             for p in (log, ready, parent_pid, child_pid, ord_pid):
                 Path(p).unlink(missing_ok=True)
             t.join(2.0)

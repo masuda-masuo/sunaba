@@ -601,6 +601,8 @@ def prepare_uv_environment(
 
                 try:
                     fp = compute_manifest_fingerprint(container, project_root)
+                except ForegroundTreeTimeout:
+                    raise
                 except Exception as exc:
                     diagnostic = re.sub(
                         r"(?i)(token|password|secret|authorization)([=: ]+)[^\s]+",

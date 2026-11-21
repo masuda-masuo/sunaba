@@ -6,19 +6,23 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
+import threading
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from sunaba.environment import check_uv_environment
+from sunaba.environment import _resolve_image_tool, check_uv_environment
 from sunaba.environment_state_store import (
     FingerprintProbeError,
     compute_manifest_fingerprint,
 )
+from sunaba.tools.container.clone import prepare_uv_environment
 from sunaba.tools.container.prepare_environment import sandbox_prepare_environment
 from sunaba.tools.vcs.publishing import publish
 from sunaba.tools.verify import verify_in_container
@@ -39,10 +43,14 @@ class LocalWorkspaceContainer:
         *,
         cid: str = "workspace-fp-container-id-1234",
         allow_network: bool = True,
+        hide_image_lint_tools: bool = True,
+        path_override: str | None = None,
     ) -> None:
         self.id = cid
         self.root = str(root)
         self.allow_network = allow_network
+        self.hide_image_lint_tools = hide_image_lint_tools
+        self.path_override = path_override
         self.labels = {"sunaba.allow_network": "true" if allow_network else "false"}
         self.attrs = {
             "Config": {"WorkingDir": str(root)},
@@ -61,9 +69,15 @@ class LocalWorkspaceContainer:
         **kwargs: Any,
     ) -> tuple[int, tuple[bytes, bytes] | bytes]:
         argv = list(cmd) if isinstance(cmd, (list, tuple)) else ["/bin/sh", "-c", str(cmd)]
+        if self.hide_image_lint_tools and argv and isinstance(argv[-1], str):
+            # Reproduce CI tool availability where /home/sandbox/.venv/bin (ruff/pyright)
+            # is absent, without altering the global container environment.
+            argv[-1] = argv[-1].replace("PATH=/home/sandbox/.venv/bin:", "PATH=")
         rendered = argv[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
         self.exec_calls.append(rendered)
         env = dict(os.environ)
+        if self.path_override is not None:
+            env["PATH"] = self.path_override
         if environment:
             env.update(environment)
         res = subprocess.run(
@@ -191,22 +205,6 @@ def _recorded_root_state(container_id: str, root: Path) -> dict[str, Any]:
     return state
 
 
-def _mock_clean_lint_gates(monkeypatch: pytest.MonkeyPatch) -> None:
-    detection = SimpleNamespace(languages={"python"}, scope={"python": "."}, reason=None)
-    monkeypatch.setattr("sunaba.edit_verify.detect_languages", lambda *a, **kw: detection)
-    monkeypatch.setattr(
-        "sunaba.edit_verify.run_lint_type_gate",
-        lambda *a, **kw: {
-            "gate_passed": True,
-            "incomplete": False,
-            "lint": [],
-            "types": [],
-            "patch_targets": [],
-            "gate_fail_reasons": [],
-        },
-    )
-
-
 def test_workspace_fingerprint_hashes_sorted_member_manifests_only(
     tmp_path: Path, isolated_env: Path
 ) -> None:
@@ -244,13 +242,18 @@ def test_member_manifest_mutation_blocks_verify_from_other_member_and_publish(
     ws_dir, pkg_a, pkg_b, _ = _make_workspace(tmp_path)
     container = LocalWorkspaceContainer(ws_dir)
     _prepare_and_verify_context(monkeypatch, container)
-    _mock_clean_lint_gates(monkeypatch)
 
     prep = json.loads(sandbox_prepare_environment(container.id, working_dir=str(ws_dir)))
     assert prep["status"] == "ok", prep
 
     verify_ok = json.loads(
-        verify_in_container(container.id, path="tests", working_dir=str(pkg_a))
+        verify_in_container(
+            container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_ok["gate_passed"] is True, verify_ok
     assert has_verify_success(container.id) is True
@@ -275,7 +278,13 @@ def test_member_manifest_mutation_blocks_verify_from_other_member_and_publish(
 
     # Verify from another member (pkg_a) must detect staleness and fail closed
     verify_stale = json.loads(
-        verify_in_container(container.id, path="tests", working_dir=str(pkg_a))
+        verify_in_container(
+            container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_stale["status"] == "environment_setup_failed"
     assert verify_stale["gate_passed"] is False
@@ -299,7 +308,13 @@ def test_member_manifest_mutation_blocks_verify_from_other_member_and_publish(
     # Reverting member b restores ready without re-preparing
     (pkg_b / "pyproject.toml").write_text(original_b_pyproject, encoding="utf-8")
     verify_recovered = json.loads(
-        verify_in_container(container.id, path="tests", working_dir=str(pkg_a))
+        verify_in_container(
+            container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_recovered["gate_passed"] is True
     assert has_verify_success(container.id) is True
@@ -320,7 +335,13 @@ def test_member_manifest_mutation_blocks_verify_from_other_member_and_publish(
     ).hexdigest()
 
     verify_after_reprep = json.loads(
-        verify_in_container(container.id, path="tests", working_dir=str(pkg_a))
+        verify_in_container(
+            container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_after_reprep["gate_passed"] is True
     pub_after_reprep = json.loads(
@@ -335,7 +356,6 @@ def test_adding_unlocked_and_locked_member_stops_verify_and_publish(
     ws_dir, pkg_a, _, _ = _make_workspace(tmp_path)
     container = LocalWorkspaceContainer(ws_dir)
     _prepare_and_verify_context(monkeypatch, container)
-    _mock_clean_lint_gates(monkeypatch)
 
     assert json.loads(sandbox_prepare_environment(container.id, working_dir=str(ws_dir)))["status"] == "ok"
     record_verify_success(container.id)
@@ -347,7 +367,13 @@ def test_adding_unlocked_and_locked_member_stops_verify_and_publish(
     _write_member(ws_dir, "packages/c", "pkg-c")
 
     verify_unlocked = json.loads(
-        verify_in_container(container.id, path="tests", working_dir=str(pkg_a))
+        verify_in_container(
+            container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_unlocked["status"] == "environment_setup_failed"
     assert verify_unlocked["gate_passed"] is False
@@ -369,7 +395,13 @@ def test_adding_unlocked_and_locked_member_stops_verify_and_publish(
     record_verify_success(container.id)
 
     verify_locked = json.loads(
-        verify_in_container(container.id, path="tests", working_dir=str(pkg_a))
+        verify_in_container(
+            container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_locked["status"] == "environment_setup_failed"
     assert verify_locked["environment_setup"]["status"] == "stale"
@@ -388,7 +420,18 @@ def test_adding_unlocked_and_locked_member_stops_verify_and_publish(
     assert "packages/c/pyproject.toml" in (
         _recorded_root_state(container.id, ws_dir)["fingerprint"]["members"]
     )
-    assert json.loads(verify_in_container(container.id, path="tests", working_dir=str(pkg_a)))["gate_passed"] is True
+    assert (
+        json.loads(
+            verify_in_container(
+                container.id,
+                path="tests",
+                working_dir=str(pkg_a),
+                skip_lint_gate=True,
+                skip_type_gate=True,
+            )
+        )["gate_passed"]
+        is True
+    )
 
 
 def test_removing_member_unlocked_and_locked_stops_verify_and_publish(
@@ -397,7 +440,6 @@ def test_removing_member_unlocked_and_locked_stops_verify_and_publish(
     ws_dir, pkg_a, pkg_b, _ = _make_workspace(tmp_path)
     container = LocalWorkspaceContainer(ws_dir)
     _prepare_and_verify_context(monkeypatch, container)
-    _mock_clean_lint_gates(monkeypatch)
 
     assert json.loads(sandbox_prepare_environment(container.id, working_dir=str(ws_dir)))["status"] == "ok"
     record_verify_success(container.id)
@@ -409,7 +451,13 @@ def test_removing_member_unlocked_and_locked_stops_verify_and_publish(
     shutil.rmtree(pkg_b)
 
     verify_unlocked = json.loads(
-        verify_in_container(container.id, path="tests", working_dir=str(pkg_a))
+        verify_in_container(
+            container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_unlocked["status"] == "environment_setup_failed"
     assert verify_unlocked["environment_setup"]["status"] == "stale"
@@ -427,7 +475,13 @@ def test_removing_member_unlocked_and_locked_stops_verify_and_publish(
     # Now relock without reprepare
     subprocess.run(["uv", "lock", "--offline"], cwd=ws_dir, check=True, capture_output=True)
     verify_locked = json.loads(
-        verify_in_container(container.id, path="tests", working_dir=str(pkg_a))
+        verify_in_container(
+            container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_locked["status"] == "environment_setup_failed"
     assert verify_locked["environment_setup"]["status"] == "stale"
@@ -437,7 +491,18 @@ def test_removing_member_unlocked_and_locked_stops_verify_and_publish(
     assert json.loads(sandbox_prepare_environment(container.id, working_dir=str(ws_dir)))["status"] == "ok"
     members = _recorded_root_state(container.id, ws_dir)["fingerprint"]["members"]
     assert "packages/b/pyproject.toml" not in members
-    assert json.loads(verify_in_container(container.id, path="tests", working_dir=str(pkg_a)))["gate_passed"] is True
+    assert (
+        json.loads(
+            verify_in_container(
+                container.id,
+                path="tests",
+                working_dir=str(pkg_a),
+                skip_lint_gate=True,
+                skip_type_gate=True,
+            )
+        )["gate_passed"]
+        is True
+    )
 
 
 def test_excluded_member_and_member_python_version_are_ignored(
@@ -447,7 +512,6 @@ def test_excluded_member_and_member_python_version_are_ignored(
     assert pkg_excluded is not None
     container = LocalWorkspaceContainer(ws_dir)
     _prepare_and_verify_context(monkeypatch, container)
-    _mock_clean_lint_gates(monkeypatch)
 
     assert json.loads(sandbox_prepare_environment(container.id, working_dir=str(ws_dir)))["status"] == "ok"
     lock_before = (ws_dir / "uv.lock").read_bytes()
@@ -468,7 +532,13 @@ def test_excluded_member_and_member_python_version_are_ignored(
     assert check_uv_environment(container, str(pkg_a)) == ("ready", None)
 
     verify_res = json.loads(
-        verify_in_container(container.id, path="tests", working_dir=str(pkg_a))
+        verify_in_container(
+            container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_res["gate_passed"] is True
     pub_res = json.loads(
@@ -646,7 +716,6 @@ def test_legacy_workspace_record_needs_one_time_reprepare(
     state_before = state_file.read_bytes()
 
     _prepare_and_verify_context(monkeypatch, ws_container)
-    _mock_clean_lint_gates(monkeypatch)
 
     status, reason = check_uv_environment(ws_container, str(pkg_a))
     assert status == "stale"
@@ -654,7 +723,13 @@ def test_legacy_workspace_record_needs_one_time_reprepare(
     assert state_file.read_bytes() == state_before
 
     verify_legacy = json.loads(
-        verify_in_container(ws_container.id, path="tests", working_dir=str(pkg_a))
+        verify_in_container(
+            ws_container.id,
+            path="tests",
+            working_dir=str(pkg_a),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_legacy["status"] == "environment_setup_failed"
     assert verify_legacy["environment_setup"]["status"] == "stale"
@@ -671,9 +746,18 @@ def test_legacy_workspace_record_needs_one_time_reprepare(
     )["status"] == "ok"
     assert "members" in _recorded_root_state(ws_container.id, ws_dir)["fingerprint"]
     assert check_uv_environment(ws_container, str(pkg_a)) == ("ready", None)
-    assert json.loads(
-        verify_in_container(ws_container.id, path="tests", working_dir=str(pkg_a))
-    )["gate_passed"] is True
+    assert (
+        json.loads(
+            verify_in_container(
+                ws_container.id,
+                path="tests",
+                working_dir=str(pkg_a),
+                skip_lint_gate=True,
+                skip_type_gate=True,
+            )
+        )["gate_passed"]
+        is True
+    )
 
 
 def test_ordinary_legacy_record_stays_ready_without_uv_metadata(
@@ -723,10 +807,15 @@ dev = ["pytest>=7.0.0"]
     ord_container.exec_calls.clear()
 
     _prepare_and_verify_context(monkeypatch, ord_container)
-    _mock_clean_lint_gates(monkeypatch)
     assert check_uv_environment(ord_container, str(ord_dir)) == ("ready", None)
     verify_ord = json.loads(
-        verify_in_container(ord_container.id, path="tests", working_dir=str(ord_dir))
+        verify_in_container(
+            ord_container.id,
+            path="tests",
+            working_dir=str(ord_dir),
+            skip_lint_gate=True,
+            skip_type_gate=True,
+        )
     )
     assert verify_ord["gate_passed"] is True
     assert not any("uv workspace metadata" in call for call in ord_container.exec_calls)
@@ -751,3 +840,425 @@ def test_empty_virtual_workspace_computes_empty_members_map(
 
     fp = compute_manifest_fingerprint(container, str(vws))
     assert fp["members"] == {}
+
+
+def test_ci_fixture_hides_image_ruff_and_pyright(
+    tmp_path: Path, isolated_env: Path
+) -> None:
+    container = LocalWorkspaceContainer(tmp_path)
+    assert _resolve_image_tool(container, str(tmp_path), "ruff") == (None, None)
+    assert _resolve_image_tool(container, str(tmp_path), "pyright") == (None, None)
+
+
+def _token_processes(token: str) -> list[int]:
+    found: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ")
+        except OSError:
+            continue
+        if token.encode("utf-8") in cmdline:
+            found.append(int(entry.name))
+    return found
+
+
+def _kill_token_processes(token: str) -> None:
+    for pid in _token_processes(token):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _wait_token_processes_dead(token: str, timeout_s: float = 3.0) -> list[int]:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        alive = _token_processes(token)
+        if not alive:
+            return []
+        time.sleep(0.05)
+    return _token_processes(token)
+
+
+def _build_no_timeout_blocking_uv_bin(
+    bin_dir: Path,
+    ws_dir: Path,
+    *,
+    token: str,
+    started_file: Path,
+    ready_file: Path,
+    pids_file: Path,
+) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for tool in ("sh", "tr", "cat", "sleep", "setsid", "env", "find", "git", "echo"):
+        found = shutil.which(tool)
+        if found:
+            (bin_dir / tool).symlink_to(found)
+    real_uv = shutil.which("uv")
+    assert real_uv is not None
+    orig_path = os.environ.get("PATH", "")
+    uv_script = bin_dir / "uv"
+    uv_script.write_text(
+        f"""#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "dir" ]; then
+    printf '%s\\n' '{ws_dir}'
+    exit 0
+fi
+if [ "$1" = "workspace" ] && [ "$2" = "metadata" ]; then
+    printf 'started\\n' >> '{started_file}'
+    trap '' TERM
+    setsid sh -c 'trap "" TERM; while :; do sleep 60; done # {token}' >/dev/null 2>&1 &
+    child=$!
+    while [ ! -d "/proc/$child" ]; do sleep 0.01; done
+    printf '%s\\n%s\\n' "$$" "$child" > '{pids_file}'
+    printf 'ready\\n' > '{ready_file}'
+    while :; do sleep 60; done # {token}
+fi
+PATH='{orig_path}' exec '{real_uv}' "$@"
+""",
+        encoding="utf-8",
+    )
+    uv_script.chmod(0o755)
+    assert shutil.which("timeout", path=str(bin_dir)) is None
+
+
+def test_missing_timeout_utility_reaps_genuinely_blocked_metadata_child(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir, pkg_a, _, _ = _make_workspace(tmp_path, name="no-timeout-reap")
+    prep_container = LocalWorkspaceContainer(ws_dir, cid="no-timeout-reap-cid")
+    _prepare_and_verify_context(monkeypatch, prep_container)
+    assert json.loads(sandbox_prepare_environment(prep_container.id, working_dir=str(ws_dir)))["status"] == "ok"
+    record_verify_success(prep_container.id)
+
+    token = f"sunabanoTO-{uuid.uuid4().hex[:12]}"
+    bin_dir = tmp_path / "no-timeout-bin"
+    started_file = tmp_path / "uv_started"
+    ready_file = tmp_path / "uv_ready"
+    pids_file = tmp_path / "uv_pids"
+    _build_no_timeout_blocking_uv_bin(
+        bin_dir,
+        ws_dir,
+        token=token,
+        started_file=started_file,
+        ready_file=ready_file,
+        pids_file=pids_file,
+    )
+
+    container = LocalWorkspaceContainer(
+        ws_dir,
+        cid=prep_container.id,
+        path_override=str(bin_dir),
+    )
+    _prepare_and_verify_context(monkeypatch, container)
+    monkeypatch.setenv("SUNABA_UV_METADATA_TIMEOUT", "0.25")
+    monkeypatch.setenv("SUNABA_VERIFY_TIMEOUT", "30.0")
+
+    lock_before = (ws_dir / "uv.lock").read_bytes()
+    state_file = isolated_env / f"{container.id}.json"
+    state_bytes_before = state_file.read_bytes()
+
+    try:
+        box: dict[str, Any] = {}
+
+        def _run_verify() -> None:
+            try:
+                box["value"] = verify_in_container(
+                    container.id,
+                    path="tests",
+                    working_dir=str(pkg_a),
+                    skip_lint_gate=True,
+                    skip_type_gate=True,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+
+        t = threading.Thread(target=_run_verify, daemon=True)
+        t.start()
+        t.join(10.0)
+        assert not t.is_alive(), "verify_in_container hung when timeout utility was absent"
+        if "error" in box:
+            raise box["error"]
+
+        result = json.loads(box["value"])
+        assert result["status"] == "environment_setup_failed"
+        assert result["gate_passed"] is False
+        assert result["environment_setup"]["status"] == "failed"
+        assert "timed out" in result["environment_setup"]["reason"]
+        assert has_verify_success(container.id) is False
+        assert state_file.read_bytes() == state_bytes_before
+        assert (ws_dir / "uv.lock").read_bytes() == lock_before
+        assert started_file.exists()
+        assert ready_file.exists()
+        assert _wait_token_processes_dead(token) == []
+
+        # Follow-up exec still works cleanly
+        ec, out = container.exec_run(["echo", "ok"])
+        assert ec == 0
+        assert isinstance(out, tuple) and b"ok" in out[0]
+    finally:
+        _kill_token_processes(token)
+
+
+def test_missing_timeout_and_unbounded_exec_fails_before_starting_uv(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir, pkg_a, _, _ = _make_workspace(tmp_path, name="no-timeout-failfast")
+    prep_container = LocalWorkspaceContainer(ws_dir, cid="no-timeout-failfast-cid")
+    _prepare_and_verify_context(monkeypatch, prep_container)
+    assert json.loads(sandbox_prepare_environment(prep_container.id, working_dir=str(ws_dir)))["status"] == "ok"
+    record_verify_success(prep_container.id)
+
+    token = f"sunabanoStart-{uuid.uuid4().hex[:12]}"
+    bin_dir = tmp_path / "no-timeout-bin"
+    started_file = tmp_path / "uv_started"
+    ready_file = tmp_path / "uv_ready"
+    pids_file = tmp_path / "uv_pids"
+    _build_no_timeout_blocking_uv_bin(
+        bin_dir,
+        ws_dir,
+        token=token,
+        started_file=started_file,
+        ready_file=ready_file,
+        pids_file=pids_file,
+    )
+
+    class NoEnvContainer:
+        """Container whose exec_run cannot accept environment markers."""
+
+        def __init__(self) -> None:
+            self.id = prep_container.id
+            self.root = str(ws_dir)
+
+        def exec_run(
+            self,
+            cmd: list[str] | str,
+            stdout: bool = True,
+            stderr: bool = True,
+            demux: bool = True,
+            workdir: str | None = None,
+        ) -> tuple[int, tuple[bytes, bytes] | bytes]:
+            argv = list(cmd) if isinstance(cmd, (list, tuple)) else ["/bin/sh", "-c", str(cmd)]
+            env = dict(os.environ)
+            env["PATH"] = str(bin_dir)
+            res = subprocess.run(
+                argv,
+                cwd=workdir or self.root,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            if demux:
+                return res.returncode, (res.stdout, res.stderr)
+            return res.returncode, res.stdout + res.stderr
+
+    class DroppedEnvContainer(LocalWorkspaceContainer):
+        """Container accepting kwargs but dropping env markers (simulating unpropagated env)."""
+
+        def exec_run(
+            self,
+            cmd: list[str] | str,
+            stdout: bool = True,
+            stderr: bool = True,
+            demux: bool = True,
+            environment: dict[str, str] | None = None,
+            workdir: str | None = None,
+            **kwargs: Any,
+        ) -> tuple[int, tuple[bytes, bytes] | bytes]:
+            return super().exec_run(
+                cmd,
+                stdout=stdout,
+                stderr=stderr,
+                demux=demux,
+                environment=None,
+                workdir=workdir,
+                **kwargs,
+            )
+
+    container = NoEnvContainer()
+    _prepare_and_verify_context(monkeypatch, container)
+    lock_before = (ws_dir / "uv.lock").read_bytes()
+    state_file = isolated_env / f"{container.id}.json"
+    state_bytes_before = state_file.read_bytes()
+
+    try:
+        with pytest.raises(FingerprintProbeError):
+            compute_manifest_fingerprint(container, str(ws_dir))
+        assert not started_file.exists(), "uv must not start when bounded cleanup cannot be guaranteed"
+
+        dropped_env_container = DroppedEnvContainer(
+            ws_dir,
+            cid=prep_container.id,
+            path_override=str(bin_dir),
+        )
+        _prepare_and_verify_context(monkeypatch, dropped_env_container)
+        verify_res = json.loads(
+            verify_in_container(
+                dropped_env_container.id,
+                path="tests",
+                working_dir=str(pkg_a),
+                skip_lint_gate=True,
+                skip_type_gate=True,
+            )
+        )
+        assert verify_res["status"] == "environment_setup_failed"
+        assert verify_res["gate_passed"] is False
+        assert has_verify_success(dropped_env_container.id) is False
+        assert not started_file.exists(), "uv must not start during verify when cleanup cannot be guaranteed"
+        assert state_file.read_bytes() == state_bytes_before
+        assert (ws_dir / "uv.lock").read_bytes() == lock_before
+
+        # Non-finite / non-positive bound must also fail before starting uv
+        real_container = LocalWorkspaceContainer(
+            ws_dir,
+            cid=prep_container.id,
+            path_override=str(bin_dir),
+        )
+        monkeypatch.setattr("sunaba.environment_state_store._uv_metadata_timeout", lambda: 0.0)
+        with pytest.raises(FingerprintProbeError):
+            compute_manifest_fingerprint(real_container, str(ws_dir))
+        assert not started_file.exists(), "uv must not start with non-positive timeout bound"
+    finally:
+        _kill_token_processes(token)
+
+
+def test_outer_verify_deadline_preserved_and_reaps_blocked_metadata(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir, pkg_a, _, _ = _make_workspace(tmp_path, name="outer-verify-deadline")
+    prep_container = LocalWorkspaceContainer(ws_dir, cid="outer-verify-cid")
+    _prepare_and_verify_context(monkeypatch, prep_container)
+    assert json.loads(sandbox_prepare_environment(prep_container.id, working_dir=str(ws_dir)))["status"] == "ok"
+    record_verify_success(prep_container.id)
+
+    token = f"sunabaOuterV-{uuid.uuid4().hex[:12]}"
+    bin_dir = tmp_path / "outer-verify-bin"
+    started_file = tmp_path / "uv_started"
+    ready_file = tmp_path / "uv_ready"
+    pids_file = tmp_path / "uv_pids"
+    _build_no_timeout_blocking_uv_bin(
+        bin_dir,
+        ws_dir,
+        token=token,
+        started_file=started_file,
+        ready_file=ready_file,
+        pids_file=pids_file,
+    )
+
+    container = LocalWorkspaceContainer(
+        ws_dir,
+        cid=prep_container.id,
+        path_override=str(bin_dir),
+    )
+    _prepare_and_verify_context(monkeypatch, container)
+    monkeypatch.setenv("SUNABA_VERIFY_TIMEOUT", "0.3")
+    monkeypatch.setenv("SUNABA_UV_METADATA_TIMEOUT", "15.0")
+
+    lock_before = (ws_dir / "uv.lock").read_bytes()
+    state_file = isolated_env / f"{container.id}.json"
+    state_bytes_before = state_file.read_bytes()
+
+    try:
+        box: dict[str, Any] = {}
+
+        def _run_verify() -> None:
+            try:
+                box["value"] = verify_in_container(
+                    container.id,
+                    path="tests",
+                    working_dir=str(pkg_a),
+                    skip_lint_gate=True,
+                    skip_type_gate=True,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+
+        t = threading.Thread(target=_run_verify, daemon=True)
+        t.start()
+        t.join(10.0)
+        assert not t.is_alive(), "verify_in_container hung under outer verify deadline"
+        if "error" in box:
+            raise box["error"]
+
+        result = json.loads(box["value"])
+        assert result["status"] == "timeout", result
+        assert result["gate_passed"] is False
+        assert result["timeout"]["deadline_s"] == 0.3
+        assert result["timeout"]["reap"] == "ok"
+        assert has_verify_success(container.id) is False
+        assert state_file.read_bytes() == state_bytes_before
+        assert (ws_dir / "uv.lock").read_bytes() == lock_before
+        assert started_file.exists()
+        assert _wait_token_processes_dead(token) == []
+    finally:
+        _kill_token_processes(token)
+
+
+def test_outer_deps_deadline_preserved_when_metadata_blocks(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir, _, _, _ = _make_workspace(tmp_path, name="outer-deps-deadline")
+    token = f"sunabaOuterD-{uuid.uuid4().hex[:12]}"
+    bin_dir = tmp_path / "outer-deps-bin"
+    started_file = tmp_path / "uv_started"
+    ready_file = tmp_path / "uv_ready"
+    pids_file = tmp_path / "uv_pids"
+    _build_no_timeout_blocking_uv_bin(
+        bin_dir,
+        ws_dir,
+        token=token,
+        started_file=started_file,
+        ready_file=ready_file,
+        pids_file=pids_file,
+    )
+    # Short-circuit `uv sync` in the fake uv binary so the deps deadline
+    # expires specifically inside `uv workspace metadata` rather than during sync.
+    uv_script = bin_dir / "uv"
+    uv_script.write_text(
+        uv_script.read_text(encoding="utf-8").replace(
+            'if [ "$1" = "workspace" ] && [ "$2" = "dir" ]; then',
+            'if [ "$1" = "sync" ]; then\n    exit 0\nfi\nif [ "$1" = "workspace" ] && [ "$2" = "dir" ]; then',
+        ),
+        encoding="utf-8",
+    )
+
+    container = LocalWorkspaceContainer(
+        ws_dir,
+        cid="outer-deps-cid",
+        path_override=str(bin_dir),
+    )
+    record_verify_success(container.id)
+    monkeypatch.setenv("SUNABA_DEPS_TIMEOUT", "0.5")
+    monkeypatch.setenv("SUNABA_UV_METADATA_TIMEOUT", "15.0")
+
+    lock_before = (ws_dir / "uv.lock").read_bytes()
+
+    try:
+        box: dict[str, Any] = {}
+
+        def _run_prep() -> None:
+            try:
+                box["value"] = prepare_uv_environment(container, str(ws_dir))
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+
+        t = threading.Thread(target=_run_prep, daemon=True)
+        t.start()
+        t.join(15.0)
+        assert not t.is_alive(), "prepare_uv_environment hung under outer deps deadline"
+        if "error" in box:
+            raise box["error"]
+
+        prep_res = box["value"]
+        assert prep_res.success is False
+        assert prep_res.exit_code == 124
+        assert prep_res.reason is not None and "deps_timeout" in prep_res.reason
+        assert "reap=ok" in prep_res.message
+        assert has_verify_success(container.id) is False
+        assert (ws_dir / "uv.lock").read_bytes() == lock_before
+        assert started_file.exists()
+        assert _wait_token_processes_dead(token) == []
+    finally:
+        _kill_token_processes(token)

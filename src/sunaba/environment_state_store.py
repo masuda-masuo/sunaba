@@ -13,17 +13,21 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import shlex
 import tempfile
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import platformdirs
+import tomllib
 
 logger: logging.Logger = logging.getLogger(__name__)
-
 MANIFEST_FILES: tuple[str, ...] = ("pyproject.toml", "uv.lock", ".python-version")
 MANIFEST_ABSENT_MARKER: bytes = b"__SUNABA_MANIFEST_ABSENT__\n"
+_DEFAULT_UV_METADATA_TIMEOUT: float = 15.0
 
 
 class FingerprintProbeError(RuntimeError):
@@ -38,41 +42,101 @@ def get_environment_state_dir() -> Path:
     return Path(platformdirs.user_state_dir("sunaba"))
 
 
-def _read_container_file(container: Any, root: str, filename: str) -> bytes | None:
-    """Read bytes of *filename* from *root* in container, or None if absent.
+def _uv_metadata_timeout() -> float:
+    """Return the wall-clock bound (seconds) for ``uv workspace metadata``."""
+    raw = os.environ.get("SUNABA_UV_METADATA_TIMEOUT", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    try:
+        from sunaba.tools.common import RECOVERY_DOCKER_TIMEOUT
 
-    Raises FingerprintProbeError if probe fails.
-    """
-    root_str = root.rstrip("/")
-    script = (
-        f"cd {shlex.quote(root_str)} && "
-        f"if [ ! -e {shlex.quote(filename)} ]; then "
-        f"printf '__SUNABA_MANIFEST_ABSENT__\\n'; "
-        f"elif [ ! -f {shlex.quote(filename)} ]; then "
-        f"exit 2; "
-        f"else cat {shlex.quote(filename)}; fi"
-    )
+        return float(RECOVERY_DOCKER_TIMEOUT)
+    except Exception:
+        return _DEFAULT_UV_METADATA_TIMEOUT
+
+
+def _exec_container_script(
+    container: Any,
+    root: str,
+    script: str,
+    *,
+    label: str,
+    timeout_s: float | None = None,
+) -> tuple[int, bytes, bytes]:
+    """Run *script* at *root* in *container*, aligned with active deadline scopes."""
+    root_str = root.rstrip("/") or "/"
+    full_script = f"cd {shlex.quote(root_str)} && {script}"
     exec_kwargs: dict[str, Any] = {
         "stdout": True,
         "stderr": True,
         "demux": True,
     }
+    deadline_runner: Callable[[Callable[[], Any]], Any] | None = None
+    tree_timeout_types: tuple[type[BaseException], ...] = ()
     try:
-        from sunaba.edit_verify.shell import foreground_marker_environment
+        from sunaba.edit_verify.shell import (
+            ForegroundTreeTimeout,
+            VerifyTreeTimeout,
+            foreground_marker_environment,
+            run_exec_under_foreground_deadline,
+            run_exec_under_verify_deadline,
+            verify_marker_environment,
+        )
 
-        marker_env = foreground_marker_environment()
-        if marker_env is not None:
-            exec_kwargs["environment"] = marker_env
+        tree_timeout_types = (ForegroundTreeTimeout, VerifyTreeTimeout)
+        fg_env = foreground_marker_environment()
+        if fg_env is not None:
+            exec_kwargs["environment"] = fg_env
+            deadline_runner = run_exec_under_foreground_deadline
+        else:
+            verify_env = verify_marker_environment()
+            if verify_env is not None:
+                exec_kwargs["environment"] = verify_env
+                deadline_runner = run_exec_under_verify_deadline
     except Exception:
         pass
 
-    try:
-        res = container.exec_run(
-            ["/bin/sh", "-c", script],
-            **exec_kwargs,
+    def _invoke_exec() -> Any:
+        if timeout_s is None:
+            return container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
+
+        result_box: list[Any] = []
+        error_box: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                result_box.append(
+                    container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
+                )
+            except BaseException as exc:
+                error_box.append(exc)
+
+        worker = threading.Thread(
+            target=_worker,
+            name="sunaba-fingerprint-probe",
+            daemon=True,
         )
+        worker.start()
+        worker.join(timeout=timeout_s)
+        if worker.is_alive():
+            raise FingerprintProbeError(f"{label} timed out after {timeout_s:g}s")
+        if error_box:
+            raise error_box[0]
+        return result_box[0]
+
+    try:
+        res = deadline_runner(_invoke_exec) if deadline_runner is not None else _invoke_exec()
+    except FingerprintProbeError:
+        raise
     except Exception as exc:
-        raise FingerprintProbeError(f"container exec failed for {filename}: {exc}") from exc
+        if tree_timeout_types and isinstance(exc, tree_timeout_types):
+            raise
+        raise FingerprintProbeError(f"container exec failed for {label}: {exc}") from exc
 
     if isinstance(res, tuple):
         ec = res[0]
@@ -86,8 +150,24 @@ def _read_container_file(container: Any, root: str, filename: str) -> bytes | No
     else:
         stdout, stderr = output, b""
 
-    stdout_bytes = stdout or b""
-    stderr_bytes = stderr or b""
+    return int(ec), stdout or b"", stderr or b""
+
+
+def _read_container_file(container: Any, root: str, filename: str) -> bytes | None:
+    """Read bytes of *filename* from *root* in container, or None if absent.
+
+    Raises FingerprintProbeError if probe fails.
+    """
+    script = (
+        f"if [ ! -e {shlex.quote(filename)} ]; then "
+        f"printf '__SUNABA_MANIFEST_ABSENT__\\n'; "
+        f"elif [ ! -f {shlex.quote(filename)} ]; then "
+        f"exit 2; "
+        f"else cat {shlex.quote(filename)}; fi"
+    )
+    ec, stdout_bytes, stderr_bytes = _exec_container_script(
+        container, root, script, label=filename
+    )
 
     if ec != 0:
         err_msg = stderr_bytes.decode("utf-8", errors="replace").strip()
@@ -101,12 +181,163 @@ def _read_container_file(container: Any, root: str, filename: str) -> bytes | No
     return stdout_bytes
 
 
+def _is_explicit_uv_workspace(pyproject_bytes: bytes) -> bool:
+    """Return True when root pyproject.toml explicitly declares ``[tool.uv.workspace]``."""
+    try:
+        data = tomllib.loads(pyproject_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise FingerprintProbeError(f"invalid root pyproject.toml: {exc}") from exc
+
+    tool = data.get("tool")
+    if not isinstance(tool, dict):
+        return False
+    uv_cfg = tool.get("uv")
+    if not isinstance(uv_cfg, dict):
+        return False
+    if "workspace" not in uv_cfg:
+        return False
+    if not isinstance(uv_cfg["workspace"], dict):
+        raise FingerprintProbeError("invalid [tool.uv.workspace] table in pyproject.toml")
+    return True
+
+
+def _validate_workspace_metadata(payload: Any, root: str) -> list[str]:
+    """Validate ``uv workspace metadata`` JSON and return sorted member manifest paths."""
+    if not isinstance(payload, dict):
+        raise FingerprintProbeError("uv workspace metadata returned non-object JSON")
+
+    schema = payload.get("schema")
+    if not isinstance(schema, dict):
+        raise FingerprintProbeError("uv workspace metadata missing schema object")
+    schema_version = schema.get("version")
+    if not isinstance(schema_version, str) or not schema_version.strip():
+        raise FingerprintProbeError("uv workspace metadata missing schema.version")
+
+    norm_root = posixpath.normpath(root.rstrip("/") or "/")
+
+    ws_root = payload.get("workspace_root")
+    if (
+        not isinstance(ws_root, str)
+        or not ws_root
+        or "\x00" in ws_root
+        or not posixpath.isabs(ws_root)
+    ):
+        raise FingerprintProbeError(
+            f"uv workspace metadata returned invalid workspace_root: {ws_root!r}"
+        )
+    if posixpath.normpath(ws_root) != norm_root:
+        raise FingerprintProbeError(
+            f"uv workspace metadata workspace_root mismatch: expected {norm_root}, got {ws_root}"
+        )
+
+    workspace_obj = payload.get("workspace")
+    if not isinstance(workspace_obj, dict):
+        raise FingerprintProbeError("uv workspace metadata missing workspace object")
+    ws_obj_path = workspace_obj.get("path")
+    if (
+        not isinstance(ws_obj_path, str)
+        or not ws_obj_path
+        or "\x00" in ws_obj_path
+        or not posixpath.isabs(ws_obj_path)
+    ):
+        raise FingerprintProbeError(
+            f"uv workspace metadata returned invalid workspace.path: {ws_obj_path!r}"
+        )
+    if posixpath.normpath(ws_obj_path) != norm_root:
+        raise FingerprintProbeError(
+            f"uv workspace metadata workspace.path mismatch: expected {norm_root}, got {ws_obj_path}"
+        )
+
+    # uv omits "members" on an empty virtual workspace (no [project] and no members).
+    raw_members = payload.get("members", [])
+    if not isinstance(raw_members, list):
+        raise FingerprintProbeError("uv workspace metadata members field is not a list")
+
+    member_manifests: set[str] = set()
+    for entry in raw_members:
+        if not isinstance(entry, dict):
+            raise FingerprintProbeError("uv workspace metadata member entry is not an object")
+        member_path = entry.get("path")
+        if (
+            not isinstance(member_path, str)
+            or not member_path
+            or "\x00" in member_path
+            or not posixpath.isabs(member_path)
+        ):
+            raise FingerprintProbeError(
+                f"uv workspace metadata invalid member path: {member_path!r}"
+            )
+        norm_member = posixpath.normpath(member_path)
+        rel_dir = posixpath.relpath(norm_member, norm_root)
+        if rel_dir == ".":
+            continue
+        if rel_dir == ".." or rel_dir.startswith("../") or posixpath.isabs(rel_dir):
+            raise FingerprintProbeError(
+                f"uv workspace member path {member_path!r} escapes root {norm_root!r}"
+            )
+        rel_manifest = posixpath.normpath(posixpath.join(rel_dir, "pyproject.toml"))
+        if (
+            rel_manifest == "pyproject.toml"
+            or rel_manifest == ".."
+            or rel_manifest.startswith("../")
+            or posixpath.isabs(rel_manifest)
+        ):
+            raise FingerprintProbeError(
+                f"uv workspace member manifest path {rel_manifest!r} invalid for root {norm_root!r}"
+            )
+        member_manifests.add(rel_manifest)
+
+    return sorted(member_manifests)
+
+
+def _enumerate_workspace_members(container: Any, root: str) -> list[str]:
+    """Run ``uv workspace metadata --frozen --offline`` at *root* and validate members."""
+    bound = _uv_metadata_timeout()
+    timeout_arg = f"{bound:g}"
+    script = (
+        "unset VIRTUAL_ENV; "
+        "if command -v timeout >/dev/null 2>&1; then "
+        f"timeout {shlex.quote(timeout_arg)} uv workspace metadata --frozen --offline; "
+        "else "
+        "uv workspace metadata --frozen --offline; "
+        "fi"
+    )
+    ec, stdout_bytes, stderr_bytes = _exec_container_script(
+        container,
+        root,
+        script,
+        label="uv workspace metadata",
+        timeout_s=bound,
+    )
+    if ec != 0:
+        detail = (
+            (stderr_bytes or stdout_bytes)
+            .decode("utf-8", errors="replace")
+            .strip()
+        )
+        raise FingerprintProbeError(
+            f"uv workspace metadata failed (exit {ec}): {detail[:200]}"
+        )
+
+    try:
+        payload = json.loads(stdout_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FingerprintProbeError(
+            f"uv workspace metadata returned invalid JSON: {exc}"
+        ) from exc
+
+    return _validate_workspace_metadata(payload, root)
+
+
 def compute_manifest_fingerprint(container: Any, root: str) -> dict[str, Any]:
-    """Compute content hashes for uv manifests and .python-version on the host."""
+    """Compute content hashes for uv manifests, workspace members, and .python-version."""
     fingerprint: dict[str, Any] = {"root": root.rstrip("/")}
     files_map: dict[str, str] = {}
+    pyproject_bytes: bytes | None = None
     for filename in MANIFEST_FILES:
         content = _read_container_file(container, root, filename)
+        if filename == "pyproject.toml":
+            pyproject_bytes = content
         if content is None:
             files_map[filename] = "absent"
         else:
@@ -114,6 +345,21 @@ def compute_manifest_fingerprint(container: Any, root: str) -> dict[str, Any]:
     fingerprint["files"] = files_map
     for filename, val in files_map.items():
         fingerprint[filename] = val
+
+    if (
+        pyproject_bytes is not None
+        and files_map.get("uv.lock") != "absent"
+        and _is_explicit_uv_workspace(pyproject_bytes)
+    ):
+        members_map: dict[str, str] = {}
+        for rel_manifest in _enumerate_workspace_members(container, root):
+            member_content = _read_container_file(container, root, rel_manifest)
+            if member_content is None:
+                members_map[rel_manifest] = "absent"
+            else:
+                members_map[rel_manifest] = hashlib.sha256(member_content).hexdigest()
+        fingerprint["members"] = members_map
+
     return fingerprint
 
 
@@ -149,6 +395,21 @@ def check_manifest_staleness(
         if rec_val != cur_val:
             changed.append(filename)
 
+    recorded_members = recorded_fingerprint.get("members")
+    current_members = current_fp.get("members")
+    if isinstance(current_members, dict):
+        if not isinstance(recorded_members, dict):
+            changed.append("workspace members")
+        else:
+            for member_path in sorted(set(recorded_members) | set(current_members)):
+                if recorded_members.get(member_path) != current_members.get(member_path):
+                    changed.append(member_path)
+    elif isinstance(recorded_members, dict):
+        if recorded_members:
+            changed.extend(sorted(recorded_members))
+        else:
+            changed.append("workspace members")
+
     return bool(changed), changed
 
 
@@ -168,7 +429,6 @@ def compare_recorded_fingerprint(
     if not root:
         return False, []
     return check_manifest_staleness(container, root, recorded_fingerprint)
-
 
 def _find_state_file(state_dir: Path, container_id: str) -> Path | None:
     p_json = state_dir / f"{container_id}.json"

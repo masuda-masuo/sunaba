@@ -513,8 +513,14 @@ class TestPackageInstallReapsRealDescendants:
         child_pid = f"/tmp/{token}.child"
         ord_pid = f"/tmp/{token}.ord"
         # Stand-in for the hung ``pip install``: spawns an ordinary and a
-        # setsid-detached TERM-ignoring descendant, then loops.  The real
-        # ``pip list`` snapshots around it still run for real.
+        # setsid-detached TERM-ignoring descendant, then loops.  The
+        # ``pip list`` snapshot package_install runs *before* the install is
+        # answered instantly by the fake instead of starting a real pip:
+        # that snapshot is unrelated setup, and under load a real
+        # ``pip list`` (which starts a Python interpreter) can consume the
+        # whole 3s deadline before the install exec is even reached, so the
+        # install tree would never appear and no reap could be observed.
+        # The install itself still runs the real deadline/reap path.
         script = (
             f"echo $$ > {parent_pid}; "
             f"setsid sh -c 'trap \"echo TERM >> {log}\" TERM; "
@@ -525,7 +531,12 @@ class TestPackageInstallReapsRealDescendants:
             f"while :; do sleep 60; done"
         )
         fake = _LocalExecContainer(
-            substitute={"pip install": script},
+            substitute={
+                "pip install": script,
+                # Keep the unrelated pre-install snapshot off the deadline
+                # budget; the install tree still has to time out for real.
+                "pip list": "printf '[]'",
+            },
             ready_path=ready,
             ready_exec_substring="pip install",
         )

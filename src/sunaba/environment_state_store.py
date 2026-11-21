@@ -155,16 +155,80 @@ def _exec_container_script(
     return _unpack_exec_result(res)
 
 
-def _build_metadata_probe_script(root: str, marker_env_name: str, bound: float) -> str:
-    """Build the shell script that enforces bounded ``uv workspace metadata`` execution."""
+def _host_boottime_ns() -> int:
+    """Return host ``CLOCK_BOOTTIME`` in nanoseconds for container ``/proc/uptime`` alignment."""
+    clock_boottime = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock_boottime is None:
+        raise FingerprintProbeError(
+            "cannot guarantee bounded startup eligibility for uv workspace metadata: "
+            "host CLOCK_BOOTTIME is unavailable"
+        )
+    try:
+        return time.clock_gettime_ns(clock_boottime)
+    except OSError as exc:
+        raise FingerprintProbeError(
+            f"cannot guarantee bounded startup eligibility for uv workspace metadata: {exc}"
+        ) from exc
+
+
+def _compute_boottime_cutoff_cs(effective_deadline_at: float) -> tuple[int, int]:
+    """Compute ``(issued_cs, cutoff_cs)`` in centiseconds matching Linux ``/proc/uptime``."""
+    boot_now_ns = _host_boottime_ns()
+    mono_now = time.monotonic()
+    remaining_s = max(0.0, effective_deadline_at - mono_now)
+    remaining_ns = int(remaining_s * 1_000_000_000)
+    issued_cs = boot_now_ns // 10_000_000
+    cutoff_cs = (boot_now_ns + remaining_ns) // 10_000_000
+    return issued_cs, cutoff_cs
+
+
+def _build_metadata_probe_script(
+    root: str,
+    marker_env_name: str,
+    *,
+    issued_cs: int,
+    cutoff_cs: int,
+) -> str:
+    """Build the shell script enforcing fail-closed startup eligibility and bounded execution."""
     root_str = root.rstrip("/") or "/"
-    timeout_arg = f"{bound:g}"
     script = (
         "unset VIRTUAL_ENV; "
+        "_sunaba_now_cs=''; "
+        "if [ -r /proc/uptime ] && IFS=' ' read -r _sunaba_up _ < /proc/uptime; then "
+        "_sunaba_sec=${_sunaba_up%%.*}; "
+        "_sunaba_frac=${_sunaba_up#*.}; "
+        'if [ -n "$_sunaba_sec" ] && [ -n "$_sunaba_frac" ] && [ "$_sunaba_sec" != "$_sunaba_up" ]; then '
+        '_sunaba_sec=${_sunaba_sec#"${_sunaba_sec%%[!0]*}"}; '
+        ': "${_sunaba_sec:=0}"; '
+        'case "$_sunaba_frac" in '
+        '?) _sunaba_frac="${_sunaba_frac}0" ;; '
+        '??*) _sunaba_frac=${_sunaba_frac%"${_sunaba_frac#??}"} ;; '
+        "esac; "
+        "_sunaba_frac=${_sunaba_frac#0}; "
+        ': "${_sunaba_frac:=0}"; '
+        'case "$_sunaba_sec$_sunaba_frac" in '
+        "''|*[!0-9]*) ;; "
+        "*) _sunaba_now_cs=$((_sunaba_sec * 100 + _sunaba_frac)) ;; "
+        "esac; "
+        "fi; "
+        "fi; "
+        'if [ -z "$_sunaba_now_cs" ]; then '
+        "echo 'uv workspace metadata startup eligibility unavailable' >&2; exit 125; "
+        "fi; "
+        f'if [ "$_sunaba_now_cs" -lt {issued_cs} ]; then '
+        "echo 'uv workspace metadata clock mismatch before startup' >&2; exit 125; "
+        "fi; "
+        f'if [ "$_sunaba_now_cs" -ge {cutoff_cs} ]; then '
+        "echo 'uv workspace metadata deadline expired before startup' >&2; exit 124; "
+        "fi; "
         f'if [ -n "${{{marker_env_name}:-}}" ] && [ -r /proc/$$/environ ]; then '
         "uv workspace metadata --frozen --offline; "
         "elif command -v timeout >/dev/null 2>&1; then "
-        f"timeout {shlex.quote(timeout_arg)} uv workspace metadata --frozen --offline; "
+        f"_sunaba_rem_cs=$(({cutoff_cs} - _sunaba_now_cs)); "
+        "_sunaba_rem_s=$((_sunaba_rem_cs / 100)); "
+        "_sunaba_rem_f=$((_sunaba_rem_cs % 100)); "
+        '[ "$_sunaba_rem_f" -lt 10 ] && _sunaba_rem_f="0$_sunaba_rem_f"; '
+        'timeout "${_sunaba_rem_s}.${_sunaba_rem_f}" uv workspace metadata --frozen --offline; '
         "else "
         "echo 'uv workspace metadata bounded cleanup unavailable' >&2; exit 125; "
         "fi"
@@ -236,17 +300,29 @@ def _run_bounded_metadata_exec(
                 "outer deadline scope has no marker environment"
             )
         marker_env_name = next(iter(outer_env))
-        full_script = _build_metadata_probe_script(root, marker_env_name, bound)
+        issued_cs, cutoff_cs = _compute_boottime_cutoff_cs(outer_scope.deadline_at)
+        full_script = _build_metadata_probe_script(
+            root,
+            marker_env_name,
+            issued_cs=issued_cs,
+            cutoff_cs=cutoff_cs,
+        )
         exec_kwargs: dict[str, Any] = {
             "stdout": True,
             "stderr": True,
             "demux": True,
             "environment": dict(outer_env),
         }
+
+        def _invoke_outer_exec() -> Any:
+            if outer_scope.cancelled or outer_scope.expired():
+                raise FingerprintProbeError(
+                    "uv workspace metadata deadline expired before container exec launch"
+                )
+            return container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
+
         try:
-            res = outer_scope.run_exec(
-                lambda: container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
-            )
+            res = outer_scope.run_exec(_invoke_outer_exec)
         except (ForegroundTreeTimeout, VerifyTreeTimeout):
             raise
         except Exception as exc:
@@ -258,7 +334,6 @@ def _run_bounded_metadata_exec(
     metadata_marker = f"sunabamd{uuid.uuid4().hex[:12]}"
     exec_env = dict(outer_env or {})
     exec_env[_UV_METADATA_MARKER_ENV] = metadata_marker
-    full_script = _build_metadata_probe_script(root, _UV_METADATA_MARKER_ENV, bound)
     exec_kwargs = {
         "stdout": True,
         "stderr": True,
@@ -269,6 +344,22 @@ def _run_bounded_metadata_exec(
     metadata_scope = _DeadlineScope(
         container, bound, metadata_marker, _MetadataTreeTimeout
     )
+    effective_deadline_at = (
+        min(metadata_scope.deadline_at, outer_scope.deadline_at)
+        if outer_scope is not None
+        else metadata_scope.deadline_at
+    )
+    try:
+        issued_cs, cutoff_cs = _compute_boottime_cutoff_cs(effective_deadline_at)
+    except Exception:
+        metadata_scope.cancelled = True
+        raise
+    full_script = _build_metadata_probe_script(
+        root,
+        _UV_METADATA_MARKER_ENV,
+        issued_cs=issued_cs,
+        cutoff_cs=cutoff_cs,
+    )
     threading.Thread(
         target=_watchdog,
         args=(metadata_scope,),
@@ -276,10 +367,19 @@ def _run_bounded_metadata_exec(
         name="uv-metadata-deadline-watchdog",
     ).start()
 
+    def _invoke_metadata_exec() -> Any:
+        if (
+            metadata_scope.cancelled
+            or metadata_scope.expired()
+            or (outer_scope is not None and (outer_scope.cancelled or outer_scope.expired()))
+        ):
+            raise FingerprintProbeError(
+                "uv workspace metadata deadline expired before container exec launch"
+            )
+        return container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
+
     def _run_under_metadata_scope() -> Any:
-        return metadata_scope.run_exec(
-            lambda: container.exec_run(["/bin/sh", "-c", full_script], **exec_kwargs)
-        )
+        return metadata_scope.run_exec(_invoke_metadata_exec)
 
     try:
         res = (
@@ -303,6 +403,7 @@ def _run_bounded_metadata_exec(
         metadata_scope.cancelled = True
 
     return _unpack_exec_result(res)
+
 
 
 def _read_container_file(container: Any, root: str, filename: str) -> bytes | None:

@@ -1262,3 +1262,609 @@ def test_outer_deps_deadline_preserved_when_metadata_blocks(
         assert _wait_token_processes_dead(token) == []
     finally:
         _kill_token_processes(token)
+
+
+class _DelayedLaunchMetadataContainer(LocalWorkspaceContainer):
+    """Synchronized container adapter delaying `uv workspace metadata` exec launch."""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        cid: str,
+        path_override: str,
+        launch_entered: threading.Event,
+        allow_launch: threading.Event,
+        runner_finished: threading.Event,
+        drop_env: bool = False,
+    ) -> None:
+        super().__init__(root, cid=cid, path_override=path_override)
+        self.launch_entered = launch_entered
+        self.allow_launch = allow_launch
+        self.runner_finished = runner_finished
+        self.drop_env = drop_env
+
+    def exec_run(
+        self,
+        cmd: list[str] | str,
+        stdout: bool = True,
+        stderr: bool = True,
+        demux: bool = True,
+        environment: dict[str, str] | None = None,
+        workdir: str | None = None,
+        **kwargs: Any,
+    ) -> tuple[int, tuple[bytes, bytes] | bytes]:
+        rendered = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "uv workspace metadata" in rendered:
+            self.launch_entered.set()
+            assert self.allow_launch.wait(timeout=15.0), "timed out waiting to release delayed exec"
+            try:
+                return super().exec_run(
+                    cmd,
+                    stdout=stdout,
+                    stderr=stderr,
+                    demux=demux,
+                    environment=None if self.drop_env else environment,
+                    workdir=workdir,
+                    **kwargs,
+                )
+            finally:
+                self.runner_finished.set()
+        return super().exec_run(
+            cmd,
+            stdout=stdout,
+            stderr=stderr,
+            demux=demux,
+            environment=environment,
+            workdir=workdir,
+            **kwargs,
+        )
+
+
+def _spy_reap_completion(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, list[str]]:
+    import sunaba.edit_verify.shell as shell_mod
+
+    reap_done = threading.Event()
+    verdicts: list[str] = []
+    orig_reap = shell_mod._reap_verify_tree
+
+    def _wrapped(scope: Any) -> str:
+        verdict = orig_reap(scope)
+        verdicts.append(verdict)
+        reap_done.set()
+        return verdict
+
+    monkeypatch.setattr(shell_mod, "_reap_verify_tree", _wrapped)
+    return reap_done, verdicts
+
+
+def test_late_metadata_exec_past_local_deadline_and_reap_never_invokes_uv(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir, pkg_a, _, _ = _make_workspace(tmp_path, name="late-local-deadline")
+    prep_container = LocalWorkspaceContainer(ws_dir, cid="late-local-cid")
+    _prepare_and_verify_context(monkeypatch, prep_container)
+    assert json.loads(sandbox_prepare_environment(prep_container.id, working_dir=str(ws_dir)))["status"] == "ok"
+    record_verify_success(prep_container.id)
+
+    token = f"sunabaLateLocal-{uuid.uuid4().hex[:12]}"
+    bin_dir = tmp_path / "late-local-bin"
+    started_file = tmp_path / "uv_started"
+    ready_file = tmp_path / "uv_ready"
+    pids_file = tmp_path / "uv_pids"
+    _build_no_timeout_blocking_uv_bin(
+        bin_dir,
+        ws_dir,
+        token=token,
+        started_file=started_file,
+        ready_file=ready_file,
+        pids_file=pids_file,
+    )
+
+    launch_entered = threading.Event()
+    allow_launch = threading.Event()
+    runner_finished = threading.Event()
+    container = _DelayedLaunchMetadataContainer(
+        ws_dir,
+        cid=prep_container.id,
+        path_override=str(bin_dir),
+        launch_entered=launch_entered,
+        allow_launch=allow_launch,
+        runner_finished=runner_finished,
+    )
+    _prepare_and_verify_context(monkeypatch, container)
+    monkeypatch.setenv("SUNABA_UV_METADATA_TIMEOUT", "0.2")
+    monkeypatch.setenv("SUNABA_VERIFY_TIMEOUT", "30.0")
+    reap_done, verdicts = _spy_reap_completion(monkeypatch)
+
+    lock_before = (ws_dir / "uv.lock").read_bytes()
+    state_file = isolated_env / f"{container.id}.json"
+    state_bytes_before = state_file.read_bytes()
+
+    try:
+        box: dict[str, Any] = {}
+
+        def _run_verify() -> None:
+            try:
+                box["value"] = verify_in_container(
+                    container.id,
+                    path="tests",
+                    working_dir=str(pkg_a),
+                    skip_lint_gate=True,
+                    skip_type_gate=True,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+
+        t = threading.Thread(target=_run_verify, daemon=True)
+        t.start()
+
+        assert launch_entered.wait(10.0), "metadata exec did not reach launch gate"
+        assert reap_done.wait(10.0), "reaper did not complete before releasing exec"
+        t.join(10.0)
+        assert not t.is_alive(), "verify_in_container hung waiting on delayed metadata exec"
+        if "error" in box:
+            raise box["error"]
+
+        result = json.loads(box["value"])
+        assert result["status"] == "environment_setup_failed", result
+        assert result["gate_passed"] is False
+        assert result["environment_setup"]["status"] == "failed"
+        assert "timed out" in result["environment_setup"]["reason"]
+        assert "reap=ok" in result["environment_setup"]["reason"]
+        assert verdicts == ["ok"]
+        assert has_verify_success(container.id) is False
+        assert state_file.read_bytes() == state_bytes_before
+        assert (ws_dir / "uv.lock").read_bytes() == lock_before
+        assert not started_file.exists()
+
+        allow_launch.set()
+        assert runner_finished.wait(2.0), "late metadata shell did not exit promptly"
+        assert not started_file.exists(), "late-started metadata shell must not invoke uv"
+        assert _wait_token_processes_dead(token) == []
+
+        ec, out = container.exec_run(["echo", "ok"])
+        assert ec == 0
+        assert isinstance(out, tuple) and b"ok" in out[0]
+    finally:
+        allow_launch.set()
+        _kill_token_processes(token)
+
+
+def test_late_metadata_exec_past_outer_verify_deadline_and_reap_never_invokes_uv(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir, pkg_a, _, _ = _make_workspace(tmp_path, name="late-outer-verify")
+    prep_container = LocalWorkspaceContainer(ws_dir, cid="late-outer-verify-cid")
+    _prepare_and_verify_context(monkeypatch, prep_container)
+    assert json.loads(sandbox_prepare_environment(prep_container.id, working_dir=str(ws_dir)))["status"] == "ok"
+    record_verify_success(prep_container.id)
+
+    token = f"sunabaLateOV-{uuid.uuid4().hex[:12]}"
+    bin_dir = tmp_path / "late-ov-bin"
+    started_file = tmp_path / "uv_started"
+    ready_file = tmp_path / "uv_ready"
+    pids_file = tmp_path / "uv_pids"
+    _build_no_timeout_blocking_uv_bin(
+        bin_dir,
+        ws_dir,
+        token=token,
+        started_file=started_file,
+        ready_file=ready_file,
+        pids_file=pids_file,
+    )
+
+    launch_entered = threading.Event()
+    allow_launch = threading.Event()
+    runner_finished = threading.Event()
+    container = _DelayedLaunchMetadataContainer(
+        ws_dir,
+        cid=prep_container.id,
+        path_override=str(bin_dir),
+        launch_entered=launch_entered,
+        allow_launch=allow_launch,
+        runner_finished=runner_finished,
+    )
+    _prepare_and_verify_context(monkeypatch, container)
+    monkeypatch.setenv("SUNABA_VERIFY_TIMEOUT", "0.25")
+    monkeypatch.setenv("SUNABA_UV_METADATA_TIMEOUT", "15.0")
+    reap_done, verdicts = _spy_reap_completion(monkeypatch)
+
+    lock_before = (ws_dir / "uv.lock").read_bytes()
+    state_file = isolated_env / f"{container.id}.json"
+    state_bytes_before = state_file.read_bytes()
+
+    try:
+        box: dict[str, Any] = {}
+
+        def _run_verify() -> None:
+            try:
+                box["value"] = verify_in_container(
+                    container.id,
+                    path="tests",
+                    working_dir=str(pkg_a),
+                    skip_lint_gate=True,
+                    skip_type_gate=True,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+
+        t = threading.Thread(target=_run_verify, daemon=True)
+        t.start()
+
+        assert launch_entered.wait(10.0), "metadata exec did not reach launch gate"
+        assert reap_done.wait(10.0), "outer verify reaper did not complete"
+        t.join(10.0)
+        assert not t.is_alive(), "verify_in_container hung under outer verify deadline"
+        if "error" in box:
+            raise box["error"]
+
+        result = json.loads(box["value"])
+        assert result["status"] == "timeout", result
+        assert result["gate_passed"] is False
+        assert result["timeout"]["deadline_s"] == 0.25
+        assert result["timeout"]["reap"] == "ok"
+        assert verdicts == ["ok"]
+        assert has_verify_success(container.id) is False
+        assert state_file.read_bytes() == state_bytes_before
+        assert (ws_dir / "uv.lock").read_bytes() == lock_before
+        assert not started_file.exists()
+
+        allow_launch.set()
+        assert runner_finished.wait(2.0), "late outer-verify metadata shell did not exit promptly"
+        assert not started_file.exists(), "late-started shell under outer verify deadline must not invoke uv"
+        assert _wait_token_processes_dead(token) == []
+    finally:
+        allow_launch.set()
+        _kill_token_processes(token)
+
+
+def test_late_metadata_exec_past_outer_deps_deadline_and_reap_never_invokes_uv(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir, _, _, _ = _make_workspace(tmp_path, name="late-outer-deps")
+    token = f"sunabaLateOD-{uuid.uuid4().hex[:12]}"
+    bin_dir = tmp_path / "late-od-bin"
+    started_file = tmp_path / "uv_started"
+    ready_file = tmp_path / "uv_ready"
+    pids_file = tmp_path / "uv_pids"
+    _build_no_timeout_blocking_uv_bin(
+        bin_dir,
+        ws_dir,
+        token=token,
+        started_file=started_file,
+        ready_file=ready_file,
+        pids_file=pids_file,
+    )
+    uv_script = bin_dir / "uv"
+    uv_script.write_text(
+        uv_script.read_text(encoding="utf-8").replace(
+            'if [ "$1" = "workspace" ] && [ "$2" = "dir" ]; then',
+            'if [ "$1" = "sync" ]; then\n    exit 0\nfi\nif [ "$1" = "workspace" ] && [ "$2" = "dir" ]; then',
+        ),
+        encoding="utf-8",
+    )
+
+    launch_entered = threading.Event()
+    allow_launch = threading.Event()
+    runner_finished = threading.Event()
+    container = _DelayedLaunchMetadataContainer(
+        ws_dir,
+        cid="late-outer-deps-cid",
+        path_override=str(bin_dir),
+        launch_entered=launch_entered,
+        allow_launch=allow_launch,
+        runner_finished=runner_finished,
+    )
+    record_verify_success(container.id)
+    monkeypatch.setenv("SUNABA_DEPS_TIMEOUT", "0.35")
+    monkeypatch.setenv("SUNABA_UV_METADATA_TIMEOUT", "15.0")
+    reap_done, verdicts = _spy_reap_completion(monkeypatch)
+
+    lock_before = (ws_dir / "uv.lock").read_bytes()
+
+    try:
+        box: dict[str, Any] = {}
+
+        def _run_prep() -> None:
+            try:
+                box["value"] = prepare_uv_environment(container, str(ws_dir))
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+
+        t = threading.Thread(target=_run_prep, daemon=True)
+        t.start()
+
+        assert launch_entered.wait(10.0), "metadata exec did not reach launch gate"
+        assert reap_done.wait(10.0), "outer deps reaper did not complete"
+        t.join(10.0)
+        assert not t.is_alive(), "prepare_uv_environment hung under outer deps deadline"
+        if "error" in box:
+            raise box["error"]
+
+        prep_res = box["value"]
+        assert prep_res.success is False
+        assert prep_res.exit_code == 124
+        assert prep_res.reason is not None and "deps_timeout" in prep_res.reason
+        assert "reap=ok" in prep_res.message
+        assert verdicts == ["ok"]
+        assert has_verify_success(container.id) is False
+        assert (ws_dir / "uv.lock").read_bytes() == lock_before
+        assert not started_file.exists()
+
+        allow_launch.set()
+        assert runner_finished.wait(2.0), "late outer-deps metadata shell did not exit promptly"
+        assert not started_file.exists(), "late-started shell under outer deps deadline must not invoke uv"
+        assert _wait_token_processes_dead(token) == []
+    finally:
+        allow_launch.set()
+        _kill_token_processes(token)
+
+
+def test_late_metadata_exec_in_timeout_fallback_branch_never_renews_budget(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_timeout = shutil.which("timeout")
+    if real_timeout is None:
+        pytest.skip("timeout binary unavailable")
+
+    ws_dir, _, _, _ = _make_workspace(tmp_path, name="late-timeout-fallback")
+    prep_container = LocalWorkspaceContainer(ws_dir, cid="late-timeout-fb-cid")
+    _prepare_and_verify_context(monkeypatch, prep_container)
+    assert json.loads(sandbox_prepare_environment(prep_container.id, working_dir=str(ws_dir)))["status"] == "ok"
+    record_verify_success(prep_container.id)
+
+    token = f"sunabaLateTF-{uuid.uuid4().hex[:12]}"
+    bin_dir = tmp_path / "late-tf-bin"
+    started_file = tmp_path / "uv_started"
+    ready_file = tmp_path / "uv_ready"
+    pids_file = tmp_path / "uv_pids"
+    _build_no_timeout_blocking_uv_bin(
+        bin_dir,
+        ws_dir,
+        token=token,
+        started_file=started_file,
+        ready_file=ready_file,
+        pids_file=pids_file,
+    )
+    (bin_dir / "timeout").symlink_to(real_timeout)
+
+    launch_entered = threading.Event()
+    allow_launch = threading.Event()
+    runner_finished = threading.Event()
+    container = _DelayedLaunchMetadataContainer(
+        ws_dir,
+        cid=prep_container.id,
+        path_override=str(bin_dir),
+        launch_entered=launch_entered,
+        allow_launch=allow_launch,
+        runner_finished=runner_finished,
+        drop_env=True,
+    )
+    _prepare_and_verify_context(monkeypatch, container)
+    monkeypatch.delenv("SUNABA_VERIFY_MARKER", raising=False)
+    monkeypatch.delenv("SUNABA_FOREGROUND_MARKER", raising=False)
+    monkeypatch.delenv("SUNABA_UV_METADATA_MARKER", raising=False)
+    monkeypatch.setenv("SUNABA_UV_METADATA_TIMEOUT", "0.2")
+    monkeypatch.setenv("SUNABA_VERIFY_TIMEOUT", "30.0")
+    reap_done, verdicts = _spy_reap_completion(monkeypatch)
+
+    try:
+        box: dict[str, Any] = {}
+
+        def _run_fp() -> None:
+            try:
+                box["value"] = compute_manifest_fingerprint(container, str(ws_dir))
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+
+        t = threading.Thread(target=_run_fp, daemon=True)
+        t.start()
+        assert launch_entered.wait(10.0)
+        assert reap_done.wait(10.0)
+        t.join(10.0)
+        assert not t.is_alive()
+        assert isinstance(box.get("error"), FingerprintProbeError)
+        assert verdicts == ["ok"]
+        assert not started_file.exists()
+
+        allow_launch.set()
+        assert runner_finished.wait(2.0), "late timeout-fallback shell did not exit promptly"
+        assert not started_file.exists(), "timeout fallback must not renew relative budget on late exec"
+        assert _wait_token_processes_dead(token) == []
+
+        # Also verify non-delayed timeout fallback honors remaining outer verify deadline (< metadata bound)
+        started_file.unlink(missing_ok=True)
+        ready_file.unlink(missing_ok=True)
+        timeout_arg_file = tmp_path / "timeout_arg.txt"
+        fb_bin_dir = tmp_path / "late-tf-imm-bin"
+        fb_bin_dir.mkdir()
+        for tool in ("sh", "tr", "cat", "sleep", "env", "find", "git", "echo"):
+            found = shutil.which(tool)
+            if found:
+                (fb_bin_dir / tool).symlink_to(found)
+        timeout_wrapper = fb_bin_dir / "timeout"
+        timeout_wrapper.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$1" > '{timeout_arg_file}'
+exec '{real_timeout}' -k 0.1 "$@"
+""",
+            encoding="utf-8",
+        )
+        timeout_wrapper.chmod(0o755)
+        real_uv = shutil.which("uv")
+        assert real_uv is not None
+        orig_path = os.environ.get("PATH", "")
+        fb_uv = fb_bin_dir / "uv"
+        fb_uv.write_text(
+            f"""#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "dir" ]; then
+    printf '%s\\n' '{ws_dir}'
+    exit 0
+fi
+if [ "$1" = "workspace" ] && [ "$2" = "metadata" ]; then
+    exec sleep 5
+fi
+PATH='{orig_path}' exec '{real_uv}' "$@"
+""",
+            encoding="utf-8",
+        )
+        fb_uv.chmod(0o755)
+
+        immediate_container = LocalWorkspaceContainer(
+            ws_dir,
+            cid=prep_container.id,
+            path_override=str(fb_bin_dir),
+        )
+        orig_exec = immediate_container.exec_run
+
+        def _drop_env_exec(
+            cmd: list[str] | str,
+            stdout: bool = True,
+            stderr: bool = True,
+            demux: bool = True,
+            environment: dict[str, str] | None = None,
+            workdir: str | None = None,
+            **kwargs: Any,
+        ) -> Any:
+            return orig_exec(
+                cmd,
+                stdout=stdout,
+                stderr=stderr,
+                demux=demux,
+                environment=None,
+                workdir=workdir,
+                **kwargs,
+            )
+
+        immediate_container.exec_run = _drop_env_exec  # type: ignore[method-assign]
+        monkeypatch.setenv("SUNABA_UV_METADATA_TIMEOUT", "15.0")
+
+        from sunaba.edit_verify.shell import (
+            VerifyTreeTimeout,
+            close_verify_deadline,
+            open_verify_deadline,
+        )
+
+        open_verify_deadline(immediate_container, 1.0, "sunaba910fb")
+        t0 = time.monotonic()
+        try:
+            with pytest.raises((FingerprintProbeError, VerifyTreeTimeout)):
+                compute_manifest_fingerprint(immediate_container, str(ws_dir))
+        finally:
+            close_verify_deadline()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 3.0, f"timeout fallback renewed 15s bound instead of honoring 1.0s outer deadline: {elapsed:.2f}s"
+        assert timeout_arg_file.exists()
+        passed_timeout = float(timeout_arg_file.read_text(encoding="utf-8").strip())
+        assert 0.0 < passed_timeout <= 1.0, f"timeout fallback must honor outer deadline, got {passed_timeout}"
+    finally:
+        allow_launch.set()
+        _kill_token_processes(token)
+
+
+def test_metadata_startup_eligibility_fails_closed_on_clock_or_protocol_mismatch(
+    tmp_path: Path, isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir, pkg_a, _, _ = _make_workspace(tmp_path, name="clock-mismatch")
+    prep_container = LocalWorkspaceContainer(ws_dir, cid="clock-mismatch-cid")
+    _prepare_and_verify_context(monkeypatch, prep_container)
+    assert json.loads(sandbox_prepare_environment(prep_container.id, working_dir=str(ws_dir)))["status"] == "ok"
+    record_verify_success(prep_container.id)
+
+    token = f"sunabaClock-{uuid.uuid4().hex[:12]}"
+    bin_dir = tmp_path / "clock-bin"
+    started_file = tmp_path / "uv_started"
+    ready_file = tmp_path / "uv_ready"
+    pids_file = tmp_path / "uv_pids"
+    _build_no_timeout_blocking_uv_bin(
+        bin_dir,
+        ws_dir,
+        token=token,
+        started_file=started_file,
+        ready_file=ready_file,
+        pids_file=pids_file,
+    )
+
+    class UptimeOverrideContainer(LocalWorkspaceContainer):
+        def __init__(self, uptime_path: Path) -> None:
+            super().__init__(ws_dir, cid=prep_container.id, path_override=str(bin_dir))
+            self.uptime_path = str(uptime_path)
+
+        def exec_run(
+            self,
+            cmd: list[str] | str,
+            stdout: bool = True,
+            stderr: bool = True,
+            demux: bool = True,
+            environment: dict[str, str] | None = None,
+            workdir: str | None = None,
+            **kwargs: Any,
+        ) -> Any:
+            if isinstance(cmd, (list, tuple)) and cmd and isinstance(cmd[-1], str):
+                cmd = [*cmd[:-1], cmd[-1].replace("/proc/uptime", self.uptime_path)]
+            return super().exec_run(
+                cmd,
+                stdout=stdout,
+                stderr=stderr,
+                demux=demux,
+                environment=environment,
+                workdir=workdir,
+                **kwargs,
+            )
+
+    lock_before = (ws_dir / "uv.lock").read_bytes()
+    state_file = isolated_env / f"{prep_container.id}.json"
+    state_bytes_before = state_file.read_bytes()
+
+    try:
+        # 1. Missing / unreadable /proc/uptime
+        missing_container = UptimeOverrideContainer(tmp_path / "missing-uptime")
+        _prepare_and_verify_context(monkeypatch, missing_container)
+        with pytest.raises(FingerprintProbeError):
+            compute_manifest_fingerprint(missing_container, str(ws_dir))
+        assert not started_file.exists()
+
+        # 2. Malformed /proc/uptime
+        bad_uptime = tmp_path / "bad-uptime"
+        bad_uptime.write_text("not-a-number 0\n", encoding="utf-8")
+        bad_container = UptimeOverrideContainer(bad_uptime)
+        _prepare_and_verify_context(monkeypatch, bad_container)
+        with pytest.raises(FingerprintProbeError):
+            compute_manifest_fingerprint(bad_container, str(ws_dir))
+        assert not started_file.exists()
+
+        # 3. Container clock behind host issued clock (VM / LXCFS mismatch)
+        behind_uptime = tmp_path / "behind-uptime"
+        behind_uptime.write_text("1.00 1.00\n", encoding="utf-8")
+        behind_container = UptimeOverrideContainer(behind_uptime)
+        _prepare_and_verify_context(monkeypatch, behind_container)
+        verify_res = json.loads(
+            verify_in_container(
+                behind_container.id,
+                path="tests",
+                working_dir=str(pkg_a),
+                skip_lint_gate=True,
+                skip_type_gate=True,
+            )
+        )
+        assert verify_res["status"] == "environment_setup_failed"
+        assert verify_res["gate_passed"] is False
+        assert has_verify_success(behind_container.id) is False
+        assert not started_file.exists()
+        assert state_file.read_bytes() == state_bytes_before
+        assert (ws_dir / "uv.lock").read_bytes() == lock_before
+
+        # 4. Host CLOCK_BOOTTIME unavailable fails closed before invoking exec_run/uv
+        real_container = LocalWorkspaceContainer(
+            ws_dir,
+            cid=prep_container.id,
+            path_override=str(bin_dir),
+        )
+        monkeypatch.delattr(time, "CLOCK_BOOTTIME", raising=False)
+        with pytest.raises(FingerprintProbeError):
+            compute_manifest_fingerprint(real_container, str(ws_dir))
+        assert not started_file.exists()
+        assert not any("uv workspace metadata" in c for c in real_container.exec_calls)
+    finally:
+        _kill_token_processes(token)

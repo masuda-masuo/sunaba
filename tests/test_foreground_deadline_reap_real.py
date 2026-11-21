@@ -514,13 +514,14 @@ class TestPackageInstallReapsRealDescendants:
         ord_pid = f"/tmp/{token}.ord"
         # Stand-in for the hung ``pip install``: spawns an ordinary and a
         # setsid-detached TERM-ignoring descendant, then loops.  The
-        # ``pip list`` snapshot package_install runs *before* the install is
-        # answered instantly by the fake instead of starting a real pip:
-        # that snapshot is unrelated setup, and under load a real
-        # ``pip list`` (which starts a Python interpreter) can consume the
-        # whole 3s deadline before the install exec is even reached, so the
-        # install tree would never appear and no reap could be observed.
-        # The install itself still runs the real deadline/reap path.
+        # pre-install ``pip list`` snapshot is answered by the fake to remove
+        # unrelated interpreter startup from the fixture while retaining all
+        # real process, timeout, and descendant-reap assertions for the install
+        # exec.  Oversized ``pip list`` startup exhausting the 3s deadline is a
+        # hypothesis for historical intermittent failures: one synthetic load
+        # reproduction confirmed it can occur, while a prior low-load
+        # full-suite failure and a separate ~0.6s ``pip list`` measurement
+        # (issue #985 comment 6744108028) leave historical causes unconfirmed.
         script = (
             f"echo $$ > {parent_pid}; "
             f"setsid sh -c 'trap \"echo TERM >> {log}\" TERM; "
@@ -533,8 +534,8 @@ class TestPackageInstallReapsRealDescendants:
         fake = _LocalExecContainer(
             substitute={
                 "pip install": script,
-                # Keep the unrelated pre-install snapshot off the deadline
-                # budget; the install tree still has to time out for real.
+                # Remove unrelated interpreter startup from the fixture; the
+                # install tree still runs and times out/reaps for real.
                 "pip list": "printf '[]'",
             },
             ready_path=ready,

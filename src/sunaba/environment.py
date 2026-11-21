@@ -278,6 +278,7 @@ def check_recorded_environment_staleness(
                 return "failed", f"uv manifest probe failed: {str(exc)[:200]}"
         return "ready", None
 
+    from sunaba.edit_verify.shell import TreeTimeout
     from sunaba.environment_state_store import (
         FingerprintProbeError,
         compare_recorded_fingerprint,
@@ -289,6 +290,9 @@ def check_recorded_environment_staleness(
         is_stale, changed = compare_recorded_fingerprint(
             container, recorded_fp, project_root
         )
+    except TreeTimeout:
+        invalidate_verify_success(container_id)
+        raise
     except FingerprintProbeError as exc:
         invalidate_verify_success(container_id)
         return "failed", f"fingerprint probe failed: {exc}"

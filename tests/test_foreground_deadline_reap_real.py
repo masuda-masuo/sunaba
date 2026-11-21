@@ -513,8 +513,15 @@ class TestPackageInstallReapsRealDescendants:
         child_pid = f"/tmp/{token}.child"
         ord_pid = f"/tmp/{token}.ord"
         # Stand-in for the hung ``pip install``: spawns an ordinary and a
-        # setsid-detached TERM-ignoring descendant, then loops.  The real
-        # ``pip list`` snapshots around it still run for real.
+        # setsid-detached TERM-ignoring descendant, then loops.  The
+        # pre-install ``pip list`` snapshot is answered by the fake to remove
+        # unrelated interpreter startup from the fixture while retaining all
+        # real process, timeout, and descendant-reap assertions for the install
+        # exec.  Oversized ``pip list`` startup exhausting the 3s deadline is a
+        # hypothesis for historical intermittent failures: one synthetic load
+        # reproduction confirmed it can occur, while a prior low-load
+        # full-suite failure and a separate ~0.6s ``pip list`` measurement
+        # (issue #985 comment 6744108028) leave historical causes unconfirmed.
         script = (
             f"echo $$ > {parent_pid}; "
             f"setsid sh -c 'trap \"echo TERM >> {log}\" TERM; "
@@ -525,7 +532,12 @@ class TestPackageInstallReapsRealDescendants:
             f"while :; do sleep 60; done"
         )
         fake = _LocalExecContainer(
-            substitute={"pip install": script},
+            substitute={
+                "pip install": script,
+                # Remove unrelated interpreter startup from the fixture; the
+                # install tree still runs and times out/reaps for real.
+                "pip list": "printf '[]'",
+            },
             ready_path=ready,
             ready_exec_substring="pip install",
         )

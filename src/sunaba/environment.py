@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shlex
+from pathlib import PurePosixPath
 from typing import Any
 
 
@@ -309,34 +310,101 @@ def check_recorded_environment_staleness(
     return "ready", None
 
 
+def _deepest_recorded_ancestor(
+    workdir: str, records: dict[str, dict[str, Any]]
+) -> tuple[str, dict[str, Any]] | None:
+    """Return the deepest recorded root that is a strict path-component ancestor."""
+    normalized_workdir = os.path.normpath(workdir)
+    workdir_parts = PurePosixPath(normalized_workdir).parts
+    best_depth = -1
+    best: tuple[str, dict[str, Any]] | None = None
+    for recorded_root, state in records.items():
+        if not recorded_root:
+            continue
+        normalized_root = os.path.normpath(recorded_root)
+        if normalized_root == normalized_workdir:
+            continue
+        root_parts = PurePosixPath(normalized_root).parts
+        if (
+            root_parts
+            and len(root_parts) < len(workdir_parts)
+            and workdir_parts[: len(root_parts)] == root_parts
+            and len(root_parts) > best_depth
+        ):
+            best_depth = len(root_parts)
+            best = (normalized_root, dict(state))
+    return best
+
+
+def select_recorded_environment_for_workdir(
+    container: Any,
+    workdir: str,
+    records: dict[str, dict[str, Any]],
+    uv_root: str | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Select the applicable preparation record for *workdir*.
+
+    Normal uv root resolution always takes precedence. When resolution yields
+    ``None``, preserve an exact-root record first; otherwise inspect the deepest
+    recorded path-component ancestor and apply it only when that ancestor is no
+    longer a locked uv root (e.g. ``uv.lock`` disappeared while
+    ``pyproject.toml`` remained).
+    """
+    normalized_records = {
+        (os.path.normpath(root) if root else ""): state
+        for root, state in records.items()
+    }
+    if uv_root is not None:
+        normalized_uv_root = os.path.normpath(uv_root)
+        state = normalized_records.get(normalized_uv_root)
+        if state is None and len(normalized_records) == 1 and "" in normalized_records:
+            # A legacy record without a root can only be scoped from the caller.
+            state = normalized_records[""]
+        return normalized_uv_root, dict(state) if state is not None else None
+
+    normalized_workdir = os.path.normpath(workdir)
+    if normalized_workdir in normalized_records:
+        return normalized_workdir, dict(normalized_records[normalized_workdir])
+
+    ancestor = _deepest_recorded_ancestor(normalized_workdir, normalized_records)
+    if ancestor is None:
+        return None, None
+
+    ancestor_root, ancestor_state = ancestor
+    if probe_uv_project_root(container, ancestor_root):
+        # A still-locked ancestor means workdir is a non-uv subdir or
+        # non-member rather than a descendant of a root that lost uv.lock.
+        return None, None
+    return ancestor_root, ancestor_state
+
+
 def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
     """Check the preparation record for the uv root containing *root*."""
+    from sunaba.edit_verify.shell import TreeTimeout
     from sunaba.verify_state import (
-        get_environment_state_for_root,
+        invalidate_verify_success,
         list_environment_states,
     )
 
     container_id = str(getattr(container, "id", ""))
     try:
         uv_root = resolve_uv_root(container, root)
+        records = list_environment_states(container_id)
+        selected_root, state = select_recorded_environment_for_workdir(
+            container, root, records, uv_root
+        )
+    except TreeTimeout:
+        invalidate_verify_success(container_id)
+        raise
     except Exception as exc:
+        invalidate_verify_success(container_id)
         return "failed", f"uv root probe failed: {str(exc)[:200]}"
-    records = list_environment_states(container_id)
-    state = (
-        get_environment_state_for_root(container_id, uv_root)
-        if uv_root is not None
-        else None
-    )
     if uv_root is None:
-        # A recorded root whose lock disappeared is stale, not an unrelated
-        # non-uv directory.
-        state = get_environment_state_for_root(container_id, os.path.normpath(root))
         if state is None:
             return "not_uv", None
-        return check_recorded_environment_staleness(container, state, root)
-    if state is None and len(records) == 1 and "" in records:
-        # A legacy record without a root can only be scoped from the caller.
-        state = records[""]
+        return check_recorded_environment_staleness(
+            container, state, selected_root or root
+        )
     if state is None and records:
         return (
             "not_prepared",

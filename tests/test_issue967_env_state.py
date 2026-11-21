@@ -1039,3 +1039,322 @@ def test_verify_nested_uv_workdir_requires_its_own_preparation(isolated_state: P
     assert all(root == nested for root in roots), roots
     assert prepared.get("status") != "environment_setup_failed"
 
+
+def test_descendant_missing_uv_lock_blocks_helper_runners_and_verify(
+    isolated_state: Path,
+) -> None:
+    """Recorded ready root retaining pyproject.toml without uv.lock blocks descendants."""
+    from sunaba.edit_verify.lint_runners import _run_pyright_verify, _run_ruff_verify
+    from sunaba.edit_verify.test_runners import _run_pytest_verify
+
+    container, files = _make_ready_container()
+    cid = container.id
+    fp = compute_manifest_fingerprint(container, container.root)
+    record_environment_state(
+        cid,
+        "ready",
+        command="uv sync --locked",
+        exit_code=0,
+        fingerprint=fp,
+        project_root=container.root,
+    )
+    record_verify_success(cid)
+    assert has_verify_success(cid) is True
+
+    original_uv_lock = files.pop(f"{container.root}/uv.lock")
+    descendant = f"{container.root}/sub/pkg"
+
+    status, reason = check_uv_environment(container, descendant)
+    assert status == "stale"
+    assert reason is not None and "uv.lock" in reason
+    assert has_verify_success(cid) is False
+    stored = get_environment_state(cid)
+    assert stored is not None and stored["status"] == "ready"
+
+    block_reason = uv_environment_block_reason(container, descendant)
+    assert block_reason is not None
+    assert "stale" in block_reason
+    assert "uv.lock" in block_reason
+
+    container.executed.clear()
+    ruff_res = _run_ruff_verify(container, "src", workdir=descendant)
+    assert ruff_res.status == "error"
+    assert "stale" in ruff_res.detail and "uv.lock" in ruff_res.detail
+
+    pyright_res = _run_pyright_verify(container, "src", workdir=descendant)
+    assert pyright_res.status == "error"
+    assert "stale" in pyright_res.detail and "uv.lock" in pyright_res.detail
+
+    pytest_desc_res = _run_pytest_verify(container, "tests/", workdir=descendant)
+    assert pytest_desc_res.status == "error"
+    assert "stale" in pytest_desc_res.detail and "uv.lock" in pytest_desc_res.detail
+
+    pytest_root_res = _run_pytest_verify(container, "tests/", workdir=container.root)
+    assert pytest_root_res.status == "error"
+    assert "stale" in pytest_root_res.detail and "uv.lock" in pytest_root_res.detail
+
+    assert not any(
+        "ruff check" in cmd or "pyright --outputjson" in cmd or "--junit-xml" in cmd
+        for cmd in container.executed
+    )
+
+    record_verify_success(cid)
+    container.executed.clear()
+    client = _make_client_mock(cast(Any, container))
+    with patch("sunaba.tools.verify._docker", return_value=client):
+        res = json.loads(
+            verify_in_container(container_id=cid, path=descendant, working_dir=descendant)
+        )
+    assert res["status"] == "environment_setup_failed"
+    assert res["gate_passed"] is False
+    assert res["environment_setup"]["status"] == "stale"
+    assert "uv.lock" in res["environment_setup"]["reason"]
+    assert res["lint"]["status"] == "skipped"
+    assert res["types"]["status"] == "skipped"
+    assert res["patch_targets"]["status"] == "skipped"
+    assert res["tests"]["status"] == "skipped"
+    assert has_verify_success(cid) is False
+    stored_after = get_environment_state(cid)
+    assert stored_after is not None and stored_after["status"] == "ready"
+    assert not any(
+        "ruff check" in cmd or "pyright --outputjson" in cmd or "--junit-xml" in cmd
+        for cmd in container.executed
+    )
+
+    files[f"{container.root}/uv.lock"] = original_uv_lock
+    assert check_uv_environment(container, descendant) == ("not_uv", None)
+
+
+def test_nested_independent_uv_root_wins_over_ancestor_missing_uv_lock(
+    isolated_state: Path,
+) -> None:
+    """An independently resolved nested uv root keeps its own readiness rules."""
+    container, files = _make_ready_container()
+    cid = container.id
+    parent_fp = compute_manifest_fingerprint(container, container.root)
+    record_environment_state(
+        cid,
+        "ready",
+        command="uv sync --locked",
+        exit_code=0,
+        fingerprint=parent_fp,
+        project_root=container.root,
+    )
+
+    nested = f"{container.root}/pkg"
+    files[f"{nested}/pyproject.toml"] = b"[project]\nname='nested'\n"
+    files[f"{nested}/uv.lock"] = b"version = 1\n"
+    files.pop(f"{container.root}/uv.lock")
+
+    status, reason = check_uv_environment(container, nested)
+    assert status == "not_prepared"
+    assert nested in (reason or "")
+
+    client = _make_client_mock(cast(Any, container))
+    with patch("sunaba.tools.verify._docker", return_value=client):
+        unprepared = json.loads(
+            verify_in_container(container_id=cid, path=nested, working_dir=nested)
+        )
+        assert unprepared["status"] == "environment_setup_failed"
+        assert unprepared["environment_setup"]["status"] == "not_prepared"
+        assert nested in unprepared["environment_setup"]["reason"]
+
+        nested_fp = compute_manifest_fingerprint(container, nested)
+        record_environment_state(
+            cid,
+            "ready",
+            command="uv sync --locked",
+            exit_code=0,
+            fingerprint=nested_fp,
+            project_root=nested,
+        )
+        assert check_uv_environment(container, nested) == ("ready", None)
+        prepared = json.loads(
+            verify_in_container(container_id=cid, path=nested, working_dir=nested)
+        )
+        assert prepared.get("status") != "environment_setup_failed"
+
+
+def test_overlapping_recorded_ancestors_select_deepest_and_match_path_components(
+    isolated_state: Path,
+) -> None:
+    """Deepest path-component ancestor governs when resolution yields None."""
+    container, files = _make_ready_container()
+    cid = container.id
+    nested = f"{container.root}/pkg"
+    files[f"{nested}/pyproject.toml"] = b"[project]\nname='nested'\n"
+    files[f"{nested}/uv.lock"] = b"version = 1\n"
+
+    parent_fp = compute_manifest_fingerprint(container, container.root)
+    nested_fp = compute_manifest_fingerprint(container, nested)
+    record_environment_state(
+        cid, "ready", command="uv sync --locked", exit_code=0, fingerprint=parent_fp, project_root=container.root
+    )
+    record_environment_state(
+        cid, "ready", command="uv sync --locked", exit_code=0, fingerprint=nested_fp, project_root=nested
+    )
+
+    # Outer loses uv.lock while nested stays locked:
+    # - /workspace/pkg/sub sees deepest ancestor /workspace/pkg (still locked) -> not_uv
+    # - /workspace/pkg2/sub does not match /workspace/pkg by path component -> checks /workspace -> stale
+    # - /workspace-sibling/sub does not match /workspace by path component -> not_uv
+    outer_lock = files.pop(f"{container.root}/uv.lock")
+    assert check_uv_environment(container, f"{nested}/sub") == ("not_uv", None)
+
+    status_prefix_sibling, reason_prefix_sibling = check_uv_environment(
+        container, f"{container.root}/pkg2/sub"
+    )
+    assert status_prefix_sibling == "stale"
+    assert reason_prefix_sibling is not None and "uv.lock" in reason_prefix_sibling
+
+    assert check_uv_environment(container, f"{container.root}-sibling/sub") == ("not_uv", None)
+    client = _make_client_mock(cast(Any, container))
+    with patch("sunaba.tools.verify._docker", return_value=client):
+        sibling_verify = json.loads(
+            verify_in_container(
+                container_id=cid,
+                path=f"{container.root}-sibling/sub",
+                working_dir=f"{container.root}-sibling/sub",
+            )
+        )
+        assert sibling_verify["status"] != "environment_setup_failed"
+
+    # Restore outer lock and delete nested lock instead:
+    # - /workspace/pkg/sub sees deepest ancestor /workspace/pkg -> stale
+    files[f"{container.root}/uv.lock"] = outer_lock
+    files.pop(f"{nested}/uv.lock")
+    status_nested_desc, reason_nested_desc = check_uv_environment(container, f"{nested}/sub")
+    assert status_nested_desc == "stale"
+    assert reason_nested_desc is not None and "uv.lock" in reason_nested_desc
+
+
+def test_non_member_beneath_still_locked_ancestor_and_member_descendant_missing_uv_lock(
+    tmp_path: Path, isolated_state: Path
+) -> None:
+    """Real uv workspace: non-member stays not_uv while locked; member blocks after lock loss."""
+    import subprocess
+
+    from sunaba.edit_verify.test_runners import _run_pytest_verify
+    from tests.test_issue972_per_root_state import LocalExecContainer
+
+    ws_dir = tmp_path / "ws"
+    member_src = ws_dir / "packages" / "a" / "src" / "pkg_a"
+    member_src.mkdir(parents=True)
+    (ws_dir / "pyproject.toml").write_text(
+        '[project]\nname = "ws"\nversion = "0.1.0"\ndependencies = []\n\n'
+        '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        encoding="utf-8",
+    )
+    (ws_dir / "packages" / "a" / "pyproject.toml").write_text(
+        '[project]\nname = "pkg-a"\nversion = "0.1.0"\ndependencies = []\n',
+        encoding="utf-8",
+    )
+    (member_src / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    non_member = ws_dir / "non_member"
+    non_member.mkdir()
+    (non_member / "pyproject.toml").write_text(
+        '[project]\nname = "non-member"\nversion = "0.1.0"\ndependencies = []\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["uv", "lock"], cwd=ws_dir, check=True, capture_output=True)
+
+    container = LocalExecContainer(ws_dir)
+    fp = compute_manifest_fingerprint(container, str(ws_dir))
+    record_environment_state(
+        container.id,
+        "ready",
+        command="uv sync --locked --all-groups --all-packages",
+        exit_code=0,
+        fingerprint=fp,
+        project_root=str(ws_dir),
+    )
+
+    # While ws_dir is still locked, non-member stays not_uv
+    assert check_uv_environment(container, str(non_member)) == ("not_uv", None)
+    client = _make_client_mock(cast(Any, container))
+    with patch("sunaba.tools.verify._docker", return_value=client):
+        non_member_res = json.loads(
+            verify_in_container(
+                container_id=container.id, path=".", working_dir=str(non_member)
+            )
+        )
+        assert non_member_res["status"] != "environment_setup_failed"
+
+    # Deleting workspace uv.lock blocks member and member subdirectory descendants
+    (ws_dir / "uv.lock").unlink()
+    for target in (str(ws_dir / "packages" / "a"), str(member_src)):
+        status, reason = check_uv_environment(container, target)
+        assert status == "stale"
+        assert reason is not None and "uv.lock" in reason
+        pytest_res = _run_pytest_verify(container, "tests/", workdir=target)
+        assert pytest_res.status == "error"
+        assert "stale" in pytest_res.detail and "uv.lock" in pytest_res.detail
+        with patch("sunaba.tools.verify._docker", return_value=client):
+            verify_res = json.loads(
+                verify_in_container(
+                    container_id=container.id, path=".", working_dir=target
+                )
+            )
+            assert verify_res["status"] == "environment_setup_failed"
+            assert verify_res["environment_setup"]["status"] == "stale"
+            assert "uv.lock" in verify_res["environment_setup"]["reason"]
+
+
+def test_descendant_ancestor_manifest_probe_failure_fails_closed(
+    isolated_state: Path,
+) -> None:
+    """When probing the recorded ancestor fails from a descendant, checks fail closed."""
+    from sunaba.edit_verify.lint_runners import _run_pyright_verify, _run_ruff_verify
+    from sunaba.edit_verify.test_runners import _run_pytest_verify
+
+    container, files = _make_ready_container()
+    cid = container.id
+    fp = compute_manifest_fingerprint(container, container.root)
+    record_environment_state(
+        cid,
+        "ready",
+        command="uv sync --locked",
+        exit_code=0,
+        fingerprint=fp,
+        project_root=container.root,
+    )
+    record_verify_success(cid)
+    descendant = f"{container.root}/sub"
+    files.pop(f"{container.root}/uv.lock")
+
+    with patch(
+        "sunaba.environment.probe_uv_project_root",
+        side_effect=RuntimeError("ancestor manifest probe transport failure"),
+    ):
+        status, reason = check_uv_environment(container, descendant)
+        assert status == "failed"
+        assert reason is not None and "ancestor manifest probe transport failure" in reason
+        assert has_verify_success(cid) is False
+        assert uv_environment_block_reason(container, descendant) is not None
+
+        for runner_res in (
+            _run_ruff_verify(container, "src", workdir=descendant),
+            _run_pyright_verify(container, "src", workdir=descendant),
+            _run_pytest_verify(container, "tests/", workdir=descendant),
+        ):
+            assert runner_res.status == "error"
+            assert "failed" in runner_res.detail
+
+        record_verify_success(cid)
+        client = _make_client_mock(cast(Any, container))
+        with patch("sunaba.tools.verify._docker", return_value=client):
+            res = json.loads(
+                verify_in_container(
+                    container_id=cid, path=descendant, working_dir=descendant
+                )
+            )
+        assert res["status"] == "environment_setup_failed"
+        assert res["gate_passed"] is False
+        assert res["environment_setup"]["status"] == "failed"
+        assert "ancestor manifest probe transport failure" in res["environment_setup"]["reason"]
+        assert res["lint"]["status"] == "skipped"
+        assert res["tests"]["status"] == "skipped"
+        assert has_verify_success(cid) is False
+        stored = get_environment_state(cid)
+        assert stored is not None and stored["status"] == "ready"

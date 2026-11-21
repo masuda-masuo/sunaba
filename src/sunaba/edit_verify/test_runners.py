@@ -55,14 +55,14 @@ def _run_pytest_verify(
         resolve_uv_root,
         uv_environment_block_reason,
     )
+    blocked = uv_environment_block_reason(container, root)
+    if blocked:
+        return _envelope_error("pytest", blocked, 1)
     try:
         uv_root = resolve_uv_root(container, root)
     except Exception as exc:
         return _envelope_error("pytest", f"uv root probe failed: {exc}", 1)
     if uv_root:
-        blocked = uv_environment_block_reason(container, root)
-        if blocked:
-            return _envelope_error("pytest", blocked, 1)
         if python_executable is None:
             try:
                 toolchain = resolve_uv_python_tools(container, uv_root)

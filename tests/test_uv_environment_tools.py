@@ -792,3 +792,218 @@ def test_malformed_image_absence_marker_is_an_error() -> None:
     with pytest.raises(EnvironmentResolutionError, match="malformed output"):
         resolve_uv_tool(container, "/workspace", "ruff")
 
+
+def test_image_executable_probe_retries_empty_success_once() -> None:
+    from sunaba.environment import _resolve_image_tool
+
+    found_container = MagicMock()
+    found_container.exec_run.side_effect = [
+        (1, (b"", b"")),
+        (0, (b"", b"")),
+        (0, (b"__SUNABA_TOOL_FOUND__/home/sandbox/.venv/bin/ruff\n", b"")),
+        (0, (b"ruff 0.17.0\n", b"")),
+    ]
+
+    path, source, version = resolve_uv_tool(found_container, "/workspace", "ruff")
+
+    assert path == "/home/sandbox/.venv/bin/ruff"
+    assert source == "image"
+    assert version == "ruff 0.17.0"
+    assert found_container.exec_run.call_count == 4
+
+    absent_container = MagicMock()
+    absent_container.exec_run.side_effect = [
+        (0, (b"\n", b"")),
+        (0, (b"__SUNABA_TOOL_ABSENT__\n", b"")),
+    ]
+
+    assert _resolve_image_tool(absent_container, "/workspace", "pyright") == (None, None)
+    assert absent_container.exec_run.call_count == 2
+
+
+def test_image_executable_probe_repeated_empty_fails_closed() -> None:
+    from sunaba.environment import _resolve_image_tool
+
+    repeated_container = MagicMock()
+    repeated_container.exec_run.side_effect = [
+        (0, (b"", b"")),
+        (0, (b"", b"")),
+    ]
+
+    with pytest.raises(EnvironmentResolutionError) as exc_info:
+        _resolve_image_tool(repeated_container, "/workspace", "pyright")
+
+    message = str(exc_info.value)
+    assert "pyright" in message
+    assert "empty output" in message
+    assert "0 output lines" in message
+    assert "multiple output lines" not in message
+    assert repeated_container.exec_run.call_count == 2
+
+    stderr_only_then_absent = MagicMock()
+    stderr_only_then_absent.exec_run.side_effect = [
+        (0, (b"", b"transient stderr\n")),
+        (0, (b"__SUNABA_TOOL_ABSENT__\n", b"")),
+    ]
+    assert _resolve_image_tool(stderr_only_then_absent, "/workspace", "ruff") == (None, None)
+    assert stderr_only_then_absent.exec_run.call_count == 2
+
+
+def test_image_executable_probe_multiline_fails_closed_without_retry() -> None:
+    from sunaba.environment import _resolve_image_tool
+
+    container = MagicMock()
+    container.exec_run.side_effect = [
+        (0, (b"__SUNABA_TOOL_FOUND__/usr/bin/ruff\nextra line\n", b"")),
+    ]
+
+    with pytest.raises(EnvironmentResolutionError) as exc_info:
+        _resolve_image_tool(container, "/workspace", "ruff")
+
+    message = str(exc_info.value)
+    assert "ruff" in message
+    assert "multiple output lines" in message
+    assert "2 lines" in message
+    assert "empty" not in message
+    assert container.exec_run.call_count == 1
+
+
+def test_image_executable_probe_does_not_retry_nonzero_or_malformed_errors() -> None:
+    from sunaba.environment import _resolve_image_tool
+
+    nonzero_container = MagicMock()
+    nonzero_container.exec_run.side_effect = [(127, (b"", b"exec error"))]
+    with pytest.raises(EnvironmentResolutionError) as nonzero_exc:
+        _resolve_image_tool(nonzero_container, "/workspace", "ruff")
+    assert "ruff" in str(nonzero_exc.value)
+    assert "exit 127" in str(nonzero_exc.value)
+    assert nonzero_container.exec_run.call_count == 1
+
+    malformed_container = MagicMock()
+    malformed_container.exec_run.side_effect = [(0, (b"unexpected-marker\n", b""))]
+    with pytest.raises(EnvironmentResolutionError) as malformed_exc:
+        _resolve_image_tool(malformed_container, "/workspace", "pyright")
+    assert "pyright" in str(malformed_exc.value)
+    assert "malformed output" in str(malformed_exc.value)
+    assert malformed_container.exec_run.call_count == 1
+
+    invalid_path_container = MagicMock()
+    invalid_path_container.exec_run.side_effect = [
+        (0, (b"__SUNABA_TOOL_FOUND__relative/pyright\n", b""))
+    ]
+    with pytest.raises(EnvironmentResolutionError) as invalid_exc:
+        _resolve_image_tool(invalid_path_container, "/workspace", "pyright")
+    assert "pyright" in str(invalid_exc.value)
+    assert "invalid path" in str(invalid_exc.value)
+    assert invalid_path_container.exec_run.call_count == 1
+
+
+def test_image_executable_probe_retry_propagates_timeout_and_verify_invalidates_state() -> None:
+    import json
+    import threading
+    import time
+
+    from sunaba.edit_verify.shell import (
+        VerifyTreeTimeout,
+        close_verify_deadline,
+        open_verify_deadline,
+    )
+    from sunaba.environment import _resolve_image_tool
+    from sunaba.verify_state import record_verify_success
+
+    # 1. Retry blocked under an active deadline propagates VerifyTreeTimeout without renewing budget.
+    cid = "uv_image_probe_timeout"
+    blocked_container, _ = _make_mock_container(cid, {"pyproject.toml", "uv.lock"})
+    release_exec = threading.Event()
+    probe_calls = 0
+
+    def blocked_on_retry(cmd, **kwargs):
+        nonlocal probe_calls
+        command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "/proc/" in command or command.startswith("kill -"):
+            return 0, (b"", b"")
+        if "__SUNABA_TOOL_FOUND__" in command:
+            probe_calls += 1
+            if probe_calls == 1:
+                return 0, (b"", b"")
+            release_exec.wait(5.0)
+        return 0, (b"", b"")
+
+    blocked_container.exec_run.side_effect = blocked_on_retry
+    open_verify_deadline(blocked_container, 0.12, "imgproberetrytimeout")
+    started = time.monotonic()
+    try:
+        with pytest.raises(VerifyTreeTimeout):
+            _resolve_image_tool(blocked_container, "/workspace", "ruff")
+        assert time.monotonic() - started < 2.0
+        assert probe_calls == 2
+    finally:
+        release_exec.set()
+        close_verify_deadline()
+        threading.Event().wait(0.01)
+
+    # 2. If the deadline expires after the initial empty probe, retry does not launch exec_run.
+    expired_container, _ = _make_mock_container(f"{cid}_expired", {"pyproject.toml", "uv.lock"})
+    expired_probe_calls = 0
+
+    def expire_after_first(cmd, **kwargs):
+        nonlocal expired_probe_calls
+        command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "/proc/" in command or command.startswith("kill -"):
+            return 0, (b"", b"")
+        if "__SUNABA_TOOL_FOUND__" in command:
+            expired_probe_calls += 1
+            time.sleep(0.15)
+            return 0, (b"", b"")
+        return 0, (b"", b"")
+
+    expired_container.exec_run.side_effect = expire_after_first
+    open_verify_deadline(expired_container, 0.08, "imgprobeexpired")
+    try:
+        with pytest.raises(VerifyTreeTimeout):
+            _resolve_image_tool(expired_container, "/workspace", "pyright")
+        assert expired_probe_calls == 1
+    finally:
+        close_verify_deadline()
+        threading.Event().wait(0.01)
+
+    # 3. Terminal repeated-empty probe during verify fails closed, clears verify success, and preserves ready state.
+    verify_cid = "uv_image_probe_terminal_verify"
+    verify_container, executed = _make_mock_container(verify_cid, {"pyproject.toml", "uv.lock"})
+    original_exec = verify_container.exec_run.side_effect
+
+    def exec_with_repeated_empty_ruff(cmd, **kwargs):
+        command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "test -x" in command:
+            if ".venv/bin/python" in command:
+                return 0, (b"", b"")
+            return 1, (b"", b"")
+        if " --version" in command:
+            return 0, (b"Python 3.14.0\n", b"")
+        if "-m pytest --version" in command:
+            return 0, (b"pytest 8.0.0\n", b"")
+        if "__SUNABA_TOOL_FOUND__" in command:
+            return 0, (b"", b"")
+        return original_exec(cmd, **kwargs)
+
+    verify_container.exec_run.side_effect = exec_with_repeated_empty_ruff
+    client = _make_client_mock(verify_container)
+    with (
+        patch("sunaba.verify_state._verify_map", {}),
+        patch("sunaba.verify_state._environment_state", {}),
+        patch("sunaba.tools.verify._docker", return_value=client),
+    ):
+        record_environment_state(
+            verify_cid, "ready", command="uv sync --locked --all-groups --all-packages"
+        )
+        record_verify_success(verify_cid)
+        failed = json.loads(verify_in_container(container_id=verify_cid, path="tests/"))
+
+        assert failed["status"] == "environment_setup_failed"
+        assert failed["gate_passed"] is False
+        assert failed["gate_fail_kinds"] == ["environment_setup"]
+        assert "ruff" in failed["environment_setup"]["reason"]
+        assert "empty output" in failed["environment_setup"]["reason"]
+        assert has_verify_success(verify_cid) is False
+        assert get_environment_state(verify_cid)["status"] == "ready"
+        assert not any("--junit-xml" in command for command in executed)

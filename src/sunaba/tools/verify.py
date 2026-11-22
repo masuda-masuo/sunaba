@@ -963,28 +963,11 @@ def _verify_in_container_guarded(
     records = list_environment_states(full_cid)
     normalized_working_dir = os.path.normpath(working_dir)
     direct_record = records.get(normalized_working_dir)
-    directory_probe_failed = False
-    if direct_record is not None:
-        try:
-            from sunaba.environment import probe_directory_exists
-
-            directory_exists = probe_directory_exists(container, normalized_working_dir)
-        except TreeTimeout:
-            invalidate_verify_success(full_cid)
-            raise
-        except Exception:
-            directory_probe_failed = True
-            directory_exists = True
-        if not directory_exists:
-            forget_environment_state_for_root(
-                full_cid,
-                normalized_working_dir,
-                reason="directory no longer exists",
-            )
-            records = list_environment_states(full_cid)
+    direct_exists = True
 
     try:
         from sunaba.environment import (
+            probe_directory_exists,
             recorded_root_from_state,
             recorded_root_is_uv_project,
             resolve_uv_root,
@@ -992,11 +975,21 @@ def _verify_in_container_guarded(
             select_recorded_environment_for_workdir,
         )
 
+        if direct_record is not None:
+            direct_exists = probe_directory_exists(container, normalized_working_dir)
+            if not direct_exists:
+                forget_environment_state_for_root(
+                    full_cid,
+                    normalized_working_dir,
+                    reason="directory no longer exists",
+                )
+                records = list_environment_states(full_cid)
+
         uv_root = resolve_uv_root(container, working_dir)
         uv_project = uv_root is not None
         if (
             direct_record is not None
-            and not directory_probe_failed
+            and direct_exists
             and uv_root is not None
         ):
             if not roots_refer_to_same_project(

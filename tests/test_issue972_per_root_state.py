@@ -1327,6 +1327,144 @@ def test_verify_probe_failure_and_timeout_retain_record_when_manifests_missing(
     assert list_environment_states(timeout_container.id)[str(root)] == timeout_state_before
 
 
+def test_verify_initial_directory_probe_error_preserves_record_and_invalidates_success(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Initial directory probe failure for a direct root must fail closed immediately."""
+    from sunaba import verify_state
+
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    root = tmp_path / "initial-probe-proj"
+    _make_locked_project(root, "initial-probe-proj")
+    (root / "requirements.txt").write_text("", encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok() -> None:\n    assert True\n", encoding="utf-8"
+    )
+    base = LocalExecContainer(tmp_path)
+    fingerprint = compute_manifest_fingerprint(base, str(root))
+
+    class InitialDirectoryProbeErrorContainer(LocalExecContainer):
+        def __init__(self, proj_root: Path) -> None:
+            super().__init__(proj_root)
+            self.directory_probe_calls = 0
+            self.executed: list[str] = []
+
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            self.executed.append(rendered)
+            if "__SUNABA_DIRECTORY_EXISTS__" in rendered:
+                self.directory_probe_calls += 1
+                if self.directory_probe_calls == 1:
+                    return 2, (b"", b"initial directory probe failed")
+            return super().exec_run(cmd, *args, **kwargs)
+
+    container = InitialDirectoryProbeErrorContainer(tmp_path)
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    state_before = list_environment_states(container.id)[str(root)].copy()
+    persisted_before = (isolated_state / f"{container.id}.json").read_text(
+        encoding="utf-8"
+    )
+    (root / "pyproject.toml").unlink()
+    (root / "uv.lock").unlink()
+    record_verify_success(container.id)
+    assert has_verify_success(container.id) is True
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(containers=SimpleNamespace(get=lambda _cid: container)),
+    )
+
+    res = json.loads(
+        verify_in_container(container.id, path="tests", working_dir=str(root))
+    )
+    assert res["status"] == "environment_setup_failed"
+    assert res["gate_passed"] is False
+    assert "environment_setup" in res["gate_fail_kinds"]
+    assert "directory probe failed" in res["environment_setup"]["reason"]
+    assert res["tests"]["status"] == "skipped"
+    assert has_verify_success(container.id) is False
+    assert list_environment_states(container.id)[str(root)] == state_before
+    assert (isolated_state / f"{container.id}.json").read_text(
+        encoding="utf-8"
+    ) == persisted_before
+    assert container.directory_probe_calls == 1
+    assert not any("for f in pyproject.toml uv.lock" in cmd for cmd in container.executed)
+    assert not any("__SUNABA_PATH_OK__" in cmd for cmd in container.executed)
+    assert not any(
+        "--junit-xml=" in cmd or " -m pytest" in cmd for cmd in container.executed
+    )
+
+
+def test_verify_initial_directory_probe_timeout_preserves_record_and_invalidates_success(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Initial directory probe TreeTimeout for a direct root preserves timeout semantics."""
+    from sunaba import verify_state
+    from sunaba.edit_verify.shell import VerifyTreeTimeout
+
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    root = tmp_path / "initial-timeout-proj"
+    _make_locked_project(root, "initial-timeout-proj")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok() -> None:\n    assert True\n", encoding="utf-8"
+    )
+    base = LocalExecContainer(tmp_path)
+    fingerprint = compute_manifest_fingerprint(base, str(root))
+
+    class InitialDirectoryProbeTimeoutContainer(LocalExecContainer):
+        def __init__(self, proj_root: Path) -> None:
+            super().__init__(proj_root)
+            self.directory_probe_calls = 0
+            self.executed: list[str] = []
+
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            self.executed.append(rendered)
+            if "__SUNABA_DIRECTORY_EXISTS__" in rendered:
+                self.directory_probe_calls += 1
+                raise VerifyTreeTimeout(5.0, "ok", 5.1)
+            return super().exec_run(cmd, *args, **kwargs)
+
+    container = InitialDirectoryProbeTimeoutContainer(tmp_path)
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    state_before = list_environment_states(container.id)[str(root)].copy()
+    persisted_before = (isolated_state / f"{container.id}.json").read_text(
+        encoding="utf-8"
+    )
+    (root / "pyproject.toml").unlink()
+    (root / "uv.lock").unlink()
+    record_verify_success(container.id)
+    assert has_verify_success(container.id) is True
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(containers=SimpleNamespace(get=lambda _cid: container)),
+    )
+
+    res = json.loads(
+        verify_in_container(container.id, path="tests", working_dir=str(root))
+    )
+    assert res["status"] == "timeout"
+    assert res["gate_passed"] is False
+    assert has_verify_success(container.id) is False
+    assert list_environment_states(container.id)[str(root)] == state_before
+    assert (isolated_state / f"{container.id}.json").read_text(
+        encoding="utf-8"
+    ) == persisted_before
+    assert container.directory_probe_calls == 1
+    assert not any("for f in pyproject.toml uv.lock" in cmd for cmd in container.executed)
+    assert not any("__SUNABA_PATH_OK__" in cmd for cmd in container.executed)
+    assert not any(
+        "--junit-xml=" in cmd or " -m pytest" in cmd for cmd in container.executed
+    )
+
+
 def test_publish_tool_description_documents_public_arguments() -> None:
     description = publish.__doc__ or ""
 

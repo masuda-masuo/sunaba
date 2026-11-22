@@ -38,9 +38,29 @@ from sunaba.verify_state import (
 class LocalExecContainer:
     """Run container shell commands against the real temp project tree."""
 
+    #: verify.py writes its nested pytest JUnit XML and raw log to these fixed
+    #: /tmp paths.  Under xdist every worker runs on this same host filesystem,
+    #: so parallel workers' nested verify calls would otherwise clobber each
+    #: other's report and parse a truncated/missing XML file.
+    _SHARED_REPORT_PATHS = (
+        ("/tmp/_pytest_report.xml", "_pytest_report.xml"),
+        ("/tmp/_pytest_raw.txt", "_pytest_raw.txt"),
+    )
+
+    #: The nested toy projects hold only a test or two.  verify's ``-n auto``
+    #: would spawn ``cpu_count`` workers inside every outer xdist worker for
+    #: no benefit, so cap the nested run while keeping real pytest execution.
+    _NESTED_XDIST_CAP = "-n 1"
+
     def __init__(self, root: Path) -> None:
         self.id = "issue972-container-id"
         self.root = str(root)
+
+    def _rewrite_command(self, text: str) -> str:
+        """Isolate verify's fixed report paths and cap nested xdist fan-out."""
+        for shared_path, local_name in self._SHARED_REPORT_PATHS:
+            text = text.replace(shared_path, os.path.join(self.root, local_name))
+        return text.replace("-n auto", self._NESTED_XDIST_CAP)
 
     def exec_run(
         self,
@@ -52,7 +72,10 @@ class LocalExecContainer:
         workdir: str | None = None,
         **kwargs: Any,
     ) -> tuple[int, tuple[bytes, bytes] | bytes]:
-        argv = list(cmd) if isinstance(cmd, (list, tuple)) else ["/bin/sh", "-c", str(cmd)]
+        if isinstance(cmd, (list, tuple)):
+            argv = [self._rewrite_command(str(part)) for part in cmd]
+        else:
+            argv = ["/bin/sh", "-c", self._rewrite_command(str(cmd))]
         env = dict(os.environ)
         if environment:
             env.update(environment)
@@ -857,6 +880,451 @@ def test_publish_unresolved_root_manifest_probe_failure_preserves_record_and_blo
         (isolated_state / f"{container.id}.json").read_text(encoding="utf-8")
     )
     assert persisted["roots"][str(root)] == state_before
+
+
+def test_verify_then_publish_retires_record_when_both_uv_manifests_are_missing(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First verify retires a both-manifests-missing root so normal verify->publish works."""
+    from sunaba import verify_state
+
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    root_a = tmp_path / "project-a"
+    root_b = tmp_path / "project-b"
+    _make_locked_project(root_a, "project-a")
+    _make_locked_project(root_b, "project-b")
+    (root_b / "requirements.txt").write_text("", encoding="utf-8")
+    tests_dir = root_b / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_ok.py").write_text(
+        "def test_ok() -> None:\n    assert True\n", encoding="utf-8"
+    )
+
+    container = LocalExecContainer(tmp_path)
+    fingerprint_a = compute_manifest_fingerprint(container, str(root_a))
+    fingerprint_b = compute_manifest_fingerprint(container, str(root_b))
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint_a, project_root=str(root_a)
+    )
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint_b, project_root=str(root_b)
+    )
+    state_a_before = list_environment_states(container.id)[str(root_a)].copy()
+
+    (root_b / "pyproject.toml").unlink()
+    (root_b / "uv.lock").unlink()
+    assert root_b.is_dir()
+    assert has_verify_success(container.id) is False
+
+    class Containers:
+        def get(self, container_id: str) -> LocalExecContainer:
+            return container
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(containers=Containers()),
+    )
+    _stub_publish_environment(monkeypatch, container)
+
+    verify_res = json.loads(
+        verify_in_container(container.id, path="tests", working_dir=str(root_b))
+    )
+    assert verify_res["status"] == "ok", verify_res
+    assert verify_res["gate_passed"] is True, verify_res
+    assert verify_res["tests"]["full"]["status"] == "ok", verify_res
+    assert verify_res["tests"]["full"]["passed"] == 1, verify_res
+    assert has_verify_success(container.id) is True
+    states_after_verify = list_environment_states(container.id)
+    assert str(root_b) not in states_after_verify
+    assert states_after_verify[str(root_a)] == state_a_before
+    persisted = json.loads(
+        (isolated_state / f"{container.id}.json").read_text(encoding="utf-8")
+    )
+    assert str(root_b) not in persisted.get("roots", {})
+    assert persisted["roots"][str(root_a)] == state_a_before
+
+    pub_res = json.loads(
+        publish(
+            container.id,
+            "owner/repo",
+            "feature",
+            "message",
+            skip_verify_gate=False,
+        )
+    )
+    assert pub_res.get("step") != "verify_gate", pub_res.get("error")
+    assert pub_res["step"] == "egress_proxy"
+
+    # Losing only one manifest (uv.lock or pyproject.toml) must block normal verify->publish.
+    for idx, missing_manifest in enumerate(("uv.lock", "pyproject.toml"), start=1):
+        single_cid = f"issue972-single-{idx}-cid"
+        single_root = tmp_path / f"single-missing-{idx}"
+        _make_locked_project(single_root, f"single-{idx}")
+        (single_root / "requirements.txt").write_text("", encoding="utf-8")
+        single_tests = single_root / "tests"
+        single_tests.mkdir()
+        (single_tests / "test_ok.py").write_text(
+            "def test_ok() -> None:\n    assert True\n", encoding="utf-8"
+        )
+        single_container = LocalExecContainer(tmp_path)
+        single_container.id = single_cid
+        single_fp = compute_manifest_fingerprint(single_container, str(single_root))
+        record_environment_state(
+            single_cid, "ready", fingerprint=single_fp, project_root=str(single_root)
+        )
+        single_state_before = list_environment_states(single_cid)[str(single_root)].copy()
+        (single_root / missing_manifest).unlink()
+        assert has_verify_success(single_cid) is False
+
+        class SingleContainers:
+            def get(self, container_id: str, _c=single_container) -> LocalExecContainer:
+                return _c
+
+        monkeypatch.setattr(
+            "sunaba.tools.verify._docker",
+            lambda _sc=SingleContainers: SimpleNamespace(containers=_sc()),
+        )
+        _stub_publish_environment(monkeypatch, single_container)
+
+        blocked_verify = json.loads(
+            verify_in_container(
+                single_cid, path="tests", working_dir=str(single_root)
+            )
+        )
+        assert blocked_verify["status"] == "environment_setup_failed"
+        assert blocked_verify["gate_passed"] is False
+        assert blocked_verify["environment_setup"]["status"] == "stale"
+        assert missing_manifest in blocked_verify["environment_setup"]["reason"]
+        assert blocked_verify["tests"]["status"] == "skipped"
+        assert has_verify_success(single_cid) is False
+        assert list_environment_states(single_cid)[str(single_root)] == single_state_before
+
+        blocked_pub = json.loads(
+            publish(
+                single_cid,
+                "owner/repo",
+                "feature",
+                "message",
+                skip_verify_gate=False,
+            )
+        )
+        assert blocked_pub["status"] == "error"
+        assert blocked_pub["step"] == "verify_gate"
+        assert "no successful verify_in_container" in blocked_pub["error"]
+        assert "stale" in blocked_pub["error"]
+        assert missing_manifest in blocked_pub["error"]
+        assert list_environment_states(single_cid)[str(single_root)] == single_state_before
+
+
+def test_verify_then_publish_from_descendant_and_alias_retires_both_manifests_missing_root(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Descendant, external-symlink, and alias callers retire only the applicable root."""
+    from sunaba import verify_state
+
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    root_a = tmp_path / "project-a"
+    root_b = tmp_path / "project-b"
+    _make_locked_project(root_a, "project-a")
+    _make_locked_project(root_b, "project-b")
+    desc = root_b / "packages" / "sub"
+    desc_tests = desc / "tests"
+    desc_tests.mkdir(parents=True)
+    (desc / "requirements.txt").write_text("", encoding="utf-8")
+    (desc_tests / "test_sub.py").write_text(
+        "def test_sub() -> None:\n    assert True\n", encoding="utf-8"
+    )
+    outside_link = tmp_path / "outside-desc-link"
+    outside_link.symlink_to(desc)
+
+    container = LocalExecContainer(tmp_path)
+    fp_a = compute_manifest_fingerprint(container, str(root_a))
+    fp_b = compute_manifest_fingerprint(container, str(root_b))
+    record_environment_state(
+        container.id, "ready", fingerprint=fp_a, project_root=str(root_a)
+    )
+    record_environment_state(
+        container.id, "ready", fingerprint=fp_b, project_root=str(root_b)
+    )
+    state_a_before = list_environment_states(container.id)[str(root_a)].copy()
+
+    (root_b / "pyproject.toml").unlink()
+    (root_b / "uv.lock").unlink()
+    assert has_verify_success(container.id) is False
+
+    class Containers:
+        def get(self, container_id: str, _c=container) -> LocalExecContainer:
+            return _c
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(containers=Containers()),
+    )
+    _stub_publish_environment(monkeypatch, container)
+
+    verify_res = json.loads(
+        verify_in_container(
+            container.id, path="tests", working_dir=str(outside_link)
+        )
+    )
+    assert verify_res["status"] == "ok", verify_res
+    assert verify_res["gate_passed"] is True, verify_res
+    assert verify_res["tests"]["full"]["passed"] == 1
+    assert has_verify_success(container.id) is True
+    assert list_environment_states(container.id) == {str(root_a): state_a_before}
+
+    pub_res = json.loads(
+        publish(
+            container.id,
+            "owner/repo",
+            "feature",
+            "message",
+            skip_verify_gate=False,
+        )
+    )
+    assert pub_res["step"] == "egress_proxy"
+
+    # Symlinked recorded root alias: deleting both manifests in target retires the alias key.
+    alias_cid = "issue972-alias-cid"
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    real_proj = tmp_path / "real-proj"
+    _make_locked_project(real_proj, "real-proj")
+    real_sub = real_proj / "sub"
+    (real_sub / "tests").mkdir(parents=True)
+    (real_sub / "requirements.txt").write_text("", encoding="utf-8")
+    (real_sub / "tests" / "test_alias.py").write_text(
+        "def test_alias() -> None:\n    assert True\n", encoding="utf-8"
+    )
+    alias_root = tmp_path / "alias-proj"
+    alias_root.symlink_to(real_proj)
+    alias_container = LocalExecContainer(tmp_path)
+    alias_container.id = alias_cid
+    alias_fp = compute_manifest_fingerprint(alias_container, str(alias_root))
+    record_environment_state(
+        alias_cid, "ready", fingerprint=alias_fp, project_root=str(alias_root)
+    )
+    (real_proj / "pyproject.toml").unlink()
+    (real_proj / "uv.lock").unlink()
+    assert has_verify_success(alias_cid) is False
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(
+            containers=SimpleNamespace(get=lambda _cid: alias_container)
+        ),
+    )
+    _stub_publish_environment(monkeypatch, alias_container)
+
+    alias_verify = json.loads(
+        verify_in_container(
+            alias_cid, path="tests", working_dir=str(real_sub)
+        )
+    )
+    assert alias_verify["status"] == "ok", alias_verify
+    assert alias_verify["gate_passed"] is True
+    assert list_environment_states(alias_cid) == {}
+    assert has_verify_success(alias_cid) is True
+    alias_pub = json.loads(
+        publish(
+            alias_cid,
+            "owner/repo",
+            "feature",
+            "message",
+            skip_verify_gate=False,
+        )
+    )
+    assert alias_pub["step"] == "egress_proxy"
+
+
+def test_verify_retirement_does_not_mint_receipt_or_bypass_publish_gate(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retiring a non-uv root never mints a verify receipt on failing or affected runs."""
+    from sunaba import verify_state
+
+    # 1. Failing tests after retiring both-absent root must leave publish blocked.
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    fail_proj = tmp_path / "fail-proj"
+    _make_locked_project(fail_proj, "fail-proj")
+    (fail_proj / "requirements.txt").write_text("", encoding="utf-8")
+    (fail_proj / "tests").mkdir()
+    (fail_proj / "tests" / "test_fail.py").write_text(
+        "def test_fail() -> None:\n    assert False\n", encoding="utf-8"
+    )
+    fail_container = LocalExecContainer(fail_proj)
+    fail_fp = compute_manifest_fingerprint(fail_container, str(fail_proj))
+    record_environment_state(
+        fail_container.id, "ready", fingerprint=fail_fp, project_root=str(fail_proj)
+    )
+    (fail_proj / "pyproject.toml").unlink()
+    (fail_proj / "uv.lock").unlink()
+    assert has_verify_success(fail_container.id) is False
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(
+            containers=SimpleNamespace(get=lambda _cid: fail_container)
+        ),
+    )
+    _stub_publish_environment(monkeypatch, fail_container)
+
+    fail_verify = json.loads(
+        verify_in_container(
+            fail_container.id, path="tests", working_dir=str(fail_proj)
+        )
+    )
+    assert fail_verify["status"] == "failed"
+    assert fail_verify["gate_passed"] is False
+    assert fail_verify["tests"]["full"]["failed"] == 1
+    assert list_environment_states(fail_container.id) == {}
+    assert has_verify_success(fail_container.id) is False
+    fail_pub = json.loads(
+        publish(
+            fail_container.id,
+            "owner/repo",
+            "feature",
+            "message",
+            skip_verify_gate=False,
+        )
+    )
+    assert fail_pub["step"] == "verify_gate"
+    assert "no successful verify_in_container" in fail_pub["error"]
+
+    # 2. Filtered partial run after retiring both-absent root must not mint a receipt.
+    partial_cid = "issue972-partial-cid"
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    part_proj = tmp_path / "partial-proj"
+    _make_locked_project(part_proj, "partial-proj")
+    (part_proj / "requirements.txt").write_text("", encoding="utf-8")
+    (part_proj / "tests").mkdir()
+    (part_proj / "tests" / "test_mod.py").write_text(
+        "def test_mod() -> None:\n    assert True\n", encoding="utf-8"
+    )
+    part_container = LocalExecContainer(part_proj)
+    part_container.id = partial_cid
+    part_fp = compute_manifest_fingerprint(part_container, str(part_proj))
+    record_environment_state(
+        partial_cid, "ready", fingerprint=part_fp, project_root=str(part_proj)
+    )
+    (part_proj / "pyproject.toml").unlink()
+    (part_proj / "uv.lock").unlink()
+    assert has_verify_success(partial_cid) is False
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(
+            containers=SimpleNamespace(get=lambda _cid: part_container)
+        ),
+    )
+    _stub_publish_environment(monkeypatch, part_container)
+
+    part_verify = json.loads(
+        verify_in_container(
+            partial_cid,
+            path="tests",
+            working_dir=str(part_proj),
+            test_filter="test_nonexistent",
+        )
+    )
+    assert part_verify["partial_test_run"] is True
+    assert part_verify["gate_passed"] is False
+    assert list_environment_states(partial_cid) == {}
+    assert has_verify_success(partial_cid) is False
+    part_pub = json.loads(
+        publish(
+            partial_cid,
+            "owner/repo",
+            "feature",
+            "message",
+            skip_verify_gate=False,
+        )
+    )
+    assert part_pub["step"] == "verify_gate"
+    assert "no successful verify_in_container" in part_pub["error"]
+
+
+def test_verify_probe_failure_and_timeout_retain_record_when_manifests_missing(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Manifest probe errors and timeouts during verify fail closed and keep the record."""
+    from sunaba import verify_state
+    from sunaba.edit_verify.shell import VerifyTreeTimeout
+
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    root = tmp_path / "probe-proj"
+    _make_locked_project(root, "probe-proj")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok() -> None:\n    assert True\n", encoding="utf-8"
+    )
+    base = LocalExecContainer(tmp_path)
+    fingerprint = compute_manifest_fingerprint(base, str(root))
+
+    class BrokenUnresolvedManifestProbe(LocalExecContainer):
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            if (
+                "for f in pyproject.toml uv.lock" in rendered
+                and "above:" not in rendered
+            ):
+                return 2, (b"", b"unresolved manifest probe failed")
+            return super().exec_run(cmd, *args, **kwargs)
+
+    container = BrokenUnresolvedManifestProbe(tmp_path)
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    state_before = list_environment_states(container.id)[str(root)].copy()
+    (root / "pyproject.toml").unlink()
+    (root / "uv.lock").unlink()
+    record_verify_success(container.id)
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(containers=SimpleNamespace(get=lambda _cid: container)),
+    )
+    probe_err = json.loads(
+        verify_in_container(container.id, path="tests", working_dir=str(root))
+    )
+    assert probe_err["status"] == "environment_setup_failed"
+    assert probe_err["gate_passed"] is False
+    assert "uv manifest probe failed" in probe_err["environment_setup"]["reason"]
+    assert has_verify_success(container.id) is False
+    assert list_environment_states(container.id)[str(root)] == state_before
+
+    class TimeoutUnresolvedManifestProbe(LocalExecContainer):
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            if (
+                "for f in pyproject.toml uv.lock" in rendered
+                and "above:" not in rendered
+            ):
+                raise VerifyTreeTimeout(5.0, "ok", 5.1)
+            return super().exec_run(cmd, *args, **kwargs)
+
+    timeout_container = TimeoutUnresolvedManifestProbe(tmp_path)
+    timeout_container.id = "issue972-timeout-cid"
+    record_environment_state(
+        timeout_container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    timeout_state_before = list_environment_states(timeout_container.id)[str(root)].copy()
+    record_verify_success(timeout_container.id)
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(
+            containers=SimpleNamespace(get=lambda _cid: timeout_container)
+        ),
+    )
+
+    timeout_res = json.loads(
+        verify_in_container(
+            timeout_container.id, path="tests", working_dir=str(root)
+        )
+    )
+    assert timeout_res["status"] == "timeout"
+    assert timeout_res["gate_passed"] is False
+    assert has_verify_success(timeout_container.id) is False
+    assert list_environment_states(timeout_container.id)[str(root)] == timeout_state_before
 
 
 def test_publish_tool_description_documents_public_arguments() -> None:

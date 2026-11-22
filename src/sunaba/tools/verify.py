@@ -985,6 +985,8 @@ def _verify_in_container_guarded(
 
     try:
         from sunaba.environment import (
+            recorded_root_from_state,
+            recorded_root_is_uv_project,
             resolve_uv_root,
             roots_refer_to_same_project,
             select_recorded_environment_for_workdir,
@@ -1011,6 +1013,23 @@ def _verify_in_container_guarded(
         selected_root, environment_state = select_recorded_environment_for_workdir(
             container, working_dir, records, uv_root
         )
+        while uv_root is None and selected_root and environment_state is not None:
+            recorded_root = recorded_root_from_state(
+                environment_state, selected_root
+            )
+            still_uv, forget_reason = recorded_root_is_uv_project(
+                container, recorded_root
+            )
+            if still_uv:
+                break
+            if not forget_environment_state_for_root(
+                full_cid, selected_root, reason=forget_reason
+            ):
+                break
+            records = list_environment_states(full_cid)
+            selected_root, environment_state = select_recorded_environment_for_workdir(
+                container, working_dir, records, uv_root
+            )
 
     except TreeTimeout:
         invalidate_verify_success(full_cid)

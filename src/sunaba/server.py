@@ -593,6 +593,14 @@ def main() -> None:
     except Exception as exc:
         logger.warning("Failed to initialize environment state store: %s", exc)
 
+    # Best-effort prune of stale container provenance records (sunaba #998)
+    try:
+        from sunaba.provenance_store import prune_container_provenances
+
+        prune_container_provenances()
+    except Exception as exc:
+        logger.warning("Failed to prune container provenance store: %s", exc)
+
     try:
         mcp.run(transport=args.transport, host=args.host, port=args.port)
     finally:

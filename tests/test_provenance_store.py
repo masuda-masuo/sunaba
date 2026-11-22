@@ -134,6 +134,52 @@ def test_load_rejects_symlink(tmp_path: Path) -> None:
     assert load_container_provenance(FULL_CID) is None
 
 
+def test_remove_container_provenance_handles_symlinks_missing_unrelated_and_errors(
+    tmp_path: Path,
+) -> None:
+    assert remove_container_provenance("") is False
+    assert remove_container_provenance(FULL_CID[:12]) is False
+    assert remove_container_provenance(f"../{FULL_CID}") is False
+    assert remove_container_provenance(FULL_CID) is False
+
+    prov_dir = get_provenance_dir()
+    prov_dir.mkdir(parents=True, exist_ok=True)
+    unrelated_json = prov_dir / f"{OTHER_CID}.json"
+    unrelated_json.write_text("{}", encoding="utf-8")
+    unrelated_other = prov_dir / f"{FULL_CID}.json.bak"
+    unrelated_other.write_text("keep", encoding="utf-8")
+
+    assert remove_container_provenance(FULL_CID) is False
+    assert unrelated_json.exists()
+    assert unrelated_other.exists()
+
+    dangling_link = prov_dir / f"{FULL_CID}.json"
+    dangling_link.symlink_to(tmp_path / "missing-target.json")
+    assert dangling_link.is_symlink()
+    assert remove_container_provenance(FULL_CID) is True
+    assert not dangling_link.is_symlink()
+    assert not dangling_link.exists()
+    assert unrelated_json.exists()
+    assert unrelated_other.exists()
+
+    real_target = tmp_path / "real-target.json"
+    real_target.write_text("preserve", encoding="utf-8")
+    dangling_link.symlink_to(real_target)
+    assert remove_container_provenance(FULL_CID) is True
+    assert not dangling_link.is_symlink()
+    assert real_target.exists()
+    assert real_target.read_text(encoding="utf-8") == "preserve"
+
+    (prov_dir / f"{FULL_CID}.json").write_text("{}", encoding="utf-8")
+    with patch("pathlib.Path.unlink", side_effect=OSError("permission denied")):
+        assert remove_container_provenance(FULL_CID) is False
+    assert (prov_dir / f"{FULL_CID}.json").exists()
+    assert remove_container_provenance(FULL_CID) is True
+    assert not (prov_dir / f"{FULL_CID}.json").exists()
+    assert unrelated_json.exists()
+    assert unrelated_other.exists()
+
+
 def test_persistence_failure_does_not_break_init_or_leave_partial_record() -> None:
     container = MagicMock()
     container.id = FULL_CID

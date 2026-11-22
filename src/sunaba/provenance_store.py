@@ -309,7 +309,17 @@ def remove_container_provenance(full_container_id: str) -> bool:
         provenance_dir = get_provenance_dir()
         if not provenance_dir.exists():
             return False
-        target_path = _provenance_file_path(provenance_dir, full_container_id)
+        expected_name = f"{full_container_id}.json"
+        target_path = next(
+            (
+                entry
+                for entry in provenance_dir.iterdir()
+                if entry.name == expected_name
+            ),
+            None,
+        )
+        if target_path is None:
+            return False
         if not target_path.exists() and not target_path.is_symlink():
             return False
         target_path.unlink(missing_ok=True)

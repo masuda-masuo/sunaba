@@ -627,7 +627,7 @@ def uv_environment_block_reason(container: Any, root: str) -> str | None:
 def _resolve_image_tool(
     container: Any, root: str, tool: str
 ) -> tuple[str | None, str | None]:
-    """Resolve an image tool, distinguishing explicit absence from exec failure."""
+    """Resolve an image tool, retrying once on empty exit-0 stdout within deadline."""
     shell_probe = (
         f"if command -v {tool} >/dev/null 2>&1; then "
         f"path=$(command -v {tool}); printf '__SUNABA_TOOL_FOUND__%s\\n' \"$path\"; "
@@ -637,23 +637,44 @@ def _resolve_image_tool(
         "env PATH=/home/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin "
         f"sh -c {shlex.quote(shell_probe)}"
     )
-    ec, output = _run(container, root, probe)
-    lines = output.splitlines()
-    if ec != 0 or len(lines) != 1:
+    stdout = ""
+    stderr = ""
+    lines: list[str] = []
+    for attempt in range(2):
+        ec, stdout, stderr = _run_split(container, root, probe)
+        if ec != 0:
+            detail = "\n".join(
+                part for part in (stdout.strip(), stderr.strip()) if part
+            )[:160]
+            raise EnvironmentResolutionError(
+                f"image executable probe failed for {tool} (exit {ec}): {detail}"
+            )
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+        if lines or attempt == 1:
+            break
+    if not lines:
+        err_detail = stderr.strip()[:160]
+        suffix = f": {err_detail}" if err_detail else ""
         raise EnvironmentResolutionError(
-            f"image executable probe failed (exit {ec}): {output[:160]}"
+            f"image executable probe for {tool} returned empty output (0 output lines){suffix}"
         )
-    line = lines[0].strip()
+    if len(lines) > 1:
+        detail = stdout.strip()[:160]
+        raise EnvironmentResolutionError(
+            f"image executable probe for {tool} returned multiple output lines "
+            f"({len(lines)} lines): {detail}"
+        )
+    line = lines[0]
     if line == "__SUNABA_TOOL_ABSENT__":
         return None, None
     if not line.startswith("__SUNABA_TOOL_FOUND__"):
         raise EnvironmentResolutionError(
-            f"image executable probe returned malformed output: {output[:160]}"
+            f"image executable probe for {tool} returned malformed output: {line[:160]}"
         )
     path = line.removeprefix("__SUNABA_TOOL_FOUND__")
     if not path.startswith("/"):
         raise EnvironmentResolutionError(
-            f"image executable probe returned invalid path: {path[:160]}"
+            f"image executable probe for {tool} returned invalid path: {path[:160]}"
         )
     return path, _tool_version(container, root, path)
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -1787,18 +1789,55 @@ def test_publish_empty_probe_outputs_preserve_record_and_invalidate_verify_succe
         ) == persisted_before
 
 
+def _prepare_local_venv_dir(venv_dir: Path) -> Path:
+    """Populate *venv_dir*/bin with deterministic python, ruff, and pyright tools."""
+    bin_dir = venv_dir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    python_bin = bin_dir / "python"
+    # Wrapper preserves sys.executable's pyvenv.cfg lookup so real pytest runs.
+    python_bin.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(0o755)
+
+    for tool, fallback_body in (
+        (
+            "ruff",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'ruff 0.17.0'; exit 0; fi\necho '[]'\n",
+        ),
+        (
+            "pyright",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'pyright 1.1.400'; exit 0; fi\necho '{\"generalDiagnostics\": []}'\n",
+        ),
+    ):
+        tool_bin = bin_dir / tool
+        real_tool = shutil.which(tool)
+        if real_tool:
+            # Wrap rather than symlink so tools resolving relative paths from argv[0] work.
+            tool_bin.write_text(
+                f"#!/bin/sh\nexec {shlex.quote(real_tool)} \"$@\"\n",
+                encoding="utf-8",
+            )
+        else:
+            tool_bin.write_text(fallback_body, encoding="utf-8")
+        tool_bin.chmod(0o755)
+
+    return venv_dir
+
+
 def test_verify_to_publish_stale_and_probe_error_recovery_flow(
     tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Empty direct probe blocks without clearing record; real stale blocks; recovery passes."""
-    import sys
-
     from sunaba import verify_state
 
     monkeypatch.setattr(verify_state, "_verify_map", {})
     root = tmp_path / "stale-recovery-proj"
     _make_locked_project(root, "stale-recovery-proj")
-    (root / ".venv").symlink_to(Path(sys.executable).parent.parent)
+    venv_dir = _prepare_local_venv_dir(tmp_path / "stale-recovery-venv")
+    (root / ".venv").symlink_to(venv_dir)
     (root / "requirements.txt").write_text("", encoding="utf-8")
     (root / "tests").mkdir()
     (root / "tests" / "test_ok.py").write_text(
@@ -1954,8 +1993,6 @@ def test_verify_failure_invalidates_requested_alias_and_canonical_receipts(
     tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify probe, staleness, tool, and deadline failures invalidate both alias and canonical receipts."""
-    import sys
-
     from sunaba import verify_state
     from sunaba.edit_verify.shell import VerifyTreeTimeout
 
@@ -1966,7 +2003,8 @@ def test_verify_failure_invalidates_requested_alias_and_canonical_receipts(
         monkeypatch.setattr(verify_state, "_environment_state", {})
         proj_root = tmp_path / f"verify-alias-{idx}"
         _make_locked_project(proj_root, f"verify-alias-{idx}")
-        (proj_root / ".venv").symlink_to(Path(sys.executable).parent.parent)
+        venv_dir = _prepare_local_venv_dir(tmp_path / f"verify-alias-venv-{idx}")
+        (proj_root / ".venv").symlink_to(venv_dir)
         (proj_root / "requirements.txt").write_text("", encoding="utf-8")
         (proj_root / "tests").mkdir()
         (proj_root / "tests" / "test_ok.py").write_text(
@@ -2087,7 +2125,7 @@ def test_verify_failure_invalidates_requested_alias_and_canonical_receipts(
         assert has_verify_success(req_id) is False
         assert has_verify_success(canonical_id) is False
         assert list_environment_states(canonical_id)[str(proj_root)] == state_before
-        (proj_root / ".venv").symlink_to(Path(sys.executable).parent.parent)
+        (proj_root / ".venv").symlink_to(venv_dir)
 
         # 5. Deadline timeout inside lint/type gate
         _seed_both_receipts()

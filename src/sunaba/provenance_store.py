@@ -98,28 +98,31 @@ def provenance_from_repo_payload(
 ) -> ContainerProvenance:
     """Build provenance from a ``GET /repos/{owner}/{repo}`` response.
 
-    For explicit branch checkouts, *requested_branch* supplies ``target_ref``.
-    For default clones, ``target_ref`` comes from the API response's verified
+    ``target_ref`` always comes from the API response's verified
     ``default_branch`` (or *default_branch_override* when supplied by a caller
-    without raw payload access).
+    without raw payload access) — never from *requested_branch*.  For explicit
+    branch checkouts, *requested_branch* is recorded separately as ``head_ref``
+    so the integration target and checked-out work branch stay distinct even
+    when the repository metadata lookup fails.
     """
     target_repo_id = (
         valid_positive_github_id(payload.get("id"))
         if isinstance(payload, Mapping)
         else None
     )
-    if requested_branch is not None:
-        target_ref = valid_ref_name(requested_branch)
-    else:
-        api_default = (
-            valid_ref_name(payload.get("default_branch"))
-            if isinstance(payload, Mapping)
-            else None
-        )
-        target_ref = api_default or valid_ref_name(default_branch_override)
+    api_default = (
+        valid_ref_name(payload.get("default_branch"))
+        if isinstance(payload, Mapping)
+        else None
+    )
+    target_ref = api_default or valid_ref_name(default_branch_override)
+    head_ref = (
+        valid_ref_name(requested_branch) if requested_branch is not None else None
+    )
     return ContainerProvenance(
         target_repo_id=target_repo_id,
         target_ref=target_ref,
+        head_ref=head_ref,
     )
 
 

@@ -364,6 +364,18 @@ For details on the image layer hierarchy, pinned digests, and language detection
 *   **Cleanup Conventions**: It is recommended to call `sandbox_stop` when closing a pull request or issue.
 *   **Orphan Reclamation**: Spun-off setups that crash or time out before completing initialization are cleaned up by the orphan reaper.
 
+### 13.2 Host-Side Container Provenance (#998) & Planned Carry Compatibility (#999)
+*   **Trusted Host-Side Source**: During `sandbox_initialize` checkout, sunaba records provenance host-side under the environment state directory, keyed by the full 64-character Docker container ID (out of reach of in-container agents). Trusted host-side GitHub API metadata supplies positive numeric GitHub repository IDs (`target_repo_id`, and `head_repo_id` when present on PRs), which stay stable across repository renames and distinguish fork IDs from upstream IDs. Missing or failed host API metadata stays unknown (`None`); in-container `origin` config or `.sandbox-meta.json` is never used as a fallback.
+*   **Target & Checkout Semantics by Mode**:
+    *   **Default clone** (`clone_repo` without `branch` or `pr`): `target_repo_id` = GitHub API repo `id`; `target_ref` = GitHub API `default_branch` (the upstream integration branch); `head_repo_id` = `None`; `head_ref` = `None`; `pr_number` = `None`.
+    *   **Explicit branch checkout** (`clone_repo` + `branch`): `target_repo_id` = GitHub API repo `id`; `target_ref` = GitHub API `default_branch` (the upstream integration branch, never the requested work branch); `head_ref` = requested `branch`; `head_repo_id` = `None`; `pr_number` = `None`. If GitHub cannot obtain `default_branch`, `target_ref` remains unknown (`None`) even while `head_ref` is recorded.
+    *   **PR checkout** (`repo` + `pr`): `target_repo_id` = `base.repo.id`; `target_ref` = `base.ref`; `head_repo_id` = `head.repo.id` (`None` if the fork repository was deleted); `head_ref` = `head.ref`; `pr_number` = `pr`.
+*   **Planned (#999 — not yet enforced) Carry Compatibility Gate**:
+    *   #998 only records, loads, and cleans up host-side provenance; `apply_from_container` does not enforce compatibility yet.
+    *   **Comparison Keys**: Once #999 lands, carry compares `(target_repo_id, target_ref, effective_checkout_repo_id)`, where `effective_checkout_repo_id` is `head_repo_id` when present (PR checkouts) and otherwise `target_repo_id` (same-repo default clones and explicit branch checkouts). Checking the effective checkout repository identity prevents a fork checkout from crossing into upstream (or vice versa), while a default clone and an explicit work branch of the same repository targeting its default branch match on all three keys and are compatible.
+    *   **Fail-Closed Missing Provenance**: Once #999 lands, missing or incomplete provenance on either source or destination (such as legacy containers without a host record, API-failure clones with unknown target fields, or deleted-fork PRs missing `head_repo_id`) fails closed.
+    *   **Pre-Transfer & Allocation Ordering**: Resolve source and destination provenance and compare before extracting or transferring any patch (and before allocating a destination container wherever destination provenance can be derived host-side prior to container creation); pass newly derived trusted destination metadata directly into the comparison before persistence, and persist destination provenance only after a successful carry so a rejected carry leaves no destination record.
+
 ---
 
 ## 14. Review Flow (Review Execution)

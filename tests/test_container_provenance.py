@@ -212,10 +212,10 @@ def test_explicit_branch_records_requested_branch() -> None:
     target_repo_id = _field(record, "target_repo_id")
     _assert_positive_int(target_repo_id, field_name="target_repo_id")
     assert target_repo_id == 104201
-    assert _field(record, "target_ref") == "release/v2"
+    assert _field(record, "target_ref") == "trunk"
+    assert _field(record, "head_ref") == "release/v2"
     assert _field(record, "pr_number") is None
-    assert _field(record, "head_repo_id") in (None, 104201)
-    assert _field(record, "head_ref") in (None, "release/v2")
+    assert _field(record, "head_repo_id") is None
 
 
 def test_pr_checkout_records_same_repo_base_head_and_pr_number() -> None:
@@ -478,7 +478,40 @@ def test_explicit_branch_clone_succeeds_when_github_api_fails_and_keeps_branch()
     record = _load_provenance(FULL_CONTAINER_ID)
     assert record is not None
     assert _field(record, "target_repo_id") is None
-    assert _field(record, "target_ref") == "feat/offline-meta"
+    assert _field(record, "target_ref") is None
+    assert _field(record, "head_repo_id") is None
+    assert _field(record, "head_ref") == "feat/offline-meta"
+    assert _field(record, "pr_number") is None
+
+
+def test_explicit_branch_missing_default_branch_leaves_target_ref_unknown_and_keeps_head_ref() -> None:
+    client, _ = _make_mock_docker_and_container(
+        FULL_CONTAINER_ID,
+        checked_out_branch="feat/x",
+    )
+    routes = {
+        "https://api.github.com/repos/acme/widget": {
+            "id": 104201,
+        },
+    }
+
+    with _mock_init_environment(client, routes):
+        result = _sandbox_initialize(
+            image=TEST_IMAGE,
+            clone_repo="acme/widget",
+            branch="feat/x",
+            pip_extras=None,
+        )
+
+    assert result.text.startswith(FULL_CONTAINER_ID[:12])
+    assert "branch setup failed" not in result.text
+
+    record = _load_provenance(FULL_CONTAINER_ID)
+    assert record is not None
+    assert _field(record, "target_repo_id") == 104201
+    assert _field(record, "target_ref") is None
+    assert _field(record, "head_repo_id") is None
+    assert _field(record, "head_ref") == "feat/x"
     assert _field(record, "pr_number") is None
 
 

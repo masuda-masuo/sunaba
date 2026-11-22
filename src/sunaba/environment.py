@@ -116,23 +116,76 @@ def _tool_version(container: Any, root: str, path: str) -> str:
     return version
 
 
+_UV_MANIFEST_NAMES: frozenset[str] = frozenset({"pyproject.toml", "uv.lock"})
+_MANIFEST_PROBE_DONE_MARKER: str = "__SUNABA_MANIFEST_PROBE_DONE__"
+
+
+def _parse_manifest_probe_output(
+    stdout: str, *, allow_above: bool = False
+) -> tuple[set[str], str | None]:
+    """Parse manifest/ancestor probe stdout requiring a single trailing marker."""
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        raise EnvironmentResolutionError(
+            "uv manifest probe returned empty output (missing completion marker)"
+        )
+    if lines[-1] != _MANIFEST_PROBE_DONE_MARKER:
+        raise EnvironmentResolutionError(
+            f"uv manifest probe missing completion marker: {stdout[:160]}"
+        )
+    if lines.count(_MANIFEST_PROBE_DONE_MARKER) != 1:
+        raise EnvironmentResolutionError(
+            f"uv manifest probe returned duplicate completion marker: {stdout[:160]}"
+        )
+
+    manifests: set[str] = set()
+    above_root: str | None = None
+    for line in lines[:-1]:
+        if line in _UV_MANIFEST_NAMES:
+            if line in manifests:
+                raise EnvironmentResolutionError(
+                    f"uv manifest probe returned duplicate record: {line}"
+                )
+            manifests.add(line)
+            continue
+        if allow_above and line.startswith("above:"):
+            if above_root is not None:
+                raise EnvironmentResolutionError(
+                    f"uv manifest probe returned multiple ancestor records: {line[:160]}"
+                )
+            ancestor = line.removeprefix("above:")
+            if (
+                not ancestor
+                or not os.path.isabs(ancestor)
+                or "\x00" in ancestor
+                or any(seg in {".", ".."} for seg in ancestor.split("/"))
+            ):
+                raise EnvironmentResolutionError(
+                    f"uv manifest probe returned malformed ancestor data: {line[:160]}"
+                )
+            above_root = ancestor
+            continue
+        raise EnvironmentResolutionError(
+            f"uv manifest probe returned malformed output: {line[:160]}"
+        )
+    return manifests, above_root
+
+
 def _probe_uv_manifests(container: Any, root: str) -> set[str]:
     """Return present uv manifest filenames directly under *root*; raise on error."""
     probe = (
-        "for f in pyproject.toml uv.lock; do "
-        "[ -f \"$f\" ] && printf '%s\\n' \"$f\" || true; done"
+        "{ for f in pyproject.toml uv.lock; do "
+        "[ -f \"$f\" ] && printf '%s\\n' \"$f\" || true; done; "
+        f"printf '{_MANIFEST_PROBE_DONE_MARKER}\\n'; }}"
     )
-    ec, output = _run(container, root, probe)
+    ec, stdout, stderr = _run_split(container, root, probe)
     if ec != 0:
+        detail = (stdout + stderr).strip()[:240]
         raise EnvironmentResolutionError(
-            f"uv manifest probe failed (exit {ec}): {output}"
+            f"uv manifest probe failed (exit {ec}): {detail}"
         )
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    if any(line not in {"pyproject.toml", "uv.lock"} for line in lines):
-        raise EnvironmentResolutionError(
-            f"uv manifest probe returned malformed output: {output[:160]}"
-        )
-    return set(lines)
+    manifests, _ = _parse_manifest_probe_output(stdout, allow_above=False)
+    return manifests
 
 
 def recorded_root_from_state(
@@ -327,13 +380,14 @@ def resolve_uv_root(container: Any, workdir: str) -> str | None:
         "[ -f \"$f\" ] && printf '%s\\n' \"$f\" || true; done"
     )
     ancestor_walk = (
-        'd=$(pwd -P); while [ "$d" != "/" ]; do '
+        'd=$(pwd -P) || exit 1; while [ "$d" != "/" ]; do '
         'd="${d%/*}"; [ -z "$d" ] && d="/"; '
         'if [ -f "$d/uv.lock" ]; then '
         "printf 'above:%s\\n' \"$d\"; break; fi; done"
     )
+    done_marker = f"printf '{_MANIFEST_PROBE_DONE_MARKER}\\n'"
     ec, stdout, stderr = _run_split(
-        container, workdir, probe + "; " + ancestor_walk
+        container, workdir, f"{{ {probe}; {ancestor_walk}; {done_marker}; }}"
     )
     if ec != 0:
         detail = (stdout + stderr).strip()[:240]
@@ -341,21 +395,11 @@ def resolve_uv_root(container: Any, workdir: str) -> str | None:
             f"uv manifest probe failed (exit {ec}): {detail}"
         )
 
-    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    for line in lines:
-        if line in {"pyproject.toml", "uv.lock"}:
-            continue
-        if line.startswith("above:") and os.path.isabs(line.removeprefix("above:")):
-            continue
-        raise EnvironmentResolutionError(
-            f"uv manifest probe returned malformed output: {line[:160]}"
-        )
-
-    manifests = set(lines)
+    manifests, above_root = _parse_manifest_probe_output(stdout, allow_above=True)
     has_workdir_project = "pyproject.toml" in manifests
     if has_workdir_project and "uv.lock" in manifests:
         return os.path.normpath(workdir)
-    if not any(line.startswith("above:") for line in lines):
+    if above_root is None:
         return None
 
     ec, stdout, stderr = _run_split(

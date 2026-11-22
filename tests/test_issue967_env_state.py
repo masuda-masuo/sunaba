@@ -123,6 +123,8 @@ class MockFilesystemContainer:
                 full_path = f"{curr_dir}/{fname}"
                 if full_path in self.files:
                     lines.append(fname.encode("utf-8"))
+            if "__SUNABA_MANIFEST_PROBE_DONE__" in cmd_str:
+                lines.append(b"__SUNABA_MANIFEST_PROBE_DONE__")
             out = b"\n".join(lines) + (b"\n" if lines else b"")
             return 0, (out, b"")
 
@@ -2095,7 +2097,7 @@ def test_review_active_deadline_foreground_precedence_no_scope_and_stderr(
     ) -> tuple[int, tuple[bytes, bytes]]:
         cmd_str = argv[-1]
         if "for f in pyproject.toml uv.lock" in cmd_str:
-            return 0, (b"above:/\n", b"")
+            return 0, (b"above:/\n__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
         if "uv workspace dir" in cmd_str:
             return 2, (
                 b"",
@@ -2497,7 +2499,7 @@ def test_review_active_deadline_single_file_lint_and_type_check(
                 )
                 return 0, (payload.encode("utf-8"), b"")
             if "for f in pyproject.toml uv.lock" in cmd_str:
-                return 0, (b"", b"")
+                return 0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
             if _tool_marker in cmd_str:
                 _container.entered.set()
                 _container.release.wait(5.0)
@@ -2561,7 +2563,7 @@ def test_review_active_deadline_single_file_foreground_precedence(
             )
             return 0, (payload.encode("utf-8"), b"")
         if "for f in pyproject.toml uv.lock" in cmd_str:
-            return 0, (b"", b"")
+            return 0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
         if "ruff check" in cmd_str:
             container.entered.set()
             container.release.wait(5.0)

@@ -42,7 +42,7 @@ class TestVerifyEarlyReturnStatus911:
         def _exec_with_non_uv_root(cmd, **kwargs):
             command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
             if "for f in pyproject.toml uv.lock" in command:
-                return 0, (b"", b"")
+                return 0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
             if "for d in src tests" in command:
                 return 0, (b"src\ntests\n", b"")
             return 0, (b"", b"")
@@ -104,7 +104,7 @@ class TestVerifyEarlyReturnStatus911:
 
         mock_container.exec_run.side_effect = [
             (0, (changed_unstaged, b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (empty_staged, b"")),
             (0, (b"", b"")),  # git ls-files
             (0, (selector_ok, b"")),
@@ -155,7 +155,7 @@ class TestVerifyEarlyReturnStatus911:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # unstaged
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # staged
             (0, (b"", b"")),  # ls-files
             (1, (failed_report, b"")),  # filtered pytest run
@@ -194,7 +194,7 @@ class TestVerifyEarlyReturnStatus911:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # unstaged
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # staged
             (0, (b"", b"")),  # ls-files
         ]
@@ -240,7 +240,7 @@ class TestVerifyEarlyReturnStatus911:
         )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # unstaged
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # staged
             (0, (b"", b"")),  # ls-files
             (0, (green_report, b"")),  # full pytest run
@@ -287,7 +287,7 @@ class TestVerifyEarlyReturnStatus911:
         )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # unstaged
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # staged
             (0, (b"", b"")),  # ls-files
             (1, (failed_report, b"")),  # full pytest run

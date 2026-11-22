@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -1465,9 +1467,851 @@ def test_verify_initial_directory_probe_timeout_preserves_record_and_invalidates
     )
 
 
+def test_verify_empty_manifest_probe_output_preserves_record_and_invalidates_success(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty exit-0 output from the direct manifest probe fails closed and keeps state."""
+    from sunaba import verify_state
+
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    root = tmp_path / "empty-manifest-probe-proj"
+    _make_locked_project(root, "empty-manifest-probe-proj")
+    (root / "requirements.txt").write_text("", encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok() -> None:\n    assert True\n", encoding="utf-8"
+    )
+    base = LocalExecContainer(tmp_path)
+    fingerprint = compute_manifest_fingerprint(base, str(root))
+
+    class EmptyDirectManifestProbeContainer(LocalExecContainer):
+        def __init__(self, proj_root: Path) -> None:
+            super().__init__(proj_root)
+            self.direct_manifest_probe_calls = 0
+            self.executed: list[str] = []
+
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            self.executed.append(rendered)
+            if (
+                "for f in pyproject.toml uv.lock" in rendered
+                and "above:" not in rendered
+            ):
+                self.direct_manifest_probe_calls += 1
+                return 0, (b"", b"")
+            return super().exec_run(cmd, *args, **kwargs)
+
+    container = EmptyDirectManifestProbeContainer(tmp_path)
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    state_before = list_environment_states(container.id)[str(root)].copy()
+    persisted_before = (isolated_state / f"{container.id}.json").read_text(
+        encoding="utf-8"
+    )
+    (root / "uv.lock").unlink()
+    assert (root / "pyproject.toml").is_file()
+    record_verify_success(container.id)
+    assert has_verify_success(container.id) is True
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(containers=SimpleNamespace(get=lambda _cid: container)),
+    )
+
+    res = json.loads(
+        verify_in_container(container.id, path="tests", working_dir=str(root))
+    )
+    assert res["status"] == "environment_setup_failed"
+    assert res["gate_passed"] is False
+    assert "environment_setup" in res["gate_fail_kinds"]
+    assert "uv manifest probe" in res["environment_setup"]["reason"]
+    assert res["tests"]["status"] == "skipped"
+    assert has_verify_success(container.id) is False
+    assert list_environment_states(container.id)[str(root)] == state_before
+    assert (isolated_state / f"{container.id}.json").read_text(
+        encoding="utf-8"
+    ) == persisted_before
+    assert container.direct_manifest_probe_calls == 1
+    assert not any(
+        "--junit-xml=" in cmd or " -m pytest" in cmd for cmd in container.executed
+    )
+
+
+def test_manifest_and_root_discovery_probe_protocol() -> None:
+    """Both _probe_uv_manifests and resolve_uv_root enforce a single trailing marker."""
+    from sunaba.edit_verify.shell import ForegroundTreeTimeout, VerifyTreeTimeout
+    from sunaba.environment import (
+        EnvironmentResolutionError,
+        _probe_uv_manifests,
+        resolve_uv_root,
+    )
+
+    class StaticProbeContainer:
+        def __init__(self, responses: list[Any]) -> None:
+            self._responses = list(responses)
+            self.calls = 0
+
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            item = self._responses.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+    # Valid normal absence, single manifest, and both manifests.
+    for payload, expected in (
+        (b"__SUNABA_MANIFEST_PROBE_DONE__\n", set()),
+        (b"pyproject.toml\n__SUNABA_MANIFEST_PROBE_DONE__\n", {"pyproject.toml"}),
+        (b"uv.lock\n__SUNABA_MANIFEST_PROBE_DONE__\n", {"uv.lock"}),
+        (
+            b"pyproject.toml\nuv.lock\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+            {"pyproject.toml", "uv.lock"},
+        ),
+    ):
+        c_manifest = StaticProbeContainer([(0, (payload, b""))])
+        assert _probe_uv_manifests(c_manifest, "/workspace") == expected
+        assert c_manifest.calls == 1
+
+        c_root = StaticProbeContainer([(0, (payload, b""))])
+        expected_root = (
+            "/workspace" if expected == {"pyproject.toml", "uv.lock"} else None
+        )
+        assert resolve_uv_root(c_root, "/workspace") == expected_root
+        assert c_root.calls == 1
+
+    # Invalid outputs for both probes: empty, missing marker, duplicate marker,
+    # marker not at end, unknown record, repeated manifest record, nonzero exit.
+    bad_payloads = [
+        b"",
+        b"   \n",
+        b"pyproject.toml\n",
+        b"pyproject.toml\nuv.lock\n",
+        b"__SUNABA_MANIFEST_PROBE_DONE__\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+        b"pyproject.toml\n__SUNABA_MANIFEST_PROBE_DONE__\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+        b"__SUNABA_MANIFEST_PROBE_DONE__\npyproject.toml\n",
+        b"unknown_file\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+        b"pyproject.toml\npyproject.toml\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+        b"uv.lock\nuv.lock\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+    ]
+    for bad in bad_payloads:
+        c_manifest = StaticProbeContainer([(0, (bad, b""))])
+        with pytest.raises(EnvironmentResolutionError):
+            _probe_uv_manifests(c_manifest, "/workspace")
+        assert c_manifest.calls == 1
+
+        c_root = StaticProbeContainer([(0, (bad, b""))])
+        with pytest.raises(EnvironmentResolutionError):
+            resolve_uv_root(c_root, "/workspace")
+        assert c_root.calls == 1
+
+    # Direct manifest probe must also reject above: records.
+    c_above_in_direct = StaticProbeContainer(
+        [(0, (b"above:/workspace\n__SUNABA_MANIFEST_PROBE_DONE__\n", b""))]
+    )
+    with pytest.raises(EnvironmentResolutionError):
+        _probe_uv_manifests(c_above_in_direct, "/workspace")
+    assert c_above_in_direct.calls == 1
+
+    # resolve_uv_root rejects missing/malformed/multiple above: records.
+    for bad_ancestor in (
+        b"above:\n",
+        b"above:\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+        b"above:relative/path\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+        b"above: /workspace\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+        b"above:/workspace/../other\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+        b"above:/ws1\nabove:/ws2\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+        b"above:/ws1\nabove:/ws1\n__SUNABA_MANIFEST_PROBE_DONE__\n",
+    ):
+        c_root = StaticProbeContainer([(0, (bad_ancestor, b""))])
+        with pytest.raises(EnvironmentResolutionError):
+            resolve_uv_root(c_root, "/workspace/sub")
+        assert c_root.calls == 1
+
+    # Nonzero exit fails closed without retrying even if stdout carried a marker.
+    for probe_fn in (
+        lambda c: _probe_uv_manifests(c, "/workspace"),
+        lambda c: resolve_uv_root(c, "/workspace"),
+    ):
+        c_err = StaticProbeContainer(
+            [(2, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"probe error"))]
+        )
+        with pytest.raises(EnvironmentResolutionError, match="exit 2"):
+            probe_fn(c_err)
+        assert c_err.calls == 1
+
+    # Active deadline TreeTimeouts propagate directly without retrying or wrapping.
+    for exc in (
+        VerifyTreeTimeout(5.0, "ok", 5.1),
+        ForegroundTreeTimeout(5.0, "ok", 5.1),
+    ):
+        c_manifest_to = StaticProbeContainer([exc])
+        with pytest.raises(type(exc)):
+            _probe_uv_manifests(c_manifest_to, "/workspace")
+        assert c_manifest_to.calls == 1
+
+        c_root_to = StaticProbeContainer([exc])
+        with pytest.raises(type(exc)):
+            resolve_uv_root(c_root_to, "/workspace")
+        assert c_root_to.calls == 1
+
+
+def test_verify_empty_root_discovery_output_preserves_record_and_invalidates_success(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty exit-0 output from resolve_uv_root's initial probe fails closed."""
+    from sunaba import verify_state
+
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    root = tmp_path / "empty-root-discovery-proj"
+    _make_locked_project(root, "empty-root-discovery-proj")
+    (root / "requirements.txt").write_text("", encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok() -> None:\n    assert True\n", encoding="utf-8"
+    )
+    base = LocalExecContainer(tmp_path)
+    fingerprint = compute_manifest_fingerprint(base, str(root))
+
+    class EmptyRootDiscoveryContainer(LocalExecContainer):
+        def __init__(self, proj_root: Path) -> None:
+            super().__init__(proj_root)
+            self.root_discovery_calls = 0
+            self.executed: list[str] = []
+
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            self.executed.append(rendered)
+            if "for f in pyproject.toml uv.lock" in rendered and "above:" in rendered:
+                self.root_discovery_calls += 1
+                return 0, (b"", b"")
+            return super().exec_run(cmd, *args, **kwargs)
+
+    container = EmptyRootDiscoveryContainer(tmp_path)
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    state_before = list_environment_states(container.id)[str(root)].copy()
+    persisted_before = (isolated_state / f"{container.id}.json").read_text(
+        encoding="utf-8"
+    )
+    record_verify_success(container.id)
+    assert has_verify_success(container.id) is True
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(containers=SimpleNamespace(get=lambda _cid: container)),
+    )
+
+    res = json.loads(
+        verify_in_container(container.id, path="tests", working_dir=str(root))
+    )
+    assert res["status"] == "environment_setup_failed"
+    assert res["gate_passed"] is False
+    assert "environment_setup" in res["gate_fail_kinds"]
+    assert "uv manifest probe" in res["environment_setup"]["reason"]
+    assert res["tests"]["status"] == "skipped"
+    assert has_verify_success(container.id) is False
+    assert list_environment_states(container.id)[str(root)] == state_before
+    assert (isolated_state / f"{container.id}.json").read_text(
+        encoding="utf-8"
+    ) == persisted_before
+    assert container.root_discovery_calls == 1
+    assert not any(
+        "--junit-xml=" in cmd or " -m pytest" in cmd for cmd in container.executed
+    )
+
+
+def test_publish_empty_probe_outputs_preserve_record_and_invalidate_verify_success(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publish fails closed, keeps records, and invalidates verify success on empty probes."""
+    from sunaba import verify_state
+
+    for probe_kind in ("direct_manifest", "root_discovery"):
+        monkeypatch.setattr(verify_state, "_verify_map", {})
+        cid = f"issue1003-pub-{probe_kind}"
+        root = tmp_path / f"pub-{probe_kind}"
+        _make_locked_project(root, f"pub-{probe_kind}")
+        base = LocalExecContainer(tmp_path)
+        fingerprint = compute_manifest_fingerprint(base, str(root))
+
+        class EmptyProbeContainer(LocalExecContainer):
+            def __init__(self, proj_root: Path, kind: str) -> None:
+                super().__init__(proj_root)
+                self.kind = kind
+                self.probe_calls = 0
+
+            def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+                rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+                is_root_discovery = (
+                    "for f in pyproject.toml uv.lock" in rendered
+                    and "above:" in rendered
+                )
+                is_direct_manifest = (
+                    "for f in pyproject.toml uv.lock" in rendered
+                    and "above:" not in rendered
+                )
+                if (self.kind == "root_discovery" and is_root_discovery) or (
+                    self.kind == "direct_manifest" and is_direct_manifest
+                ):
+                    self.probe_calls += 1
+                    return 0, (b"", b"")
+                return super().exec_run(cmd, *args, **kwargs)
+
+        container = EmptyProbeContainer(tmp_path, probe_kind)
+        container.id = cid
+        record_environment_state(
+            cid, "ready", fingerprint=fingerprint, project_root=str(root)
+        )
+        state_before = list_environment_states(cid)[str(root)].copy()
+        persisted_before = (isolated_state / f"{cid}.json").read_text(
+            encoding="utf-8"
+        )
+        if probe_kind == "direct_manifest":
+            (root / "uv.lock").unlink()
+        record_verify_success(cid)
+        assert has_verify_success(cid) is True
+
+        _stub_publish_environment(monkeypatch, container)
+        res = json.loads(
+            publish(cid, "owner/repo", "feature", "message", skip_verify_gate=False)
+        )
+        assert res["status"] == "error"
+        assert res["step"] == "verify_gate"
+        assert "failed" in res["error"]
+        assert "uv manifest probe" in res["error"]
+        assert container.probe_calls == 1
+        assert has_verify_success(cid) is False
+        assert list_environment_states(cid)[str(root)] == state_before
+        assert (isolated_state / f"{cid}.json").read_text(
+            encoding="utf-8"
+        ) == persisted_before
+
+
+def _prepare_local_venv_dir(venv_dir: Path) -> Path:
+    """Populate *venv_dir*/bin with deterministic python, ruff, and pyright tools."""
+    bin_dir = venv_dir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    python_bin = bin_dir / "python"
+    # Wrapper preserves sys.executable's pyvenv.cfg lookup so real pytest runs.
+    python_bin.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(0o755)
+
+    for tool, fallback_body in (
+        (
+            "ruff",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'ruff 0.17.0'; exit 0; fi\necho '[]'\n",
+        ),
+        (
+            "pyright",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'pyright 1.1.400'; exit 0; fi\necho '{\"generalDiagnostics\": []}'\n",
+        ),
+    ):
+        tool_bin = bin_dir / tool
+        real_tool = shutil.which(tool)
+        if real_tool:
+            # Wrap rather than symlink so tools resolving relative paths from argv[0] work.
+            tool_bin.write_text(
+                f"#!/bin/sh\nexec {shlex.quote(real_tool)} \"$@\"\n",
+                encoding="utf-8",
+            )
+        else:
+            tool_bin.write_text(fallback_body, encoding="utf-8")
+        tool_bin.chmod(0o755)
+
+    return venv_dir
+
+
+def test_verify_to_publish_stale_and_probe_error_recovery_flow(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty direct probe blocks without clearing record; real stale blocks; recovery passes."""
+    from sunaba import verify_state
+
+    monkeypatch.setattr(verify_state, "_verify_map", {})
+    root = tmp_path / "stale-recovery-proj"
+    _make_locked_project(root, "stale-recovery-proj")
+    venv_dir = _prepare_local_venv_dir(tmp_path / "stale-recovery-venv")
+    (root / ".venv").symlink_to(venv_dir)
+    (root / "requirements.txt").write_text("", encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok() -> None:\n    assert True\n", encoding="utf-8"
+    )
+
+    class ControllableProbeContainer(LocalExecContainer):
+        def __init__(self, proj_root: Path) -> None:
+            super().__init__(proj_root)
+            self.inject_empty_direct_probe = False
+
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            if (
+                self.inject_empty_direct_probe
+                and "for f in pyproject.toml uv.lock" in rendered
+                and "above:" not in rendered
+            ):
+                return 0, (b"", b"")
+            return super().exec_run(cmd, *args, **kwargs)
+
+    container = ControllableProbeContainer(tmp_path)
+    fingerprint = compute_manifest_fingerprint(container, str(root))
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    state_before = list_environment_states(container.id)[str(root)].copy()
+    original_lock = (root / "uv.lock").read_bytes()
+    record_verify_success(container.id)
+
+    monkeypatch.setattr(
+        "sunaba.tools.verify._docker",
+        lambda: SimpleNamespace(containers=SimpleNamespace(get=lambda _cid: container)),
+    )
+    _stub_publish_environment(monkeypatch, container)
+
+    # 1. Remove uv.lock and inject empty direct manifest probe -> fail closed, keep record, clear verify.
+    (root / "uv.lock").unlink()
+    container.inject_empty_direct_probe = True
+    err_verify = json.loads(
+        verify_in_container(container.id, path="tests", working_dir=str(root))
+    )
+    assert err_verify["status"] == "environment_setup_failed"
+    assert err_verify["tests"]["status"] == "skipped"
+    assert has_verify_success(container.id) is False
+    assert list_environment_states(container.id)[str(root)] == state_before
+
+    # 2. Stop injecting empty probe -> real verify sees stale uv.lock, blocks, then publish blocks too.
+    container.inject_empty_direct_probe = False
+    stale_verify = json.loads(
+        verify_in_container(container.id, path="tests", working_dir=str(root))
+    )
+    assert stale_verify["status"] == "environment_setup_failed"
+    assert stale_verify["environment_setup"]["status"] == "stale"
+    assert "uv.lock" in stale_verify["environment_setup"]["reason"]
+    assert has_verify_success(container.id) is False
+    assert list_environment_states(container.id)[str(root)] == state_before
+
+    stale_pub = json.loads(
+        publish(
+            container.id,
+            "owner/repo",
+            "feature",
+            "message",
+            skip_verify_gate=False,
+        )
+    )
+    assert stale_pub["step"] == "verify_gate"
+    assert "no successful verify_in_container" in stale_pub["error"]
+    assert "stale" in stale_pub["error"]
+    assert "uv.lock" in stale_pub["error"]
+
+    # 3. Restore uv.lock: publish still blocks until a fresh verify_in_container passes.
+    (root / "uv.lock").write_bytes(original_lock)
+    unverified_pub = json.loads(
+        publish(
+            container.id,
+            "owner/repo",
+            "feature",
+            "message",
+            skip_verify_gate=False,
+        )
+    )
+    assert unverified_pub["step"] == "verify_gate"
+    assert "no successful verify_in_container" in unverified_pub["error"]
+
+    ok_verify = json.loads(
+        verify_in_container(container.id, path="tests", working_dir=str(root))
+    )
+    assert ok_verify["status"] == "ok", ok_verify
+    assert ok_verify["gate_passed"] is True
+    assert has_verify_success(container.id) is True
+
+    ok_pub = json.loads(
+        publish(
+            container.id,
+            "owner/repo",
+            "feature",
+            "message",
+            skip_verify_gate=False,
+        )
+    )
+    assert ok_pub["step"] == "egress_proxy"
+
+
 def test_publish_tool_description_documents_public_arguments() -> None:
     description = publish.__doc__ or ""
 
     assert "create_pr:" in description
     assert "files:" in description
     assert len(description.splitlines()) > 1
+
+
+def test_manifest_probes_fail_when_workdir_cannot_be_entered(tmp_path: Path) -> None:
+    """Real shell probes fail closed when cd to workdir fails instead of returning absence."""
+    from sunaba.environment import (
+        EnvironmentResolutionError,
+        _probe_uv_manifests,
+        probe_uv_project_root,
+        resolve_uv_root,
+    )
+
+    locked_root = tmp_path / "locked-root"
+    _make_locked_project(locked_root, "locked-root")
+    not_a_dir = locked_root / "not-a-dir"
+    not_a_dir.write_text("file\n", encoding="utf-8")
+    missing_dir = locked_root / "missing-workdir"
+    empty_subdir = tmp_path / "outside-subdir"
+    empty_subdir.mkdir()
+
+    # Start the shell cwd inside a locked project so an unguarded tail would
+    # otherwise inspect the wrong directory or emit the completion marker.
+    container = LocalExecContainer(locked_root)
+
+    assert _probe_uv_manifests(container, str(locked_root)) == {
+        "pyproject.toml",
+        "uv.lock",
+    }
+    assert resolve_uv_root(container, str(locked_root)) == str(locked_root)
+    assert _probe_uv_manifests(container, str(empty_subdir)) == set()
+    assert resolve_uv_root(container, str(empty_subdir)) is None
+
+    for bad_workdir in (missing_dir, not_a_dir, locked_root / "pyproject.toml"):
+        with pytest.raises(EnvironmentResolutionError, match="uv manifest probe failed"):
+            _probe_uv_manifests(container, str(bad_workdir))
+        with pytest.raises(EnvironmentResolutionError, match="uv manifest probe failed"):
+            probe_uv_project_root(container, str(bad_workdir))
+        with pytest.raises(EnvironmentResolutionError, match="uv manifest probe failed"):
+            resolve_uv_root(container, str(bad_workdir))
+
+
+def test_verify_failure_invalidates_requested_alias_and_canonical_receipts(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify probe, staleness, tool, and deadline failures invalidate both alias and canonical receipts."""
+    from sunaba import verify_state
+    from sunaba.edit_verify.shell import VerifyTreeTimeout
+
+    canonical_id = "abc123def456" + "0" * 52
+
+    for idx, req_id in enumerate(("dev-box-alias", "abc123", canonical_id[:12])):
+        monkeypatch.setattr(verify_state, "_verify_map", {})
+        monkeypatch.setattr(verify_state, "_environment_state", {})
+        proj_root = tmp_path / f"verify-alias-{idx}"
+        _make_locked_project(proj_root, f"verify-alias-{idx}")
+        venv_dir = _prepare_local_venv_dir(tmp_path / f"verify-alias-venv-{idx}")
+        (proj_root / ".venv").symlink_to(venv_dir)
+        (proj_root / "requirements.txt").write_text("", encoding="utf-8")
+        (proj_root / "tests").mkdir()
+        (proj_root / "tests" / "test_ok.py").write_text(
+            "def test_ok() -> None:\n    assert True\n", encoding="utf-8"
+        )
+        original_lock = (proj_root / "uv.lock").read_bytes()
+
+        class AliasContainer(LocalExecContainer):
+            def __init__(self, root: Path, cid: str) -> None:
+                super().__init__(root)
+                self.id = cid
+                self.inject_empty_root_probe = False
+                self.inject_fp_timeout = False
+                self.inject_lint_timeout = False
+
+            def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+                rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+                if (
+                    self.inject_empty_root_probe
+                    and "for f in pyproject.toml uv.lock" in rendered
+                    and "above:" in rendered
+                ):
+                    return 0, (b"", b"")
+                if self.inject_fp_timeout and "__SUNABA_MANIFEST_ABSENT__" in rendered:
+                    raise VerifyTreeTimeout(5.0, "ok", 5.1)
+                if (
+                    self.inject_lint_timeout
+                    and "ruff" in rendered
+                    and "check --output-format json" in rendered
+                ):
+                    raise VerifyTreeTimeout(5.0, "ok", 5.1)
+                return super().exec_run(cmd, *args, **kwargs)
+
+        container = AliasContainer(tmp_path, canonical_id)
+        fp = compute_manifest_fingerprint(container, str(proj_root))
+        record_environment_state(
+            canonical_id, "ready", fingerprint=fp, project_root=str(proj_root)
+        )
+        state_before = list_environment_states(canonical_id)[str(proj_root)].copy()
+        persisted_before = (isolated_state / f"{canonical_id}.json").read_text(
+            encoding="utf-8"
+        )
+
+        monkeypatch.setattr(
+            "sunaba.tools.verify._docker",
+            lambda _c=container: SimpleNamespace(
+                containers=SimpleNamespace(get=lambda _cid: _c)
+            ),
+        )
+        _stub_publish_environment(monkeypatch, container)
+
+        def _seed_both_receipts(requested_id: str = req_id) -> None:
+            record_verify_success(requested_id)
+            record_verify_success(canonical_id)
+            assert has_verify_success(requested_id) is True
+            assert has_verify_success(canonical_id) is True
+
+        # 1. Manifest probe failure
+        _seed_both_receipts()
+        container.inject_empty_root_probe = True
+        probe_res = json.loads(
+            verify_in_container(req_id, path="tests", working_dir=str(proj_root))
+        )
+        container.inject_empty_root_probe = False
+        assert probe_res["status"] == "environment_setup_failed"
+        assert has_verify_success(req_id) is False
+        assert has_verify_success(canonical_id) is False
+        assert list_environment_states(canonical_id)[str(proj_root)] == state_before
+        assert (isolated_state / f"{canonical_id}.json").read_text(
+            encoding="utf-8"
+        ) == persisted_before
+
+        # 2. Staleness failure (uv.lock removed) + publish stays blocked after restore
+        _seed_both_receipts()
+        (proj_root / "uv.lock").unlink()
+        stale_res = json.loads(
+            verify_in_container(req_id, path="tests", working_dir=str(proj_root))
+        )
+        assert stale_res["status"] == "environment_setup_failed"
+        assert stale_res["environment_setup"]["status"] == "stale"
+        assert has_verify_success(req_id) is False
+        assert has_verify_success(canonical_id) is False
+        assert list_environment_states(canonical_id)[str(proj_root)] == state_before
+        (proj_root / "uv.lock").write_bytes(original_lock)
+        for check_id in (req_id, canonical_id):
+            pub_blocked = json.loads(
+                publish(
+                    check_id,
+                    "owner/repo",
+                    "feature",
+                    "message",
+                    skip_verify_gate=False,
+                )
+            )
+            assert pub_blocked["step"] == "verify_gate"
+            assert "no successful verify_in_container" in pub_blocked["error"]
+
+        # 3. Deadline timeout during staleness fingerprint probe
+        _seed_both_receipts()
+        container.inject_fp_timeout = True
+        timeout_res = json.loads(
+            verify_in_container(req_id, path="tests", working_dir=str(proj_root))
+        )
+        container.inject_fp_timeout = False
+        assert timeout_res["status"] == "timeout"
+        assert timeout_res["gate_passed"] is False
+        assert has_verify_success(req_id) is False
+        assert has_verify_success(canonical_id) is False
+        assert list_environment_states(canonical_id)[str(proj_root)] == state_before
+
+        # 4. Missing required uv tool
+        _seed_both_receipts()
+        (proj_root / ".venv").unlink()
+        tool_res = json.loads(
+            verify_in_container(req_id, path="tests", working_dir=str(proj_root))
+        )
+        assert tool_res["status"] == "environment_setup_failed"
+        assert has_verify_success(req_id) is False
+        assert has_verify_success(canonical_id) is False
+        assert list_environment_states(canonical_id)[str(proj_root)] == state_before
+        (proj_root / ".venv").symlink_to(venv_dir)
+
+        # 5. Deadline timeout inside lint/type gate
+        _seed_both_receipts()
+        container.inject_lint_timeout = True
+        lint_timeout_res = json.loads(
+            verify_in_container(req_id, path="tests", working_dir=str(proj_root))
+        )
+        container.inject_lint_timeout = False
+        assert lint_timeout_res["status"] == "timeout"
+        assert lint_timeout_res["gate_passed"] is False
+        assert has_verify_success(req_id) is False
+        assert has_verify_success(canonical_id) is False
+        assert list_environment_states(canonical_id)[str(proj_root)] == state_before
+        assert (isolated_state / f"{canonical_id}.json").read_text(
+            encoding="utf-8"
+        ) == persisted_before
+
+        # 6. Already non-ready recorded roots invalidate both receipts and preserve records
+        for non_ready_status in ("failed", "not_prepared"):
+            record_environment_state(
+                canonical_id,
+                non_ready_status,
+                reason=f"prior {non_ready_status}",
+                project_root=str(proj_root),
+            )
+            non_ready_before = list_environment_states(canonical_id)[str(proj_root)].copy()
+            non_ready_persisted = (isolated_state / f"{canonical_id}.json").read_text(
+                encoding="utf-8"
+            )
+            _seed_both_receipts()
+            non_ready_res = json.loads(
+                verify_in_container(req_id, path="tests", working_dir=str(proj_root))
+            )
+            assert non_ready_res["status"] == "environment_setup_failed"
+            assert non_ready_res["environment_setup"]["status"] == non_ready_status
+            assert has_verify_success(req_id) is False
+            assert has_verify_success(canonical_id) is False
+            assert list_environment_states(canonical_id)[str(proj_root)] == non_ready_before
+            assert (isolated_state / f"{canonical_id}.json").read_text(
+                encoding="utf-8"
+            ) == non_ready_persisted
+
+
+def test_publish_recorded_root_gate_failure_invalidates_alias_and_canonical_receipts(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publish recorded-root gate failures invalidate both supplied alias and canonical receipts."""
+    from sunaba import verify_state
+    from sunaba.edit_verify.shell import VerifyTreeTimeout
+
+    canonical_id = "fedcba987654" + "0" * 52
+
+    for idx, req_id in enumerate(("pub-box-alias", "fedcba", canonical_id[:12])):
+        monkeypatch.setattr(verify_state, "_verify_map", {})
+        monkeypatch.setattr(verify_state, "_environment_state", {})
+        proj_root = tmp_path / f"pub-alias-{idx}"
+        _make_locked_project(proj_root, f"pub-alias-{idx}")
+        original_lock = (proj_root / "uv.lock").read_bytes()
+
+        class PublishAliasContainer(LocalExecContainer):
+            def __init__(self, root: Path, cid: str) -> None:
+                super().__init__(root)
+                self.id = cid
+                self.inject_empty_direct_probe = False
+                self.inject_fp_error = False
+                self.inject_fp_timeout = False
+
+            def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+                rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+                if (
+                    self.inject_empty_direct_probe
+                    and "for f in pyproject.toml uv.lock" in rendered
+                    and "above:" not in rendered
+                ):
+                    return 0, (b"", b"")
+                if "__SUNABA_MANIFEST_ABSENT__" in rendered:
+                    if self.inject_fp_timeout:
+                        raise VerifyTreeTimeout(5.0, "ok", 5.1)
+                    if self.inject_fp_error:
+                        return 2, (b"", b"fingerprint probe failed")
+                return super().exec_run(cmd, *args, **kwargs)
+
+        container = PublishAliasContainer(tmp_path, canonical_id)
+        fp = compute_manifest_fingerprint(container, str(proj_root))
+        record_environment_state(
+            canonical_id, "ready", fingerprint=fp, project_root=str(proj_root)
+        )
+        state_before = list_environment_states(canonical_id)[str(proj_root)].copy()
+        persisted_before = (isolated_state / f"{canonical_id}.json").read_text(
+            encoding="utf-8"
+        )
+        _stub_publish_environment(monkeypatch, container)
+
+        def _seed_both_receipts(requested_id: str = req_id) -> None:
+            record_verify_success(requested_id)
+            record_verify_success(canonical_id)
+            assert has_verify_success(requested_id) is True
+            assert has_verify_success(canonical_id) is True
+
+        # 1. Stale recorded root -> publish refuses, invalidates both receipts, stays blocked after restore
+        _seed_both_receipts()
+        (proj_root / "uv.lock").unlink()
+        stale_pub = json.loads(
+            publish(req_id, "owner/repo", "feature", "message", skip_verify_gate=False)
+        )
+        assert stale_pub["status"] == "error"
+        assert stale_pub["step"] == "verify_gate"
+        assert "stale" in stale_pub["error"]
+        assert "no successful verify_in_container" in stale_pub["error"]
+        assert has_verify_success(req_id) is False
+        assert has_verify_success(canonical_id) is False
+        assert list_environment_states(canonical_id)[str(proj_root)] == state_before
+        assert (isolated_state / f"{canonical_id}.json").read_text(
+            encoding="utf-8"
+        ) == persisted_before
+
+        (proj_root / "uv.lock").write_bytes(original_lock)
+        retry_pub = json.loads(
+            publish(req_id, "owner/repo", "feature", "message", skip_verify_gate=False)
+        )
+        assert retry_pub["step"] == "verify_gate"
+        assert "no successful verify_in_container" in retry_pub["error"]
+
+        # 2. Fingerprint probe failure -> invalidates both receipts and stays blocked
+        _seed_both_receipts()
+        container.inject_fp_error = True
+        fp_err_pub = json.loads(
+            publish(req_id, "owner/repo", "feature", "message", skip_verify_gate=False)
+        )
+        container.inject_fp_error = False
+        assert fp_err_pub["status"] == "error"
+        assert fp_err_pub["step"] == "verify_gate"
+        assert "no successful verify_in_container" in fp_err_pub["error"]
+        assert has_verify_success(req_id) is False
+        assert has_verify_success(canonical_id) is False
+        assert list_environment_states(canonical_id)[str(proj_root)] == state_before
+
+        # 3. Direct manifest probe failure inside recorded_root_is_uv_project
+        _seed_both_receipts()
+        (proj_root / "uv.lock").unlink()
+        container.inject_empty_direct_probe = True
+        probe_err_pub = json.loads(
+            publish(req_id, "owner/repo", "feature", "message", skip_verify_gate=False)
+        )
+        container.inject_empty_direct_probe = False
+        (proj_root / "uv.lock").write_bytes(original_lock)
+        assert probe_err_pub["status"] == "error"
+        assert probe_err_pub["step"] == "verify_gate"
+        assert "no successful verify_in_container" in probe_err_pub["error"]
+        assert has_verify_success(req_id) is False
+        assert has_verify_success(canonical_id) is False
+        assert list_environment_states(canonical_id)[str(proj_root)] == state_before
+
+        # 4. VerifyTreeTimeout during publish staleness check propagates and invalidates both
+        _seed_both_receipts()
+        container.inject_fp_timeout = True
+        with pytest.raises(VerifyTreeTimeout):
+            publish(req_id, "owner/repo", "feature", "message", skip_verify_gate=False)
+        container.inject_fp_timeout = False
+        assert has_verify_success(req_id) is False
+        assert has_verify_success(canonical_id) is False
+        assert list_environment_states(canonical_id)[str(proj_root)] == state_before
+
+        # 5. Already non-ready recorded roots invalidate both receipts and preserve records
+        for non_ready_status in ("failed", "not_prepared"):
+            record_environment_state(
+                canonical_id,
+                non_ready_status,
+                reason=f"prior {non_ready_status}",
+                project_root=str(proj_root),
+            )
+            non_ready_before = list_environment_states(canonical_id)[str(proj_root)].copy()
+            non_ready_persisted = (isolated_state / f"{canonical_id}.json").read_text(
+                encoding="utf-8"
+            )
+            _seed_both_receipts()
+            non_ready_pub = json.loads(
+                publish(req_id, "owner/repo", "feature", "message", skip_verify_gate=False)
+            )
+            assert non_ready_pub["status"] == "error"
+            assert non_ready_pub["step"] == "verify_gate"
+            assert non_ready_status in non_ready_pub["error"]
+            assert "no successful verify_in_container" in non_ready_pub["error"]
+            assert has_verify_success(req_id) is False
+            assert has_verify_success(canonical_id) is False
+            assert list_environment_states(canonical_id)[str(proj_root)] == non_ready_before
+            assert (isolated_state / f"{canonical_id}.json").read_text(
+                encoding="utf-8"
+            ) == non_ready_persisted

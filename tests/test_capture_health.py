@@ -804,8 +804,24 @@ class TestDiffInContainerCaptureGuard:
 class TestVerifyInContainerCaptureGuard:
     """verify_in_container: a green gate must not be built from empties."""
 
+    @staticmethod
+    def _verify_incident_container(
+        canary_empty: bool,
+    ) -> tuple[MagicMock, dict[str, bool]]:
+        container, state = _incident_container(canary_empty=canary_empty)
+        base_exec = container.exec_run.side_effect
+
+        def exec_run(argv: list[str], **kwargs: Any) -> tuple[int, object]:
+            cmd = argv[-1] if argv else ""
+            if isinstance(cmd, str) and "for f in pyproject.toml uv.lock" in cmd:
+                return (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b""))
+            return base_exec(argv, **kwargs)
+
+        container.exec_run.side_effect = exec_run
+        return container, state
+
     def test_incident_shape_trips_loud_error(self) -> None:
-        container, _state = _incident_container(canary_empty=True)
+        container, _state = self._verify_incident_container(canary_empty=True)
         with patch("sunaba.tools.verify._docker") as mock_docker:
             mock_docker.return_value.containers.get.return_value = container
             for _ in range(capture_health.EMPTY_TRIGGER - 1):
@@ -817,7 +833,7 @@ class TestVerifyInContainerCaptureGuard:
 
     def test_refused_verify_records_no_success(self) -> None:
         """A refused verify must not leave a publish-unblocking record."""
-        container, _state = _incident_container(canary_empty=True)
+        container, _state = self._verify_incident_container(canary_empty=True)
         with patch("sunaba.tools.verify._docker") as mock_docker, patch(
             "sunaba.tools.verify.record_verify_success"
         ) as rec:
@@ -830,7 +846,7 @@ class TestVerifyInContainerCaptureGuard:
         assert rec.call_count == capture_health.EMPTY_TRIGGER - 1
 
     def test_healthy_canary_still_serves_the_verdict(self) -> None:
-        container, _state = _incident_container(canary_empty=False)
+        container, _state = self._verify_incident_container(canary_empty=False)
         with patch("sunaba.tools.verify._docker") as mock_docker:
             mock_docker.return_value.containers.get.return_value = container
             for _ in range(10 * capture_health.EMPTY_TRIGGER):
@@ -840,7 +856,7 @@ class TestVerifyInContainerCaptureGuard:
         assert not capture_health.is_capture_broken(_CID)
 
     def test_flag_set_by_another_tool_blocks_verify(self) -> None:
-        container, _state = _incident_container(canary_empty=True)
+        container, _state = self._verify_incident_container(canary_empty=True)
         _break_capture_via_sandbox_exec(container)
         with patch("sunaba.tools.verify._docker") as mock_docker:
             mock_docker.return_value.containers.get.return_value = container

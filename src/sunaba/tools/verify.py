@@ -17,6 +17,7 @@ from sunaba.edit_verify import (
     type_check_file,
 )
 from sunaba.edit_verify.shell import (
+    TreeTimeout,
     VerifyTreeTimeout,
     close_verify_deadline,
     open_verify_deadline,
@@ -954,7 +955,6 @@ def _verify_in_container_guarded(
     unstaged_raw = unstaged_raw if unstaged_ec == 0 else ""
     from sunaba.verify_state import (
         forget_environment_state_for_root,
-        get_environment_state_for_root,
         invalidate_verify_success,
         list_environment_states,
     )
@@ -969,6 +969,9 @@ def _verify_in_container_guarded(
             from sunaba.environment import probe_directory_exists
 
             directory_exists = probe_directory_exists(container, normalized_working_dir)
+        except TreeTimeout:
+            invalidate_verify_success(full_cid)
+            raise
         except Exception:
             directory_probe_failed = True
             directory_exists = True
@@ -981,7 +984,11 @@ def _verify_in_container_guarded(
             records = list_environment_states(full_cid)
 
     try:
-        from sunaba.environment import resolve_uv_root
+        from sunaba.environment import (
+            resolve_uv_root,
+            roots_refer_to_same_project,
+            select_recorded_environment_for_workdir,
+        )
 
         uv_root = resolve_uv_root(container, working_dir)
         uv_project = uv_root is not None
@@ -990,7 +997,9 @@ def _verify_in_container_guarded(
             and not directory_probe_failed
             and uv_root is not None
         ):
-            if os.path.normpath(uv_root) != normalized_working_dir:
+            if not roots_refer_to_same_project(
+                container, normalized_working_dir, uv_root
+            ):
                 forget_environment_state_for_root(
                     full_cid,
                     normalized_working_dir,
@@ -998,6 +1007,14 @@ def _verify_in_container_guarded(
                 )
                 records = list_environment_states(full_cid)
 
+        records = list_environment_states(full_cid)
+        selected_root, environment_state = select_recorded_environment_for_workdir(
+            container, working_dir, records, uv_root
+        )
+
+    except TreeTimeout:
+        invalidate_verify_success(full_cid)
+        raise
     except Exception as exc:
         invalidate_verify_success(full_cid)
         reason = f"uv manifest probe failed: {str(exc)[:200]}"
@@ -1021,21 +1038,14 @@ def _verify_in_container_guarded(
         _record_verify_outcome(container_id, result)
         return json.dumps(result)
 
-    records = list_environment_states(full_cid)
-    environment_state = get_environment_state_for_root(
-        full_cid, uv_root or os.path.normpath(working_dir)
-    )
-    if environment_state is None and uv_root is not None and "" in records:
-        # Legacy records without a recorded root retain their single-root
-        # compatibility behavior.
-        environment_state = records[""]
     uv_tool_root = uv_root or working_dir
 
     if environment_state is not None and (uv_project or records):
         from sunaba.environment import check_recorded_environment_staleness
 
         if (
-            environment_state.get("status") == "ready"
+            uv_project
+            and environment_state.get("status") == "ready"
             and not environment_state.get("fingerprint")
         ):
             # Legacy records have no captured manifests to compare; retain
@@ -1043,10 +1053,17 @@ def _verify_in_container_guarded(
             status, reason = "ready", None
         else:
             status, reason = check_recorded_environment_staleness(
-                container, environment_state, uv_root
+                container, environment_state, selected_root or uv_root
             )
         if status == "ready":
-            uv_tool_root = environment_state.get("project_root") or uv_root or working_dir
+            uv_tool_root = (
+                environment_state.get("project_root")
+                or selected_root
+                or uv_root
+                or working_dir
+            )
+        elif status == "not_uv":
+            pass
         else:
             reason = reason or environment_state.get("reason") or "preparation state missing or not_prepared"
             result = {
@@ -1118,17 +1135,19 @@ def _verify_in_container_guarded(
         return json.dumps(result)
 
     if uv_project:
-        from sunaba.environment import resolve_uv_python_tools, resolve_uv_root
+        from sunaba.environment import resolve_uv_python_tools
 
         try:
-            if environment_state is None or (
-                environment_state.get("project_root")
-                and os.path.normpath(working_dir) != os.path.normpath(environment_state["project_root"])
-            ):
-                uv_tool_root = resolve_uv_root(container, working_dir) or working_dir
-            else:
-                uv_tool_root = environment_state.get("project_root") or working_dir
+            uv_tool_root = (
+                (environment_state or {}).get("project_root")
+                or selected_root
+                or uv_root
+                or working_dir
+            )
             python_toolchain = resolve_uv_python_tools(container, uv_tool_root)
+        except TreeTimeout:
+            invalidate_verify_success(full_cid)
+            raise
         except Exception as exc:
             from sunaba.verify_state import invalidate_verify_success
 

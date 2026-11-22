@@ -50,22 +50,27 @@ def _run_pytest_verify(
     _junit_file = "/tmp/_pytest_report.xml"
     _raw_file = "/tmp/_pytest_raw.txt"
     root = workdir or "/workspace"
+    from sunaba.edit_verify.shell import TreeTimeout
     from sunaba.environment import (
         resolve_uv_python_tools,
         resolve_uv_root,
         uv_environment_block_reason,
     )
+    blocked = uv_environment_block_reason(container, root)
+    if blocked:
+        return _envelope_error("pytest", blocked, 1)
     try:
         uv_root = resolve_uv_root(container, root)
+    except TreeTimeout:
+        raise
     except Exception as exc:
         return _envelope_error("pytest", f"uv root probe failed: {exc}", 1)
     if uv_root:
-        blocked = uv_environment_block_reason(container, root)
-        if blocked:
-            return _envelope_error("pytest", blocked, 1)
         if python_executable is None:
             try:
                 toolchain = resolve_uv_python_tools(container, uv_root)
+            except TreeTimeout:
+                raise
             except Exception as exc:
                 return _envelope_error(
                     "pytest", f"uv tool resolution failed: {str(exc)[:180]}", 1

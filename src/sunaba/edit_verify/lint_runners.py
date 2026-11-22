@@ -108,6 +108,7 @@ def _run_ruff_verify(
     fix_arg = "--fix " if fix else ""
     tool_cmd = "ruff"
     if workdir:
+        from sunaba.edit_verify.shell import TreeTimeout
         from sunaba.environment import resolve_uv_root, resolve_uv_tool, uv_environment_block_reason
 
         blocked = uv_environment_block_reason(container, workdir)
@@ -115,6 +116,8 @@ def _run_ruff_verify(
             return _envelope_error("ruff", blocked, 1)
         try:
             resolved_uv_root = resolve_uv_root(container, workdir)
+        except TreeTimeout:
+            raise
         except Exception as exc:
             return _envelope_error("ruff", f"uv root resolution failed: {str(exc)[:180]}", 1)
         if resolved_uv_root is not None:
@@ -124,6 +127,8 @@ def _run_ruff_verify(
                     resolved_tool.get("path") if resolved_tool is not None
                     else resolve_uv_tool(container, uv_tool_root, "ruff")[0]
                 )
+            except TreeTimeout:
+                raise
             except Exception as exc:
                 return _envelope_error("ruff", f"uv tool resolution failed: {str(exc)[:180]}", 1)
             if executable is None:
@@ -436,6 +441,7 @@ def _run_pyright_verify(
     tool_cmd = "pyright"
     interpreter_arg = ""
     if project_root and workdir:
+        from sunaba.edit_verify.shell import TreeTimeout
         from sunaba.environment import resolve_uv_root, resolve_uv_tool, uv_environment_block_reason
 
         blocked = uv_environment_block_reason(container, workdir)
@@ -443,6 +449,8 @@ def _run_pyright_verify(
             return _envelope_error("pyright", blocked, 1)
         try:
             resolved_uv_root = resolve_uv_root(container, workdir)
+        except TreeTimeout:
+            raise
         except Exception as exc:
             return _envelope_error("pyright", f"uv root resolution failed: {str(exc)[:180]}", 1)
         if resolved_uv_root is not None:
@@ -452,6 +460,8 @@ def _run_pyright_verify(
                     resolved_tool.get("path") if resolved_tool is not None
                     else resolve_uv_tool(container, uv_tool_root, "pyright")[0]
                 )
+            except TreeTimeout:
+                raise
             except Exception as exc:
                 return _envelope_error("pyright", f"uv tool resolution failed: {str(exc)[:180]}", 1)
             if executable is None:

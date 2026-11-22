@@ -969,6 +969,9 @@ def _verify_in_container_guarded(
             from sunaba.environment import probe_directory_exists
 
             directory_exists = probe_directory_exists(container, normalized_working_dir)
+        except TreeTimeout:
+            invalidate_verify_success(full_cid)
+            raise
         except Exception:
             directory_probe_failed = True
             directory_exists = True
@@ -983,6 +986,7 @@ def _verify_in_container_guarded(
     try:
         from sunaba.environment import (
             resolve_uv_root,
+            roots_refer_to_same_project,
             select_recorded_environment_for_workdir,
         )
 
@@ -993,7 +997,9 @@ def _verify_in_container_guarded(
             and not directory_probe_failed
             and uv_root is not None
         ):
-            if os.path.normpath(uv_root) != normalized_working_dir:
+            if not roots_refer_to_same_project(
+                container, normalized_working_dir, uv_root
+            ):
                 forget_environment_state_for_root(
                     full_cid,
                     normalized_working_dir,
@@ -1129,17 +1135,19 @@ def _verify_in_container_guarded(
         return json.dumps(result)
 
     if uv_project:
-        from sunaba.environment import resolve_uv_python_tools, resolve_uv_root
+        from sunaba.environment import resolve_uv_python_tools
 
         try:
-            if environment_state is None or (
-                environment_state.get("project_root")
-                and os.path.normpath(working_dir) != os.path.normpath(environment_state["project_root"])
-            ):
-                uv_tool_root = resolve_uv_root(container, working_dir) or working_dir
-            else:
-                uv_tool_root = environment_state.get("project_root") or working_dir
+            uv_tool_root = (
+                (environment_state or {}).get("project_root")
+                or selected_root
+                or uv_root
+                or working_dir
+            )
             python_toolchain = resolve_uv_python_tools(container, uv_tool_root)
+        except TreeTimeout:
+            invalidate_verify_success(full_cid)
+            raise
         except Exception as exc:
             from sunaba.verify_state import invalidate_verify_success
 

@@ -13,7 +13,16 @@ from .lint_runners import (
 )
 from .parsers import _parse_pylint_output
 from .paths import ScopeWorkdir, _determine_scope, _get_extension
-from .shell import _SANDBOX_ENV, _exec_run, _quote_path
+from .shell import _SANDBOX_ENV, TreeTimeout, _exec_run, _quote_path
+
+
+def _is_same_or_descendant(path: str, ancestor: str) -> bool:
+    """Return True when *path* equals *ancestor* or lies beneath it."""
+    norm_path = posixpath.normpath(path)
+    norm_ancestor = posixpath.normpath(ancestor)
+    if norm_ancestor == "/":
+        return norm_path.startswith("/")
+    return norm_path == norm_ancestor or norm_path.startswith(norm_ancestor + "/")
 
 
 def lint_file(
@@ -65,6 +74,8 @@ def lint_file(
             context.target_path,
             context.scope_path,
         )
+    except TreeTimeout:
+        raise
     except Exception as e:
         return [{
             "file": file_path,
@@ -151,15 +162,35 @@ def _resolve_single_file_context(
         else posixpath.normpath(posixpath.join(base_workdir, normalized_file))
     )
 
+    probe: _TargetProjectProbe | None = None
     if cwd_is_known:
-        project_root = _project_root_for_absolute_path(
+        probe = _probe_target_project_context(
             container, absolute_file, base_workdir
         )
-        # A standalone absolute target belongs to its own directory; do not
-        # inherit an unrelated project rooted at the Docker WORKDIR.
-        workdir = project_root or (
-            posixpath.dirname(absolute_file) if is_absolute_file else base_workdir
-        )
+        project_root = probe.project_root
+        if project_root is not None:
+            workdir = project_root
+        elif is_absolute_file:
+            # A standalone absolute target belongs to its own physical directory;
+            # do not inherit an unrelated project rooted at the Docker WORKDIR.
+            workdir = probe.target_dir or posixpath.dirname(absolute_file)
+        else:
+            # Preserve base_workdir for regular relative paths inside it, but
+            # avoid inheriting base_workdir when a relative path escapes it via
+            # a symlink or parent traversal.
+            phys_check = probe.target_dir or probe.target_ancestor
+            if (
+                phys_check is not None
+                and probe.base_workdir is not None
+                and not _is_same_or_descendant(phys_check, probe.base_workdir)
+            ):
+                workdir = (
+                    probe.target_dir
+                    or probe.target_ancestor
+                    or posixpath.dirname(absolute_file)
+                )
+            else:
+                workdir = base_workdir
     else:
         workdir = (
             base_workdir
@@ -167,16 +198,34 @@ def _resolve_single_file_context(
             else None
         )
 
+    lexical_parent = posixpath.dirname(absolute_file)
+    is_aliased = bool(
+        probe is not None
+        and (
+            (probe.target_dir is not None and probe.target_dir != lexical_parent)
+            or (probe.target_file is not None and probe.target_file != absolute_file)
+        )
+    )
+    effective_file = absolute_file
+    if is_aliased and probe is not None:
+        effective_file = probe.target_file or (
+            posixpath.join(probe.target_dir, posixpath.basename(absolute_file))
+            if probe.target_dir is not None
+            else absolute_file
+        )
+
     if not cwd_is_known and not is_absolute_file:
         target_path = posixpath.normpath(normalized_file)
+    elif is_aliased:
+        target_path = (
+            posixpath.relpath(effective_file, workdir)
+            if workdir and _is_same_or_descendant(effective_file, workdir)
+            else effective_file
+        )
     elif is_absolute_file:
         target_path = (
             posixpath.relpath(absolute_file, workdir)
-            if workdir
-            and (
-                absolute_file == workdir
-                or absolute_file.startswith(workdir.rstrip("/") + "/")
-            )
+            if workdir and _is_same_or_descendant(absolute_file, workdir)
             else absolute_file
         )
     elif workdir != base_workdir:
@@ -186,35 +235,48 @@ def _resolve_single_file_context(
 
     scope_path: str | None = None
     if scope_workdir is not None:
-        scope = posixpath.normpath(scope_workdir[0].replace("\\", "/"))
-        anchor = posixpath.normpath(scope_workdir[1].replace("\\", "/"))
-
-        # _determine_scope's parent fallback repeats the input parent in both
-        # tuple fields. Only here do we recognize that the scope is already
-        # relative to Docker WORKDIR; callers otherwise preserve its anchor.
-        input_parent = posixpath.normpath(
-            posixpath.dirname(normalized_file) or "."
-        )
-        is_parent_fallback = (
-            scope_workdir == _determine_scope(file_path)
-            and scope == anchor == input_parent
-        )
-        if not scope.startswith("/") and not is_parent_fallback:
-            scope = posixpath.join(anchor, scope)
-
-        if workdir is None and not scope.startswith("/"):
-            scope_path = posixpath.normpath(scope)
-        else:
-            absolute_scope = posixpath.normpath(
-                scope if scope.startswith("/") else posixpath.join(base_workdir, scope)
-            )
-            if workdir and (
-                absolute_scope == workdir
-                or absolute_scope.startswith(workdir.rstrip("/") + "/")
-            ):
-                scope_path = posixpath.relpath(absolute_scope, workdir)
+        if is_aliased and scope_workdir == _determine_scope(file_path):
+            if workdir and _is_same_or_descendant(effective_file, workdir):
+                rel_effective = posixpath.relpath(effective_file, workdir)
+                rel_scope = _determine_scope(rel_effective)
+                if rel_scope.workdir in (".", rel_scope.scope):
+                    scope_path = rel_scope.scope
+                else:
+                    scope_path = posixpath.normpath(
+                        posixpath.join(rel_scope.workdir, rel_scope.scope)
+                    )
             else:
-                scope_path = absolute_scope
+                scope_path = (
+                    (probe.target_dir if probe is not None else None)
+                    or posixpath.dirname(effective_file)
+                )
+        else:
+            scope = posixpath.normpath(scope_workdir[0].replace("\\", "/"))
+            anchor = posixpath.normpath(scope_workdir[1].replace("\\", "/"))
+
+            # _determine_scope's parent fallback repeats the input parent in both
+            # tuple fields. Only here do we recognize that the scope is already
+            # relative to Docker WORKDIR; callers otherwise preserve its anchor.
+            input_parent = posixpath.normpath(
+                posixpath.dirname(normalized_file) or "."
+            )
+            is_parent_fallback = (
+                scope_workdir == _determine_scope(file_path)
+                and scope == anchor == input_parent
+            )
+            if not scope.startswith("/") and not is_parent_fallback:
+                scope = posixpath.join(anchor, scope)
+
+            if workdir is None and not scope.startswith("/"):
+                scope_path = posixpath.normpath(scope)
+            else:
+                absolute_scope = posixpath.normpath(
+                    scope if scope.startswith("/") else posixpath.join(base_workdir, scope)
+                )
+                if workdir and _is_same_or_descendant(absolute_scope, workdir):
+                    scope_path = posixpath.relpath(absolute_scope, workdir)
+                else:
+                    scope_path = absolute_scope
 
     return SingleFileContext(workdir, target_path, scope_path)
 
@@ -229,6 +291,143 @@ def _resolve_lint_context(
     return context.workdir, context.target_path, context.scope_path
 
 
+class _TargetProjectProbe(NamedTuple):
+    """Physical target/workdir resolution and nearest project root."""
+
+    project_root: str | None
+    target_dir: str | None
+    target_file: str | None
+    target_ancestor: str | None
+    base_workdir: str | None
+
+
+_TARGET_DIR_SENTINEL = "__SUNABA_TARGET_DIR__"
+_TARGET_FILE_SENTINEL = "__SUNABA_TARGET_FILE__"
+_TARGET_ANCESTOR_SENTINEL = "__SUNABA_TARGET_ANCESTOR__"
+_BASE_WORKDIR_SENTINEL = "__SUNABA_BASE_WORKDIR__"
+_PROJECT_ROOT_SENTINEL = "__SUNABA_PROJECT_ROOT__"
+
+
+def _probe_target_project_context(
+    container: Any,
+    file_path: str,
+    fallback_workdir: str | None,
+) -> _TargetProjectProbe:
+    """Resolve physical target directory/file and nearest project marker in container."""
+    # Docker uses / when Config.WorkingDir is empty.
+    fallback_workdir = fallback_workdir or "/"
+    quoted_file = _quote_path(posixpath.normpath(file_path))
+    quoted_base = _quote_path(posixpath.normpath(fallback_workdir))
+    script = (
+        f"_sunaba_f={quoted_file}; "
+        "_sunaba_hops=0; "
+        "_sunaba_dir=''; "
+        "_sunaba_walk=''; "
+        "while :; do "
+        "_sunaba_parent=$(dirname -- \"$_sunaba_f\"); "
+        "_sunaba_base=$(basename -- \"$_sunaba_f\"); "
+        "if [ -d \"$_sunaba_parent\" ]; then "
+        "_sunaba_phys_parent=$(CDPATH= cd -P -- \"$_sunaba_parent\" 2>&1 && pwd -P) "
+        "|| { printf '%s\\n' \"$_sunaba_phys_parent\" >&2; exit 1; }; "
+        "_sunaba_f=\"${_sunaba_phys_parent%/}/$_sunaba_base\"; "
+        "_sunaba_dir=\"$_sunaba_phys_parent\"; "
+        "_sunaba_walk=\"$_sunaba_phys_parent\"; "
+        "elif [ -e \"$_sunaba_parent\" ]; then "
+        "printf 'target parent is not a directory: %s\\n' \"$_sunaba_parent\" >&2; exit 1; "
+        "elif [ -L \"$_sunaba_parent\" ]; then "
+        "printf 'target parent is a broken symlink: %s\\n' \"$_sunaba_parent\" >&2; exit 1; "
+        "else "
+        "_sunaba_dir=''; "
+        "_sunaba_probe=\"$_sunaba_parent\"; "
+        "while [ ! -e \"$_sunaba_probe\" ] && [ ! -L \"$_sunaba_probe\" ] && [ \"$_sunaba_probe\" != / ]; do "
+        "_sunaba_probe=$(dirname -- \"$_sunaba_probe\"); "
+        "done; "
+        "if [ -d \"$_sunaba_probe\" ]; then "
+        "_sunaba_walk=$(CDPATH= cd -P -- \"$_sunaba_probe\" 2>&1 && pwd -P) "
+        "|| { printf '%s\\n' \"$_sunaba_walk\" >&2; exit 1; }; "
+        "else "
+        "printf 'target ancestor is not a directory: %s\\n' \"$_sunaba_probe\" >&2; exit 1; "
+        "fi; "
+        "break; "
+        "fi; "
+        "if [ -L \"$_sunaba_f\" ]; then "
+        "if ! command -v readlink >/dev/null 2>&1; then "
+        "printf 'readlink unavailable to resolve symlink: %s\\n' \"$_sunaba_f\" >&2; exit 1; "
+        "fi; "
+        "_sunaba_hops=$((_sunaba_hops + 1)); "
+        "if [ \"$_sunaba_hops\" -gt 40 ]; then "
+        "printf 'too many levels of symbolic links: %s\\n' \"$_sunaba_f\" >&2; exit 1; "
+        "fi; "
+        "_sunaba_link=$(readlink -- \"$_sunaba_f\") || exit 1; "
+        "case \"$_sunaba_link\" in "
+        "/*) _sunaba_f=\"$_sunaba_link\" ;; "
+        "*) _sunaba_f=\"${_sunaba_phys_parent%/}/$_sunaba_link\" ;; "
+        "esac; "
+        "continue; "
+        "fi; "
+        "break; "
+        "done; "
+        "_sunaba_base_wd=''; "
+        f"if [ -d {quoted_base} ]; then "
+        f"_sunaba_base_wd=$(CDPATH= cd -P -- {quoted_base} 2>&1 && pwd -P) "
+        "|| { printf '%s\\n' \"$_sunaba_base_wd\" >&2; exit 1; }; "
+        "fi; "
+        f"printf '{_TARGET_DIR_SENTINEL}%s\\n' \"$_sunaba_dir\"; "
+        f"printf '{_TARGET_FILE_SENTINEL}%s\\n' \"$_sunaba_f\"; "
+        f"printf '{_TARGET_ANCESTOR_SENTINEL}%s\\n' \"$_sunaba_walk\"; "
+        f"printf '{_BASE_WORKDIR_SENTINEL}%s\\n' \"$_sunaba_base_wd\"; "
+        "_sunaba_d=\"$_sunaba_walk\"; "
+        "while :; do "
+        "for f in pyproject.toml uv.lock setup.py setup.cfg tox.ini package.json; do "
+        "if [ -f \"$_sunaba_d/$f\" ]; then "
+        f"printf '{_PROJECT_ROOT_SENTINEL}%s\\n' \"$_sunaba_d\"; exit 0; fi; done; "
+        "if [ -d \"$_sunaba_d/.git\" ] || [ -f \"$_sunaba_d/.git\" ]; then "
+        f"printf '{_PROJECT_ROOT_SENTINEL}%s\\n' \"$_sunaba_d\"; exit 0; fi; "
+        "[ \"$_sunaba_d\" = / ] && break; "
+        "_sunaba_d=$(dirname -- \"$_sunaba_d\"); "
+        f"done; printf '{_PROJECT_ROOT_SENTINEL}\\n'"
+    )
+    ec, stdout, stderr = _exec_run(
+        container, ["/bin/sh", "-c", script], workdir=fallback_workdir
+    )
+    if ec != 0:
+        raise RuntimeError(stderr.strip() or f"project ancestor probe exited {ec}")
+
+    parsed: dict[str, str | None] = {}
+    sentinels = (
+        _TARGET_DIR_SENTINEL,
+        _TARGET_FILE_SENTINEL,
+        _TARGET_ANCESTOR_SENTINEL,
+        _BASE_WORKDIR_SENTINEL,
+        _PROJECT_ROOT_SENTINEL,
+    )
+    for line in stdout.splitlines():
+        matched = False
+        for sentinel in sentinels:
+            if line.startswith(sentinel):
+                if sentinel in parsed:
+                    raise RuntimeError("project ancestor probe returned malformed output")
+                value = line[len(sentinel):]
+                if value and not value.startswith("/"):
+                    raise RuntimeError("project ancestor probe returned malformed output")
+                parsed[sentinel] = posixpath.normpath(value) if value else None
+                matched = True
+                break
+        if not matched:
+            raise RuntimeError("project ancestor probe returned malformed output")
+
+    if _PROJECT_ROOT_SENTINEL not in parsed:
+        raise RuntimeError("project ancestor probe returned malformed output")
+
+    return _TargetProjectProbe(
+        project_root=parsed[_PROJECT_ROOT_SENTINEL],
+        target_dir=parsed.get(_TARGET_DIR_SENTINEL),
+        target_file=parsed.get(_TARGET_FILE_SENTINEL),
+        target_ancestor=parsed.get(_TARGET_ANCESTOR_SENTINEL),
+        base_workdir=parsed.get(_BASE_WORKDIR_SENTINEL),
+    )
+
+
 def _project_root_for_absolute_path(
     container: Any,
     file_path: str,
@@ -236,36 +435,14 @@ def _project_root_for_absolute_path(
 ) -> str | None:
     """Find the nearest project marker in the container filesystem.
 
-    This probes real directories from the resolved target parent upward; it
-    is separate from the lexical scope/anchor inferred by _determine_scope.
-    Docker WORKDIR is used only as the probe cwd and fallback boundary.
+    This probes real directories from the resolved physical target directory
+    upward; it is separate from the lexical scope/anchor inferred by
+    _determine_scope. Docker WORKDIR is used only as the probe cwd and fallback
+    boundary.
     """
-    # Docker uses / when Config.WorkingDir is empty.
-    fallback_workdir = fallback_workdir or "/"
-    parent = posixpath.dirname(file_path)
-    script = (
-        "d=" + _quote_path(parent) + "; "
-        "while :; do "
-        "for f in pyproject.toml uv.lock setup.py setup.cfg tox.ini package.json; do "
-        "if [ -f \"$d/$f\" ]; then "
-        "printf '__SUNABA_PROJECT_ROOT__%s\\n' \"$d\"; exit 0; fi; done; "
-        "if [ -d \"$d/.git\" ] || [ -f \"$d/.git\" ]; then "
-        "printf '__SUNABA_PROJECT_ROOT__%s\\n' \"$d\"; exit 0; fi; "
-        "[ \"$d\" = / ] && break; "
-        "d=$(dirname \"$d\"); "
-        "done; printf '__SUNABA_PROJECT_ROOT__\\n'"
-    )
-    ec, stdout, stderr = _exec_run(container, ["/bin/sh", "-c", script], workdir=fallback_workdir)
-    if ec != 0:
-        raise RuntimeError(stderr.strip() or f"project ancestor probe exited {ec}")
-    sentinel = "__SUNABA_PROJECT_ROOT__"
-    lines = stdout.splitlines()
-    if len(lines) != 1 or not lines[0].startswith(sentinel):
-        raise RuntimeError("project ancestor probe returned malformed output")
-    root = lines[0][len(sentinel):]
-    if root and not root.startswith("/"):
-        raise RuntimeError("project ancestor probe returned malformed output")
-    return posixpath.normpath(root) if root else None
+    return _probe_target_project_context(
+        container, file_path, fallback_workdir
+    ).project_root
 
 
 def _error_findings(result: Any, file_path: str, tool: str) -> list[dict[str, Any]]:
@@ -374,6 +551,8 @@ def type_check_file(
     ext = _get_extension(file_path)
     try:
         context = _resolve_single_file_context(container, file_path, scope_workdir)
+    except TreeTimeout:
+        raise
     except Exception as e:
         return [{
             "file": file_path,
@@ -404,6 +583,8 @@ def type_check_file(
         if not findings and scope_path is not None and workdir is not None:
             try:
                 has_tsconfig = _has_tsconfig(container, workdir)
+            except TreeTimeout:
+                raise
             except Exception as exc:
                 return [{
                     "file": file_path,

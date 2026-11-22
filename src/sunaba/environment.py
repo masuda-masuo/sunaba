@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shlex
+from collections.abc import Sequence
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -12,65 +13,87 @@ class EnvironmentResolutionError(RuntimeError):
     """A container command or tool probe failed while resolving uv tools."""
 
 
-def _run(container: Any, root: str, command: str) -> tuple[int, str]:
+def _exec_container(
+    container: Any,
+    script: str,
+    *,
+    error_prefix: str,
+) -> tuple[int, str, str]:
+    """Run *script* in *container*, propagating deadline timeouts."""
+    from collections.abc import Callable
+
     exec_kwargs: dict[str, Any] = {
         "stdout": True,
         "stderr": True,
         "demux": True,
     }
+    deadline_runner: Callable[[Callable[[], Any]], Any] | None = None
+    tree_timeout_type: type[BaseException] | None = None
     try:
-        from sunaba.edit_verify.shell import foreground_marker_environment
+        from sunaba.edit_verify.shell import (
+            TreeTimeout,
+            foreground_marker_environment,
+            run_exec_under_foreground_deadline,
+            run_exec_under_verify_deadline,
+            verify_marker_environment,
+        )
 
-        marker_env = foreground_marker_environment()
-        if marker_env is not None:
-            exec_kwargs["environment"] = marker_env
+        tree_timeout_type = TreeTimeout
+        fg_env = foreground_marker_environment()
+        if fg_env is not None:
+            exec_kwargs["environment"] = fg_env
+            deadline_runner = run_exec_under_foreground_deadline
+        else:
+            verify_env = verify_marker_environment()
+            if verify_env is not None:
+                exec_kwargs["environment"] = verify_env
+                deadline_runner = run_exec_under_verify_deadline
     except Exception:
         pass
 
+    def _invoke_exec() -> Any:
+        return container.exec_run(["/bin/sh", "-c", script], **exec_kwargs)
+
     try:
-        ec, output = container.exec_run(
-            ["/bin/sh", "-c", f"cd {shlex.quote(root)} && {command}"],
-            **exec_kwargs,
+        result = (
+            deadline_runner(_invoke_exec)
+            if deadline_runner is not None
+            else _invoke_exec()
         )
     except Exception as exc:
+        if tree_timeout_type is not None and isinstance(exc, tree_timeout_type):
+            raise
         raise EnvironmentResolutionError(
-            f"container command failed: {str(exc)[:180]}"
+            f"{error_prefix}: {str(exc)[:180]}"
         ) from exc
-    stdout, stderr = output or (b"", b"")
+
+    if isinstance(result, tuple):
+        ec, output = result
+    else:
+        ec = getattr(result, "exit_code", 0)
+        output = getattr(result, "output", b"")
+    stdout, stderr = output if isinstance(output, tuple) else (output, b"")
     out = stdout.decode("utf-8", errors="replace") if stdout else ""
     err = stderr.decode("utf-8", errors="replace") if stderr else ""
+    return int(ec), out, err
+
+
+def _run(container: Any, root: str, command: str) -> tuple[int, str]:
+    ec, out, err = _exec_container(
+        container,
+        f"cd {shlex.quote(root)} && {command}",
+        error_prefix="container command failed",
+    )
     return ec, (out + err).strip()[:240]
 
 
 def _run_split(container: Any, root: str, command: str) -> tuple[int, str, str]:
     """Run a container command and return its stdout and stderr separately."""
-    exec_kwargs: dict[str, Any] = {
-        "stdout": True,
-        "stderr": True,
-        "demux": True,
-    }
-    try:
-        from sunaba.edit_verify.shell import foreground_marker_environment
-
-        marker_env = foreground_marker_environment()
-        if marker_env is not None:
-            exec_kwargs["environment"] = marker_env
-    except Exception:
-        pass
-
-    try:
-        ec, output = container.exec_run(
-            ["/bin/sh", "-c", f"cd {shlex.quote(root)} && {command}"],
-            **exec_kwargs,
-        )
-    except Exception as exc:
-        raise EnvironmentResolutionError(
-            f"container command failed: {str(exc)[:180]}"
-        ) from exc
-    stdout, stderr = output or (b"", b"")
-    out = stdout.decode("utf-8", errors="replace") if stdout else ""
-    err = stderr.decode("utf-8", errors="replace") if stderr else ""
-    return ec, out, err
+    return _exec_container(
+        container,
+        f"cd {shlex.quote(root)} && {command}",
+        error_prefix="container command failed",
+    )
 
 
 def _test_executable(container: Any, root: str, path: str) -> bool:
@@ -93,8 +116,8 @@ def _tool_version(container: Any, root: str, path: str) -> str:
     return version
 
 
-def probe_uv_project_root(container: Any, root: str) -> bool:
-    """Reliably detect root uv manifests; raise when the probe itself fails."""
+def _probe_uv_manifests(container: Any, root: str) -> set[str]:
+    """Return present uv manifest filenames directly under *root*; raise on error."""
     probe = (
         "for f in pyproject.toml uv.lock; do "
         "[ -f \"$f\" ] && printf '%s\\n' \"$f\" || true; done"
@@ -105,9 +128,12 @@ def probe_uv_project_root(container: Any, root: str) -> bool:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     if any(line not in {"pyproject.toml", "uv.lock"} for line in lines):
         raise RuntimeError(f"uv manifest probe returned malformed output: {output[:160]}")
-    manifests = set(lines)
-    return {"pyproject.toml", "uv.lock"} <= manifests
+    return set(lines)
 
+
+def probe_uv_project_root(container: Any, root: str) -> bool:
+    """Reliably detect root uv manifests; raise when the probe itself fails."""
+    return {"pyproject.toml", "uv.lock"} <= _probe_uv_manifests(container, root)
 
 
 def probe_directory_exists(container: Any, root: str) -> bool:
@@ -115,37 +141,12 @@ def probe_directory_exists(container: Any, root: str) -> bool:
     quoted_root = shlex.quote(root)
     script = (
         f"if [ -d {quoted_root} ]; then "
-        "printf '__SUNABA_DIRECTORY_EXISTS__\n'; "
-        "else printf '__SUNABA_DIRECTORY_ABSENT__\n'; fi"
+        "printf '__SUNABA_DIRECTORY_EXISTS__\\n'; "
+        "else printf '__SUNABA_DIRECTORY_ABSENT__\\n'; fi"
     )
-    exec_kwargs: dict[str, Any] = {
-        "stdout": True,
-        "stderr": True,
-        "demux": True,
-    }
-    try:
-        from sunaba.edit_verify.shell import foreground_marker_environment
-
-        marker_env = foreground_marker_environment()
-        if marker_env is not None:
-            exec_kwargs["environment"] = marker_env
-    except Exception:
-        pass
-    try:
-        result = container.exec_run(["/bin/sh", "-c", script], **exec_kwargs)
-    except Exception as exc:
-        raise EnvironmentResolutionError(
-            f"directory probe failed: {str(exc)[:180]}"
-        ) from exc
-
-    if isinstance(result, tuple):
-        exit_code, output = result
-    else:
-        exit_code = getattr(result, "exit_code", None)
-        output = getattr(result, "output", b"")
-    stdout, stderr = output if isinstance(output, tuple) else (output, b"")
-    stdout_text = (stdout or b"").decode("utf-8", errors="replace")
-    stderr_text = (stderr or b"").decode("utf-8", errors="replace")
+    exit_code, stdout_text, stderr_text = _exec_container(
+        container, script, error_prefix="directory probe failed"
+    )
     if exit_code != 0:
         detail = (stdout_text + stderr_text).strip()[:180]
         raise EnvironmentResolutionError(
@@ -161,13 +162,138 @@ def probe_directory_exists(container: Any, root: str) -> bool:
     )
 
 
+def _resolve_physical_paths(
+    container: Any, paths: Sequence[str]
+) -> dict[str, str | None]:
+    """Resolve physical paths for *paths* in one container exec.
+
+    Returns ``{normalized_path: resolved_physical_path_or_None}``.
+    ``None`` means the path is genuinely absent inside the container; any
+    other failure, malformed output, or incomplete output fails closed.
+    """
+    unique_paths: list[str] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        normalized = os.path.normpath(raw_path)
+        if normalized not in seen:
+            seen.add(normalized)
+            unique_paths.append(normalized)
+    if not unique_paths:
+        return {}
+
+    chunks: list[str] = []
+    for idx, path in enumerate(unique_paths):
+        quoted = shlex.quote(path)
+        chunks.append(
+            f"_sunaba_p={quoted}; "
+            "if [ -d \"$_sunaba_p\" ]; then "
+            "if _sunaba_r=$(CDPATH= cd -P -- \"$_sunaba_p\" 2>/dev/null && pwd -P); then "
+            f"printf '__SUNABA_PATH_OK__{idx}:%s\\n' \"$_sunaba_r\"; "
+            f"else printf '__SUNABA_PATH_ERR__{idx}\\n'; fi; "
+            "elif [ -e \"$_sunaba_p\" ]; then "
+            f"printf '__SUNABA_PATH_ERR__{idx}\\n'; "
+            "elif command -v ls >/dev/null 2>&1; then "
+            "_sunaba_e=$(LC_ALL=C ls -Ld -- \"$_sunaba_p\" 2>&1); "
+            "case \"$_sunaba_e\" in "
+            "*\"No such file or directory\"*) "
+            f"printf '__SUNABA_PATH_ABSENT__{idx}\\n' ;; "
+            f"*) printf '__SUNABA_PATH_ERR__{idx}\\n' ;; "
+            "esac; "
+            "elif [ ! -L \"$_sunaba_p\" ]; then "
+            f"printf '__SUNABA_PATH_ABSENT__{idx}\\n'; "
+            "else "
+            f"printf '__SUNABA_PATH_ERR__{idx}\\n'; "
+            "fi"
+        )
+    ec, stdout_text, stderr_text = _exec_container(
+        container,
+        "; ".join(chunks),
+        error_prefix="physical path probe failed",
+    )
+    if ec != 0:
+        detail = (stdout_text + stderr_text).strip()[:180]
+        raise EnvironmentResolutionError(
+            f"physical path probe failed (exit {ec}): {detail}"
+        )
+
+    resolved: dict[str, str | None] = {}
+    seen_indices: set[int] = set()
+    for raw_line in stdout_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("__SUNABA_PATH_ERR__"):
+            raise EnvironmentResolutionError(
+                f"physical path probe failed: {line[:160]}"
+            )
+        if line.startswith("__SUNABA_PATH_ABSENT__"):
+            idx_str = line.removeprefix("__SUNABA_PATH_ABSENT__")
+            if not idx_str.isdigit():
+                raise EnvironmentResolutionError(
+                    f"physical path probe returned malformed output: {line[:160]}"
+                )
+            idx = int(idx_str)
+            if idx < 0 or idx >= len(unique_paths) or idx in seen_indices:
+                raise EnvironmentResolutionError(
+                    f"physical path probe returned malformed output: {line[:160]}"
+                )
+            seen_indices.add(idx)
+            resolved[unique_paths[idx]] = None
+            continue
+        if line.startswith("__SUNABA_PATH_OK__"):
+            payload = line.removeprefix("__SUNABA_PATH_OK__")
+            if ":" not in payload:
+                raise EnvironmentResolutionError(
+                    f"physical path probe returned malformed output: {line[:160]}"
+                )
+            idx_str, phys = payload.split(":", 1)
+            if not idx_str.isdigit() or not phys.startswith("/"):
+                raise EnvironmentResolutionError(
+                    f"physical path probe returned malformed output: {line[:160]}"
+                )
+            idx = int(idx_str)
+            if idx < 0 or idx >= len(unique_paths) or idx in seen_indices:
+                raise EnvironmentResolutionError(
+                    f"physical path probe returned malformed output: {line[:160]}"
+                )
+            seen_indices.add(idx)
+            resolved[unique_paths[idx]] = os.path.normpath(phys)
+            continue
+        raise EnvironmentResolutionError(
+            f"physical path probe returned malformed output: {line[:160]}"
+        )
+
+    if len(seen_indices) != len(unique_paths):
+        raise EnvironmentResolutionError(
+            "physical path probe returned incomplete output "
+            f"({len(seen_indices)}/{len(unique_paths)})"
+        )
+    return resolved
+
+
+def roots_refer_to_same_project(
+    container: Any, root_a: str, root_b: str
+) -> bool:
+    """Return True when *root_a* and *root_b* normalize or physically resolve identically."""
+    norm_a = os.path.normpath(root_a)
+    norm_b = os.path.normpath(root_b)
+    if norm_a == norm_b:
+        return True
+    resolved = _resolve_physical_paths(container, [norm_a, norm_b])
+    phys_a = resolved.get(norm_a)
+    phys_b = resolved.get(norm_b)
+    return phys_a is not None and phys_a == phys_b
+
+
 def recorded_root_is_uv_project(container: Any, root: str) -> tuple[bool, str]:
     """Check whether a recorded root still exists and resolves to itself."""
     if not probe_directory_exists(container, root):
         return False, "directory no longer exists"
     resolved = resolve_uv_root(container, root)
     normalized_root = os.path.normpath(root)
-    if resolved is not None and os.path.normpath(resolved) != normalized_root:
+    if resolved is not None and not roots_refer_to_same_project(
+        container, normalized_root, resolved
+    ):
         return False, f"root now resolves to {os.path.normpath(resolved)}"
     return True, ""
 
@@ -184,7 +310,7 @@ def resolve_uv_root(container: Any, workdir: str) -> str | None:
         "[ -f \"$f\" ] && printf '%s\\n' \"$f\" || true; done"
     )
     ancestor_walk = (
-        'd=$(pwd); while [ "$d" != "/" ]; do '
+        'd=$(pwd -P); while [ "$d" != "/" ]; do '
         'd="${d%/*}"; [ -z "$d" ] && d="/"; '
         'if [ -f "$d/uv.lock" ]; then '
         "printf 'above:%s\\n' \"$d\"; break; fi; done"
@@ -261,31 +387,43 @@ def check_recorded_environment_staleness(
     Fingerprints are always read from the prepared project root. The caller's
     workdir is used only for legacy ready records that have no fingerprint.
     """
+    from sunaba.edit_verify.shell import TreeTimeout
     from sunaba.verify_state import invalidate_verify_success
 
+    container_id = str(getattr(container, "id", ""))
     status = state.get("status") or "not_prepared"
     if status != "ready":
         return status, state.get("reason") or "preparation state missing or not_prepared"
 
     recorded_fp = state.get("fingerprint")
     if not recorded_fp:
-        project_root = state.get("project_root") or caller_root
+        explicit_root = state.get("project_root")
+        project_root = explicit_root or caller_root
         if project_root:
             try:
                 if resolve_uv_root(container, project_root) is None:
+                    if explicit_root:
+                        manifests = _probe_uv_manifests(container, explicit_root)
+                        if "pyproject.toml" in manifests and "uv.lock" not in manifests:
+                            invalidate_verify_success(container_id)
+                            return (
+                                "stale",
+                                "uv.lock missing; run sandbox_prepare_environment or recreate container to recover",
+                            )
                     return "not_uv", None
+            except TreeTimeout:
+                invalidate_verify_success(container_id)
+                raise
             except Exception as exc:
-                invalidate_verify_success(str(getattr(container, "id", "")))
+                invalidate_verify_success(container_id)
                 return "failed", f"uv manifest probe failed: {str(exc)[:200]}"
         return "ready", None
 
-    from sunaba.edit_verify.shell import TreeTimeout
     from sunaba.environment_state_store import (
         FingerprintProbeError,
         compare_recorded_fingerprint,
     )
 
-    container_id = str(getattr(container, "id", ""))
     project_root = state.get("project_root") or recorded_fp.get("root")
     try:
         is_stale, changed = compare_recorded_fingerprint(
@@ -346,31 +484,76 @@ def select_recorded_environment_for_workdir(
 
     Normal uv root resolution always takes precedence. When resolution yields
     ``None``, preserve an exact-root record first; otherwise inspect the deepest
-    recorded path-component ancestor and apply it only when that ancestor is no
-    longer a locked uv root (e.g. ``uv.lock`` disappeared while
-    ``pyproject.toml`` remained).
+    recorded path-component ancestor (comparing physical paths resolved inside
+    the container while keeping persisted keys and fingerprint comparison scoped
+    to the recorded root) and apply it only when that ancestor is no longer a
+    locked uv root (e.g. ``uv.lock`` disappeared while ``pyproject.toml``
+    remained).
     """
     normalized_records = {
         (os.path.normpath(root) if root else ""): state
         for root, state in records.items()
     }
+    if not normalized_records:
+        if uv_root is not None:
+            return os.path.normpath(uv_root), None
+        return None, None
+
+    candidate_roots = [root for root in normalized_records if root]
+
     if uv_root is not None:
         normalized_uv_root = os.path.normpath(uv_root)
         state = normalized_records.get(normalized_uv_root)
-        if state is None and len(normalized_records) == 1 and "" in normalized_records:
+        if state is not None:
+            return normalized_uv_root, dict(state)
+        if candidate_roots:
+            physical = _resolve_physical_paths(
+                container, [normalized_uv_root, *candidate_roots]
+            )
+            phys_uv_root = physical.get(normalized_uv_root)
+            if phys_uv_root is not None:
+                for candidate in candidate_roots:
+                    if physical.get(candidate) == phys_uv_root:
+                        return candidate, dict(normalized_records[candidate])
+        if len(normalized_records) == 1 and "" in normalized_records:
             # A legacy record without a root can only be scoped from the caller.
-            state = normalized_records[""]
-        return normalized_uv_root, dict(state) if state is not None else None
+            return normalized_uv_root, dict(normalized_records[""])
+        return normalized_uv_root, None
 
     normalized_workdir = os.path.normpath(workdir)
     if normalized_workdir in normalized_records:
         return normalized_workdir, dict(normalized_records[normalized_workdir])
 
-    ancestor = _deepest_recorded_ancestor(normalized_workdir, normalized_records)
+    if not candidate_roots:
+        return None, None
+
+    physical = _resolve_physical_paths(
+        container, [normalized_workdir, *candidate_roots]
+    )
+    phys_workdir = physical.get(normalized_workdir)
+    if phys_workdir is None:
+        return None, None
+
+    phys_records: dict[str, dict[str, Any]] = {}
+    phys_to_original: dict[str, str] = {}
+    for candidate in candidate_roots:
+        phys_candidate = physical.get(candidate)
+        if phys_candidate is None:
+            continue
+        if phys_candidate == phys_workdir:
+            return candidate, dict(normalized_records[candidate])
+        phys_records[phys_candidate] = normalized_records[candidate]
+        phys_to_original[phys_candidate] = candidate
+
+    if not phys_records:
+        return None, None
+
+    ancestor = _deepest_recorded_ancestor(phys_workdir, phys_records)
     if ancestor is None:
         return None, None
 
-    ancestor_root, ancestor_state = ancestor
+    phys_ancestor, ancestor_state = ancestor
+    ancestor_root = phys_to_original[phys_ancestor]
     if probe_uv_project_root(container, ancestor_root):
         # A still-locked ancestor means workdir is a non-uv subdir or
         # non-member rather than a descendant of a root that lost uv.lock.
@@ -413,7 +596,7 @@ def check_uv_environment(container: Any, root: str) -> tuple[str, str | None]:
         )
     if state is None:
         return "not_prepared", "preparation state missing"
-    return check_recorded_environment_staleness(container, state, uv_root)
+    return check_recorded_environment_staleness(container, state, selected_root or uv_root)
 
 
 def uv_environment_block_reason(container: Any, root: str) -> str | None:

@@ -58,6 +58,7 @@ def _exec_run(
     container: Any,
     cmd: list[str],
     workdir: str | None = None,
+    environment: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     """Run ``container.exec_run`` with ``demux=True``.
 
@@ -67,10 +68,16 @@ def _exec_run(
     centralises the call so every caller gets clean decoded text
     without repeating the idiom.
 
-    When the calling thread runs inside a #910 verify deadline scope the
-    exec is routed through :func:`run_exec_under_verify_deadline` and the
-    command inherits the scope's marker environment, so a deadline expiry
-    reaps this command too.
+    This is also the single enforcement point for the calling thread's
+    deadline scope.  When a foreground exec scope is active it takes
+    precedence over a verify scope (a foreground tool call owns its own
+    tree, and its reaper must not be shadowed by a verify scope armed on
+    the same thread); otherwise an active verify scope is honored.  In
+    either case the exec is routed through the matching ``run_exec_*``
+    runner and the command inherits the scope's marker environment, so a
+    deadline expiry reaps this command too.  *environment* lets a caller
+    supply its own variables; the scope marker is merged on top rather
+    than replacing them.
 
     Returns:
         ``(exit_code, stdout_text, stderr_text)``.
@@ -81,12 +88,28 @@ def _exec_run(
         "demux": True,
         "workdir": workdir,
     }
-    marker_env = verify_marker_environment()
-    if marker_env is not None:
-        exec_kwargs["environment"] = marker_env
-    exit_code, (stdout_part, stderr_part) = run_exec_under_verify_deadline(
-        lambda: container.exec_run(cmd, **exec_kwargs)
-    )
+    env: dict[str, str] | None = dict(environment) if environment is not None else None
+    foreground_env = foreground_marker_environment()
+    if foreground_env is not None:
+        env = {**(env or {}), **foreground_env}
+        deadline_runner: Callable[[Callable[[], Any]], Any] | None = (
+            run_exec_under_foreground_deadline
+        )
+    else:
+        verify_env = verify_marker_environment()
+        if verify_env is not None:
+            env = {**(env or {}), **verify_env}
+            deadline_runner = run_exec_under_verify_deadline
+        else:
+            deadline_runner = None
+    if env is not None:
+        exec_kwargs["environment"] = env
+
+    def exec_fn() -> Any:
+        return container.exec_run(cmd, **exec_kwargs)
+
+    result = deadline_runner(exec_fn) if deadline_runner is not None else exec_fn()
+    exit_code, (stdout_part, stderr_part) = result
     # docker-py hands back ``None`` -- not ``b""`` -- for a stream that
     # produced nothing, so both parts are guarded before decoding.
     stdout_text = stdout_part.decode("utf-8", errors="replace") if stdout_part else ""

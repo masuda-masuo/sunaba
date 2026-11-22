@@ -468,7 +468,7 @@ class TestLintFileAutofix:
         def _exec_with_empty_non_uv_probe(cmd, **kwargs):
             command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
             if "for f in pyproject.toml uv.lock" in command:
-                return 0, (b"", b"")
+                return 0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
             return 0, (b"[]", b"")
         mock_container.exec_run.side_effect = _exec_with_empty_non_uv_probe
         client = self._client_with(mock_container)
@@ -515,7 +515,7 @@ class TestLintFileAutofix:
         def _exec_with_empty_non_uv_probe(cmd, **kwargs):
             command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
             if "for f in pyproject.toml uv.lock" in command:
-                return 0, (b"", b"")
+                return 0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
             return 0, (b"[]", b"")
         mock_container.exec_run.side_effect = _exec_with_empty_non_uv_probe
         client = self._client_with(mock_container)
@@ -680,10 +680,12 @@ class TestVerifyInContainer:
             detect_mock,
         ):
             # Mock exec_run for _run() calls (git diff, pytest)
-            mock_container.exec_run.return_value = (
-                0,
-                (b"", b""),
-            )
+            def _exec_non_uv(cmd, **kwargs):
+                command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+                if "for f in pyproject.toml uv.lock" in command:
+                    return 0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
+                return 0, (b"", b"")
+            mock_container.exec_run.side_effect = _exec_non_uv
 
             verify_in_container(
                 container_id="abc123",
@@ -718,7 +720,12 @@ class TestVerifyInContainer:
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_container.exec_run.return_value = (0, (b"", b""))
+        def _exec_non_uv(cmd, **kwargs):
+            command = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "for f in pyproject.toml uv.lock" in command:
+                return 0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
+            return 0, (b"", b"")
+        mock_container.exec_run.side_effect = _exec_non_uv
         mock_resolve.return_value = "/tmp/repo/sunaba"
 
         result = DetectionResult(languages={"python"}, scope={"python": "/repo"}, reason=None)
@@ -745,7 +752,7 @@ class TestVerifyInContainer:
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_container.exec_run.side_effect = lambda cmd, **kw: (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")) if "for f in pyproject.toml uv.lock" in (cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)) else (0, (b"", b""))
 
         with patch(
             "sunaba.edit_verify.detect_languages",
@@ -777,7 +784,7 @@ class TestVerifyInContainer:
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_container.exec_run.side_effect = lambda cmd, **kw: (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")) if "for f in pyproject.toml uv.lock" in (cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)) else (0, (b"", b""))
         gate_ret = {
             "gate_passed": True, "incomplete": False,
             "lint": [], "types": [], "gate_fail_reasons": [],
@@ -817,7 +824,7 @@ class TestVerifyInContainer:
         mock_docker.return_value = mock_client
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"src\ntests\n", b"")),  # src/tests existence probe
@@ -857,7 +864,7 @@ class TestVerifyInContainer:
         mock_docker.return_value = mock_client
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"tests\n", b"")),  # src/tests existence probe: only tests exists
@@ -897,7 +904,7 @@ class TestVerifyInContainer:
         mock_docker.return_value = mock_client
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),  # src/tests existence probe: neither exists
@@ -935,7 +942,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -977,7 +984,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1019,7 +1026,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1067,7 +1074,7 @@ class TestVerifyInContainer:
         )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1109,7 +1116,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1153,7 +1160,7 @@ class TestVerifyInContainer:
         # Exit code 1 + "No module named pytest" in raw output
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1199,7 +1206,7 @@ class TestVerifyInContainer:
         # Exit code 1 + "No module named pytest" in raw output
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1263,7 +1270,7 @@ class TestVerifyInContainer:
         )
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1317,7 +1324,7 @@ class TestVerifyInContainer:
         # pytest exits 4 (usage error) and writes no XML report.
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1370,7 +1377,7 @@ class TestVerifyInContainer:
         # Exit 3 (internal error), no XML, no recognizable tool-absence marker.
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),
@@ -1411,7 +1418,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"new_file.py\ndirty.txt\n", b"")),  # git ls-files --others --exclude-standard
             (0, (b"", b"")),  # src/tests dir probe
@@ -1452,7 +1459,7 @@ class TestVerifyInContainer:
 
         mock_container.exec_run.side_effect = [
             (0, (b"", b"")),  # git diff HEAD --numstat
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),  # git diff --cached --numstat
             (0, (b"", b"")),  # git ls-files --others --exclude-standard (empty)
             (0, (b"", b"")),  # src/tests dir probe
@@ -1496,7 +1503,7 @@ class TestVerifyInContainer:
         calls: list[str] = []
         ls_files_reply: list[tuple[int, tuple[bytes, bytes]]] = [
             (0, (b"", b"")),   # numstat1 (fallback)
-            (0, (b"", b"")),   # successful empty uv-root probe (non-uv)
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),   # successful empty uv-root probe (non-uv)
             (0, (b"", b"")),   # numstat2 (fallback)
             (0, (b"", b"")),   # the ls-files reply
             (0, (b"", b"")),   # dir probe
@@ -1559,7 +1566,7 @@ class TestVerifyDispatch:
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_container.exec_run.side_effect = lambda cmd, **kw: (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")) if "for f in pyproject.toml uv.lock" in (cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)) else (0, (b"", b""))
 
         with patch(
             "sunaba.edit_verify.detect_languages",
@@ -1589,7 +1596,7 @@ class TestVerifyDispatch:
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_container.exec_run.side_effect = lambda cmd, **kw: (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")) if "for f in pyproject.toml uv.lock" in (cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)) else (0, (b"", b""))
 
         mock_runner = MagicMock(return_value=VerifyResult(
             tool="go test", status="ok", detail=json.dumps({
@@ -1632,7 +1639,7 @@ class TestVerifyDispatch:
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_container.exec_run.side_effect = lambda cmd, **kw: (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")) if "for f in pyproject.toml uv.lock" in (cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)) else (0, (b"", b""))
 
         mock_runner = MagicMock(return_value=VerifyResult(
             tool="go test", status="not_available",
@@ -1677,7 +1684,7 @@ class TestVerifyDispatch:
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_container.exec_run.side_effect = lambda cmd, **kw: (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")) if "for f in pyproject.toml uv.lock" in (cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)) else (0, (b"", b""))
 
         mock_runner = MagicMock(return_value=VerifyResult(
             tool="npm test", status="findings",
@@ -1721,7 +1728,7 @@ class TestVerifyDispatch:
         mock_container = MagicMock()
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
-        mock_container.exec_run.return_value = (0, (b"", b""))
+        mock_container.exec_run.side_effect = lambda cmd, **kw: (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")) if "for f in pyproject.toml uv.lock" in (cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)) else (0, (b"", b""))
 
         mock_js_runner = MagicMock(return_value=VerifyResult(
             tool="jest", status="ok",
@@ -2420,7 +2427,7 @@ class TestVerifyAffectedScope:
     def _base_effects(self) -> list[tuple[int, tuple[bytes, bytes]]]:
         return [
             (0, (self.CHANGED_UNSTAGED, b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (self.EMPTY_STAGED, b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
         ]
@@ -2632,7 +2639,7 @@ class TestVerifyAffectedScope:
         """No changed files -> widen to a genuine full run."""
         effects = [
             (0, (b"", b"")),
-            (0, (b"", b"")),  # root manifest probe: no uv manifests
+            (0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")),  # root manifest probe: no uv manifests
             (0, (b"", b"")),
             (0, (b"", b"")),  # git ls-files --others --exclude-standard
             (0, (self.GREEN_REPORT, b"")),
@@ -3010,7 +3017,10 @@ class _HangingExecContainer:
 
     def exec_run(self, cmd: object, **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
         self.exec_calls.append((cmd, dict(kwargs)))
-        if "pytest" in _cmd_text(cmd):
+        text = _cmd_text(cmd)
+        if "for f in pyproject.toml uv.lock" in text:
+            return 0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
+        if "pytest" in text:
             self.entered.set()
             self.release.wait()
             return self._pytest_result

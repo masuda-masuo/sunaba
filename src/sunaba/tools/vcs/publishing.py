@@ -1885,7 +1885,15 @@ def _publish_impl(
                 check_recorded_environment_staleness,
                 recorded_root_is_uv_project,
             )
-            from sunaba.verify_state import forget_environment_state_for_root
+            from sunaba.verify_state import (
+                forget_environment_state_for_root,
+                invalidate_verify_success,
+            )
+
+            def _invalidate_verify_receipts() -> None:
+                invalidate_verify_success(full_cid)
+                if full_cid[:12] != cid:
+                    invalidate_verify_success(cid)
 
             blocked: list[str] = []
             for root, environment_state in environment_states.items():
@@ -1903,6 +1911,8 @@ def _publish_impl(
                             container, recorded_root
                         )
                     except Exception as exc:
+                        _invalidate_verify_receipts()
+                        verified = has_verify_success(cid)
                         still_uv = True
                         state_name = "failed"
                         reason = f"uv root probe failed: {str(exc)[:200]}"
@@ -1915,12 +1925,18 @@ def _publish_impl(
                             )
                         continue
                 if state_name == "ready":
-                    state_name, stale_reason = check_recorded_environment_staleness(
-                        container, environment_state
-                    )
+                    try:
+                        state_name, stale_reason = check_recorded_environment_staleness(
+                            container, environment_state
+                        )
+                    except Exception:
+                        _invalidate_verify_receipts()
+                        raise
                     if stale_reason is not None:
                         reason = stale_reason
                 if state_name != "ready":
+                    _invalidate_verify_receipts()
+                    verified = has_verify_success(cid)
                     display_root = root or environment_state.get("project_root")
                     if display_root:
                         blocked.append(f"{display_root}: {state_name}: {reason}")

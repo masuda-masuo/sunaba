@@ -37,7 +37,10 @@ def _result(status: str, detail: str = "", findings=None):
 
 def test_unprepared_uv_project_is_reported_and_does_not_run_ruff():
     client, container = _client()
-    container.exec_run.return_value = (0, (b"pyproject.toml\nuv.lock\n", b""))
+    container.exec_run.return_value = (
+        0,
+        (b"pyproject.toml\nuv.lock\n__SUNABA_MANIFEST_PROBE_DONE__\n", b""),
+    )
 
     findings = lint_file(
         client, "issue942-single", "src/mod.py",
@@ -62,7 +65,7 @@ def test_uv_project_uses_resolved_project_ruff_and_supplied_workdir():
         command = argv[-1]
         commands.append((command, kwargs.get("workdir")))
         if "for f in pyproject.toml uv.lock" in command:
-            return 0, (b"pyproject.toml\nuv.lock\n", b"")
+            return 0, (b"pyproject.toml\nuv.lock\n__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
         if "test -x /workspace/.venv/bin/ruff" in command:
             return 0, (b"", b"")
         if "/workspace/.venv/bin/ruff --version" in command:
@@ -94,7 +97,7 @@ def test_uv_project_with_no_project_or_image_ruff_reports_unavailable():
     def exec_run(argv, **kwargs):
         command = argv[-1]
         if "for f in pyproject.toml uv.lock" in command:
-            return 0, (b"pyproject.toml\nuv.lock\n", b"")
+            return 0, (b"pyproject.toml\nuv.lock\n__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
         if "test -x /workspace/.venv/bin/ruff" in command:
             return 1, (b"", b"")
         if "command -v ruff" in command:

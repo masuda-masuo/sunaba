@@ -102,6 +102,8 @@ class MockPrepareContainer:
                 full_path = f"{self.root}/{fname}"
                 if full_path in self.files:
                     lines.append(fname.encode("utf-8"))
+            if "__SUNABA_MANIFEST_PROBE_DONE__" in cmd_str:
+                lines.append(b"__SUNABA_MANIFEST_PROBE_DONE__")
             out = b"\n".join(lines) + (b"\n" if lines else b"")
             return 0, (out, b"")
 

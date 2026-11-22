@@ -75,6 +75,8 @@ def _make_mock_container(
                 ]
                 if f in root_files and f in cmd_str
             ]
+            if "__SUNABA_MANIFEST_PROBE_DONE__" in cmd_str:
+                probed.append("__SUNABA_MANIFEST_PROBE_DONE__")
             out = ("\n".join(probed) + "\n").encode() if probed else b""
             return 0, (out, b"")
 

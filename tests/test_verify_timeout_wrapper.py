@@ -193,7 +193,7 @@ class _ScriptedReapContainer:
     def exec_run(self, cmd: object, **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
         text = _cmd_text(cmd)
         if "for f in pyproject.toml uv.lock" in text:
-            return 0, (b"", b"")
+            return 0, (b"__SUNABA_MANIFEST_PROBE_DONE__\n", b"")
         if "pytest" in text:
             self.release.wait()
             return 0, (b"", b"")

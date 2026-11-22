@@ -960,6 +960,12 @@ def _verify_in_container_guarded(
     )
 
     full_cid = str(getattr(container, "id", None) or container_id)
+
+    def _invalidate_verify_receipts() -> None:
+        invalidate_verify_success(full_cid)
+        if container_id[:12] != full_cid[:12]:
+            invalidate_verify_success(container_id)
+
     records = list_environment_states(full_cid)
     normalized_working_dir = os.path.normpath(working_dir)
     direct_record = records.get(normalized_working_dir)
@@ -1025,10 +1031,10 @@ def _verify_in_container_guarded(
             )
 
     except TreeTimeout:
-        invalidate_verify_success(full_cid)
+        _invalidate_verify_receipts()
         raise
     except Exception as exc:
-        invalidate_verify_success(full_cid)
+        _invalidate_verify_receipts()
         reason = f"uv manifest probe failed: {str(exc)[:200]}"
         result = {
             "status": "environment_setup_failed",
@@ -1064,9 +1070,13 @@ def _verify_in_container_guarded(
             # their existing ready behavior without probing the root twice.
             status, reason = "ready", None
         else:
-            status, reason = check_recorded_environment_staleness(
-                container, environment_state, selected_root or uv_root
-            )
+            try:
+                status, reason = check_recorded_environment_staleness(
+                    container, environment_state, selected_root or uv_root
+                )
+            except TreeTimeout:
+                _invalidate_verify_receipts()
+                raise
         if status == "ready":
             uv_tool_root = (
                 environment_state.get("project_root")
@@ -1077,6 +1087,7 @@ def _verify_in_container_guarded(
         elif status == "not_uv":
             pass
         else:
+            _invalidate_verify_receipts()
             reason = reason or environment_state.get("reason") or "preparation state missing or not_prepared"
             result = {
                 "status": "environment_setup_failed",
@@ -1158,13 +1169,11 @@ def _verify_in_container_guarded(
             )
             python_toolchain = resolve_uv_python_tools(container, uv_tool_root)
         except TreeTimeout:
-            invalidate_verify_success(full_cid)
+            _invalidate_verify_receipts()
             raise
         except Exception as exc:
-            from sunaba.verify_state import invalidate_verify_success
-
             reason = f"uv tool resolution failed: {str(exc)[:180]}"
-            invalidate_verify_success(full_cid)
+            _invalidate_verify_receipts()
             result = {
                 "status": "environment_setup_failed",
                 "gate_passed": False,
@@ -1198,9 +1207,7 @@ def _verify_in_container_guarded(
         if missing_tools:
             missing = ", ".join(missing_tools)
             reason = f"required verification tool unavailable: {missing}"
-            from sunaba.verify_state import invalidate_verify_success
-
-            invalidate_verify_success(full_cid)
+            _invalidate_verify_receipts()
             result = {
                 "status": "environment_setup_failed",
                 "gate_passed": False,
@@ -1327,23 +1334,27 @@ def _verify_in_container_guarded(
     # gate is still enforced on the final pre-publish call where the flags
     # are left at their default (False).
     if not (skip_lint_gate and skip_type_gate and skip_patch_targets_gate):
-        _, dirs_out, _ = _run(
-            "for d in src tests; do test -d \"$d\" && echo \"$d\"; done"
-        )
-        existing_dirs = dirs_out.split()
-        type_scope = "src" if "src" in existing_dirs else "."
-        lint_scope = "."
-        lt_gate = run_lint_type_gate(
-            container,
-            type_scope,
-            lint_scope=lint_scope,
-            working_dir=working_dir,
-            language=language,
-            gate_on_lint=not skip_lint_gate,
-            gate_on_type=not skip_type_gate,
-            gate_on_patch_targets=not skip_patch_targets_gate,
-            python_toolchain=python_toolchain if uv_project else None,
-        )
+        try:
+            _, dirs_out, _ = _run(
+                "for d in src tests; do test -d \"$d\" && echo \"$d\"; done"
+            )
+            existing_dirs = dirs_out.split()
+            type_scope = "src" if "src" in existing_dirs else "."
+            lint_scope = "."
+            lt_gate = run_lint_type_gate(
+                container,
+                type_scope,
+                lint_scope=lint_scope,
+                working_dir=working_dir,
+                language=language,
+                gate_on_lint=not skip_lint_gate,
+                gate_on_type=not skip_type_gate,
+                gate_on_patch_targets=not skip_patch_targets_gate,
+                python_toolchain=python_toolchain if uv_project else None,
+            )
+        except TreeTimeout:
+            _invalidate_verify_receipts()
+            raise
         result["lint"] = lt_gate["lint"]
         result["types"] = lt_gate["types"]
         result["patch_targets"] = lt_gate.get("patch_targets", [])

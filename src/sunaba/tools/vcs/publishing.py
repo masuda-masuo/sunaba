@@ -1839,6 +1839,7 @@ def publish(
     return result
 
 
+# Dedent publish.__doc__ so FastMCP gets a cleanly formatted tool description.
 publish.__doc__ = inspect.cleandoc(publish.__doc__ or "")
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shlex
@@ -23,7 +24,7 @@ from sunaba.environment_state_store import (
     prune_and_load_environment_states,
 )
 from sunaba.tools.container.prepare_environment import sandbox_prepare_environment
-from sunaba.tools.vcs.publishing import publish
+from sunaba.tools.vcs.publishing import _publish_impl, publish
 from sunaba.tools.verify import verify_in_container
 from sunaba.verify_state import (
     clear_environment_state,
@@ -1949,6 +1950,87 @@ def test_publish_tool_description_documents_public_arguments() -> None:
     assert "create_pr:" in description
     assert "files:" in description
     assert len(description.splitlines()) > 1
+
+
+def test_publish_signatures_and_forwarding_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pub_sig = inspect.signature(publish)
+    impl_sig = inspect.signature(_publish_impl)
+
+    assert "environment_notes" not in pub_sig.parameters
+    assert "environment_notes" in impl_sig.parameters
+    assert (
+        impl_sig.parameters["environment_notes"].kind
+        is inspect.Parameter.KEYWORD_ONLY
+    )
+    assert (
+        impl_sig.parameters["environment_notes"].default
+        is inspect.Parameter.empty
+    )
+
+    pub_params = [
+        (param.name, param.kind, type(param.default), param.default)
+        for param in pub_sig.parameters.values()
+    ]
+    impl_params = [
+        (param.name, param.kind, type(param.default), param.default)
+        for name, param in impl_sig.parameters.items()
+        if name != "environment_notes"
+    ]
+    assert pub_params == impl_params
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_publish_impl(*args: Any, **kwargs: Any) -> str:
+        bound = impl_sig.bind(*args, **kwargs)
+        captured.append(dict(bound.arguments))
+        return json.dumps({"status": "ok", "step": "stub"})
+
+    monkeypatch.setattr(
+        "sunaba.tools.vcs.publishing._publish_impl", fake_publish_impl
+    )
+
+    base_args: dict[str, Any] = {
+        "container_id": "cid-distinct-01",
+        "repo": "owner-distinct/repo-distinct",
+        "branch": "branch-distinct-03",
+        "message": "commit-message-distinct-04",
+        "working_dir": "/workspace/distinct-workdir-05",
+        "create_pr": True,
+        "pr_title": "PR Title Distinct 06",
+        "pr_body": "PR Body Distinct 07",
+        "base_branch": "base-distinct-08",
+        "allow_force_push": True,
+        "author_name": "Author Distinct 09",
+        "author_email": "author-distinct@example.test",
+        "skip_verify_gate": True,
+        "files": ["src/distinct_a.py", "tests/distinct_b.py"],
+        "include_untracked": True,
+        "allow_upstream_overwrite": True,
+    }
+    assert list(base_args) == list(pub_sig.parameters)
+
+    bool_params = [
+        name
+        for name, param in pub_sig.parameters.items()
+        if isinstance(param.default, bool)
+    ]
+    cases = [base_args] + [
+        {**base_args, **{b: b == target for b in bool_params}}
+        for target in bool_params
+    ]
+
+    for expected in cases:
+        captured.clear()
+        raw_result = publish(**expected)
+        assert json.loads(raw_result) == {"status": "ok", "step": "stub"}
+        assert len(captured) == 1
+        forwarded = captured[0]
+        assert set(forwarded) == set(impl_sig.parameters)
+        for name, expected_value in expected.items():
+            assert forwarded[name] is expected_value
+        assert forwarded["environment_notes"] == []
 
 
 def test_manifest_probes_fail_when_workdir_cannot_be_entered(tmp_path: Path) -> None:

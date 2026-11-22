@@ -290,8 +290,12 @@ def recorded_root_is_uv_project(container: Any, root: str) -> tuple[bool, str]:
     if not probe_directory_exists(container, root):
         return False, "directory no longer exists"
     resolved = resolve_uv_root(container, root)
+    if resolved is None:
+        if not _probe_uv_manifests(container, root):
+            return False, "neither pyproject.toml nor uv.lock exists"
+        return True, ""
     normalized_root = os.path.normpath(root)
-    if resolved is not None and not roots_refer_to_same_project(
+    if not roots_refer_to_same_project(
         container, normalized_root, resolved
     ):
         return False, f"root now resolves to {os.path.normpath(resolved)}"

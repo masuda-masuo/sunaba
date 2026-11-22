@@ -677,6 +677,188 @@ def test_forgotten_root_notes_are_attached_to_later_publish_failure(
     )
 
 
+def _stub_publish_environment(
+    monkeypatch: pytest.MonkeyPatch, container: LocalExecContainer
+) -> None:
+    """Stub Docker lookup and post-gate egress proxy for isolated publish tests."""
+
+    class Containers:
+        def get(self, container_id: str) -> LocalExecContainer:
+            return container
+
+    monkeypatch.setattr(
+        "sunaba.tools.vcs.publishing._docker",
+        lambda: SimpleNamespace(containers=Containers()),
+    )
+    monkeypatch.setattr(
+        "sunaba.tools.vcs.publishing._ensure_proxy_ready",
+        lambda _client: "stubbed after verify gate",
+    )
+
+
+def test_publish_retires_record_when_both_uv_manifests_are_missing(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing directory with neither uv manifest retires only its own record."""
+    root_a = tmp_path / "project-a"
+    root_b = tmp_path / "project-b"
+    _make_locked_project(root_a, "project-a")
+    _make_locked_project(root_b, "project-b")
+    container = LocalExecContainer(tmp_path)
+    fingerprint_a = compute_manifest_fingerprint(container, str(root_a))
+    fingerprint_b = compute_manifest_fingerprint(container, str(root_b))
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint_a, project_root=str(root_a)
+    )
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint_b, project_root=str(root_b)
+    )
+    state_a_before = list_environment_states(container.id)[str(root_a)].copy()
+
+    (root_b / "pyproject.toml").unlink()
+    (root_b / "uv.lock").unlink()
+    assert root_b.is_dir()
+    record_verify_success(container.id)
+
+    _stub_publish_environment(monkeypatch, container)
+    result = json.loads(
+        publish(container.id, "owner/repo", "feature", "message", skip_verify_gate=False)
+    )
+
+    assert result.get("step") != "verify_gate", result.get("error")
+    assert result["step"] == "egress_proxy"
+    states = list_environment_states(container.id)
+    assert str(root_b) not in states
+    assert states[str(root_a)] == state_a_before
+    persisted = json.loads(
+        (isolated_state / f"{container.id}.json").read_text(encoding="utf-8")
+    )
+    assert str(root_b) not in persisted.get("roots", {})
+    assert persisted["roots"][str(root_a)] == state_a_before
+    assert any(str(root_b) in note for note in result.get("environment_notes", []))
+
+
+def test_publish_blocks_when_recorded_root_loses_pyproject_while_uv_lock_remains(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Losing only pyproject.toml while uv.lock remains must block and keep the record."""
+    root_a = tmp_path / "project-a"
+    root_b = tmp_path / "project-b"
+    _make_locked_project(root_a, "project-a")
+    _make_locked_project(root_b, "project-b")
+    container = LocalExecContainer(tmp_path)
+    fingerprint_a = compute_manifest_fingerprint(container, str(root_a))
+    fingerprint_b = compute_manifest_fingerprint(container, str(root_b))
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint_a, project_root=str(root_a)
+    )
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint_b, project_root=str(root_b)
+    )
+    state_b_before = list_environment_states(container.id)[str(root_b)].copy()
+
+    (root_b / "pyproject.toml").unlink()
+    assert (root_b / "uv.lock").is_file()
+    record_verify_success(container.id)
+
+    _stub_publish_environment(monkeypatch, container)
+    result = json.loads(
+        publish(container.id, "owner/repo", "feature", "message", skip_verify_gate=False)
+    )
+
+    assert result["step"] == "verify_gate"
+    assert str(root_b) in result["error"]
+    assert "stale" in result["error"]
+    assert "pyproject.toml" in result["error"]
+    assert list_environment_states(container.id)[str(root_b)] == state_b_before
+    persisted = json.loads(
+        (isolated_state / f"{container.id}.json").read_text(encoding="utf-8")
+    )
+    assert persisted["roots"][str(root_b)] == state_b_before
+
+
+def test_publish_manifest_probe_failure_preserves_root_record_and_blocks(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manifest probe failure after directory check must not retire the record."""
+    root = tmp_path / "project"
+    _make_locked_project(root, "project")
+    base = LocalExecContainer(tmp_path)
+    fingerprint = compute_manifest_fingerprint(base, str(root))
+
+    class BrokenManifestProbe(LocalExecContainer):
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            if "__SUNABA_DIRECTORY_EXISTS__" not in rendered and (
+                "pyproject.toml" in rendered or "uv.lock" in rendered
+            ):
+                return 2, (b"", b"manifest probe failed")
+            return super().exec_run(cmd, *args, **kwargs)
+
+    container = BrokenManifestProbe(tmp_path)
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    state_before = list_environment_states(container.id)[str(root)].copy()
+    record_verify_success(container.id)
+
+    _stub_publish_environment(monkeypatch, container)
+    result = json.loads(
+        publish(container.id, "owner/repo", "feature", "message", skip_verify_gate=False)
+    )
+
+    assert result["step"] == "verify_gate"
+    assert "failed" in result["error"]
+    assert list_environment_states(container.id)[str(root)] == state_before
+    persisted = json.loads(
+        (isolated_state / f"{container.id}.json").read_text(encoding="utf-8")
+    )
+    assert persisted["roots"][str(root)] == state_before
+
+
+def test_publish_unresolved_root_manifest_probe_failure_preserves_record_and_blocks(
+    tmp_path: Path, isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failure in _probe_uv_manifests on an unresolved root must not retire the record."""
+    root = tmp_path / "project"
+    _make_locked_project(root, "project")
+    base = LocalExecContainer(tmp_path)
+    fingerprint = compute_manifest_fingerprint(base, str(root))
+
+    class BrokenUnresolvedManifestProbe(LocalExecContainer):
+        def exec_run(self, cmd: list[str] | str, *args: Any, **kwargs: Any) -> Any:
+            rendered = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            if (
+                "__SUNABA_DIRECTORY_EXISTS__" not in rendered
+                and "above:" not in rendered
+                and ("pyproject.toml" in rendered or "uv.lock" in rendered)
+            ):
+                return 2, (b"", b"unresolved manifest probe failed")
+            return super().exec_run(cmd, *args, **kwargs)
+
+    container = BrokenUnresolvedManifestProbe(tmp_path)
+    record_environment_state(
+        container.id, "ready", fingerprint=fingerprint, project_root=str(root)
+    )
+    state_before = list_environment_states(container.id)[str(root)].copy()
+    (root / "pyproject.toml").unlink()
+    (root / "uv.lock").unlink()
+    record_verify_success(container.id)
+
+    _stub_publish_environment(monkeypatch, container)
+    result = json.loads(
+        publish(container.id, "owner/repo", "feature", "message", skip_verify_gate=False)
+    )
+
+    assert result["step"] == "verify_gate"
+    assert "failed" in result["error"]
+    assert list_environment_states(container.id)[str(root)] == state_before
+    persisted = json.loads(
+        (isolated_state / f"{container.id}.json").read_text(encoding="utf-8")
+    )
+    assert persisted["roots"][str(root)] == state_before
+
+
 def test_publish_tool_description_documents_public_arguments() -> None:
     description = publish.__doc__ or ""
 

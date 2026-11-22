@@ -15,6 +15,7 @@ from sunaba.journal import (
     read_container_states,
     record_stop,
 )
+from sunaba.provenance_store import remove_container_provenance
 from sunaba.security import (
     CREATED_AT_LABEL,
     KIND_SANDBOX,
@@ -128,6 +129,7 @@ def _reap_orphaned_init_containers(client: Any = None) -> list[str]:
             continue
         record_stop(cid)
         capture_health.prune(cid)  # dead container: drop its guard state (#852)
+        remove_container_provenance(str(container.id))
         reaped.append(cid)
         logger.info("Reaped orphaned init container %s (age=%.0fs)", cid, age)
     return reaped
@@ -216,6 +218,7 @@ def _reap_idle_containers() -> list[str]:
             continue
         record_stop(cid)
         capture_health.prune(cid)  # dead container: drop its guard state (#852)
+        remove_container_provenance(str(c.id))
         reaped.append(cid)
     return reaped
 

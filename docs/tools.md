@@ -32,7 +32,17 @@ When `apply_from_container=<source_cid>` is specified in `sandbox_initialize`:
   - Refreshing `origin` keeps work already merged upstream with a normal merge or fast-forward out of the patch.
   - Work merged upstream with a **squash** is not detected. A fresh `merge-base` still predates the squash, so that work can be carried again. It often surfaces as conflicts, but nothing guarantees it will (#974).
   - When `origin/HEAD` is missing, the diff base falls back to `HEAD`. Checkpointed commits are then **not** carried, only uncommitted changes, and the carry report says so.
-  - The carry does not check that the source and destination share the same repository and upstream target branch (#975).
+  - The carry does not yet enforce that the source and destination share the same repository and upstream target branch (#975; host-side provenance is recorded under #998, and compatibility enforcement is **planned for #999 — not yet enforced**).
+- **Container Provenance (#998) and Planned Carry Compatibility (#999)**:
+  - **Trusted Host Metadata**: Host-side provenance is derived strictly from trusted GitHub API responses and stored outside the container by full 64-character Docker ID. Numeric GitHub repository IDs remain stable across repository renames and distinguish fork IDs from upstream IDs. Missing or failed host metadata stays unknown (`None`); in-container `origin` / `.sandbox-meta.json` is not a fallback.
+  - **Targets by Checkout Mode**:
+    - *Default clone* (`clone_repo`): `target_repo_id` = GitHub repo `id`, `target_ref` = GitHub API `default_branch` (upstream integration branch), `head_repo_id` = `None`, `head_ref` = `None`, `pr_number` = `None`.
+    - *Explicit branch checkout* (`clone_repo` + `branch`): `target_repo_id` = GitHub repo `id`, `target_ref` = GitHub API `default_branch` (never the requested work branch), `head_ref` = requested `branch`, `head_repo_id` = `None`, `pr_number` = `None`. If GitHub cannot obtain `default_branch`, `target_ref` stays unknown (`None`) even though `head_ref` is preserved.
+    - *PR checkout* (`repo` + `pr`): `target_repo_id` = `base.repo.id`, `target_ref` = `base.ref`, `head_repo_id` = `head.repo.id` (`None` if the fork was deleted), `head_ref` = `head.ref`, `pr_number` = `pr`.
+  - **Planned (#999 — not yet enforced)**:
+    - Compatibility will compare `target_repo_id`, integration `target_ref`, and effective checkout repository identity (`head_repo_id` if present, else `target_repo_id`) so a fork cannot cross into upstream, while a default clone and an explicit work branch of the same repository targeting its default branch are compatible.
+    - Missing provenance fails closed once #999 lands.
+    - Source and destination provenance will be resolved and compared before extracting/transferring a patch (and before allocating a destination container where possible); newly derived trusted destination metadata will be used directly before persistence, and destination provenance will be persisted only after a successful carry so a rejected carry leaves no record.
 - **Preflight Fetch Before Destination Allocation**: Source origin is refreshed host-side under host authorization before creating/running or cloning the destination container. If the source fetch fails, destination container allocation and checkout are skipped entirely (no `containers.run` or clone), avoiding wasted resource allocation, network operations, and teardown. Exactly one authenticated source fetch is performed per public carry.
 - **Error Response Formats (Structured JSON vs. Legacy `Error:` Strings)**:
   `sandbox_initialize` returns two distinct error forms depending on the failure stage:

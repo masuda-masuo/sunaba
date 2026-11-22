@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import os
 import re
 import shlex
+from collections.abc import Iterator
 from typing import Any, NamedTuple
 
 from sunaba.edit_verify.shell import (
@@ -35,6 +37,21 @@ from sunaba.tools.vcs import (
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+_PROVENANCE_CAPTURE: contextvars.ContextVar[dict[str, Any] | None] = (
+    contextvars.ContextVar("sunaba_provenance_capture", default=None)
+)
+
+
+@contextlib.contextmanager
+def _provenance_capture_scope() -> Iterator[dict[str, Any]]:
+    """Collect host-side API metadata and resolved token within an init call."""
+    bucket: dict[str, Any] = {}
+    token = _PROVENANCE_CAPTURE.set(bucket)
+    try:
+        yield bucket
+    finally:
+        _PROVENANCE_CAPTURE.reset(token)
 
 #: Environment variable resolving the dependency preparation deadline (seconds).
 #: ``0`` disables the deadline; a positive numeric value overrides the default;
@@ -154,7 +171,11 @@ def _clone_repo_via_network(
     clone_path = clone_dest.rstrip("/") or clone_dest
     cmd = _build_clone_command(clone_repo, clone_path, authenticated=authenticated)
     if open_read_grant:
-        with authorized_read_grant(clone_repo, token=_resolve_vcs_token() or None):
+        token = _resolve_vcs_token()
+        capture = _PROVENANCE_CAPTURE.get()
+        if capture is not None:
+            capture["token"] = token
+        with authorized_read_grant(clone_repo, token=token or None):
             exit_code, output = container.exec_run(["/bin/sh", "-c", cmd])
     else:
         exit_code, output = container.exec_run(["/bin/sh", "-c", cmd])
@@ -879,6 +900,51 @@ def _try_clone_into_container(
         return CloneResult(None, str(e))
 
 
+def _fetch_pr_metadata(
+    repo: str,
+    pr_number: int,
+    *,
+    token: str | None = None,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Fetch PR JSON metadata host-side via the GitHub REST API."""
+    import urllib.error
+    import urllib.request
+
+    # Also makes interpolating *repo* into the URL injection-safe.
+    _validate_clone_repo(repo)
+    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "sunaba",
+    }
+    if token is None:
+        token = _resolve_vcs_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        hint = ""
+        if e.code in (403, 429):
+            # Anonymous requests share the 60 req/h per-IP budget, so this
+            # is the failure mode a token-less host hits first.
+            hint = (
+                " (possibly rate-limited: anonymous GitHub API requests are"
+                " capped at 60/h per IP; configuring a host token raises it)"
+            )
+        raise RuntimeError(
+            f"Failed to resolve head ref for PR #{pr_number} in {repo}: GitHub API returned HTTP {e.code}{hint}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Failed to resolve head ref for PR #{pr_number} in {repo}: {e.reason}") from e
+    if not isinstance(data, dict):
+        raise RuntimeError(f"GitHub API returned unexpected PR payload for PR #{pr_number} in {repo}")
+    return data
+
+
 def _resolve_pr_head_ref(repo: str, pr_number: int, *, token: str | None = None) -> tuple[str, str]:
     """Resolve a PR's head and base branch names host-side via the GitHub REST API.
 
@@ -904,38 +970,12 @@ def _resolve_pr_head_ref(repo: str, pr_number: int, *, token: str | None = None)
     :func:`_setup_pr_branch`, which also needs one for the egress-proxy read
     grant) should pass it through here instead of paying for a second mint.
     """
-    import urllib.error
-    import urllib.request
-
-    # Also makes interpolating *repo* into the URL injection-safe.
-    _validate_clone_repo(repo)
-    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "sunaba",
-    }
-    if token is None:
-        token = _resolve_vcs_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        hint = ""
-        if e.code in (403, 429):
-            # Anonymous requests share the 60 req/h per-IP budget, so this
-            # is the failure mode a token-less host hits first.
-            hint = (
-                " (possibly rate-limited: anonymous GitHub API requests are"
-                " capped at 60/h per IP; configuring a host token raises it)"
-            )
-        raise RuntimeError(
-            f"Failed to resolve head ref for PR #{pr_number} in {repo}: GitHub API returned HTTP {e.code}{hint}"
-        ) from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Failed to resolve head ref for PR #{pr_number} in {repo}: {e.reason}") from e
+    data = _fetch_pr_metadata(repo, pr_number, token=token)
+    capture = _PROVENANCE_CAPTURE.get()
+    if capture is not None:
+        capture["pr_repo"] = repo
+        capture["pr_number"] = pr_number
+        capture["pr_data"] = data
     head_ref = (data.get("head") or {}).get("ref") or ""
     base_ref = (data.get("base") or {}).get("ref") or ""
     if not head_ref:
@@ -1123,6 +1163,43 @@ def _setup_pr_branch(
         cid,
     )
 
+    capture = _PROVENANCE_CAPTURE.get()
+    if authenticated and capture is not None:
+        try:
+            pr_data = _fetch_pr_metadata(repo, pr_number)
+        except Exception as e:
+            logger.warning(
+                "Failed to resolve host PR metadata for %s#%s: %s",
+                repo,
+                pr_number,
+                e,
+            )
+        else:
+            api_number = pr_data.get("number")
+            api_head = pr_data.get("head")
+            api_base = pr_data.get("base")
+            api_head_ref = api_head.get("ref") if isinstance(api_head, dict) else None
+            api_base_ref = api_base.get("ref") if isinstance(api_base, dict) else None
+            number_ok = api_number is None or (
+                isinstance(api_number, int)
+                and not isinstance(api_number, bool)
+                and api_number == pr_number
+            )
+            if number_ok and api_head_ref == head_ref and api_base_ref == base_ref:
+                capture["pr_repo"] = repo
+                capture["pr_number"] = pr_number
+                capture["pr_data"] = pr_data
+            else:
+                logger.warning(
+                    "Host PR metadata mismatch for %s#%s (expected %s -> %s, got %s -> %s); retaining unknown fields",
+                    repo,
+                    pr_number,
+                    head_ref,
+                    base_ref,
+                    api_head_ref,
+                    api_base_ref,
+                )
+
     # Step 4: Install dev dependencies (non-fatal).  Manifest-aware: pip
     # for python projects, npm ci/install for JS projects, a fetch-on-build
     # note for go/rust, a skip note when nothing to install (#798).  When
@@ -1154,6 +1231,49 @@ def _setup_pr_branch(
     return f"PR #{pr_number} ({head_ref}) → {clone_dest} in container {cid}{deps_msg}"
 
 
+def _fetch_repo_metadata(
+    repo: str,
+    *,
+    token: str | None = None,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Fetch repository JSON metadata host-side via the GitHub REST API."""
+    import urllib.error
+    import urllib.request
+
+    _validate_clone_repo(repo)
+    url = f"https://api.github.com/repos/{repo}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "sunaba",
+    }
+    if token is None:
+        token = _resolve_vcs_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        hint = ""
+        if e.code in (403, 429):
+            # Anonymous requests share the 60 req/h per-IP budget, so this
+            # is the failure mode a token-less host hits first.
+            hint = (
+                " (possibly rate-limited: anonymous GitHub API requests are"
+                " capped at 60/h per IP; configuring a host token raises it)"
+            )
+        raise RuntimeError(
+            f"Failed to resolve default branch for {repo}: GitHub API returned HTTP {e.code}{hint}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Failed to resolve default branch for {repo}: {e.reason}") from e
+    if not isinstance(data, dict):
+        raise RuntimeError(f"GitHub API returned unexpected repo payload for {repo}")
+    return data
+
+
 def _resolve_default_branch(repo: str, *, token: str | None = None) -> str:
     """Resolve the default branch of a repository via the GitHub REST API.
 
@@ -1171,37 +1291,11 @@ def _resolve_default_branch(repo: str, *, token: str | None = None) -> str:
     Raises:
         RuntimeError: If the API call fails or returns no default branch.
     """
-    import urllib.error
-    import urllib.request
-
-    _validate_clone_repo(repo)
-    url = f"https://api.github.com/repos/{repo}"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "sunaba",
-    }
-    if token is None:
-        token = _resolve_vcs_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        hint = ""
-        if e.code in (403, 429):
-            # Anonymous requests share the 60 req/h per-IP budget, so this
-            # is the failure mode a token-less host hits first.
-            hint = (
-                " (possibly rate-limited: anonymous GitHub API requests are"
-                " capped at 60/h per IP; configuring a host token raises it)"
-            )
-        raise RuntimeError(
-            f"Failed to resolve default branch for {repo}: GitHub API returned HTTP {e.code}{hint}"
-        ) from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Failed to resolve default branch for {repo}: {e.reason}") from e
+    data = _fetch_repo_metadata(repo, token=token)
+    capture = _PROVENANCE_CAPTURE.get()
+    if capture is not None:
+        capture["repo"] = repo
+        capture["repo_data"] = data
     default_branch = data.get("default_branch", "")
     if not default_branch:
         raise RuntimeError(f"GitHub API returned no default_branch for {repo}")

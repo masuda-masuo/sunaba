@@ -49,6 +49,14 @@ from sunaba.output_control import (
     truncate_by_tokens,
     truncate_output,
 )
+from sunaba.provenance_store import (
+    ContainerProvenance,
+    is_full_container_id,
+    provenance_from_pr_payload,
+    provenance_from_repo_payload,
+    remove_container_provenance,
+    save_container_provenance,
+)
 from sunaba.security import (
     CREATED_AT_LABEL,
     MANAGED_LABEL,
@@ -81,6 +89,8 @@ from sunaba.tools.vcs.merge_base import _resolve_repo_from_container
 from .clone import (
     _install_repo_deps,
     _normalize_pip_extras,
+    _provenance_capture_scope,
+    _resolve_default_branch,
     # Kept importable: tests patch sunaba.tools.container.lifecycle._run_pip_install
     # (inert now that deps go through _install_repo_deps, but the name must
     # exist in this namespace for the patch target).
@@ -765,6 +775,65 @@ def _format_carry_report(report: _CarryReport, old_cid: str) -> str:
     return segment
 
 
+def _record_init_provenance(
+    full_container_id: str,
+    *,
+    clone_repo: str | None,
+    repo: str | None,
+    pr: int | None,
+    branch: str | None,
+    provenance_capture: dict[str, Any],
+) -> None:
+    """Resolve and persist host-side repository provenance after checkout."""
+    if not is_full_container_id(full_container_id):
+        return
+
+    provenance: ContainerProvenance | None = None
+    if pr is not None and repo is not None:
+        pr_data = (
+            provenance_capture.get("pr_data")
+            if provenance_capture.get("pr_repo") == repo
+            and provenance_capture.get("pr_number") == pr
+            else None
+        )
+        provenance = provenance_from_pr_payload(pr_data, pr_number=pr)
+    elif clone_repo and branch:
+        repo_data = (
+            provenance_capture.get("repo_data")
+            if provenance_capture.get("repo") == clone_repo
+            else None
+        )
+        provenance = provenance_from_repo_payload(
+            repo_data, requested_branch=branch
+        )
+    elif clone_repo:
+        default_branch_val: str | None = None
+        with _provenance_capture_scope() as lookup_capture:
+            try:
+                default_branch_val = _resolve_default_branch(
+                    clone_repo,
+                    token=provenance_capture.get("token"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to resolve host repo metadata for %s: %s",
+                    clone_repo,
+                    exc,
+                )
+        repo_data = (
+            lookup_capture.get("repo_data")
+            if lookup_capture.get("repo") == clone_repo
+            else None
+        )
+        provenance = provenance_from_repo_payload(
+            repo_data,
+            default_branch_override=default_branch_val,
+        )
+
+    if provenance is not None:
+        save_container_provenance(full_container_id, provenance)
+
+
 def _sandbox_initialize(
     image: str | None = None,
     allow_network: bool = False,
@@ -1113,6 +1182,7 @@ def _sandbox_initialize(
         return InitResult(f"Error: {e}", deps_failed=False)
 
     cid = str(container.id)[:12]
+    full_container_id = str(container.id)
     with _run_map_lock:
         _run_map[cid] = run_id
     if session_label:
@@ -1155,68 +1225,16 @@ def _sandbox_initialize(
     # Tracks whether a repo is actually present in the new container, so the
     # carry step (Issue #889) only runs when there is something to apply into.
     repo_cloned = False
-    if clone_repo and branch:
-        # Branch checkout path (Issue #675b): _setup_branch handles its
-        # own clone with the branch parameter.
-        try:
-            clone_msg = " " + _setup_branch(
-                container,
-                cid,
-                clone_repo,
-                branch,
-                clone_dest,
-                pip_extras,
-                authenticated=container_has_token,
-                open_read_grant=open_read_grant,
-                pip_args=pip_args,
-                install_deps=False,
-                allow_network=allow_network,
-            )
-            repo_cloned = True
-        except Exception as e:
-            # Branch setup failure is non-fatal: the container is still usable.
-            logger.warning("Branch setup failed: %s", e)
-            clone_msg = f" (branch setup failed: {e})"
-    elif clone_repo and pr is None:
-        msg, err = _try_clone_into_container(
-            container,
-            cid,
-            clone_repo,
-            clone_dest,
-            container_has_token,
-            open_read_grant=open_read_grant,
-        )
-        if err is not None:
-            clone_msg = f" (clone_repo failed: {err})"
-        else:
-            clone_msg = " " + (msg or "")
-            repo_cloned = True
-    elif clone_repo and pr is not None:
-        logger.info(
-            "Skipping clone_repo=%s (pr=%s handles its own clone)",
-            clone_repo,
-            pr,
-        )
-
-    # -- PR branch setup (Issue #136) --
-    pr_msg = ""
-    if pr is not None:
-        if not repo:
-            logger.warning("pr parameter requires repo, got repo=None")
-            pr_msg = " (pr setup failed: repo is required when pr is specified)"
-        else:
+    with _provenance_capture_scope() as provenance_capture:
+        if clone_repo and branch:
+            # Branch checkout path (Issue #675b): _setup_branch handles its
+            # own clone with the branch parameter.
             try:
-                # A token-free container (e.g. proxied, #356) takes the
-                # anonymous checkout path: head ref resolved host-side,
-                # plain git in the container (#403).  open_read_grant
-                # (already computed above for the clone_repo path) lets
-                # this anonymous path work for private repos too (#419),
-                # instead of only public ones.
-                pr_msg = " " + _setup_pr_branch(
+                clone_msg = " " + _setup_branch(
                     container,
                     cid,
-                    repo,
-                    pr,
+                    clone_repo,
+                    branch,
                     clone_dest,
                     pip_extras,
                     authenticated=container_has_token,
@@ -1227,9 +1245,62 @@ def _sandbox_initialize(
                 )
                 repo_cloned = True
             except Exception as e:
-                # PR setup failure is non-fatal: the container is still usable.
-                logger.warning("PR branch setup failed: %s", e)
-                pr_msg = f" (pr setup failed: {e})"
+                # Branch setup failure is non-fatal: the container is still usable.
+                logger.warning("Branch setup failed: %s", e)
+                clone_msg = f" (branch setup failed: {e})"
+        elif clone_repo and pr is None:
+            msg, err = _try_clone_into_container(
+                container,
+                cid,
+                clone_repo,
+                clone_dest,
+                container_has_token,
+                open_read_grant=open_read_grant,
+            )
+            if err is not None:
+                clone_msg = f" (clone_repo failed: {err})"
+            else:
+                clone_msg = " " + (msg or "")
+                repo_cloned = True
+        elif clone_repo and pr is not None:
+            logger.info(
+                "Skipping clone_repo=%s (pr=%s handles its own clone)",
+                clone_repo,
+                pr,
+            )
+
+        # -- PR branch setup (Issue #136) --
+        pr_msg = ""
+        if pr is not None:
+            if not repo:
+                logger.warning("pr parameter requires repo, got repo=None")
+                pr_msg = " (pr setup failed: repo is required when pr is specified)"
+            else:
+                try:
+                    # A token-free container (e.g. proxied, #356) takes the
+                    # anonymous checkout path: head ref resolved host-side,
+                    # plain git in the container (#403).  open_read_grant
+                    # (already computed above for the clone_repo path) lets
+                    # this anonymous path work for private repos too (#419),
+                    # instead of only public ones.
+                    pr_msg = " " + _setup_pr_branch(
+                        container,
+                        cid,
+                        repo,
+                        pr,
+                        clone_dest,
+                        pip_extras,
+                        authenticated=container_has_token,
+                        open_read_grant=open_read_grant,
+                        pip_args=pip_args,
+                        install_deps=False,
+                        allow_network=allow_network,
+                    )
+                    repo_cloned = True
+                except Exception as e:
+                    # PR setup failure is non-fatal: the container is still usable.
+                    logger.warning("PR branch setup failed: %s", e)
+                    pr_msg = f" (pr setup failed: {e})"
 
     # -- Carry an old container's uncommitted worktree (Issue #889) --
     # Runs after the clone/checkout and BEFORE the dev dependency install so
@@ -1295,6 +1366,16 @@ def _sandbox_initialize(
                 pr_msg += deps_note
             else:
                 clone_msg += deps_note
+
+    if repo_cloned:
+        _record_init_provenance(
+            full_container_id,
+            clone_repo=clone_repo,
+            repo=repo,
+            pr=pr,
+            branch=branch,
+            provenance_capture=provenance_capture,
+        )
 
     # All setup phases finished — mark the container as a completed, usable
     # init so the orphan reaper never touches it (Issue #298).  Clone / PR
@@ -1652,6 +1733,7 @@ def sandbox_stop(
         # container may leave a resolved-id bucket behind until the reaper
         # or a server restart clears it -- the id cannot be recovered here.
         capture_health.prune(cid)
+        remove_container_provenance(container_id)
         return f"Error: container {cid} not found"
     except Exception as e:
         return f"Error: {e}"
@@ -1752,6 +1834,7 @@ def sandbox_stop(
     if resolved != cid:
         # Best effort for legacy buckets keyed by the caller string.
         capture_health.prune(cid)
+    remove_container_provenance(str(getattr(container, "id", "") or ""))
     return f"Container {cid} stopped and removed"
 
 

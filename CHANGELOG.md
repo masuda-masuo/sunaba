@@ -20,6 +20,7 @@ The compatibility policy (what counts as a breaking change) is described in
 
 ### Changed
 
+- **Retire uv preparation records when both `pyproject.toml` and `uv.lock` are removed** (#990, #1001): when an existing recorded uv root no longer resolves to an enclosing uv project and neither `pyproject.toml` nor `uv.lock` remains, both `verify_in_container` (for the applicable root or its descendants) and `publish` (`skip_verify_gate=False`, across recorded roots) retire only that root's preparation record while leaving unrelated ready roots intact. Removing only one manifest (`uv.lock` or `pyproject.toml`) retains the record and still blocks as `stale` where applicable, and directory/root/manifest probe failures or deadline timeouts fail closed, invalidate prior verify success, and retain every record. Retiring a record during verify allows ordinary full verify to proceed on the non-uv project without minting a verify receipt on its own; `publish` still requires a passing full `verify_in_container` receipt.
 - **Carry preflight failure network-off hint wording** (#977): when preflight source fetch fails on an offline source container (`allow_network=False`), the returned hint clarifies that carry fetches origin from GitHub in the source container and cannot reconnect an existing container, rather than referencing push; `status`, `step` (`carry_fetch`), and `error` payloads remain unchanged.
 
 ### Behavior change

@@ -124,11 +124,24 @@ def _probe_uv_manifests(container: Any, root: str) -> set[str]:
     )
     ec, output = _run(container, root, probe)
     if ec != 0:
-        raise RuntimeError(f"uv manifest probe failed (exit {ec}): {output}")
+        raise EnvironmentResolutionError(
+            f"uv manifest probe failed (exit {ec}): {output}"
+        )
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     if any(line not in {"pyproject.toml", "uv.lock"} for line in lines):
-        raise RuntimeError(f"uv manifest probe returned malformed output: {output[:160]}")
+        raise EnvironmentResolutionError(
+            f"uv manifest probe returned malformed output: {output[:160]}"
+        )
     return set(lines)
+
+
+def recorded_root_from_state(
+    state: dict[str, Any], fallback_root: str = ""
+) -> str:
+    """Return the recorded uv root stored in *state*, falling back to *fallback_root*."""
+    fingerprint = state.get("fingerprint")
+    fp_root = fingerprint.get("root") if isinstance(fingerprint, dict) else None
+    return str(state.get("project_root") or fp_root or fallback_root)
 
 
 def probe_uv_project_root(container: Any, root: str) -> bool:
@@ -290,8 +303,12 @@ def recorded_root_is_uv_project(container: Any, root: str) -> tuple[bool, str]:
     if not probe_directory_exists(container, root):
         return False, "directory no longer exists"
     resolved = resolve_uv_root(container, root)
+    if resolved is None:
+        if not _probe_uv_manifests(container, root):
+            return False, "neither pyproject.toml nor uv.lock exists"
+        return True, ""
     normalized_root = os.path.normpath(root)
-    if resolved is not None and not roots_refer_to_same_project(
+    if not roots_refer_to_same_project(
         container, normalized_root, resolved
     ):
         return False, f"root now resolves to {os.path.normpath(resolved)}"

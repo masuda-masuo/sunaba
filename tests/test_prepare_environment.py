@@ -65,6 +65,25 @@ class MockPrepareContainer:
         cmd_str = cmd[-1] if isinstance(cmd, (list, tuple)) else str(cmd)
         self.executed.append(cmd_str)
 
+        if "__SUNABA_DIRECTORY_EXISTS__" in cmd_str:
+            directory = (
+                cmd_str.split("[ -d ", 1)[1]
+                .split(" ];", 1)[0]
+                .strip()
+                .strip("'\"")
+                .rstrip("/")
+            )
+            exists = any(
+                path == directory or path.startswith(directory + "/")
+                for path in self.files
+            )
+            marker = (
+                b"__SUNABA_DIRECTORY_EXISTS__\n"
+                if exists
+                else b"__SUNABA_DIRECTORY_ABSENT__\n"
+            )
+            return 0, (marker, b"")
+
         if "uv workspace dir" in cmd_str:
             if f"{self.root}/pyproject.toml" in self.files:
                 return 0, (f"{self.root}\n".encode("utf-8"), b"")

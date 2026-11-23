@@ -592,3 +592,92 @@ def test_failed_carry_does_not_record_provenance() -> None:
 
     assert "Error:" in result.text
     assert load_container_provenance(FULL_CID) is None
+
+
+def test_pr_checkout_provenance_drift_rejects_before_patch_extraction() -> None:
+    """If PR metadata drifts between preflight and checkout, reject before carry."""
+    save_container_provenance(
+        OTHER_CID,
+        ContainerProvenance(
+            target_repo_id=500001,
+            target_ref="trunk",
+            head_repo_id=900002,
+            head_ref="feat/a",
+            pr_number=77,
+        ),
+    )
+    old_container = MagicMock()
+    old_container.id = OTHER_CID
+    old_container.status = "running"
+    old_container.labels = {}
+    old_container.attrs = {"Config": {"WorkingDir": "/workspace"}}
+
+    def _old_exec(cmd: Any, **kwargs: Any) -> tuple[int, Any]:
+        cmd_str = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        if "git remote get-url origin" in cmd_str:
+            return (0, (b"https://github.com/upstream/core.git\n", b"")) if kwargs.get("demux") else (0, b"https://github.com/upstream/core.git\n")
+        return (0, (b"", b"")) if kwargs.get("demux") else (0, b"")
+
+    old_container.exec_run.side_effect = _old_exec
+
+    new_container = MagicMock()
+    new_container.id = FULL_CID
+    new_container.exec_run.return_value = (0, (b"", b""))
+
+    client = MagicMock()
+    client.containers.list.return_value = []
+    client.containers.run.return_value = new_container
+    client.containers.get.side_effect = lambda cid: (
+        old_container if cid in (OTHER_CID, OTHER_CID[:12]) else new_container
+    )
+
+    pr_responses = iter(
+        [
+            {
+                "number": 77,
+                "base": {"ref": "trunk", "repo": {"id": 500001}},
+                "head": {"ref": "feat/a", "repo": {"id": 900002}},
+            },
+            {
+                "number": 77,
+                "base": {"ref": "release-2", "repo": {"id": 500001}},
+                "head": {"ref": "feat/a", "repo": {"id": 900002}},
+            },
+        ]
+    )
+
+    def _drift_urlopen(request: Any, *args: Any, **kwargs: Any) -> Any:
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(next(pr_responses)).encode("utf-8")
+        cm = MagicMock()
+        cm.__enter__.return_value = resp
+        cm.__exit__.return_value = False
+        return cm
+
+    with (
+        patch("sunaba.tools.container._docker", return_value=client),
+        patch("sunaba.tools.container.lifecycle._ensure_image"),
+        patch("sunaba.tools.container.lifecycle.validate_image_ref"),
+        patch("sunaba.tools.container.clone._resolve_vcs_token", return_value=""),
+        patch("sunaba.tools.github_api._resolve_vcs_token", return_value=""),
+        patch("urllib.request.urlopen", side_effect=_drift_urlopen),
+    ):
+        result = _sandbox_initialize(
+            image=TEST_IMAGE,
+            repo="upstream/core",
+            pr=77,
+            apply_from_container=OTHER_CID[:12],
+            pip_extras=None,
+        )
+
+    data = json.loads(result.text)
+    assert data["status"] == "error"
+    assert data["step"] == "carry_provenance"
+    assert data["reason"] == "target_ref_mismatch"
+    assert new_container.remove.called
+    assert load_container_provenance(FULL_CID) is None
+    old_cmds = [
+        " ".join(c.args[0]) if isinstance(c.args[0], (list, tuple)) else str(c.args[0])
+        for c in old_container.exec_run.call_args_list
+    ]
+    assert not any("git diff" in c for c in old_cmds)

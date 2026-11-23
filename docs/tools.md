@@ -32,21 +32,33 @@ When `apply_from_container=<source_cid>` is specified in `sandbox_initialize`:
   - Refreshing `origin` keeps work already merged upstream with a normal merge or fast-forward out of the patch.
   - Work merged upstream with a **squash** is not detected. A fresh `merge-base` still predates the squash, so that work can be carried again. It often surfaces as conflicts, but nothing guarantees it will (#974).
   - When `origin/HEAD` is missing, the diff base falls back to `HEAD`. Checkpointed commits are then **not** carried, only uncommitted changes, and the carry report says so.
-  - The carry does not yet enforce that the source and destination share the same repository and upstream target branch (#975; host-side provenance is recorded under #998, and compatibility enforcement is **planned for #999 — not yet enforced**).
-- **Container Provenance (#998) and Planned Carry Compatibility (#999)**:
+  - Carry enforces that the source and destination share the same repository, effective checkout repository (preventing fork-vs-upstream crossings), and integration target branch (#975; host-side provenance recorded under #998, compatibility enforcement in #999).
+- **Container Provenance (#998) and Carry Compatibility (#999)**:
   - **Trusted Host Metadata**: Host-side provenance is derived strictly from trusted GitHub API responses and stored outside the container by full 64-character Docker ID. Numeric GitHub repository IDs remain stable across repository renames and distinguish fork IDs from upstream IDs. Missing or failed host metadata stays unknown (`None`); in-container `origin` / `.sandbox-meta.json` is not a fallback.
   - **Targets by Checkout Mode**:
     - *Default clone* (`clone_repo`): `target_repo_id` = GitHub repo `id`, `target_ref` = GitHub API `default_branch` (upstream integration branch), `head_repo_id` = `None`, `head_ref` = `None`, `pr_number` = `None`.
     - *Explicit branch checkout* (`clone_repo` + `branch`): `target_repo_id` = GitHub repo `id`, `target_ref` = GitHub API `default_branch` (never the requested work branch), `head_ref` = requested `branch`, `head_repo_id` = `None`, `pr_number` = `None`. If GitHub cannot obtain `default_branch`, `target_ref` stays unknown (`None`) even though `head_ref` is preserved.
     - *PR checkout* (`repo` + `pr`): `target_repo_id` = `base.repo.id`, `target_ref` = `base.ref`, `head_repo_id` = `head.repo.id` (`None` if the fork was deleted), `head_ref` = `head.ref`, `pr_number` = `pr`.
-  - **Planned (#999 — not yet enforced)**:
-    - Compatibility will compare `target_repo_id`, integration `target_ref`, and effective checkout repository identity (`head_repo_id` if present, else `target_repo_id`) so a fork cannot cross into upstream, while a default clone and an explicit work branch of the same repository targeting its default branch are compatible.
-    - Missing provenance fails closed once #999 lands.
-    - Source and destination provenance will be resolved and compared before extracting/transferring a patch (and before allocating a destination container where possible); newly derived trusted destination metadata will be used directly before persistence, and destination provenance will be persisted only after a successful carry so a rejected carry leaves no record.
+  - **Enforced Compatibility & Ordering (#999)**:
+    - **Comparison Keys**: Carry compares `(target_repo_id, target_ref, effective_checkout_repo_id)`, where `effective_checkout_repo_id` is `head_repo_id` for PR checkouts (missing PR `head_repo_id` is treated as unknown) and `target_repo_id` for non-PR checkouts (default clone or explicit branch). Default clones and explicit work branches of the same repository targeting its default branch are compatible; fork checkouts cannot cross into upstream (or different forks) even with equal base repo/ref; repository renames are allowed when numeric IDs match.
+    - **Fail-Closed Missing Provenance**: Missing or incomplete provenance on either a running source or the destination (legacy containers without a host record, API-failure clones with unknown target fields, or deleted-fork PRs missing `head_repo_id`) fails closed with `step="carry_provenance"`.
+    - **Preflight & Persistence Ordering**: For a running source container, host provenance is checked first (without source git activity on failure), then destination provenance is resolved from trusted host GitHub metadata and compared before source fetch and before destination container allocation. After destination checkout, checkout-captured selection/PR metadata is verified against the validated destination provenance before extracting, copying, or applying any patch. The validated in-memory destination record is persisted only after a successful carry (a rejected carry or fatal carry failure leaves no destination provenance record). Missing or stopped source containers skip preflight and preserve the legacy `Error:` response and destination cleanup.
+    - **Legacy Migration (No Backfill)**: Old containers lacking complete host provenance are never silently backfilled from container config or `.sandbox-meta.json`. Keep the old container intact, retain work via its normal `checkpoint`/`diff`/`publish` workflow, and start a fresh managed clone from the intended repository and target instead of carrying.
 - **Preflight Fetch Before Destination Allocation**: Source origin is refreshed host-side under host authorization before creating/running or cloning the destination container. If the source fetch fails, destination container allocation and checkout are skipped entirely (no `containers.run` or clone), avoiding wasted resource allocation, network operations, and teardown. Exactly one authenticated source fetch is performed per public carry.
 - **Error Response Formats (Structured JSON vs. Legacy `Error:` Strings)**:
-  `sandbox_initialize` returns two distinct error forms depending on the failure stage:
-  1. **Carry Fetch Failure (`step="carry_fetch"`)**: Returns a plain structured JSON object. Illustrative example for a running source started with `allow_network=False`; the `error` text comes from git and `hint` is built from the container's network label and host token state:
+  `sandbox_initialize` returns distinct error forms depending on the failure stage:
+  1. **Carry Provenance Failure (`step="carry_provenance"`)**: Returns a plain structured JSON object before source fetch or destination allocation (or before patch extraction/transfer if post-checkout consistency fails):
+     ```json
+     {
+       "status": "error",
+       "step": "carry_provenance",
+       "reason": "source_provenance_unknown",
+       "error": "Source container repository provenance is missing or incomplete; carry cannot verify compatibility.",
+       "hint": "The source container may be a legacy container without host provenance or a clone whose repository or PR head metadata could not be verified. Keep the old container intact, retain your work via its normal checkpoint/diff/publish workflow, and start a fresh managed clone from the intended repository and target instead of carrying."
+     }
+     ```
+     `reason` is one of `source_provenance_unknown`, `destination_provenance_unknown`, `repo_mismatch` (either `target_repo_id` or `effective_checkout_repo_id` differs), or `target_ref_mismatch`.
+  2. **Carry Fetch Failure (`step="carry_fetch"`)**: Returns a plain structured JSON object. Illustrative example for a running source started with `allow_network=False`; the `error` text comes from git and `hint` is built from the container's network label and host token state:
      ```json
      {
        "status": "error",
@@ -55,19 +67,20 @@ When `apply_from_container=<source_cid>` is specified in `sandbox_initialize`:
        "hint": "Source container was started with allow_network=False (no network access). Carry fetches origin from GitHub in the source container, so carry is not available from this container; an existing container cannot be reconnected. Its work is left untouched (see docs/tools.md \"Offline source containers\")."
      }
      ```
-  2. **Legacy Initialization & Carry Errors**: All other initialization errors (parameter validation, name collision, resource caps, missing/stopped source container, fatal patch apply) return plain-text strings prefixed with `Error: `:
+  3. **Legacy Initialization & Carry Errors**: All other initialization errors (parameter validation, name collision, resource caps, missing/stopped source container, fatal patch apply) return plain-text strings prefixed with `Error: `:
      - Unknown source container: `Error: old container <cid> not found or not running`; stopped source container: `Error: old container <cid> is not running` (the destination is created first, then removed)
      - Parameter errors: `Error: apply_from_container requires clone_repo (or pr/branch) to be set; ...`, `Error: branch and pr are mutually exclusive; ...`
      - Patch application fatal errors: `Error: git apply failed: ...`
 - **Caller Handling**:
-  Callers should inspect the response prefix to distinguish structured JSON carry fetch failures from legacy `Error:` strings:
+  Callers should inspect the response prefix to distinguish structured JSON carry failures (`carry_provenance` / `carry_fetch`) from legacy `Error:` strings:
   ```python
   result = sandbox_initialize(clone_repo="owner/repo", apply_from_container=old_cid)
   if result.startswith("{"):
       payload = json.loads(result)
       if payload.get("status") == "error":
-          # Structured carry fetch failure
+          # Structured carry failure (carry_provenance or carry_fetch)
           step = payload["step"]
+          reason = payload.get("reason")
           error = payload["error"]
           hint = payload.get("hint", "")
   elif result.startswith("Error:"):
@@ -77,7 +90,7 @@ When `apply_from_container=<source_cid>` is specified in `sandbox_initialize`:
       # Success: 12-char container ID and messages
       cid = result.split()[0]
   ```
-  Repository test and caller references: See `_parse_init_error(result)` and `result.startswith("Error:")` in `tests/test_carry_fresh_origin.py` and `tests/test_init_apply_from_container.py`.
+  Repository test and caller references: See `_parse_init_error(result)` / `_parse_carry_provenance_error(result)` and `result.startswith("Error:")` in `tests/test_carry_provenance.py`, `tests/test_carry_fresh_origin.py`, and `tests/test_init_apply_from_container.py`.
 
 ---
 

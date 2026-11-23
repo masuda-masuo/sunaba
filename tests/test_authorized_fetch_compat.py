@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sunaba.provenance_store import ContainerProvenance, save_container_provenance
 from sunaba.proxy_client import ProxyAuthError
 from sunaba.tools.container import lifecycle
 from sunaba.tools.vcs import publishing
@@ -23,6 +25,17 @@ from tests.test_carry_fresh_origin import (
 )
 from tests.test_init_apply_from_container import _patched
 from tests.test_publish_ops_gitrepo import _git
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provenance_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate host-side provenance store per test."""
+    env_dir = tmp_path / "env_state"
+    xdg_dir = tmp_path / "xdg_state"
+    env_dir.mkdir(parents=True)
+    xdg_dir.mkdir(parents=True)
+    monkeypatch.setenv("SUNABA_ENVIRONMENT_STATE_DIR", str(env_dir))
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_dir))
 
 
 class _Container:
@@ -189,8 +202,13 @@ def test_carry_public_initialize_response_json_is_complete(tmp_path, monkeypatch
     monkeypatch.setattr(lifecycle.github_api, "_resolve_vcs_token", lambda: "")
     monkeypatch.delenv("SUNABA_PROXY_CONTROL_URL", raising=False)
     fixture = _make_normal_merge_fixture(tmp_path)
+    old_full_id = "a" * 64
+    save_container_provenance(
+        old_full_id,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
     old_c = _CarryGitContainer(
-        fixture["source_dir"], cid="compatold001", repo="owner/repo",
+        fixture["source_dir"], cid="a" * 64, repo="owner/repo",
         require_auth_for_fetch=True,
     )
     old_c.force_fetch_error = True
@@ -287,8 +305,13 @@ def test_public_initialize_fetch_failure_matrix_is_complete_and_fail_closed(
     tmp_path, monkeypatch, failure, expected
 ):
     fixture = _make_normal_merge_fixture(tmp_path)
+    old_full_id = "b" * 64
+    save_container_provenance(
+        old_full_id,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
     old_c = _CarryGitContainer(
-        fixture["source_dir"], cid="matrixold001", repo="owner/repo",
+        fixture["source_dir"], cid="b" * 64, repo="owner/repo",
         require_auth_for_fetch=True,
     )
     new_c = _CarryGitContainer(
@@ -524,8 +547,13 @@ def test_public_initialize_execution_exception_and_grant_exit_failure_are_fail_c
     close_error = RuntimeError("close token-secret")
     expected_error = "Failed to close authorization grant for fetch: close <redacted>"
     fixture = _make_normal_merge_fixture(tmp_path)
+    old_full_id = "c" * 64
+    save_container_provenance(
+        old_full_id,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
     old_c = _CarryGitContainer(
-        fixture["source_dir"], cid="exitfailold001", repo="owner/repo",
+        fixture["source_dir"], cid="c" * 64, repo="owner/repo",
         require_auth_for_fetch=True,
     )
     new_c = _CarryGitContainer(
@@ -636,8 +664,13 @@ def test_publish_unknown_shared_fetch_failure_is_complete_and_fail_closed(monkey
 
 def test_public_initialize_unknown_shared_fetch_failure_stops_before_allocation(tmp_path, monkeypatch):
     fixture = _make_normal_merge_fixture(tmp_path)
+    old_full_id = "d" * 64
+    save_container_provenance(
+        old_full_id,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
     old_c = _CarryGitContainer(
-        fixture["source_dir"], cid="unknownold001", repo="owner/repo",
+        fixture["source_dir"], cid="d" * 64, repo="owner/repo",
         require_auth_for_fetch=True,
     )
     new_c = _CarryGitContainer(

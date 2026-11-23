@@ -143,6 +143,19 @@ def test_sandbox_initialize_apply_from_container_reprepares_with_network(
     monkeypatch, pathway
 ):
     _client, _container = _lifecycle_mocks(monkeypatch)
+    old_full_id = "a" * 64
+    old_container = MagicMock()
+    old_container.id = old_full_id
+    old_container.status = "running"
+    _client.containers.get.side_effect = (
+        lambda cid: old_container if cid in ("old-container", old_full_id) else _container
+    )
+    prov = lifecycle.ContainerProvenance(target_repo_id=104201, target_ref="main")
+    monkeypatch.setattr(lifecycle, "load_container_provenance", lambda cid: prov)
+    monkeypatch.setattr(lifecycle, "_resolve_destination_provenance", lambda **kwargs: prov)
+    monkeypatch.setattr(lifecycle, "_verify_checkout_provenance_consistency", lambda **kwargs: None)
+    monkeypatch.setattr(lifecycle, "_fetch_source_origin", lambda *args, **kwargs: None)
+    monkeypatch.setattr(lifecycle, "save_container_provenance", lambda *args, **kwargs: True)
     setup_branch = MagicMock(return_value="branch ready")
     setup_pr = MagicMock(return_value="pr ready")
     try_clone = MagicMock(return_value=("clone ready", None))

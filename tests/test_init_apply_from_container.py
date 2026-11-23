@@ -15,6 +15,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sunaba.provenance_store import (
+    ContainerProvenance,
+    load_container_provenance,
+    save_container_provenance,
+)
 from sunaba.security import NETWORK_LABEL
 from sunaba.tools.container.lifecycle import _carry_worktree, sandbox_initialize
 from tests.test_publish_ops_gitrepo import (
@@ -32,12 +37,30 @@ def _parse_init_error(result: str) -> dict[str, Any]:
     return json.loads(raw)
 
 OLD_CID = "0f0d8d07a070"
+OLD_FULL_ID = OLD_CID + "0" * 52
 NEW_CID = "new123456789"
+NEW_FULL_ID = "1234567890ab" + "0" * 52
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provenance_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate host-side provenance store per test."""
+    env_dir = tmp_path / "env_state"
+    xdg_dir = tmp_path / "xdg_state"
+    env_dir.mkdir(parents=True)
+    xdg_dir.mkdir(parents=True)
+    monkeypatch.setenv("SUNABA_ENVIRONMENT_STATE_DIR", str(env_dir))
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_dir))
 
 
 def _make_container(cid: str, working_dir: str = "/workspace") -> MagicMock:
     c = MagicMock()
-    c.id = cid
+    if cid == OLD_CID:
+        c.id = OLD_FULL_ID
+    elif cid == NEW_CID:
+        c.id = NEW_FULL_ID
+    else:
+        c.id = cid
     c.labels = {}
     # The repo root is recorded in the container's WorkingDir at creation
     # time (sandbox_initialize passes clone_dest as working_dir), so
@@ -52,7 +75,7 @@ def _make_client(old_container: MagicMock, new_container: MagicMock) -> MagicMoc
     client.containers.list.return_value = []
     # copy_file looks the new container up by id; the carry looks the old up.
     def _get(cid: str) -> MagicMock:
-        if cid == OLD_CID:
+        if cid in (OLD_CID, OLD_FULL_ID):
             return old_container
         return new_container
 
@@ -145,9 +168,41 @@ def _cmd_strings(container: MagicMock) -> list[str]:
     return out
 
 
+def _fake_github_urlopen(request: Any, *args: Any, **kwargs: Any) -> Any:
+    url = request.full_url if hasattr(request, "full_url") else str(request)
+    routes: dict[str, Any] = {
+        "https://api.github.com/repos/owner/repo": {
+            "id": 104201,
+            "default_branch": "main",
+        },
+        "https://api.github.com/repos/validated-org/real-repo": {
+            "id": 104202,
+            "default_branch": "main",
+        },
+        "https://api.github.com/repos/owner/repo/pulls/42": {
+            "number": 42,
+            "base": {"ref": "main", "repo": {"id": 104201}},
+            "head": {"ref": "owner:feature-branch", "repo": {"id": 104201}},
+        },
+    }
+    if url not in routes:
+        raise AssertionError(f"Unexpected GitHub API URL in test: {url!r}")
+    resp = MagicMock()
+    resp.read.return_value = json.dumps(routes[url]).encode("utf-8")
+    cm = MagicMock()
+    cm.__enter__.return_value = resp
+    cm.__exit__.return_value = False
+    return cm
+
+
 @contextmanager
 def _patched(client: MagicMock):
     """Patch the docker client + its side effects so init runs headless."""
+    if load_container_provenance(OLD_FULL_ID) is None:
+        save_container_provenance(
+            OLD_FULL_ID,
+            ContainerProvenance(target_repo_id=104201, target_ref="main"),
+        )
     with patch("sunaba.tools.container._docker", return_value=client), patch(
         "sunaba.tools.common._docker", return_value=client
     ), patch(
@@ -166,13 +221,13 @@ def _patched(client: MagicMock):
         "sunaba.proxy_lifecycle.egress_proxy_enabled",
         return_value=False,
     ), patch(
-        # The branch/pr checkout paths resolve a host token and the default
-        # branch via network; keep them offline for a headless test.
+        # The branch/pr checkout paths resolve a host token and GitHub metadata
+        # via network; keep them offline with realistic API fixtures.
         "sunaba.tools.container.clone._resolve_vcs_token",
         return_value=None,
     ), patch(
-        "sunaba.tools.container.clone._resolve_default_branch",
-        return_value="main",
+        "urllib.request.urlopen",
+        side_effect=_fake_github_urlopen,
     ), patch(
         "sunaba.tools.container.clone.record_copy",
     ), patch(
@@ -838,6 +893,10 @@ def test_carry_fetch_proxy_token_isolation_and_correct_repo():
     new.exec_run.side_effect = _fake_exec_factory(b"")
     client = _make_client(old, new)
 
+    save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104202, target_ref="main"),
+    )
     with _patched(client), patch(
         "sunaba.proxy_client.proxy_configured",
         return_value=True,
@@ -1270,10 +1329,7 @@ def test_carry_success_single_fetch_before_allocation_on_pr_path():
 
     client.containers.run.side_effect = _spy_run
 
-    with _patched(client), patch(
-        "sunaba.tools.container.clone._resolve_pr_head_ref",
-        return_value=("owner:feature-branch", "main"),
-    ):
+    with _patched(client):
         result = sandbox_initialize(
             repo="owner/repo",
             pr=42,
@@ -1386,3 +1442,254 @@ def test_carry_fetch_exit_offline_source_token_missing():
     assert data == expected
     assert "Push" not in data["hint"]
     client.containers.run.assert_not_called()
+
+
+def test_source_missing_at_preflight_becoming_available_later_never_carries():
+    """A source missing during preflight that appears before transfer must never be carried."""
+    save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old = _make_container(OLD_CID)
+    old.status = "running"
+    new = _make_container(NEW_CID)
+    patch_bytes = b"diff --git a/src/a.py b/src/a.py\n+line_a\n"
+    fake = _fake_exec_factory(patch_bytes, changed=b"src/a.py\n")
+    old.exec_run.side_effect = fake
+    new.exec_run.side_effect = fake
+
+    from docker.errors import NotFound
+
+    source_available = False
+    client = MagicMock()
+    client.containers.list.return_value = []
+
+    def _run(*args, **kwargs):
+        nonlocal source_available
+        source_available = True
+        return new
+
+    def _get(cid: str) -> MagicMock:
+        if cid in (OLD_CID, OLD_FULL_ID):
+            if not source_available:
+                raise NotFound("not yet created")
+            return old
+        return new
+
+    client.containers.run.side_effect = _run
+    client.containers.get.side_effect = _get
+
+    with _patched(client) as stop:
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container=OLD_CID,
+            pip_extras=None,
+        )
+
+    assert result.startswith("Error:"), result
+    assert f"old container {OLD_CID[:12]} not found or not running" in result, result
+    assert old.exec_run.call_count == 0
+    assert new.remove.called
+    assert stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
+    assert not any(
+        "git apply" in c or "sunaba-carry.patch" in c for c in _cmd_strings(new)
+    )
+
+
+def test_source_stopped_at_preflight_started_later_never_carries():
+    """A source stopped during preflight that starts before transfer must never be carried."""
+    save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old = _make_container(OLD_CID)
+    old.status = "exited"
+    new = _make_container(NEW_CID)
+    patch_bytes = b"diff --git a/src/a.py b/src/a.py\n+line_a\n"
+    fake = _fake_exec_factory(patch_bytes, changed=b"src/a.py\n")
+    old.exec_run.side_effect = fake
+    new.exec_run.side_effect = fake
+    client = _make_client(old, new)
+
+    def _run(*args, **kwargs):
+        old.status = "running"
+        return new
+
+    client.containers.run.side_effect = _run
+
+    with _patched(client) as stop:
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container=OLD_CID,
+            pip_extras=None,
+        )
+
+    assert result.startswith("Error:"), result
+    assert f"old container {OLD_CID[:12]} is not running" in result, result
+    assert old.exec_run.call_count == 0
+    assert new.remove.called
+    assert stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
+    assert not any(
+        "git apply" in c or "sunaba-carry.patch" in c for c in _cmd_strings(new)
+    )
+
+
+def test_selector_replaced_with_distinct_source_never_transfers_unchecked_source():
+    """If the selector is rebound to a distinct container after preflight, reject without touching it."""
+    other_full_id = "beef" * 16
+    save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old_a = _make_container(OLD_CID)
+    old_a.status = "running"
+    old_b = _make_container(other_full_id)
+    old_b.status = "running"
+    new = _make_container(NEW_CID)
+
+    fake_a = _fake_exec_factory(b"diff --git a/a.py b/a.py\n+a\n", changed=b"a.py\n")
+    fake_b = _fake_exec_factory(b"diff --git a/b.py b/b.py\n+b\n", changed=b"b.py\n")
+    old_a.exec_run.side_effect = fake_a
+    old_b.exec_run.side_effect = fake_b
+    new.exec_run.side_effect = fake_a
+
+    # Case 1: selector "shared-alias" is rebound to old_b after preflight and old_a disappears.
+    from docker.errors import NotFound
+
+    rebound = False
+    client = MagicMock()
+    client.containers.list.return_value = []
+
+    def _run_rebind(*args, **kwargs):
+        nonlocal rebound
+        rebound = True
+        return new
+
+    def _get_rebind(cid: str) -> MagicMock:
+        if cid == "shared-alias":
+            return old_b if rebound else old_a
+        if cid == OLD_FULL_ID:
+            if rebound:
+                raise NotFound("old_a gone")
+            return old_a
+        if cid == other_full_id:
+            return old_b
+        return new
+
+    client.containers.run.side_effect = _run_rebind
+    client.containers.get.side_effect = _get_rebind
+
+    with _patched(client) as stop:
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container="shared-alias",
+            pip_extras=None,
+        )
+
+    assert result.startswith("Error:"), result
+    assert "old container shared-alias not found or not running" in result, result
+    assert old_b.exec_run.call_count == 0
+    assert new.remove.called
+    assert stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
+
+    # Case 2: lookup by validated full ID unexpectedly returns a distinct container object.
+    old_a2 = _make_container(OLD_CID)
+    old_a2.status = "running"
+    old_a2.exec_run.side_effect = fake_a
+    old_b2 = _make_container(other_full_id)
+    old_b2.status = "running"
+    old_b2.exec_run.side_effect = fake_b
+    new2 = _make_container(NEW_CID)
+    new2.exec_run.side_effect = fake_a
+
+    swapped = False
+    client2 = MagicMock()
+    client2.containers.list.return_value = []
+
+    def _run_swap(*args, **kwargs):
+        nonlocal swapped
+        swapped = True
+        return new2
+
+    def _get_swap(cid: str) -> MagicMock:
+        if cid in (OLD_CID, OLD_FULL_ID):
+            return old_b2 if swapped else old_a2
+        return new2
+
+    client2.containers.run.side_effect = _run_swap
+    client2.containers.get.side_effect = _get_swap
+
+    with _patched(client2) as stop2:
+        result2 = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container=OLD_CID,
+            pip_extras=None,
+        )
+
+    assert result2.startswith("Error:"), result2
+    assert f"old container {OLD_CID[:12]} not found or not running" in result2, result2
+    old_b2.reload.assert_not_called()
+    assert old_b2.exec_run.call_count == 0
+    assert new2.remove.called
+    assert stop2.called
+    assert load_container_provenance(NEW_FULL_ID) is None
+
+
+def test_selector_rebound_while_validated_source_still_running_carries_only_validated_source():
+    """If an alias selector is rebound after preflight, carry uses the validated full ID exclusively."""
+    other_full_id = "beef" * 16
+    save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old_a = _make_container(OLD_CID)
+    old_a.status = "running"
+    old_b = _make_container(other_full_id)
+    old_b.status = "running"
+    new = _make_container(NEW_CID)
+
+    fake_a = _fake_exec_factory(b"diff --git a/a.py b/a.py\n+a\n", changed=b"a.py\n")
+    fake_b = _fake_exec_factory(b"diff --git a/b.py b/b.py\n+b\n", changed=b"b.py\n")
+    old_a.exec_run.side_effect = fake_a
+    old_b.exec_run.side_effect = fake_b
+    new.exec_run.side_effect = fake_a
+
+    rebound = False
+    client = MagicMock()
+    client.containers.list.return_value = []
+
+    def _run_rebind(*args, **kwargs):
+        nonlocal rebound
+        rebound = True
+        return new
+
+    def _get_rebind(cid: str) -> MagicMock:
+        if cid == "shared-alias":
+            return old_b if rebound else old_a
+        if cid == OLD_FULL_ID:
+            return old_a
+        if cid == other_full_id:
+            return old_b
+        return new
+
+    client.containers.run.side_effect = _run_rebind
+    client.containers.get.side_effect = _get_rebind
+
+    with _patched(client):
+        result = sandbox_initialize(
+            clone_repo="owner/repo",
+            apply_from_container="shared-alias",
+            pip_extras=None,
+        )
+
+    assert not result.startswith("Error:"), result
+    assert "[carried 1 file(s) from shared-alias: 1 applied cleanly]" in result, result
+    assert old_b.exec_run.call_count == 0
+    old_a_cmds = _cmd_strings(old_a)
+    assert sum("fetch origin" in c for c in old_a_cmds) == 1
+    assert load_container_provenance(NEW_FULL_ID) == ContainerProvenance(
+        target_repo_id=104201, target_ref="main"
+    )

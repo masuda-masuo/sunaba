@@ -645,15 +645,32 @@ def _carry_worktree(
     #    shared cd prefix -- guarantee every git command lands in the right
     #    directory even when the source and destination clone_dest differ
     #    (Issue #889 finding 3).
-    src_root = resolve_git_root(old_container)
-    dst_root = resolve_git_root(new_container)
+    try:
+        src_root = resolve_git_root(old_container)
+        dst_root = resolve_git_root(new_container)
+    except Exception:
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error="Failed to fetch origin in source container",
+            step="carry_fetch",
+            hint="Ensure the source container is running and healthy.",
+        )
 
     # 1a. Refresh origin in source container under host authorized_read_grant (Issue #935).
-    #     Must run BEFORE merge-base calculation so commits already merged into
-    #     upstream main are excluded from the carry patch.
-    #     If already prefetched before destination allocation, skip to avoid fetching twice.
+    #     Must run AFTER destination checkout and provenance consistency checks, and
+    #     BEFORE merge-base calculation so commits already merged into upstream main
+    #     are excluded from the carry patch.
+    #     If already prefetched, skip to avoid fetching twice.
     if not _source_fetched:
-        fetch_report = _fetch_source_origin(old_container, src_root)
+        try:
+            fetch_report = _fetch_source_origin(old_container, src_root)
+        except Exception:
+            return _CarryReport(
+                files=[], applied=[], conflicts=[], untracked=[],
+                error="Failed to fetch origin in source container",
+                step="carry_fetch",
+                hint="Ensure the source container is running and healthy.",
+            )
         if fetch_report is not None:
             return fetch_report
 
@@ -1002,17 +1019,43 @@ def _check_provenance_compatibility(
     return None
 
 
+def _inspect_destination_checked_out_branch(container: Any) -> str | None:
+    """Return the symbolic HEAD branch name of *container*'s repo, or ``None``."""
+    try:
+        dst_root = resolve_git_root(container)
+        dst_git = _git_at(container, dst_root)
+        ec, out = dst_git("rev-parse", "--abbrev-ref", "HEAD")
+    except Exception as exc:
+        logger.warning(
+            "Failed to inspect checked-out branch in destination container: %s",
+            exc,
+        )
+        return None
+    if isinstance(out, tuple):
+        out = out[0]
+    if isinstance(out, str):
+        actual_branch = out.strip()
+    elif isinstance(out, (bytes, bytearray)):
+        actual_branch = out.decode("utf-8", errors="replace").strip()
+    else:
+        return None
+    if ec != 0 or not actual_branch or actual_branch == "HEAD":
+        return None
+    return valid_ref_name(actual_branch)
+
+
 def _verify_checkout_provenance_consistency(
     *,
     source_prov: ContainerProvenance,
     dest_prov: ContainerProvenance,
+    dest_container: Any,
     provenance_capture: dict[str, Any],
     clone_repo: str | None,
     repo: str | None,
     pr: int | None,
     branch: str | None,
 ) -> str | None:
-    """Verify checkout-captured metadata matches the preflight destination provenance."""
+    """Verify checkout metadata and checked-out branch match preflight provenance."""
     if pr is not None:
         pr_data = provenance_capture.get("pr_data")
         if (
@@ -1046,6 +1089,32 @@ def _verify_checkout_provenance_consistency(
             return reason
         if checkout_prov != dest_prov:
             return "destination_provenance_unknown"
+        return None
+
+    if clone_repo:
+        try:
+            repo_data = _fetch_repo_metadata(
+                clone_repo,
+                token=provenance_capture.get("token"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to re-read host repo metadata after default clone of %s: %s",
+                clone_repo,
+                exc,
+            )
+            return "destination_provenance_unknown"
+        checkout_prov = provenance_from_repo_payload(repo_data)
+        reason = _check_provenance_compatibility(source_prov, checkout_prov)
+        if reason is not None:
+            return reason
+        if checkout_prov != dest_prov:
+            return "destination_provenance_unknown"
+        actual_branch = _inspect_destination_checked_out_branch(dest_container)
+        if actual_branch is None or dest_prov.target_ref is None:
+            return "destination_provenance_unknown"
+        if actual_branch != dest_prov.target_ref:
+            return "target_ref_mismatch"
         return None
 
     return None
@@ -1132,11 +1201,14 @@ def _sandbox_initialize(
                / ``pr`` / ``branch``; untracked files are not carried and
                conflicts are not an error.  The source container must have
                network access (``allow_network=True``); offline source
-               support is tracked in #939.  Source origin is refreshed
-               under host authorization as a preflight before creating or
-               cloning the destination container.  If source fetch fails,
-               initialization fails closed and returns structured JSON
-               (step="carry_fetch") without allocating the destination.
+               support is tracked in #939.  Provenance compatibility is
+               validated host-side before allocating the destination
+               container, and source origin is refreshed under host
+               authorization after destination checkout and post-checkout
+               provenance consistency checks (before merge-base/diff).  If
+               source fetch fails, the newly allocated destination container
+               is torn down and initialization fails closed with structured
+               JSON (step="carry_fetch").
 
     The image must be pulled locally before use: docker pull <image>
 
@@ -1334,10 +1406,12 @@ def _sandbox_initialize(
     if proxy_runtime is not None:
         run_kwargs = proxy_lifecycle.apply_network(run_kwargs, proxy_runtime)
 
-    # Source preflight for carry (Issue #937 review follow-up):
-    # Fetch origin in source container BEFORE creating/cloning the destination container.
-    # This avoids wasted destination allocation, clone, and teardown on fetch failure.
-    source_fetched = False
+    # Provenance preflight for carry:
+    # Validate running source provenance and destination provenance compatibility
+    # BEFORE allocating the destination container.  Source origin refresh
+    # (carry_fetch) is intentionally deferred until after destination checkout
+    # and post-checkout provenance consistency checks so that a late provenance
+    # rejection leaves the source container completely untouched.
     source_prov: ContainerProvenance | None = None
     dest_prov: ContainerProvenance | None = None
     validated_source_id: str | None = None
@@ -1379,28 +1453,6 @@ def _sandbox_initialize(
                 )
                 if mismatch_reason is not None:
                     return _carry_provenance_error(mismatch_reason)
-                try:
-                    src_root = resolve_git_root(source_c)
-                    fetch_report = _fetch_source_origin(source_c, src_root)
-                except Exception:
-                    err_payload = {
-                        "status": "error",
-                        "step": "carry_fetch",
-                        "error": "Failed to preflight fetch in source container",
-                        "hint": "Ensure the source container is running and healthy.",
-                    }
-                    return InitResult(json.dumps(err_payload), deps_failed=False)
-                if fetch_report is not None:
-                    if fetch_report.step:
-                        err_payload = {
-                            "status": "error",
-                            "step": fetch_report.step,
-                            "error": fetch_report.error,
-                            "hint": fetch_report.hint or "",
-                        }
-                        return InitResult(json.dumps(err_payload), deps_failed=False)
-                    return InitResult(f"Error: {fetch_report.error}", deps_failed=False)
-                source_fetched = True
                 validated_source_id = full_source_id
 
     try:
@@ -1558,7 +1610,6 @@ def _sandbox_initialize(
     if apply_from_container is not None and repo_cloned:
         if (
             preflight_error is not None
-            or not source_fetched
             or validated_source_id is None
             or source_prov is None
             or dest_prov is None
@@ -1575,6 +1626,7 @@ def _sandbox_initialize(
         consistency_reason = _verify_checkout_provenance_consistency(
             source_prov=source_prov,
             dest_prov=dest_prov,
+            dest_container=container,
             provenance_capture=provenance_capture,
             clone_repo=clone_repo,
             repo=repo,
@@ -1592,7 +1644,7 @@ def _sandbox_initialize(
             client,
             validated_source_id,
             container,
-            _source_fetched=source_fetched,
+            _source_fetched=False,
             _expected_source_id=validated_source_id,
             _display_cid=apply_from_container,
         )
@@ -1784,11 +1836,14 @@ def sandbox_initialize(
                / ``pr`` / ``branch``; untracked files are not carried and
                conflicts are not an error.  The source container must have
                network access (``allow_network=True``); offline source
-               support is tracked in #939.  Source origin is refreshed
-               under host authorization as a preflight before creating or
-               cloning the destination container.  If source fetch fails,
-               initialization fails closed and returns structured JSON
-               (step="carry_fetch") without allocating the destination.
+               support is tracked in #939.  Provenance compatibility is
+               validated host-side before allocating the destination
+               container, and source origin is refreshed under host
+               authorization after destination checkout and post-checkout
+               provenance consistency checks (before merge-base/diff).  If
+               source fetch fails, the newly allocated destination container
+               is torn down and initialization fails closed with structured
+               JSON (step="carry_fetch").
 
     The image must be pulled locally before use: docker pull <image>
 

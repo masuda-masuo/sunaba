@@ -11,7 +11,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sunaba.provenance_store import ContainerProvenance, save_container_provenance
+from sunaba.provenance_store import (
+    ContainerProvenance,
+    load_container_provenance,
+    save_container_provenance,
+)
 from sunaba.proxy_client import ProxyAuthError
 from sunaba.tools.container import lifecycle
 from sunaba.tools.vcs import publishing
@@ -362,12 +366,16 @@ def test_public_initialize_fetch_failure_matrix_is_complete_and_fail_closed(
         _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
         _git(fixture["source_dir"], "status", "--porcelain").stdout,
     )
-    with _patched(client):
+    with _patched(client), patch.object(
+        new_c, "remove", wraps=new_c.remove
+    ) as mock_remove:
         result = lifecycle.sandbox_initialize(
             clone_repo="owner/repo", apply_from_container=old_c.id, pip_extras=None
         )
     assert _parse_init_error(result) == expected
-    assert client.containers.run.call_count == 0
+    assert client.containers.run.call_count == 1
+    mock_remove.assert_called_once_with(force=True)
+    assert load_container_provenance(new_c.id) is None
     after = (
         _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
         _git(fixture["source_dir"], "status", "--porcelain").stdout,
@@ -589,7 +597,9 @@ def test_public_initialize_execution_exception_and_grant_exit_failure_are_fail_c
         _git(fixture["source_dir"], "status", "--porcelain").stdout,
     )
 
-    with _patched(client):
+    with _patched(client), patch.object(
+        new_c, "remove", wraps=new_c.remove
+    ) as mock_remove:
         result = lifecycle.sandbox_initialize(
             clone_repo="owner/repo", apply_from_container=old_c.id, pip_extras=None
         )
@@ -600,7 +610,8 @@ def test_public_initialize_execution_exception_and_grant_exit_failure_are_fail_c
         "error": expected_error,
         "hint": "Check egress proxy connection and authorization grant cleanup.",
     }
-    assert client.containers.run.call_count == 0
+    assert client.containers.run.call_count == 1
+    mock_remove.assert_called_once_with(force=True)
     after = (
         _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
         _git(fixture["source_dir"], "status", "--porcelain").stdout,
@@ -696,7 +707,9 @@ def test_public_initialize_unknown_shared_fetch_failure_stops_before_allocation(
         _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
         _git(fixture["source_dir"], "status", "--porcelain").stdout,
     )
-    with _patched(client):
+    with _patched(client), patch.object(
+        new_c, "remove", wraps=new_c.remove
+    ) as mock_remove:
         result = lifecycle.sandbox_initialize(
             clone_repo="owner/repo", apply_from_container=old_c.id, pip_extras=None
         )
@@ -712,7 +725,8 @@ def test_public_initialize_unknown_shared_fetch_failure_stops_before_allocation(
     assert "unrecognized private failure token" not in serialized
     assert "token-secret" not in serialized
     assert "raw detail" not in serialized
-    assert client.containers.run.call_count == 0
+    assert client.containers.run.call_count == 1
+    mock_remove.assert_called_once_with(force=True)
     after = (
         _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
         _git(fixture["source_dir"], "status", "--porcelain").stdout,

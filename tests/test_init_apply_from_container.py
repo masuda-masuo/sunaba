@@ -699,7 +699,7 @@ def test_fallback_base_reported_when_origin_head_missing():
 
 def test_carry_fetch_token_provider_failure_fails_closed_and_cleans_up():
     """Token provider exception fails closed, returns structured error without
-    leaking unknown secret material, and avoids allocating destination container."""
+    leaking unknown secret material, and cleans up the allocated destination."""
     secret = "secret_provider_material_99999"
     old = _make_container(OLD_CID)
     old.status = "running"
@@ -727,14 +727,15 @@ def test_carry_fetch_token_provider_failure_fails_closed_and_cleans_up():
     assert data["error"]
     assert data["hint"]
     assert secret not in result
-    client.containers.run.assert_not_called()
-    assert not new.remove.called
-    assert not mock_stop.called
+    client.containers.run.assert_called_once()
+    assert new.remove.called
+    assert mock_stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
 
 
 def test_carry_fetch_grant_entry_exception_distinguished_and_redacted():
     """Failure opening authorization grant distinguishes grant entry, redacts
-    resolved token, and avoids allocating destination container."""
+    resolved token, and cleans up the allocated destination."""
     token = "ghp_entry_secret_token_11111"
     old = _make_container(OLD_CID)
     old.status = "running"
@@ -766,14 +767,15 @@ def test_carry_fetch_grant_entry_exception_distinguished_and_redacted():
     assert data["hint"]
     assert token not in data["error"]
     assert "<redacted>" in data["error"]
-    client.containers.run.assert_not_called()
-    assert not new.remove.called
-    assert not mock_stop.called
+    client.containers.run.assert_called_once()
+    assert new.remove.called
+    assert mock_stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
 
 
 def test_carry_fetch_grant_close_exception_distinguished_and_redacted():
     """Failure closing authorization grant distinguishes grant close/cleanup,
-    redacts resolved token, and avoids allocating destination container."""
+    redacts resolved token, and cleans up the allocated destination."""
     token = "ghp_close_secret_token_22222"
     old = _make_container(OLD_CID)
     old.status = "running"
@@ -810,14 +812,15 @@ def test_carry_fetch_grant_close_exception_distinguished_and_redacted():
     assert data["hint"]
     assert token not in data["error"]
     assert "<redacted>" in data["error"]
-    client.containers.run.assert_not_called()
-    assert not new.remove.called
-    assert not mock_stop.called
+    client.containers.run.assert_called_once()
+    assert new.remove.called
+    assert mock_stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
 
 
 def test_carry_fetch_exec_exception_distinguished_and_redacted():
     """Docker API or subprocess exception during fetch distinguishes execution failure,
-    redacts sensitive token, and avoids allocating destination container."""
+    redacts sensitive token, and cleans up the allocated destination."""
     token = "ghp_exec_secret_token_33333"
     old = _make_container(OLD_CID)
     old.status = "running"
@@ -854,11 +857,10 @@ def test_carry_fetch_exec_exception_distinguished_and_redacted():
     assert data["hint"]
     assert token not in data["error"]
     assert "<redacted>" in data["error"]
-    client.containers.run.assert_not_called()
-    assert not new.remove.called
-    assert not mock_stop.called
-
-
+    client.containers.run.assert_called_once()
+    assert new.remove.called
+    assert mock_stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
 def test_carry_fetch_proxy_token_isolation_and_correct_repo():
     """When egress proxy is configured:
     - Grant receives correct repo resolved from git remote get-url origin (not labels)
@@ -1066,10 +1068,10 @@ def test_real_git_stale_patch_conflicts_and_fresh_patch_clean(tmp_path: Path):
 
 
 def test_carry_fetch_failure_never_allocates_destination_nor_clones():
-    """On source fetch failure in sandbox_initialize:
+    """On source fetch failure in sandbox_initialize (after checkout consistency):
     - Structured JSON is returned (step="carry_fetch")
-    - Destination container is never allocated (containers.run not called)
-    - Destination clone/checkout is never executed."""
+    - Newly allocated destination container is torn down and recorded stopped
+    - No patch extraction/apply or destination provenance persistence occurs."""
     old = _make_container(OLD_CID)
     old.status = "running"
     new = _make_container(NEW_CID)
@@ -1078,7 +1080,7 @@ def test_carry_fetch_failure_never_allocates_destination_nor_clones():
     new.exec_run.side_effect = fake
     client = _make_client(old, new)
 
-    with _patched(client):
+    with _patched(client) as mock_stop:
         result = sandbox_initialize(
             clone_repo="owner/repo",
             apply_from_container=OLD_CID,
@@ -1092,10 +1094,13 @@ def test_carry_fetch_failure_never_allocates_destination_nor_clones():
     assert "fatal: network error" in data["error"]
     assert data["hint"]
 
-    # Destination container was never allocated nor cloned
-    client.containers.run.assert_not_called()
-    assert not new.remove.called
-    assert len(new.exec_run.call_args_list) == 0
+    # Destination container was allocated, then cleaned up on fetch failure
+    client.containers.run.assert_called_once()
+    assert new.remove.called
+    assert mock_stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
+    assert not any("git diff" in c for c in _cmd_strings(old))
+    assert not any("git apply" in c or "sunaba-carry.patch" in c for c in _cmd_strings(new))
 
 
 @pytest.mark.parametrize(
@@ -1108,12 +1113,12 @@ def test_carry_fetch_failure_never_allocates_destination_nor_clones():
 def test_carry_preflight_unexpected_exception_no_sentinel_exposure_and_no_allocation(
     patch_target: str,
 ):
-    """Preflight unexpected exception (resolve_git_root or _fetch_source_origin) containing sentinel:
+    """Unexpected source-fetch exception (resolve_git_root on source or _fetch_source_origin)
+    containing sentinel:
     - Sentinel is absent from serialized JSON result
     - Returns nonempty stable generic error and hint
     - Returns step="carry_fetch"
-    - Destination container is never allocated (containers.run not called)
-    - Destination clone/checkout is never executed."""
+    - Newly allocated destination container is cleaned up and no provenance persisted."""
     sentinel = "FAKE_SECRET_PREFLIGHT_ONLY"
     old = _make_container(OLD_CID)
     old.status = "running"
@@ -1123,10 +1128,18 @@ def test_carry_preflight_unexpected_exception_no_sentinel_exposure_and_no_alloca
     new.exec_run.side_effect = fake
     client = _make_client(old, new)
 
-    with _patched(client), patch(
-        patch_target,
-        side_effect=RuntimeError(f"internal failure containing {sentinel}"),
-    ):
+    def _fail_source_only(container: Any, *args: Any, **kwargs: Any) -> str:
+        if getattr(container, "id", "") == OLD_FULL_ID:
+            raise RuntimeError(f"internal failure containing {sentinel}")
+        return "/workspace"
+
+    patch_kwargs: dict[str, Any] = (
+        {"side_effect": _fail_source_only}
+        if patch_target.endswith("resolve_git_root")
+        else {"side_effect": RuntimeError(f"internal failure containing {sentinel}")}
+    )
+
+    with _patched(client) as mock_stop, patch(patch_target, **patch_kwargs):
         result = sandbox_initialize(
             clone_repo="owner/repo",
             apply_from_container=OLD_CID,
@@ -1138,21 +1151,23 @@ def test_carry_preflight_unexpected_exception_no_sentinel_exposure_and_no_alloca
     assert data["status"] == "error"
     assert data["step"] in ("carry_fetch", "fetch")
     assert data["step"] == "carry_fetch"
-    assert "Failed to preflight fetch in source container" in data["error"]
+    assert "Failed to fetch origin in source container" in data["error"]
     assert data["error"]
     assert data["hint"]
     assert sentinel not in result
 
-    # Destination container was never allocated nor cloned
-    client.containers.run.assert_not_called()
-    assert not new.remove.called
-    assert len(new.exec_run.call_args_list) == 0
+    # Destination container was cleaned up and no provenance persisted
+    client.containers.run.assert_called_once()
+    assert new.remove.called
+    assert mock_stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
+    assert not any("git apply" in c or "sunaba-carry.patch" in c for c in _cmd_strings(new))
 
 
 def test_carry_success_single_fetch_before_allocation_on_clone_path():
     """On clone_repo carry path:
-    - Exactly one authenticated source fetch runs BEFORE destination allocation
-    - Carry applies after checkout and before deps
+    - Exactly one authenticated source fetch runs AFTER destination checkout
+    - Carry applies after fetch and before deps
     - Single fetch per public carry contract is upheld."""
     events: list[str] = []
 
@@ -1176,6 +1191,8 @@ def test_carry_success_single_fetch_before_allocation_on_clone_path():
         c = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
         if "git clone" in c:
             events.append("clone")
+        elif "git rev-parse --abbrev-ref HEAD" in c:
+            events.append("branch_check")
         elif "git apply" in c:
             events.append("apply")
         elif "pip install" in c:
@@ -1203,23 +1220,28 @@ def test_carry_success_single_fetch_before_allocation_on_clone_path():
     assert "carried 1 file(s)" in result, result
     assert events.count("source_fetch") == 1
     assert "destination_run" in events
+    assert "clone" in events
+    assert "branch_check" in events
     assert "apply" in events
     assert "install" in events
 
-    fetch_idx = events.index("source_fetch")
     run_idx = events.index("destination_run")
+    clone_idx = events.index("clone")
+    branch_idx = events.index("branch_check")
+    fetch_idx = events.index("source_fetch")
     apply_idx = events.index("apply")
     install_idx = events.index("install")
 
-    assert fetch_idx < run_idx, f"Source fetch must run before allocation: {events}"
-    assert run_idx < apply_idx, f"Allocation must run before carry: {events}"
+    assert run_idx < clone_idx < branch_idx < fetch_idx, (
+        f"Source fetch must run after allocation, clone, and branch check: {events}"
+    )
+    assert fetch_idx < apply_idx, f"Source fetch must run before carry apply: {events}"
     assert apply_idx < install_idx, f"Carry must run before dep install: {events}"
 
 
 def test_carry_success_single_fetch_before_allocation_on_branch_path():
     """On branch checkout carry path:
-    - Exactly one authenticated source fetch runs BEFORE destination allocation
-    - Branch checkout runs after destination allocation and before carry
+    - Exactly one authenticated source fetch runs AFTER destination branch checkout
     - Carry applies before dependency install."""
     events: list[str] = []
 
@@ -1272,23 +1294,26 @@ def test_carry_success_single_fetch_before_allocation_on_branch_path():
     assert "carried 1 file(s)" in result, result
     assert events.count("source_fetch") == 1
     assert "destination_run" in events
+    assert "branch_checkout" in events
     assert "apply" in events
     assert "install" in events
 
-    fetch_idx = events.index("source_fetch")
     run_idx = events.index("destination_run")
+    checkout_idx = events.index("branch_checkout")
+    fetch_idx = events.index("source_fetch")
     apply_idx = events.index("apply")
     install_idx = events.index("install")
 
-    assert fetch_idx < run_idx, f"Source fetch must run before allocation: {events}"
-    assert run_idx < apply_idx, f"Allocation must run before carry: {events}"
+    assert run_idx < checkout_idx < fetch_idx, (
+        f"Source fetch must run after allocation and branch checkout: {events}"
+    )
+    assert fetch_idx < apply_idx, f"Source fetch must run before carry apply: {events}"
     assert apply_idx < install_idx, f"Carry must run before dep install: {events}"
 
 
 def test_carry_success_single_fetch_before_allocation_on_pr_path():
     """On PR checkout carry path:
-    - Exactly one authenticated source fetch runs BEFORE destination allocation
-    - PR setup runs after destination allocation and before carry
+    - Exactly one authenticated source fetch runs AFTER destination PR setup
     - Carry applies before dependency install."""
     events: list[str] = []
 
@@ -1341,25 +1366,28 @@ def test_carry_success_single_fetch_before_allocation_on_pr_path():
     assert "carried 1 file(s)" in result, result
     assert events.count("source_fetch") == 1
     assert "destination_run" in events
+    assert "pr_setup" in events
     assert "apply" in events
     assert "install" in events
 
-    fetch_idx = events.index("source_fetch")
     run_idx = events.index("destination_run")
+    pr_idx = events.index("pr_setup")
+    fetch_idx = events.index("source_fetch")
     apply_idx = events.index("apply")
     install_idx = events.index("install")
 
-    assert fetch_idx < run_idx, f"Source fetch must run before allocation: {events}"
-    assert run_idx < apply_idx, f"Allocation must run before carry: {events}"
+    assert run_idx < pr_idx < fetch_idx, (
+        f"Source fetch must run after allocation and PR setup: {events}"
+    )
+    assert fetch_idx < apply_idx, f"Source fetch must run before carry apply: {events}"
     assert apply_idx < install_idx, f"Carry must run before dep install: {events}"
 
 
 def test_carry_fetch_exit_offline_source_token_available():
-    """Carry preflight failure on offline source (network_off=True) with token available.
+    """Carry fetch failure on offline source (network_off=True) with token available.
 
     Locks existing status/step/error and asserts carry-specific hint wording
-    without push references. Destination container must not be allocated.
-    """
+    without push references. Allocated destination container must be cleaned up."""
     old = _make_container(OLD_CID)
     old.status = "running"
     old.labels = {NETWORK_LABEL: "false"}
@@ -1369,7 +1397,7 @@ def test_carry_fetch_exit_offline_source_token_available():
     new.exec_run.side_effect = fake
     client = _make_client(old, new)
 
-    with _patched(client), patch(
+    with _patched(client) as mock_stop, patch(
         "sunaba.tools.github_api._resolve_vcs_token",
         return_value="ghp_test_token_12345",
     ):
@@ -1395,15 +1423,17 @@ def test_carry_fetch_exit_offline_source_token_available():
     }
     assert data == expected
     assert "Push" not in data["hint"]
-    client.containers.run.assert_not_called()
+    client.containers.run.assert_called_once()
+    assert new.remove.called
+    assert mock_stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
 
 
 def test_carry_fetch_exit_offline_source_token_missing():
-    """Carry preflight failure on offline source (network_off=True) with token missing.
+    """Carry fetch failure on offline source (network_off=True) with token missing.
 
     Locks existing status/step/error and asserts carry-specific hint wording
-    joined with host token hint. Destination container must not be allocated.
-    """
+    joined with host token hint. Allocated destination container must be cleaned up."""
     old = _make_container(OLD_CID)
     old.status = "running"
     old.labels = {NETWORK_LABEL: "false"}
@@ -1413,7 +1443,7 @@ def test_carry_fetch_exit_offline_source_token_missing():
     new.exec_run.side_effect = fake
     client = _make_client(old, new)
 
-    with _patched(client), patch(
+    with _patched(client) as mock_stop, patch(
         "sunaba.tools.github_api._resolve_vcs_token",
         return_value="",
     ):
@@ -1441,7 +1471,10 @@ def test_carry_fetch_exit_offline_source_token_missing():
     }
     assert data == expected
     assert "Push" not in data["hint"]
-    client.containers.run.assert_not_called()
+    client.containers.run.assert_called_once()
+    assert new.remove.called
+    assert mock_stop.called
+    assert load_container_provenance(NEW_FULL_ID) is None
 
 
 def test_source_missing_at_preflight_becoming_available_later_never_carries():

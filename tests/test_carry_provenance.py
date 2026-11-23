@@ -1010,7 +1010,11 @@ def test_failed_carry_after_checkout_leaves_no_destination_provenance_record() -
         ContainerProvenance(target_repo_id=104201, target_ref="trunk"),
     )
     old = _make_mock_container(OLD_FULL_ID)
-    new = _make_mock_container(NEW_FULL_ID, apply_fatal_error=True)
+    new = _make_mock_container(
+        NEW_FULL_ID,
+        checked_out_branch="trunk",
+        apply_fatal_error=True,
+    )
     client = _make_docker_client(old, new)
     routes = {
         "https://api.github.com/repos/acme/widget": {
@@ -1030,3 +1034,515 @@ def test_failed_carry_after_checkout_leaves_no_destination_provenance_record() -
     assert result.startswith("Error:"), result
     assert new.remove.called
     assert load_container_provenance(NEW_FULL_ID) is None
+
+
+def _assert_post_checkout_provenance_refusal(
+    result: str,
+    *,
+    expected_reason: str,
+    old_container: MagicMock,
+    new_container: MagicMock,
+    new_full_id: str = NEW_FULL_ID,
+) -> dict[str, Any]:
+    data = _parse_carry_provenance_error(result)
+    assert data.get("status") == "error", f"Unexpected status in {data!r}"
+    assert data.get("step") == "carry_provenance", (
+        f"Expected step='carry_provenance', got {data!r}"
+    )
+    assert data.get("reason") == expected_reason, (
+        f"Expected reason={expected_reason!r}, got {data!r}"
+    )
+    assert isinstance(data.get("error"), str) and data["error"].strip()
+
+    old_cmds = _executed_commands(old_container)
+    new_cmds = _executed_commands(new_container)
+    assert not any("fetch origin" in c for c in old_cmds), (
+        f"Source fetch must not run on post-checkout refusal: {old_cmds}"
+    )
+    assert not any("git diff" in c for c in old_cmds), (
+        f"Patch extraction must not run on post-checkout refusal: {old_cmds}"
+    )
+    assert not any("git apply" in c or "sunaba-carry.patch" in c for c in new_cmds), (
+        f"Patch copy/apply must not run on post-checkout refusal: {new_cmds}"
+    )
+    new_container.put_archive.assert_not_called()
+    assert new_container.remove.called, "Fresh destination must be cleaned up"
+    assert load_container_provenance(new_full_id) is None
+    return data
+
+
+def test_default_clone_branch_moved_from_main_to_develop_rejects_without_source_fetch() -> None:
+    """If default_branch moves from main to develop after preflight, fail closed before source fetch."""
+    assert save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old = _make_mock_container(OLD_FULL_ID)
+    new = _make_mock_container(NEW_FULL_ID, checked_out_branch="main")
+    client = _make_docker_client(old, new)
+
+    responses = iter(
+        [
+            {"id": 104201, "default_branch": "main"},
+            {"id": 104201, "default_branch": "develop"},
+        ]
+    )
+    routes = {
+        "https://api.github.com/repos/acme/widget": lambda _req: next(responses),
+    }
+
+    with _mock_carry_environment(client, routes):
+        result = sandbox_initialize(
+            image=TEST_IMAGE,
+            clone_repo="acme/widget",
+            apply_from_container=OLD_FULL_ID[:12],
+            pip_extras=None,
+        )
+
+    _assert_post_checkout_provenance_refusal(
+        result,
+        expected_reason="target_ref_mismatch",
+        old_container=old,
+        new_container=new,
+    )
+    assert old.exec_run.call_count == 0
+
+
+def test_default_clone_actual_checkout_mismatch_independently_of_api_rejects() -> None:
+    """When API matches preflight but destination checked out develop instead of main, reject."""
+    assert save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old = _make_mock_container(OLD_FULL_ID)
+    new = _make_mock_container(NEW_FULL_ID, checked_out_branch="develop")
+    client = _make_docker_client(old, new)
+    routes = {
+        "https://api.github.com/repos/acme/widget": {
+            "id": 104201,
+            "default_branch": "main",
+        },
+    }
+
+    with _mock_carry_environment(client, routes):
+        result = sandbox_initialize(
+            image=TEST_IMAGE,
+            clone_repo="acme/widget",
+            apply_from_container=OLD_FULL_ID[:12],
+            pip_extras=None,
+        )
+
+    _assert_post_checkout_provenance_refusal(
+        result,
+        expected_reason="target_ref_mismatch",
+        old_container=old,
+        new_container=new,
+    )
+    assert old.exec_run.call_count == 0
+
+
+@pytest.mark.parametrize(
+    ("rev_parse_exit", "rev_parse_output"),
+    [
+        pytest.param(0, b"HEAD\n", id="detached_head"),
+        pytest.param(128, b"fatal: not a git repository\n", id="git_failure"),
+        pytest.param(0, b"\n", id="empty_branch_output"),
+    ],
+)
+def test_default_clone_detached_head_or_git_failure_rejects_as_unknown(
+    rev_parse_exit: int,
+    rev_parse_output: bytes,
+) -> None:
+    """Detached HEAD or git branch inspection failure fails closed with destination_provenance_unknown."""
+    assert save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old = _make_mock_container(OLD_FULL_ID)
+    new = _make_mock_container(NEW_FULL_ID, checked_out_branch="main")
+    base_exec = new.exec_run.side_effect
+
+    def _exec_with_head_override(cmd: Any, **kwargs: Any) -> tuple[int, Any]:
+        if "git rev-parse --abbrev-ref HEAD" in _cmd_text(cmd):
+            if kwargs.get("demux"):
+                return rev_parse_exit, (rev_parse_output, b"")
+            return rev_parse_exit, rev_parse_output
+        return base_exec(cmd, **kwargs)
+
+    new.exec_run.side_effect = _exec_with_head_override
+    client = _make_docker_client(old, new)
+    routes = {
+        "https://api.github.com/repos/acme/widget": {
+            "id": 104201,
+            "default_branch": "main",
+        },
+    }
+
+    with _mock_carry_environment(client, routes):
+        result = sandbox_initialize(
+            image=TEST_IMAGE,
+            clone_repo="acme/widget",
+            apply_from_container=OLD_FULL_ID[:12],
+            pip_extras=None,
+        )
+
+    _assert_post_checkout_provenance_refusal(
+        result,
+        expected_reason="destination_provenance_unknown",
+        old_container=old,
+        new_container=new,
+    )
+    assert old.exec_run.call_count == 0
+
+
+def test_default_clone_real_git_detached_head_rejects_as_unknown(
+    tmp_path: Path,
+) -> None:
+    """Real git detached HEAD on destination fails closed without source fetch or diff."""
+    from tests.test_publish_ops_gitrepo import _RealGitContainer
+
+    assert save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old = _make_mock_container(OLD_FULL_ID)
+
+    dest_dir = tmp_path / "dest_detached"
+    _init_git_repo(dest_dir)
+    _git(str(dest_dir), "checkout", "--detach", "HEAD")
+
+    new_real = _RealGitContainer(str(dest_dir))
+    new_real.id = NEW_FULL_ID
+    new_real.status = "running"
+    new_real.labels = {}
+    new_real.attrs = {"Config": {"WorkingDir": str(dest_dir)}}
+    new_real.remove = MagicMock()
+    new_real.put_archive = MagicMock()
+
+    orig_exec = new_real.exec_run
+
+    def _dest_exec(cmd: Any, **kwargs: Any) -> tuple[int, Any]:
+        if "git clone" in _cmd_text(cmd):
+            return (0, (b"", b"")) if kwargs.get("demux") else (0, b"")
+        return orig_exec(cmd, **kwargs)
+
+    new_real.exec_run = MagicMock(side_effect=_dest_exec)
+    client = _make_docker_client(old, new_real)
+    routes = {
+        "https://api.github.com/repos/acme/widget": {
+            "id": 104201,
+            "default_branch": "main",
+        },
+    }
+
+    with _mock_carry_environment(client, routes):
+        result = sandbox_initialize(
+            image=TEST_IMAGE,
+            clone_repo="acme/widget",
+            apply_from_container=OLD_FULL_ID[:12],
+            pip_extras=None,
+        )
+
+    _assert_post_checkout_provenance_refusal(
+        result,
+        expected_reason="destination_provenance_unknown",
+        old_container=old,
+        new_container=new_real,
+    )
+    assert old.exec_run.call_count == 0
+
+
+@pytest.mark.parametrize(
+    ("second_outcome", "expected_reason"),
+    [
+        pytest.param(
+            urllib.error.URLError("network unreachable"),
+            "destination_provenance_unknown",
+            id="post_checkout_url_error",
+        ),
+        pytest.param(
+            urllib.error.HTTPError(
+                "https://api.github.com/repos/acme/widget",
+                503,
+                "Service Unavailable",
+                None,  # type: ignore[arg-type]
+                None,
+            ),
+            "destination_provenance_unknown",
+            id="post_checkout_http_503",
+        ),
+        pytest.param(
+            {"id": 104201},
+            "destination_provenance_unknown",
+            id="post_checkout_missing_default_branch",
+        ),
+        pytest.param(
+            {"default_branch": "main"},
+            "destination_provenance_unknown",
+            id="post_checkout_missing_repo_id",
+        ),
+        pytest.param(
+            {"id": 999999, "default_branch": "main"},
+            "repo_mismatch",
+            id="post_checkout_repo_id_mismatch_despite_matching_origin",
+        ),
+    ],
+)
+def test_default_clone_unknown_or_mismatched_post_checkout_metadata_rejects(
+    second_outcome: Any,
+    expected_reason: str,
+) -> None:
+    """Missing, failed, or mismatched host metadata after default clone rejects without origin fallback."""
+    assert save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old = _make_mock_container(OLD_FULL_ID)
+    new = _make_mock_container(
+        NEW_FULL_ID,
+        checked_out_branch="main",
+        origin_url="https://github.com/acme/widget.git",
+    )
+    client = _make_docker_client(old, new)
+
+    calls = 0
+
+    def _route(_req: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"id": 104201, "default_branch": "main"}
+        if isinstance(second_outcome, Exception):
+            raise second_outcome
+        return second_outcome
+
+    routes = {"https://api.github.com/repos/acme/widget": _route}
+
+    with _mock_carry_environment(client, routes):
+        result = sandbox_initialize(
+            image=TEST_IMAGE,
+            clone_repo="acme/widget",
+            apply_from_container=OLD_FULL_ID[:12],
+            pip_extras=None,
+        )
+
+    _assert_post_checkout_provenance_refusal(
+        result,
+        expected_reason=expected_reason,
+        old_container=old,
+        new_container=new,
+    )
+    assert calls == 2
+    assert old.exec_run.call_count == 0
+
+
+def test_late_provenance_rejection_leaves_source_remote_tracking_refs_untouched(
+    tmp_path: Path,
+) -> None:
+    """A late provenance rejection leaves a real-git source's remote-tracking refs completely untouched."""
+    from tests.test_publish_ops_gitrepo import _RealGitContainer
+
+    origin_dir = tmp_path / "origin.git"
+    source_dir = tmp_path / "source"
+    work_dir = tmp_path / "work"
+
+    _git(str(tmp_path), "init", "--bare", "--initial-branch=main", str(origin_dir))
+    _git(str(tmp_path), "clone", str(origin_dir), str(source_dir))
+    _git(str(source_dir), "config", "user.email", "tester@example.com")
+    _git(str(source_dir), "config", "user.name", "Tester")
+    (source_dir / "app.py").write_text("v1\n", encoding="utf-8")
+    _git(str(source_dir), "add", "app.py")
+    _git(str(source_dir), "commit", "-m", "initial")
+    _git(str(source_dir), "push", "origin", "main")
+    initial_remote_sha = _git(
+        str(source_dir), "rev-parse", "refs/remotes/origin/main"
+    ).stdout.strip()
+
+    # Advance upstream origin/main without fetching in source_dir.
+    _git(str(tmp_path), "clone", str(origin_dir), str(work_dir))
+    _git(str(work_dir), "config", "user.email", "tester@example.com")
+    _git(str(work_dir), "config", "user.name", "Tester")
+    (work_dir / "upstream.py").write_text("new\n", encoding="utf-8")
+    _git(str(work_dir), "add", "upstream.py")
+    _git(str(work_dir), "commit", "-m", "upstream advance")
+    _git(str(work_dir), "push", "origin", "main")
+    upstream_sha = _git(str(work_dir), "rev-parse", "HEAD").stdout.strip()
+    assert upstream_sha != initial_remote_sha
+
+    assert save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old_real = _RealGitContainer(str(source_dir))
+    old_real.id = OLD_FULL_ID
+    old_real.status = "running"
+    old_real.labels = {}
+    old_real.attrs = {"Config": {"WorkingDir": str(source_dir)}}
+    old_real.exec_run = MagicMock(side_effect=old_real.exec_run)
+
+    new = _make_mock_container(NEW_FULL_ID, checked_out_branch="main")
+    client = _make_docker_client(old_real, new)
+    responses = iter(
+        [
+            {"id": 104201, "default_branch": "main"},
+            {"id": 104201, "default_branch": "develop"},
+        ]
+    )
+    routes = {
+        "https://api.github.com/repos/acme/widget": lambda _req: next(responses),
+    }
+
+    with _mock_carry_environment(client, routes):
+        result = sandbox_initialize(
+            image=TEST_IMAGE,
+            clone_repo="acme/widget",
+            apply_from_container=OLD_FULL_ID[:12],
+            pip_extras=None,
+        )
+
+    _assert_post_checkout_provenance_refusal(
+        result,
+        expected_reason="target_ref_mismatch",
+        old_container=old_real,
+        new_container=new,
+    )
+    assert old_real.exec_run.call_count == 0
+    assert (
+        _git(str(source_dir), "rev-parse", "refs/remotes/origin/main").stdout.strip()
+        == initial_remote_sha
+    )
+
+
+def test_valid_default_clone_carry_fetches_once_after_consistency_checks() -> None:
+    """Valid default-clone carry checks host metadata and destination branch before fetching source once."""
+    events: list[str] = []
+    assert save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old = _make_mock_container(OLD_FULL_ID)
+    new = _make_mock_container(NEW_FULL_ID, checked_out_branch="main")
+
+    old_base_exec = old.exec_run.side_effect
+    new_base_exec = new.exec_run.side_effect
+
+    def _old_exec(cmd: Any, **kwargs: Any) -> tuple[int, Any]:
+        c = _cmd_text(cmd)
+        if "fetch origin" in c:
+            events.append("source_fetch")
+        elif "git merge-base" in c:
+            events.append("source_merge_base")
+        elif "git diff --binary" in c:
+            events.append("source_diff")
+        return old_base_exec(cmd, **kwargs)
+
+    def _new_exec(cmd: Any, **kwargs: Any) -> tuple[int, Any]:
+        c = _cmd_text(cmd)
+        if "git clone" in c:
+            events.append("clone")
+        elif "git rev-parse --abbrev-ref HEAD" in c:
+            events.append("branch_check")
+        elif "git apply" in c:
+            events.append("apply")
+        return new_base_exec(cmd, **kwargs)
+
+    old.exec_run.side_effect = _old_exec
+    new.exec_run.side_effect = _new_exec
+    client = _make_docker_client(old, new)
+
+    def _spy_run(*args: Any, **kwargs: Any) -> MagicMock:
+        events.append("destination_run")
+        return new
+
+    client.containers.run.side_effect = _spy_run
+
+    api_calls = 0
+
+    def _route(_req: Any) -> dict[str, Any]:
+        nonlocal api_calls
+        api_calls += 1
+        events.append(f"api_{api_calls}")
+        return {"id": 104201, "default_branch": "main"}
+
+    routes = {"https://api.github.com/repos/acme/widget": _route}
+
+    with _mock_carry_environment(client, routes):
+        result = sandbox_initialize(
+            image=TEST_IMAGE,
+            clone_repo="acme/widget",
+            apply_from_container=OLD_FULL_ID[:12],
+            pip_extras=None,
+        )
+
+    assert result.startswith(NEW_FULL_ID[:12]), result
+    assert "carried 1 file(s)" in result, result
+    assert events.count("source_fetch") == 1
+    assert events == [
+        "api_1",
+        "destination_run",
+        "clone",
+        "api_2",
+        "branch_check",
+        "source_fetch",
+        "source_merge_base",
+        "source_diff",
+        "apply",
+    ]
+    assert load_container_provenance(NEW_FULL_ID) == ContainerProvenance(
+        target_repo_id=104201,
+        target_ref="main",
+    )
+
+
+def test_post_checkout_fetch_uses_immutable_validated_source_id_binding() -> None:
+    """Alias rebinding after preflight still binds post-checkout fetch and diff to the validated source ID."""
+    other_full_id = "beef" * 16
+    assert save_container_provenance(
+        OLD_FULL_ID,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
+    old_a = _make_mock_container(OLD_FULL_ID)
+    old_b = _make_mock_container(other_full_id)
+    new = _make_mock_container(NEW_FULL_ID, checked_out_branch="main")
+
+    rebound = False
+    client = MagicMock()
+    client.containers.list.return_value = []
+
+    def _spy_run(*args: Any, **kwargs: Any) -> MagicMock:
+        nonlocal rebound
+        rebound = True
+        return new
+
+    def _get(cid: str) -> MagicMock:
+        if cid == "shared-alias":
+            return old_b if rebound else old_a
+        if cid in (OLD_FULL_ID, OLD_FULL_ID[:12]):
+            return old_a
+        if cid in (other_full_id, other_full_id[:12]):
+            return old_b
+        return new
+
+    client.containers.run.side_effect = _spy_run
+    client.containers.get.side_effect = _get
+
+    routes = {
+        "https://api.github.com/repos/acme/widget": {
+            "id": 104201,
+            "default_branch": "main",
+        },
+    }
+
+    with _mock_carry_environment(client, routes):
+        result = sandbox_initialize(
+            image=TEST_IMAGE,
+            clone_repo="acme/widget",
+            apply_from_container="shared-alias",
+            pip_extras=None,
+        )
+
+    assert result.startswith(NEW_FULL_ID[:12]), result
+    assert old_b.exec_run.call_count == 0
+    old_a_cmds = _executed_commands(old_a)
+    assert sum("fetch origin" in c for c in old_a_cmds) == 1
+    assert any("git diff --binary" in c for c in old_a_cmds)

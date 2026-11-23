@@ -34,10 +34,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import sunaba.proxy_client
+from sunaba.provenance_store import ContainerProvenance, save_container_provenance
 from sunaba.proxy_lifecycle import ENABLE_EGRESS_PROXY_ENV
 from sunaba.tools.container.lifecycle import _carry_worktree, sandbox_initialize
 from tests.test_init_apply_from_container import _patched
 from tests.test_publish_ops_gitrepo import _git, _git_raw_bytes, _RealGitContainer
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provenance_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate host-side provenance store per test."""
+    env_dir = tmp_path / "env_state"
+    xdg_dir = tmp_path / "xdg_state"
+    env_dir.mkdir(parents=True)
+    xdg_dir.mkdir(parents=True)
+    monkeypatch.setenv("SUNABA_ENVIRONMENT_STATE_DIR", str(env_dir))
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_dir))
 
 
 class GrantSpy:
@@ -538,9 +550,14 @@ def test_sandbox_initialize_carry_fetch_failure_returns_structured_error(
     source_dir = fixture["source_dir"]
     dest_dir = fixture["dest_dir"]
 
+    old_full_id = "01d123456789" + "0" * 52
+    save_container_provenance(
+        old_full_id,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
     old_c = _CarryGitContainer(
         source_dir,
-        cid="oldiniterr01",
+        cid=old_full_id,
         repo="owner/repo",
         require_auth_for_fetch=True,
     )

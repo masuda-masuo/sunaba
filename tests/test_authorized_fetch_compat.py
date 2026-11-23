@@ -5,11 +5,17 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sunaba.provenance_store import (
+    ContainerProvenance,
+    load_container_provenance,
+    save_container_provenance,
+)
 from sunaba.proxy_client import ProxyAuthError
 from sunaba.tools.container import lifecycle
 from sunaba.tools.vcs import publishing
@@ -23,6 +29,17 @@ from tests.test_carry_fresh_origin import (
 )
 from tests.test_init_apply_from_container import _patched
 from tests.test_publish_ops_gitrepo import _git
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provenance_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate host-side provenance store per test."""
+    env_dir = tmp_path / "env_state"
+    xdg_dir = tmp_path / "xdg_state"
+    env_dir.mkdir(parents=True)
+    xdg_dir.mkdir(parents=True)
+    monkeypatch.setenv("SUNABA_ENVIRONMENT_STATE_DIR", str(env_dir))
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_dir))
 
 
 class _Container:
@@ -189,8 +206,13 @@ def test_carry_public_initialize_response_json_is_complete(tmp_path, monkeypatch
     monkeypatch.setattr(lifecycle.github_api, "_resolve_vcs_token", lambda: "")
     monkeypatch.delenv("SUNABA_PROXY_CONTROL_URL", raising=False)
     fixture = _make_normal_merge_fixture(tmp_path)
+    old_full_id = "a" * 64
+    save_container_provenance(
+        old_full_id,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
     old_c = _CarryGitContainer(
-        fixture["source_dir"], cid="compatold001", repo="owner/repo",
+        fixture["source_dir"], cid="a" * 64, repo="owner/repo",
         require_auth_for_fetch=True,
     )
     old_c.force_fetch_error = True
@@ -287,8 +309,13 @@ def test_public_initialize_fetch_failure_matrix_is_complete_and_fail_closed(
     tmp_path, monkeypatch, failure, expected
 ):
     fixture = _make_normal_merge_fixture(tmp_path)
+    old_full_id = "b" * 64
+    save_container_provenance(
+        old_full_id,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
     old_c = _CarryGitContainer(
-        fixture["source_dir"], cid="matrixold001", repo="owner/repo",
+        fixture["source_dir"], cid="b" * 64, repo="owner/repo",
         require_auth_for_fetch=True,
     )
     new_c = _CarryGitContainer(
@@ -339,12 +366,16 @@ def test_public_initialize_fetch_failure_matrix_is_complete_and_fail_closed(
         _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
         _git(fixture["source_dir"], "status", "--porcelain").stdout,
     )
-    with _patched(client):
+    with _patched(client), patch.object(
+        new_c, "remove", wraps=new_c.remove
+    ) as mock_remove:
         result = lifecycle.sandbox_initialize(
             clone_repo="owner/repo", apply_from_container=old_c.id, pip_extras=None
         )
     assert _parse_init_error(result) == expected
-    assert client.containers.run.call_count == 0
+    assert client.containers.run.call_count == 1
+    mock_remove.assert_called_once_with(force=True)
+    assert load_container_provenance(new_c.id) is None
     after = (
         _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
         _git(fixture["source_dir"], "status", "--porcelain").stdout,
@@ -524,8 +555,13 @@ def test_public_initialize_execution_exception_and_grant_exit_failure_are_fail_c
     close_error = RuntimeError("close token-secret")
     expected_error = "Failed to close authorization grant for fetch: close <redacted>"
     fixture = _make_normal_merge_fixture(tmp_path)
+    old_full_id = "c" * 64
+    save_container_provenance(
+        old_full_id,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
     old_c = _CarryGitContainer(
-        fixture["source_dir"], cid="exitfailold001", repo="owner/repo",
+        fixture["source_dir"], cid="c" * 64, repo="owner/repo",
         require_auth_for_fetch=True,
     )
     new_c = _CarryGitContainer(
@@ -561,7 +597,9 @@ def test_public_initialize_execution_exception_and_grant_exit_failure_are_fail_c
         _git(fixture["source_dir"], "status", "--porcelain").stdout,
     )
 
-    with _patched(client):
+    with _patched(client), patch.object(
+        new_c, "remove", wraps=new_c.remove
+    ) as mock_remove:
         result = lifecycle.sandbox_initialize(
             clone_repo="owner/repo", apply_from_container=old_c.id, pip_extras=None
         )
@@ -572,7 +610,8 @@ def test_public_initialize_execution_exception_and_grant_exit_failure_are_fail_c
         "error": expected_error,
         "hint": "Check egress proxy connection and authorization grant cleanup.",
     }
-    assert client.containers.run.call_count == 0
+    assert client.containers.run.call_count == 1
+    mock_remove.assert_called_once_with(force=True)
     after = (
         _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
         _git(fixture["source_dir"], "status", "--porcelain").stdout,
@@ -636,8 +675,13 @@ def test_publish_unknown_shared_fetch_failure_is_complete_and_fail_closed(monkey
 
 def test_public_initialize_unknown_shared_fetch_failure_stops_before_allocation(tmp_path, monkeypatch):
     fixture = _make_normal_merge_fixture(tmp_path)
+    old_full_id = "d" * 64
+    save_container_provenance(
+        old_full_id,
+        ContainerProvenance(target_repo_id=104201, target_ref="main"),
+    )
     old_c = _CarryGitContainer(
-        fixture["source_dir"], cid="unknownold001", repo="owner/repo",
+        fixture["source_dir"], cid="d" * 64, repo="owner/repo",
         require_auth_for_fetch=True,
     )
     new_c = _CarryGitContainer(
@@ -663,7 +707,9 @@ def test_public_initialize_unknown_shared_fetch_failure_stops_before_allocation(
         _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
         _git(fixture["source_dir"], "status", "--porcelain").stdout,
     )
-    with _patched(client):
+    with _patched(client), patch.object(
+        new_c, "remove", wraps=new_c.remove
+    ) as mock_remove:
         result = lifecycle.sandbox_initialize(
             clone_repo="owner/repo", apply_from_container=old_c.id, pip_extras=None
         )
@@ -679,7 +725,8 @@ def test_public_initialize_unknown_shared_fetch_failure_stops_before_allocation(
     assert "unrecognized private failure token" not in serialized
     assert "token-secret" not in serialized
     assert "raw detail" not in serialized
-    assert client.containers.run.call_count == 0
+    assert client.containers.run.call_count == 1
+    mock_remove.assert_called_once_with(force=True)
     after = (
         _git(fixture["source_dir"], "rev-parse", "HEAD").stdout.strip(),
         _git(fixture["source_dir"], "status", "--porcelain").stdout,

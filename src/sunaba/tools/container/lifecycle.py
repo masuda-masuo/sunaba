@@ -52,10 +52,13 @@ from sunaba.output_control import (
 from sunaba.provenance_store import (
     ContainerProvenance,
     is_full_container_id,
+    load_container_provenance,
     provenance_from_pr_payload,
     provenance_from_repo_payload,
     remove_container_provenance,
     save_container_provenance,
+    valid_positive_github_id,
+    valid_ref_name,
 )
 from sunaba.security import (
     CREATED_AT_LABEL,
@@ -87,6 +90,8 @@ from sunaba.tools.vcs.authorized_fetch import authorized_origin_fetch
 from sunaba.tools.vcs.merge_base import _resolve_repo_from_container
 
 from .clone import (
+    _fetch_pr_metadata,
+    _fetch_repo_metadata,
     _install_repo_deps,
     _normalize_pip_extras,
     _provenance_capture_scope,
@@ -566,6 +571,8 @@ def _carry_worktree(
     new_container: Any,
     *,
     _source_fetched: bool = False,
+    _expected_source_id: str | None = None,
+    _display_cid: str | None = None,
 ) -> _CarryReport:
     """Carry an old container's uncommitted tracked work into a fresh clone.
 
@@ -593,22 +600,37 @@ def _carry_worktree(
             return ""
         return b.decode("utf-8", errors="replace")
 
+    display_cid = _display_cid or old_cid
     try:
         old_container = client.containers.get(old_cid)
     except Exception:
         return _CarryReport(
             files=[], applied=[], conflicts=[], untracked=[],
-            error=f"old container {old_cid[:12]} not found or not running",
+            error=f"old container {display_cid[:12]} not found or not running",
         )
+    if _expected_source_id is not None:
+        actual_source_id = str(getattr(old_container, "id", "") or "")
+        if actual_source_id != _expected_source_id:
+            return _CarryReport(
+                files=[], applied=[], conflicts=[], untracked=[],
+                error=f"old container {display_cid[:12]} not found or not running",
+            )
     # The old container must be alive to diff it.
     try:
         old_container.reload()
     except Exception:
         pass
+    if _expected_source_id is not None:
+        actual_source_id = str(getattr(old_container, "id", "") or "")
+        if actual_source_id != _expected_source_id:
+            return _CarryReport(
+                files=[], applied=[], conflicts=[], untracked=[],
+                error=f"old container {display_cid[:12]} not found or not running",
+            )
     if getattr(old_container, "status", "running") != "running":
         return _CarryReport(
             files=[], applied=[], conflicts=[], untracked=[],
-            error=f"old container {old_cid[:12]} is not running",
+            error=f"old container {display_cid[:12]} is not running",
         )
 
     # 1. Determine the base commit. The source container may hold local
@@ -623,15 +645,32 @@ def _carry_worktree(
     #    shared cd prefix -- guarantee every git command lands in the right
     #    directory even when the source and destination clone_dest differ
     #    (Issue #889 finding 3).
-    src_root = resolve_git_root(old_container)
-    dst_root = resolve_git_root(new_container)
+    try:
+        src_root = resolve_git_root(old_container)
+        dst_root = resolve_git_root(new_container)
+    except Exception:
+        return _CarryReport(
+            files=[], applied=[], conflicts=[], untracked=[],
+            error="Failed to fetch origin in source container",
+            step="carry_fetch",
+            hint="Ensure the source container is running and healthy.",
+        )
 
     # 1a. Refresh origin in source container under host authorized_read_grant (Issue #935).
-    #     Must run BEFORE merge-base calculation so commits already merged into
-    #     upstream main are excluded from the carry patch.
-    #     If already prefetched before destination allocation, skip to avoid fetching twice.
+    #     Must run AFTER destination checkout and provenance consistency checks, and
+    #     BEFORE merge-base calculation so commits already merged into upstream main
+    #     are excluded from the carry patch.
+    #     If already prefetched, skip to avoid fetching twice.
     if not _source_fetched:
-        fetch_report = _fetch_source_origin(old_container, src_root)
+        try:
+            fetch_report = _fetch_source_origin(old_container, src_root)
+        except Exception:
+            return _CarryReport(
+                files=[], applied=[], conflicts=[], untracked=[],
+                error="Failed to fetch origin in source container",
+                step="carry_fetch",
+                hint="Ensure the source container is running and healthy.",
+            )
         if fetch_report is not None:
             return fetch_report
 
@@ -833,6 +872,253 @@ def _record_init_provenance(
     if provenance is not None:
         save_container_provenance(full_container_id, provenance)
 
+_CARRY_PROVENANCE_MESSAGES: dict[str, tuple[str, str]] = {
+    "source_provenance_unknown": (
+        "Source container repository provenance is missing or incomplete; carry cannot verify compatibility.",
+        (
+            "The source container may be a legacy container without host provenance or a clone whose "
+            "repository or PR head metadata could not be verified. Keep the old container intact, "
+            "retain your work via its normal checkpoint/diff/publish workflow, and start a fresh "
+            "managed clone from the intended repository and target instead of carrying."
+        ),
+    ),
+    "destination_provenance_unknown": (
+        "Destination repository provenance could not be resolved from trusted GitHub metadata; carry cannot verify compatibility.",
+        (
+            "Ensure the host can reach the GitHub API for the target repository/PR (and has a valid "
+            "host VCS token for private repositories or deleted-fork checks), or start a fresh clone "
+            "without apply_from_container and handle the old container via its normal checkpoint/diff/publish workflow."
+        ),
+    ),
+    "repo_mismatch": (
+        "Source and destination containers belong to different repositories or fork/upstream checkouts; carry rejected.",
+        (
+            "Start a fresh managed clone targeting the same repository (and same fork/upstream "
+            "checkout) as the source container, or keep the source container intact and publish from it directly."
+        ),
+    ),
+    "target_ref_mismatch": (
+        "Source and destination containers target different integration branches; carry rejected.",
+        (
+            "Start a fresh managed clone targeting the same integration base branch as the source "
+            "container, or keep the source container intact and publish from it directly."
+        ),
+    ),
+}
+
+
+def _carry_provenance_error(reason: str) -> InitResult:
+    """Build a structured JSON ``carry_provenance`` refusal result."""
+    error, hint = _CARRY_PROVENANCE_MESSAGES[reason]
+    payload = {
+        "status": "error",
+        "step": "carry_provenance",
+        "reason": reason,
+        "error": error,
+        "hint": hint,
+    }
+    return InitResult(json.dumps(payload), deps_failed=False)
+
+
+def _provenance_comparison_keys(
+    provenance: ContainerProvenance | None,
+    *,
+    require_pr_head_ref: bool = False,
+) -> tuple[int, str, int] | None:
+    """Extract ``(target_repo_id, target_ref, effective_checkout_repo_id)`` or ``None``."""
+    if provenance is None:
+        return None
+    target_repo_id = valid_positive_github_id(provenance.target_repo_id)
+    target_ref = valid_ref_name(provenance.target_ref)
+    if target_repo_id is None or target_ref is None:
+        return None
+    if provenance.pr_number is not None:
+        if valid_positive_github_id(provenance.pr_number) is None:
+            return None
+        checkout_repo_id = valid_positive_github_id(provenance.head_repo_id)
+        if checkout_repo_id is None:
+            return None
+        if require_pr_head_ref and valid_ref_name(provenance.head_ref) is None:
+            return None
+    else:
+        checkout_repo_id = target_repo_id
+    return target_repo_id, target_ref, checkout_repo_id
+
+
+def _resolve_destination_provenance(
+    *,
+    clone_repo: str | None,
+    repo: str | None,
+    pr: int | None,
+    branch: str | None,
+) -> ContainerProvenance | None:
+    """Resolve trusted destination provenance host-side before container allocation."""
+    if pr is not None:
+        if not repo or valid_positive_github_id(pr) is None:
+            return None
+        try:
+            pr_data = _fetch_pr_metadata(repo, pr)
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve destination PR provenance for %s#%s: %s",
+                repo,
+                pr,
+                exc,
+            )
+            return None
+        provenance = provenance_from_pr_payload(pr_data, pr_number=pr)
+        if provenance.pr_number != pr:
+            return None
+        if _provenance_comparison_keys(provenance, require_pr_head_ref=True) is None:
+            return None
+        return provenance
+
+    if clone_repo:
+        if branch is not None and valid_ref_name(branch) is None:
+            return None
+        try:
+            repo_data = _fetch_repo_metadata(clone_repo)
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve destination repo provenance for %s: %s",
+                clone_repo,
+                exc,
+            )
+            return None
+        provenance = provenance_from_repo_payload(
+            repo_data, requested_branch=branch
+        )
+        if branch is not None and provenance.head_ref is None:
+            return None
+        if _provenance_comparison_keys(provenance) is None:
+            return None
+        return provenance
+
+    return None
+
+
+def _check_provenance_compatibility(
+    source_prov: ContainerProvenance | None,
+    dest_prov: ContainerProvenance | None,
+    *,
+    require_dest_pr_head_ref: bool = False,
+) -> str | None:
+    """Return a carry_provenance failure reason or ``None`` when compatible."""
+    src_keys = _provenance_comparison_keys(source_prov)
+    if src_keys is None:
+        return "source_provenance_unknown"
+    dst_keys = _provenance_comparison_keys(
+        dest_prov, require_pr_head_ref=require_dest_pr_head_ref
+    )
+    if dst_keys is None:
+        return "destination_provenance_unknown"
+    if src_keys[0] != dst_keys[0] or src_keys[2] != dst_keys[2]:
+        return "repo_mismatch"
+    if src_keys[1] != dst_keys[1]:
+        return "target_ref_mismatch"
+    return None
+
+
+def _inspect_destination_checked_out_branch(container: Any) -> str | None:
+    """Return the symbolic HEAD branch name of *container*'s repo, or ``None``."""
+    try:
+        dst_root = resolve_git_root(container)
+        dst_git = _git_at(container, dst_root)
+        ec, out = dst_git("rev-parse", "--abbrev-ref", "HEAD")
+    except Exception as exc:
+        logger.warning(
+            "Failed to inspect checked-out branch in destination container: %s",
+            exc,
+        )
+        return None
+    if isinstance(out, tuple):
+        out = out[0]
+    if isinstance(out, str):
+        actual_branch = out.strip()
+    elif isinstance(out, (bytes, bytearray)):
+        actual_branch = out.decode("utf-8", errors="replace").strip()
+    else:
+        return None
+    if ec != 0 or not actual_branch or actual_branch == "HEAD":
+        return None
+    return valid_ref_name(actual_branch)
+
+
+def _verify_checkout_provenance_consistency(
+    *,
+    source_prov: ContainerProvenance,
+    dest_prov: ContainerProvenance,
+    dest_container: Any,
+    provenance_capture: dict[str, Any],
+    clone_repo: str | None,
+    repo: str | None,
+    pr: int | None,
+    branch: str | None,
+) -> str | None:
+    """Verify checkout metadata and checked-out branch match preflight provenance."""
+    if pr is not None:
+        pr_data = provenance_capture.get("pr_data")
+        if (
+            provenance_capture.get("pr_repo") != repo
+            or provenance_capture.get("pr_number") != pr
+            or not isinstance(pr_data, dict)
+        ):
+            return "destination_provenance_unknown"
+        checkout_prov = provenance_from_pr_payload(pr_data, pr_number=pr)
+        reason = _check_provenance_compatibility(
+            source_prov, checkout_prov, require_dest_pr_head_ref=True
+        )
+        if reason is not None:
+            return reason
+        if checkout_prov != dest_prov:
+            return "destination_provenance_unknown"
+        return None
+
+    if clone_repo and branch:
+        repo_data = provenance_capture.get("repo_data")
+        if (
+            provenance_capture.get("repo") != clone_repo
+            or not isinstance(repo_data, dict)
+        ):
+            return "destination_provenance_unknown"
+        checkout_prov = provenance_from_repo_payload(
+            repo_data, requested_branch=branch
+        )
+        reason = _check_provenance_compatibility(source_prov, checkout_prov)
+        if reason is not None:
+            return reason
+        if checkout_prov != dest_prov:
+            return "destination_provenance_unknown"
+        return None
+
+    if clone_repo:
+        try:
+            repo_data = _fetch_repo_metadata(
+                clone_repo,
+                token=provenance_capture.get("token"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to re-read host repo metadata after default clone of %s: %s",
+                clone_repo,
+                exc,
+            )
+            return "destination_provenance_unknown"
+        checkout_prov = provenance_from_repo_payload(repo_data)
+        reason = _check_provenance_compatibility(source_prov, checkout_prov)
+        if reason is not None:
+            return reason
+        if checkout_prov != dest_prov:
+            return "destination_provenance_unknown"
+        actual_branch = _inspect_destination_checked_out_branch(dest_container)
+        if actual_branch is None or dest_prov.target_ref is None:
+            return "destination_provenance_unknown"
+        if actual_branch != dest_prov.target_ref:
+            return "target_ref_mismatch"
+        return None
+
+    return None
+
 
 def _sandbox_initialize(
     image: str | None = None,
@@ -915,11 +1201,14 @@ def _sandbox_initialize(
                / ``pr`` / ``branch``; untracked files are not carried and
                conflicts are not an error.  The source container must have
                network access (``allow_network=True``); offline source
-               support is tracked in #939.  Source origin is refreshed
-               under host authorization as a preflight before creating or
-               cloning the destination container.  If source fetch fails,
-               initialization fails closed and returns structured JSON
-               (step="carry_fetch") without allocating the destination.
+               support is tracked in #939.  Provenance compatibility is
+               validated host-side before allocating the destination
+               container, and source origin is refreshed under host
+               authorization after destination checkout and post-checkout
+               provenance consistency checks (before merge-base/diff).  If
+               source fetch fails, the newly allocated destination container
+               is torn down and initialization fails closed with structured
+               JSON (step="carry_fetch").
 
     The image must be pulled locally before use: docker pull <image>
 
@@ -1117,44 +1406,54 @@ def _sandbox_initialize(
     if proxy_runtime is not None:
         run_kwargs = proxy_lifecycle.apply_network(run_kwargs, proxy_runtime)
 
-    # Source preflight for carry (Issue #937 review follow-up):
-    # Fetch origin in source container BEFORE creating/cloning the destination container.
-    # This avoids wasted destination allocation, clone, and teardown on fetch failure.
-    source_fetched = False
+    # Provenance preflight for carry:
+    # Validate running source provenance and destination provenance compatibility
+    # BEFORE allocating the destination container.  Source origin refresh
+    # (carry_fetch) is intentionally deferred until after destination checkout
+    # and post-checkout provenance consistency checks so that a late provenance
+    # rejection leaves the source container completely untouched.
+    source_prov: ContainerProvenance | None = None
+    dest_prov: ContainerProvenance | None = None
+    validated_source_id: str | None = None
+    preflight_error: str | None = None
     if apply_from_container is not None:
         try:
             source_c = client.containers.get(apply_from_container)
         except Exception:
             source_c = None
 
-        if source_c is not None:
+        if source_c is None:
+            preflight_error = (
+                f"old container {apply_from_container[:12]} not found or not running"
+            )
+        else:
             try:
                 source_c.reload()
             except Exception:
                 pass
-            if getattr(source_c, "status", "running") == "running":
-                try:
-                    src_root = resolve_git_root(source_c)
-                    fetch_report = _fetch_source_origin(source_c, src_root)
-                except Exception:
-                    err_payload = {
-                        "status": "error",
-                        "step": "carry_fetch",
-                        "error": "Failed to preflight fetch in source container",
-                        "hint": "Ensure the source container is running and healthy.",
-                    }
-                    return InitResult(json.dumps(err_payload), deps_failed=False)
-                if fetch_report is not None:
-                    if fetch_report.step:
-                        err_payload = {
-                            "status": "error",
-                            "step": fetch_report.step,
-                            "error": fetch_report.error,
-                            "hint": fetch_report.hint or "",
-                        }
-                        return InitResult(json.dumps(err_payload), deps_failed=False)
-                    return InitResult(f"Error: {fetch_report.error}", deps_failed=False)
-                source_fetched = True
+            if getattr(source_c, "status", "running") != "running":
+                preflight_error = (
+                    f"old container {apply_from_container[:12]} is not running"
+                )
+            else:
+                full_source_id = str(getattr(source_c, "id", "") or "")
+                source_prov = load_container_provenance(full_source_id)
+                if _provenance_comparison_keys(source_prov) is None:
+                    return _carry_provenance_error("source_provenance_unknown")
+                dest_prov = _resolve_destination_provenance(
+                    clone_repo=clone_repo,
+                    repo=repo,
+                    pr=pr,
+                    branch=branch,
+                )
+                mismatch_reason = _check_provenance_compatibility(
+                    source_prov,
+                    dest_prov,
+                    require_dest_pr_head_ref=(pr is not None),
+                )
+                if mismatch_reason is not None:
+                    return _carry_provenance_error(mismatch_reason)
+                validated_source_id = full_source_id
 
     try:
         _ensure_image(resolved)
@@ -1309,11 +1608,45 @@ def _sandbox_initialize(
     # same way other init failures do (no half-initialised container left).
     carry_msg = ""
     if apply_from_container is not None and repo_cloned:
+        if (
+            preflight_error is not None
+            or validated_source_id is None
+            or source_prov is None
+            or dest_prov is None
+        ):
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+            record_stop(cid)
+            if preflight_error is not None:
+                return InitResult(f"Error: {preflight_error}", deps_failed=False)
+            return _carry_provenance_error("source_provenance_unknown")
+
+        consistency_reason = _verify_checkout_provenance_consistency(
+            source_prov=source_prov,
+            dest_prov=dest_prov,
+            dest_container=container,
+            provenance_capture=provenance_capture,
+            clone_repo=clone_repo,
+            repo=repo,
+            pr=pr,
+            branch=branch,
+        )
+        if consistency_reason is not None:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+            record_stop(cid)
+            return _carry_provenance_error(consistency_reason)
         report = _carry_worktree(
             client,
-            apply_from_container,
+            validated_source_id,
             container,
-            _source_fetched=source_fetched,
+            _source_fetched=False,
+            _expected_source_id=validated_source_id,
+            _display_cid=apply_from_container,
         )
         if report.error is not None:
             try:
@@ -1368,14 +1701,17 @@ def _sandbox_initialize(
                 clone_msg += deps_note
 
     if repo_cloned:
-        _record_init_provenance(
-            full_container_id,
-            clone_repo=clone_repo,
-            repo=repo,
-            pr=pr,
-            branch=branch,
-            provenance_capture=provenance_capture,
-        )
+        if apply_from_container is not None and dest_prov is not None:
+            save_container_provenance(full_container_id, dest_prov)
+        else:
+            _record_init_provenance(
+                full_container_id,
+                clone_repo=clone_repo,
+                repo=repo,
+                pr=pr,
+                branch=branch,
+                provenance_capture=provenance_capture,
+            )
 
     # All setup phases finished — mark the container as a completed, usable
     # init so the orphan reaper never touches it (Issue #298).  Clone / PR
@@ -1500,11 +1836,14 @@ def sandbox_initialize(
                / ``pr`` / ``branch``; untracked files are not carried and
                conflicts are not an error.  The source container must have
                network access (``allow_network=True``); offline source
-               support is tracked in #939.  Source origin is refreshed
-               under host authorization as a preflight before creating or
-               cloning the destination container.  If source fetch fails,
-               initialization fails closed and returns structured JSON
-               (step="carry_fetch") without allocating the destination.
+               support is tracked in #939.  Provenance compatibility is
+               validated host-side before allocating the destination
+               container, and source origin is refreshed under host
+               authorization after destination checkout and post-checkout
+               provenance consistency checks (before merge-base/diff).  If
+               source fetch fails, the newly allocated destination container
+               is torn down and initialization fails closed with structured
+               JSON (step="carry_fetch").
 
     The image must be pulled locally before use: docker pull <image>
 
